@@ -7,6 +7,10 @@ on:
       - main
     paths:
       - "site/**"
+  pull_request:
+    paths:
+      - "site/**"
+    
 
 permissions:
   contents: read
@@ -18,7 +22,21 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  lint:
+    if: github.event_name == 'pull_request' && !github.event.pull_request.draft
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Install dependencies
+        run: bun install
+        working-directory: site
+      - name: Lint
+        run: bun lint
+        working-directory: site
+
   build:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -40,10 +58,6 @@ jobs:
 
       - name: Install dependencies
         run: bun install
-        working-directory: site
-
-      - name: Lint
-        run: bun lint
         working-directory: site
 
       - name: Build
