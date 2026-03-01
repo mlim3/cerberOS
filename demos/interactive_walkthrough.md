@@ -6,7 +6,7 @@ This document outlines how to run the `aegis-agents` component in interactive mo
 
 Ensure you are in the project root:
 ```bash
-cd /Users/chemch/GolandProjects/cerberOS
+cd /Users/<username>/GolandProjects/cerberOS
 ```
 
 ## 1. Start the Application
