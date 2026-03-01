@@ -148,7 +148,10 @@ func (f *Factory) provision(spec *types.TaskSpec) error {
 	}
 
 	// Publish status update.
-	return f.publishStatus(agentID, spec.TaskID, "provisioned", spec.TraceID)
+	if err := f.publishStatus(agentID, spec.TaskID, "provisioned", spec.TraceID); err != nil {
+		return err
+	}
+	return f.publishStatus(agentID, spec.TaskID, "assigned", spec.TraceID)
 }
 
 // assignTask links an existing agent to a task.

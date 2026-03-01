@@ -1,11 +1,15 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/cerberOS/agents-component/config"
 	"github.com/cerberOS/agents-component/internal/comms"
@@ -130,7 +134,106 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Subscribe to status_update to print to console for interactive feedback
+	commsClient.Subscribe("status_update", func(msg *comms.Message) {
+		var update types.StatusUpdate
+		if err := json.Unmarshal(msg.Data, &update); err == nil {
+			fmt.Printf("\n[STATUS] Agent: %s | Task: %s | State: %s\n> ", update.AgentID, update.TaskID, update.State)
+		}
+	})
+
 	log.Info("aegis-agents ready")
+
+	// Interactive CLI loop
+	go func() {
+		reader := bufio.NewReader(os.Stdin)
+		fmt.Println("\n--- Interactive Mode ---")
+		fmt.Println("Commands: task <id> <skill>, query <skill>, list, exit")
+		fmt.Print("> ")
+
+		for {
+			text, _ := reader.ReadString('\n')
+			text = strings.TrimSpace(text)
+			parts := strings.Fields(text)
+
+			if len(parts) == 0 {
+				fmt.Print("> ")
+				continue
+			}
+
+			switch parts[0] {
+			case "exit":
+				syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+				return
+			case "list":
+				agents := reg.List()
+				fmt.Printf("Registered Agents: %d\n", len(agents))
+				for _, a := range agents {
+					fmt.Printf("- %s [%s] Skills: %v\n", a.AgentID, a.State, a.SkillDomains)
+				}
+			case "task":
+				if len(parts) < 3 {
+					fmt.Println("Usage: task <task_id> <skill_domain>")
+					break
+				}
+				taskID := parts[1]
+				skill := parts[2]
+				spec := types.TaskSpec{
+					TaskID:         taskID,
+					RequiredSkills: []string{skill},
+					TraceID:        fmt.Sprintf("trace-%d", time.Now().Unix()),
+				}
+				env := types.Envelope{
+					MessageID:   fmt.Sprintf("msg-%d", time.Now().Unix()),
+					Source:      "cli",
+					Destination: "agents-component",
+					Timestamp:   time.Now().UTC(),
+					Payload:     spec,
+					TraceID:     spec.TraceID,
+				}
+				if err := commsClient.Publish("task_spec", env); err != nil {
+					fmt.Printf("Error publishing task: %v\n", err)
+				} else {
+					fmt.Println("Task published.")
+				}
+			case "query":
+				if len(parts) < 2 {
+					fmt.Println("Usage: query <skill_domain>")
+					break
+				}
+				skill := parts[1]
+				query := types.CapabilityQuery{
+					QueryID: fmt.Sprintf("q-%d", time.Now().Unix()),
+					Domains: []string{skill},
+					TraceID: fmt.Sprintf("trace-%d", time.Now().Unix()),
+				}
+				env := types.Envelope{
+					MessageID:   fmt.Sprintf("msg-%d", time.Now().Unix()),
+					Source:      "cli",
+					Destination: "agents-component",
+					Timestamp:   time.Now().UTC(),
+					Payload:     query,
+					TraceID:     query.TraceID,
+				}
+				// Subscribe to response temporarily
+				commsClient.Subscribe("capability_response", func(msg *comms.Message) {
+					var resp types.CapabilityResponse
+					json.Unmarshal(msg.Data, &resp)
+					if resp.QueryID == query.QueryID {
+						fmt.Printf("\n[QUERY RESULT] Match: %v\n> ", resp.HasMatch)
+					}
+				})
+				if err := commsClient.Publish("capability_query", env); err != nil {
+					fmt.Printf("Error publishing query: %v\n", err)
+				} else {
+					fmt.Println("Query published.")
+				}
+			default:
+				fmt.Println("Unknown command.")
+			}
+			fmt.Print("> ")
+		}
+	}()
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
