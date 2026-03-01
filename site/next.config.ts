@@ -5,6 +5,9 @@ const nextConfig: NextConfig = {
   output: 'export',
   basePath: '/cerberOS',
   assetPrefix: '/cerberOS/',
+  images: {
+    unoptimized: true,
+  },
 };
 
 export default nextConfig;
