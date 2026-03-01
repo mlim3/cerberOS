@@ -1,0 +1,238 @@
+// Package factory is M2 — the Agent Factory. It is the central coordinator that
+// receives TaskSpecs, queries the Registry for an existing capable agent, and
+// initiates provisioning when no match is found. It wires together all other
+// modules and is the only module that orchestrates across them.
+package factory
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/aegis/aegis-agents/internal/comms"
+	"github.com/aegis/aegis-agents/internal/credentials"
+	"github.com/aegis/aegis-agents/internal/lifecycle"
+	"github.com/aegis/aegis-agents/internal/memory"
+	"github.com/aegis/aegis-agents/internal/registry"
+	"github.com/aegis/aegis-agents/internal/skills"
+	"github.com/aegis/aegis-agents/pkg/types"
+)
+
+// IDGenerator is a function that produces a unique agent ID.
+type IDGenerator func() string
+
+// Factory coordinates agent provisioning and task dispatch.
+type Factory struct {
+	registry    registry.Registry
+	skills      skills.Manager
+	credentials credentials.Broker
+	lifecycle   lifecycle.Manager
+	memory      memory.Client
+	comms       comms.Client
+	generateID  IDGenerator
+}
+
+// Config carries the dependencies required to construct a Factory.
+type Config struct {
+	Registry    registry.Registry
+	Skills      skills.Manager
+	Credentials credentials.Broker
+	Lifecycle   lifecycle.Manager
+	Memory      memory.Client
+	Comms       comms.Client
+	GenerateID  IDGenerator // optional; defaults to timestamp-based ID
+}
+
+// New returns a Factory wired with the provided dependencies.
+func New(cfg Config) (*Factory, error) {
+	if cfg.Registry == nil {
+		return nil, fmt.Errorf("factory: Registry is required")
+	}
+	if cfg.Skills == nil {
+		return nil, fmt.Errorf("factory: Skills is required")
+	}
+	if cfg.Credentials == nil {
+		return nil, fmt.Errorf("factory: Credentials is required")
+	}
+	if cfg.Lifecycle == nil {
+		return nil, fmt.Errorf("factory: Lifecycle is required")
+	}
+	if cfg.Memory == nil {
+		return nil, fmt.Errorf("factory: Memory is required")
+	}
+	if cfg.Comms == nil {
+		return nil, fmt.Errorf("factory: Comms is required")
+	}
+	if cfg.GenerateID == nil {
+		cfg.GenerateID = defaultIDGenerator
+	}
+	return &Factory{
+		registry:    cfg.Registry,
+		skills:      cfg.Skills,
+		credentials: cfg.Credentials,
+		lifecycle:   cfg.Lifecycle,
+		memory:      cfg.Memory,
+		comms:       cfg.Comms,
+		generateID:  cfg.GenerateID,
+	}, nil
+}
+
+// HandleTaskSpec processes an incoming TaskSpec. It finds an existing idle agent
+// or provisions a new one, then assigns the task.
+func (f *Factory) HandleTaskSpec(spec *types.TaskSpec) error {
+	if spec == nil {
+		return fmt.Errorf("factory: TaskSpec must not be nil")
+	}
+	if spec.TaskID == "" {
+		return fmt.Errorf("factory: TaskSpec.TaskID must not be empty")
+	}
+
+	// Try to reuse an existing idle agent with the required skill domains.
+	candidates, err := f.registry.FindBySkills(spec.RequiredSkills)
+	if err != nil {
+		return fmt.Errorf("factory: registry lookup: %w", err)
+	}
+
+	for _, agent := range candidates {
+		if agent.State == "idle" {
+			return f.assignTask(agent.AgentID, spec)
+		}
+	}
+
+	// No idle match found — provision a new agent.
+	return f.provision(spec)
+}
+
+// provision runs the full agent provisioning sequence for a TaskSpec.
+func (f *Factory) provision(spec *types.TaskSpec) error {
+	agentID := f.generateID()
+
+	// Step 1: Resolve entry-point skill domain (first required domain).
+	if len(spec.RequiredSkills) == 0 {
+		return fmt.Errorf("factory: TaskSpec has no required skills")
+	}
+	entryDomain := spec.RequiredSkills[0]
+	if _, err := f.skills.GetDomain(entryDomain); err != nil {
+		return fmt.Errorf("factory: skills.GetDomain %q: %w", entryDomain, err)
+	}
+
+	// Step 2: Pre-authorize credential permission set.
+	permSet := permissionSetForDomains(spec.RequiredSkills)
+	token, err := f.credentials.PreAuthorize(agentID, permSet)
+	if err != nil {
+		return fmt.Errorf("factory: credentials.PreAuthorize: %w", err)
+	}
+
+	// Step 3: Spawn Firecracker microVM.
+	vmCfg := lifecycle.VMConfig{
+		AgentID:       agentID,
+		SkillDomain:   entryDomain,
+		CredentialPtr: token,
+		TraceID:       spec.TraceID,
+	}
+	if err := f.lifecycle.Spawn(vmCfg); err != nil {
+		return fmt.Errorf("factory: lifecycle.Spawn: %w", err)
+	}
+
+	// Step 4: Register agent.
+	agent := &types.AgentRecord{
+		AgentID:       agentID,
+		State:         "active",
+		SkillDomains:  spec.RequiredSkills,
+		PermissionSet: permSet,
+		AssignedTask:  spec.TaskID,
+		CreatedAt:     time.Now().UTC(),
+		UpdatedAt:     time.Now().UTC(),
+	}
+	if err := f.registry.Register(agent); err != nil {
+		return fmt.Errorf("factory: registry.Register: %w", err)
+	}
+
+	// Publish status update.
+	return f.publishStatus(agentID, spec.TaskID, "provisioned", spec.TraceID)
+}
+
+// assignTask links an existing agent to a task.
+func (f *Factory) assignTask(agentID string, spec *types.TaskSpec) error {
+	if err := f.registry.AssignTask(agentID, spec.TaskID); err != nil {
+		return fmt.Errorf("factory: registry.AssignTask: %w", err)
+	}
+	return f.publishStatus(agentID, spec.TaskID, "assigned", spec.TraceID)
+}
+
+// CompleteTask collects results, writes to Memory, publishes task_result, and
+// tears down the agent.
+func (f *Factory) CompleteTask(agentID, sessionID, traceID string, output interface{}, taskErr error) error {
+	agent, err := f.registry.Get(agentID)
+	if err != nil {
+		return fmt.Errorf("factory: registry.Get: %w", err)
+	}
+
+	// Publish tagged output via Memory Interface. The Orchestrator routes it to the Memory Component.
+	mw := &types.MemoryWrite{
+		AgentID:   agentID,
+		SessionID: sessionID,
+		DataType:  "task_result",
+		TTLHint:   86400,
+		Payload:   output,
+		Tags:      map[string]string{"context": "result", "task_id": agent.AssignedTask},
+	}
+	if err := f.memory.Write(mw); err != nil {
+		return fmt.Errorf("factory: memory.Write: %w", err)
+	}
+
+	// Publish task_result to Orchestrator.
+	result := types.TaskResult{
+		TaskID:  agent.AssignedTask,
+		AgentID: agentID,
+		Success: taskErr == nil,
+		Output:  output,
+		TraceID: traceID,
+	}
+	if taskErr != nil {
+		result.Error = taskErr.Error()
+	}
+	if err := f.comms.Publish("task_result", result); err != nil {
+		return fmt.Errorf("factory: comms.Publish task_result: %w", err)
+	}
+
+	// Teardown: terminate VM → revoke credentials → update registry.
+	if err := f.lifecycle.Terminate(agentID); err != nil {
+		return fmt.Errorf("factory: lifecycle.Terminate: %w", err)
+	}
+	if err := f.credentials.Revoke(agentID); err != nil {
+		return fmt.Errorf("factory: credentials.Revoke: %w", err)
+	}
+	if err := f.registry.UpdateState(agentID, "terminated"); err != nil {
+		return fmt.Errorf("factory: registry.UpdateState: %w", err)
+	}
+
+	return nil
+}
+
+// publishStatus sends a StatusUpdate to the Orchestrator via Comms.
+func (f *Factory) publishStatus(agentID, taskID, state, traceID string) error {
+	update := types.StatusUpdate{
+		TaskID:  taskID,
+		AgentID: agentID,
+		State:   state,
+		TraceID: traceID,
+	}
+	if err := f.comms.Publish("status_update", update); err != nil {
+		return fmt.Errorf("factory: comms.Publish status_update: %w", err)
+	}
+	return nil
+}
+
+// permissionSetForDomains derives a credential permission set from skill domains.
+// In production this would be driven by a policy map; the stub grants one key per domain.
+func permissionSetForDomains(domains []string) []string {
+	perms := make([]string, len(domains))
+	for i, d := range domains {
+		perms[i] = d + ".credential"
+	}
+	return perms
+}
+
+func defaultIDGenerator() string {
+	return fmt.Sprintf("agent-%d", time.Now().UnixNano())
+}
