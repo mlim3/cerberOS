@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/aegis/aegis-agents/pkg/types"
+	"github.com/cerberOS/agents-component/pkg/types"
 )
 
 // Registry is the interface for agent catalog operations.

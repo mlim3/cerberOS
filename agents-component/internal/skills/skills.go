@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/aegis/aegis-agents/pkg/types"
+	"github.com/cerberOS/agents-component/pkg/types"
 )
 
 // Manager is the interface for skill tree operations.

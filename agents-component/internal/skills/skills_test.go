@@ -3,8 +3,8 @@ package skills_test
 import (
 	"testing"
 
-	"github.com/aegis/aegis-agents/internal/skills"
-	"github.com/aegis/aegis-agents/pkg/types"
+	"github.com/cerberOS/agents-component/internal/skills"
+	"github.com/cerberOS/agents-component/pkg/types"
 )
 
 func webDomain() *types.SkillNode {

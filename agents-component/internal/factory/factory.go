@@ -8,13 +8,13 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/aegis/aegis-agents/internal/comms"
-	"github.com/aegis/aegis-agents/internal/credentials"
-	"github.com/aegis/aegis-agents/internal/lifecycle"
-	"github.com/aegis/aegis-agents/internal/memory"
-	"github.com/aegis/aegis-agents/internal/registry"
-	"github.com/aegis/aegis-agents/internal/skills"
-	"github.com/aegis/aegis-agents/pkg/types"
+	"github.com/cerberOS/agents-component/internal/comms"
+	"github.com/cerberOS/agents-component/internal/credentials"
+	"github.com/cerberOS/agents-component/internal/lifecycle"
+	"github.com/cerberOS/agents-component/internal/memory"
+	"github.com/cerberOS/agents-component/internal/registry"
+	"github.com/cerberOS/agents-component/internal/skills"
+	"github.com/cerberOS/agents-component/pkg/types"
 )
 
 // IDGenerator is a function that produces a unique agent ID.

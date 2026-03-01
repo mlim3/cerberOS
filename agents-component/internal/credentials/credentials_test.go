@@ -3,7 +3,7 @@ package credentials_test
 import (
 	"testing"
 
-	"github.com/aegis/aegis-agents/internal/credentials"
+	"github.com/cerberOS/agents-component/internal/credentials"
 )
 
 func TestPreAuthorizeAndGetCredential(t *testing.T) {

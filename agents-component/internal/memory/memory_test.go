@@ -3,8 +3,8 @@ package memory_test
 import (
 	"testing"
 
-	"github.com/aegis/aegis-agents/internal/memory"
-	"github.com/aegis/aegis-agents/pkg/types"
+	"github.com/cerberOS/agents-component/internal/memory"
+	"github.com/cerberOS/agents-component/pkg/types"
 )
 
 func TestWriteAndRead(t *testing.T) {

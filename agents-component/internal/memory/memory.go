@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/aegis/aegis-agents/pkg/types"
+	"github.com/cerberOS/agents-component/pkg/types"
 )
 
 // Client is the interface for all Memory Component interactions.

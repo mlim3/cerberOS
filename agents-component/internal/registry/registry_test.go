@@ -3,8 +3,8 @@ package registry_test
 import (
 	"testing"
 
-	"github.com/aegis/aegis-agents/internal/registry"
-	"github.com/aegis/aegis-agents/pkg/types"
+	"github.com/cerberOS/agents-component/internal/registry"
+	"github.com/cerberOS/agents-component/pkg/types"
 )
 
 func newAgent(id string, domains ...string) *types.AgentRecord {

@@ -39,12 +39,9 @@ type agentAuth struct {
 // Orchestrator via comms.Publish and awaits a credential_response. It never
 // calls OpenBao directly.
 type stubBroker struct {
-	mu     sync.RWMutex
-	agents map[string]*agentAuth
-
-	// stubSecrets simulates the vault. In production this is replaced by
-	// OpenBao API calls using the agent's scoped vault token.
-	stubSecrets map[string]string // simulates vault responses; replaced by Orchestrator responses in production
+	mu          sync.RWMutex
+	agents      map[string]*agentAuth
+	stubSecrets map[string]string
 }
 
 // New returns a Credential Broker backed by an in-process stub vault.

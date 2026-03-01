@@ -3,7 +3,7 @@ package lifecycle_test
 import (
 	"testing"
 
-	"github.com/aegis/aegis-agents/internal/lifecycle"
+	"github.com/cerberOS/agents-component/internal/lifecycle"
 )
 
 func TestSpawnAndHealth(t *testing.T) {

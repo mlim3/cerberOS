@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/aegis/aegis-agents/internal/comms"
+	"github.com/cerberOS/agents-component/internal/comms"
 )
 
 func TestStubClientPublishSubscribe(t *testing.T) {
