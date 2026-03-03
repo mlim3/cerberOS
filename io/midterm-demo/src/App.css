@@ -1,0 +1,76 @@
+.app {
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+}
+
+.main-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--bg-secondary);
+  position: relative;
+}
+
+.header {
+  height: var(--header-height);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 24px;
+  background-color: var(--bg-primary);
+  border-bottom: 1px solid var(--border);
+}
+
+.header-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.settings-panel {
+  position: absolute;
+  top: var(--header-height);
+  right: 0;
+  width: 320px;
+  background-color: var(--bg-tertiary);
+  border-left: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  padding: 20px;
+  box-shadow: -4px 4px 12px rgba(0, 0, 0, 0.3);
+  z-index: 100;
+}
+
+.settings-panel h2 {
+  font-size: 16px;
+  margin-bottom: 20px;
+  color: var(--text-primary);
+}
+
+.settings-item {
+  margin-bottom: 16px;
+}
+
+.settings-item label {
+  display: block;
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.settings-item input,
+.settings-item select {
+  width: 100%;
+  padding: 10px 12px;
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.settings-item input:focus,
+.settings-item select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
