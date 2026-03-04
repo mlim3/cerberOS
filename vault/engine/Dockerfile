@@ -35,26 +35,26 @@ RUN apk add --no-cache linux-virt busybox-static
 
 # Build minimal rootfs directory (no brace expansion — alpine sh is POSIX only)
 RUN mkdir -p /rootfs/bin /rootfs/dev /rootfs/etc /rootfs/proc /rootfs/sys /rootfs/tmp /rootfs/run && \
-    cp /bin/busybox.static /rootfs/bin/busybox && \
-    ln -sf busybox /rootfs/bin/sh && \
-    ln -sf busybox /rootfs/bin/ash && \
-    ln -sf busybox /rootfs/bin/ls && \
-    ln -sf busybox /rootfs/bin/cat && \
-    ln -sf busybox /rootfs/bin/echo && \
-    ln -sf busybox /rootfs/bin/mount && \
-    ln -sf busybox /rootfs/bin/umount && \
-    ln -sf busybox /rootfs/bin/mkdir && \
-    ln -sf busybox /rootfs/bin/env && \
-    ln -sf busybox /rootfs/bin/sleep
+  cp /bin/busybox.static /rootfs/bin/busybox && \
+  ln -sf busybox /rootfs/bin/sh && \
+  ln -sf busybox /rootfs/bin/ash && \
+  ln -sf busybox /rootfs/bin/ls && \
+  ln -sf busybox /rootfs/bin/cat && \
+  ln -sf busybox /rootfs/bin/echo && \
+  ln -sf busybox /rootfs/bin/mount && \
+  ln -sf busybox /rootfs/bin/umount && \
+  ln -sf busybox /rootfs/bin/mkdir && \
+  ln -sf busybox /rootfs/bin/env && \
+  ln -sf busybox /rootfs/bin/sleep
 
 # Init script: mounts essential pseudo-filesystems then drops to a shell
 RUN printf '#!/bin/sh\n\
-mount -t proc proc /proc\n\
-mount -t sysfs sysfs /sys\n\
-mount -t devtmpfs devtmpfs /dev 2>/dev/null || true\n\
-echo "=== cerberOS VM ready ==="\n\
-exec /bin/sh\n' > /rootfs/init && \
-    chmod +x /rootfs/init
+  mount -t proc proc /proc\n\
+  mount -t sysfs sysfs /sys\n\
+  mount -t devtmpfs devtmpfs /dev 2>/dev/null || true\n\
+  echo "=== cerberOS VM ready ==="\n\
+  exec /bin/sh\n' > /rootfs/init && \
+  chmod +x /rootfs/init
 
 # Pack rootfs into a gzipped cpio initramfs.
 # The kernel loads this directly into memory — no disk driver or block device needed.
@@ -67,9 +67,9 @@ WORKDIR /
 
 # Install QEMU for the current platform (aarch64 or x86_64)
 RUN case "$(uname -m)" in \
-      aarch64) apk add --no-cache qemu-system-aarch64 ;; \
-      x86_64)  apk add --no-cache qemu-system-x86_64  ;; \
-    esac
+  aarch64) apk add --no-cache qemu-system-aarch64 ;; \
+  x86_64)  apk add --no-cache qemu-system-x86_64  ;; \
+  esac
 
 # Copy kernel and initramfs from artifacts stage, owned by altuser (1001) so QEMU can open them
 COPY --chown=1001:1001 --from=artifacts /boot/vmlinuz-virt /vm/kernel
