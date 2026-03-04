@@ -51,6 +51,7 @@ func NewQEMU(cfg QEMUConfig) *QEMU {
 
 // Start launches the QEMU process and boots the VM.
 func (q *QEMU) Start(ctx context.Context) error {
+	q.stopped = make(chan struct{})
 	if q.cfg.KernelImagePath == "" {
 		return fmt.Errorf("KERNEL_IMAGE_PATH is not set")
 	}
