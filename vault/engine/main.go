@@ -12,7 +12,7 @@ import (
 )
 
 func main() {
-	cfg := engine.DefaultVMConfig()
+	cfg := engine.DefaultQEMUConfig()
 
 	if v := os.Getenv("KERNEL_IMAGE_PATH"); v != "" {
 		cfg.KernelImagePath = v
@@ -24,7 +24,7 @@ func main() {
 		cfg.Accel = v
 	}
 
-	vm := engine.NewVM(cfg)
+	var vm engine.VM = engine.NewQEMU(cfg)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
