@@ -45,7 +45,8 @@ RUN mkdir -p /rootfs/bin /rootfs/dev /rootfs/etc /rootfs/proc /rootfs/sys /rootf
   ln -sf busybox /rootfs/bin/umount && \
   ln -sf busybox /rootfs/bin/mkdir && \
   ln -sf busybox /rootfs/bin/env && \
-  ln -sf busybox /rootfs/bin/sleep
+  ln -sf busybox /rootfs/bin/sleep && \
+  ln -sf busybox /rootfs/bin/poweroff
 
 # Init script: mounts essential pseudo-filesystems then drops to a shell
 RUN printf '#!/bin/sh\n\
@@ -80,7 +81,7 @@ ENV KERNEL_IMAGE_PATH=/vm/kernel
 ENV INITRD_PATH=/vm/initrd.gz
 
 COPY --from=build /app/engine engine
-RUN chmod +x /engine
+RUN chmod +x /engine && mkdir -p /tmp && chown 1001:1001 /tmp
 
 # Use non-root user
 COPY --from=build /etc/passwd /etc/passwd
