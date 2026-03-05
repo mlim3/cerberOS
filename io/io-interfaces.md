@@ -1,6 +1,6 @@
 # IO Interfaces
 
-This document describes the format and requirements for the **IO component**’s interfaces with the **orchestrator** and **memory** components. It is intended to guide implementation and integration; the current demo may use mocks that conform to these contracts.
+This document describes the format and requirements for the **IO component**’s interfaces with the **orchestrator** and **memory** components. The spec targets production functionality; the current demo may use simplified mocks (e.g. display-oriented strings) that should be replaced with these contracts for real integration.
 
 ---
 
@@ -20,7 +20,7 @@ The IO component needs **heartbeat-like status updates** from the orchestrator f
 | `taskId` | `string` | Yes | Unique identifier of the task. |
 | `status` | `'awaiting_feedback' \| 'working' \| 'completed'` | Yes | Current task state. |
 | `lastUpdate` | `string` | Yes | Short human-readable description of what is being done or what is needed (e.g. “Creating chart components…”, “Awaiting user approval for OAuth provider selection”). |
-| `expectedNextInput` | `string` | Yes | When the next user input is expected. Suggested values: `"Now"`, `"Done"`, or a relative ETA such as `"~5 min"`, `"~12 min"` (format is display-oriented; IO may show as-is or normalize). |
+| `expectedNextInputMinutes` | `number \| null` | Yes | Minutes from now until the next user input is expected. `0` = input needed now; positive number = estimated minutes until next input; `null` = task completed or no further input needed. IO is responsible for formatting for display (e.g. 0 → “Now”, null → “Done”, 5 → “~5 min”). |
 | `timestamp` | `string` (ISO 8601) or `number` (ms) | Optional | When this update was produced; used for “seconds since last heartbeat” if not provided by transport. |
 
 **Frequency and delivery**
@@ -31,9 +31,9 @@ The IO component needs **heartbeat-like status updates** from the orchestrator f
 
 **IO behavior**
 
-- **Working** tasks: Show “seconds since last heartbeat” (reset to 0 when an update is received); display `lastUpdate` and `expectedNextInput`.
-- **Awaiting feedback**: Highlight that user input is needed; `expectedNextInput` is typically `"Now"`.
-- **Completed**: Treat as done; `expectedNextInput` is typically `"Done"`.
+- **Working** tasks: Show “seconds since last heartbeat” (reset to 0 when an update is received); display `lastUpdate` and derive display from `expectedNextInputMinutes` (e.g. 0 → “Now”, 5 → “~5 min”).
+- **Awaiting feedback**: Highlight that user input is needed; `expectedNextInputMinutes` is 0.
+- **Completed**: Treat as done; `expectedNextInputMinutes` is `null`.
 
 ### 1.2 Chat (task conversation)
 
@@ -112,7 +112,7 @@ Each log entry should include at least:
 
 | Interface | Direction | Purpose |
 |-----------|-----------|---------|
-| **Status updates** | Orchestrator → IO | Semantic heartbeat per task: status, lastUpdate, expectedNextInput; 1–4 s per task, push or poll. |
+| **Status updates** | Orchestrator → IO | Semantic heartbeat per task: status, lastUpdate, expectedNextInputMinutes (scalar, minutes from now); 1–4 s per task, push or poll. |
 | **Chat (send)** | IO → Orchestrator | User message + optional history; taskId required. |
 | **Chat (stream)** | Orchestrator → IO | Streamed assistant reply (chunks); IO accumulates and displays. |
 | **Logging** | IO/Orchestrator → Memory | Append user and orchestrator messages with taskId, role, content, timestamp. |
