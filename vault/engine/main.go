@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"net/http"
 	"os"
@@ -9,12 +10,16 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/mlim3/cerberOS/vault/engine/initrd"
+	"github.com/mlim3/cerberOS/vault/engine/orchestrator"
+	"github.com/mlim3/cerberOS/vault/engine/preprocessor"
 	engine "github.com/mlim3/cerberOS/vault/engine/vm"
 )
 
 type controller struct {
 	mu      sync.Mutex
 	vm      engine.VM
+	orch    *orchestrator.Orchestrator
 	cancel  context.CancelFunc
 	running bool
 }
@@ -64,6 +69,35 @@ func (c *controller) stopVM() {
 	c.running = false
 }
 
+type executeRequest struct {
+	Script string            `json:"script"`
+	Env    map[string]string `json:"env"`
+}
+
+func (c *controller) handleExecute(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req executeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	resp, err := c.orch.Execute(r.Context(), orchestrator.Request{
+		Script: []byte(req.Script),
+		Env:    req.Env,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
 func main() {
 	cfg := engine.DefaultQEMUConfig()
 
@@ -77,11 +111,27 @@ func main() {
 		cfg.Accel = v
 	}
 
-	ctrl := &controller{vm: engine.NewQEMU(cfg)}
+	// Set up preprocessor with mock secrets
+	store := &preprocessor.MockStore{
+		Secrets: map[string]string{
+			"API_KEY":    "mock-api-key-12345",
+			"DB_PASS":    "mock-db-password",
+			"SECRET_KEY": "mock-secret-key",
+		},
+	}
+	pp := preprocessor.New(store)
+	builder := initrd.New(cfg.InitrdPath)
+	orch := orchestrator.New(pp, builder, cfg)
+
+	ctrl := &controller{
+		vm:   engine.NewQEMU(cfg),
+		orch: orch,
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/start", ctrl.handleStart)
 	mux.HandleFunc("/stop", ctrl.handleStop)
+	mux.HandleFunc("/execute", ctrl.handleExecute)
 
 	srv := &http.Server{Addr: ":8000", Handler: mux}
 
