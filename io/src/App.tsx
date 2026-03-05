@@ -1,9 +1,35 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import TaskSidebar from './components/TaskSidebar'
 import ChatWindow from './components/ChatWindow'
 import SettingsButton from './components/SettingsButton'
+import SettingsPanel, { defaultUISettings } from './components/SettingsPanel'
+import type { UISettings } from './components/SettingsPanel'
+import ActivityLog from './components/ActivityLog'
+import type { LogEntry } from './components/ActivityLog'
 import { streamOrchestratorReply } from './api/orchestrator'
 import './App.css'
+
+const SETTINGS_STORAGE_KEY = 'cerberos-io-settings'
+
+function loadSettings(): UISettings {
+  try {
+    const stored = localStorage.getItem(SETTINGS_STORAGE_KEY)
+    if (stored) {
+      return { ...defaultUISettings, ...JSON.parse(stored) }
+    }
+  } catch {
+    // ignore parse errors
+  }
+  return defaultUISettings
+}
+
+function saveSettings(settings: UISettings): void {
+  try {
+    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings))
+  } catch {
+    // ignore storage errors
+  }
+}
 
 export interface Task {
   id: string
@@ -171,8 +197,87 @@ function App() {
   const [showSettings, setShowSettings] = useState(false)
   const [streamingForTaskId, setStreamingForTaskId] = useState<string | null>(null)
   const [streamingContent, setStreamingContent] = useState('')
+  const [uiSettings, setUISettings] = useState<UISettings>(loadSettings)
+  const [logEntries, setLogEntries] = useState<LogEntry[]>([])
+  const heartbeatIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const selectedTask = tasks.find(t => t.id === selectedTaskId)
+
+  const addLogEntry = useCallback((entry: Omit<LogEntry, 'id' | 'timestamp'>) => {
+    const newEntry: LogEntry = {
+      ...entry,
+      id: nextId(),
+      timestamp: timeLabel(),
+    }
+    setLogEntries(prev => [...prev.slice(-99), newEntry])
+  }, [])
+
+  useEffect(() => {
+    saveSettings(uiSettings)
+  }, [uiSettings])
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-font-scale', uiSettings.fontSizeScale)
+    document.documentElement.setAttribute('data-high-contrast', uiSettings.highContrast ? 'true' : 'false')
+  }, [uiSettings.fontSizeScale, uiSettings.highContrast])
+
+  useEffect(() => {
+    if (!uiSettings.showActivityLog) {
+      if (heartbeatIntervalRef.current) {
+        clearInterval(heartbeatIntervalRef.current)
+        heartbeatIntervalRef.current = null
+      }
+      return
+    }
+
+    heartbeatIntervalRef.current = setInterval(() => {
+      const workingTasks = tasks.filter(t => t.status === 'working')
+      if (workingTasks.length > 0) {
+        const task = workingTasks[Math.floor(Math.random() * workingTasks.length)]
+        addLogEntry({
+          type: 'heartbeat',
+          taskId: task.id,
+          taskTitle: task.title.slice(0, 20),
+          message: `${task.lastUpdate} Next input in ${task.expectedNextInput}.`,
+        })
+      }
+    }, 3000)
+
+    return () => {
+      if (heartbeatIntervalRef.current) {
+        clearInterval(heartbeatIntervalRef.current)
+      }
+    }
+  }, [uiSettings.showActivityLog, tasks, addLogEntry])
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+        e.preventDefault()
+        const input = document.querySelector('.chat-input') as HTMLInputElement | null
+        input?.focus()
+      }
+
+      if (e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+        e.preventDefault()
+        const currentIndex = tasks.findIndex(t => t.id === selectedTaskId)
+        if (currentIndex === -1) return
+        const newIndex = e.key === 'ArrowUp'
+          ? Math.max(0, currentIndex - 1)
+          : Math.min(tasks.length - 1, currentIndex + 1)
+        if (newIndex !== currentIndex) {
+          setSelectedTaskId(tasks[newIndex].id)
+        }
+      }
+
+      if (e.key === 'Escape' && showSettings) {
+        setShowSettings(false)
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [tasks, selectedTaskId, showSettings])
 
   const onSendMessage = useCallback(
     async (taskId: string, userContent: string) => {
@@ -189,6 +294,16 @@ function App() {
           t.id === taskId ? { ...t, messages: [...t.messages, userMsg] } : t
         )
       )
+
+      if (uiSettings.showActivityLog) {
+        addLogEntry({
+          type: 'user_message',
+          taskId,
+          taskTitle: task.title.slice(0, 20),
+          message: `User: "${userContent.slice(0, 50)}${userContent.length > 50 ? '…' : ''}"`,
+        })
+      }
+
       setStreamingForTaskId(taskId)
       setStreamingContent('')
       const history = task.messages.map(m => ({
@@ -220,10 +335,19 @@ function App() {
               t.id === taskId ? { ...t, messages: [...t.messages, agentMsg] } : t
             )
           )
+
+          if (uiSettings.showActivityLog) {
+            addLogEntry({
+              type: 'agent_response',
+              taskId,
+              taskTitle: task.title.slice(0, 20),
+              message: `Agent replied (${full.length} chars)`,
+            })
+          }
         }
       }
     },
-    [tasks]
+    [tasks, uiSettings.showActivityLog, addLogEntry]
   )
 
   return (
@@ -232,43 +356,67 @@ function App() {
         tasks={tasks}
         selectedTaskId={selectedTaskId}
         onSelectTask={setSelectedTaskId}
+        settings={uiSettings}
       />
       <main className="main-content">
         <header className="header">
-          <h1 className="header-title">
-            {selectedTask?.title || 'Select a task'}
-          </h1>
+          <div className="header-task-info">
+            <h1 className="header-title">
+              {selectedTask?.title || 'Select a task'}
+            </h1>
+            {selectedTask && (
+              <div className="header-meta">
+                <span className={`header-status-pill ${selectedTask.status}`}>
+                  {selectedTask.status === 'working' && (
+                    <span className="header-heartbeat-dot"></span>
+                  )}
+                  {selectedTask.status === 'awaiting_feedback' && 'Awaiting feedback'}
+                  {selectedTask.status === 'working' && 'In progress'}
+                  {selectedTask.status === 'completed' && 'Completed'}
+                </span>
+                <span className="header-eta">
+                  ETA: {selectedTask.expectedNextInput}
+                </span>
+              </div>
+            )}
+            {selectedTask && selectedTask.status !== 'completed' && (
+              <p className="header-last-update">{selectedTask.lastUpdate}</p>
+            )}
+          </div>
           <SettingsButton
             isOpen={showSettings}
             onToggle={() => setShowSettings(!showSettings)}
           />
         </header>
-        {selectedTask && (
+        {selectedTask ? (
           <ChatWindow
             task={selectedTask}
             onSendMessage={onSendMessage}
             isStreaming={streamingForTaskId === selectedTask.id}
             streamingContent={streamingForTaskId === selectedTask.id ? streamingContent : ''}
+            settings={uiSettings}
           />
-        )}
-        {showSettings && (
-          <div className="settings-panel">
-            <h2>Settings</h2>
-            <div className="settings-item">
-              <label>API Key</label>
-              <input type="password" placeholder="sk-ant-..." />
-            </div>
-            <div className="settings-item">
-              <label>Model</label>
-              <select>
-                <option>claude-3-opus</option>
-                <option>claude-3-sonnet</option>
-                <option>claude-3-haiku</option>
-              </select>
-            </div>
+        ) : (
+          <div className="empty-state">
+            <div className="empty-state-icon">🤖</div>
+            <h2 className="empty-state-title">Select a task to begin</h2>
+            <p className="empty-state-text">Choose a task from the sidebar to view its conversation and provide feedback to the agent.</p>
           </div>
         )}
+        {showSettings && (
+          <SettingsPanel
+            settings={uiSettings}
+            onSettingsChange={setUISettings}
+            onClose={() => setShowSettings(false)}
+          />
+        )}
       </main>
+      {uiSettings.showActivityLog && (
+        <ActivityLog
+          entries={logEntries}
+          onClose={() => setUISettings(prev => ({ ...prev, showActivityLog: false }))}
+        />
+      )}
     </div>
   )
 }

@@ -3,6 +3,7 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  font-size: calc(14px * var(--font-scale, 1));
 }
 
 .chat-status-bar {
@@ -33,7 +34,7 @@
 }
 
 .status-dot.working {
-  background-color: var(--accent);
+  background-color: var(--success);
   animation: pulse 1.5s ease-in-out infinite;
 }
 
@@ -139,8 +140,6 @@
   display: flex;
   gap: 12px;
   padding: 16px 24px;
-  background-color: var(--bg-primary);
-  border-top: 1px solid var(--border);
 }
 
 .chat-input {
@@ -193,4 +192,70 @@
   50% {
     opacity: 0;
   }
+}
+
+.streaming-progress-bar {
+  height: 3px;
+  background-color: var(--bg-tertiary);
+  overflow: hidden;
+}
+
+.streaming-progress-fill {
+  height: 100%;
+  width: 30%;
+  background: linear-gradient(90deg, var(--accent), var(--accent-hover), var(--accent));
+  animation: progress 1.5s ease-in-out infinite;
+}
+
+@keyframes progress {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(400%);
+  }
+}
+
+.message.streaming .message-text {
+  background: linear-gradient(135deg, var(--bg-tertiary), rgba(233, 69, 96, 0.1));
+}
+
+.streaming-badge {
+  font-size: 10px;
+  padding: 2px 6px;
+  background-color: var(--accent);
+  color: white;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  animation: pulse 2s ease-in-out infinite;
+}
+
+.chat-input-area {
+  background-color: var(--bg-primary);
+  border-top: 1px solid var(--border);
+}
+
+.suggestion-chips {
+  display: flex;
+  gap: 8px;
+  padding: 12px 24px 0;
+  flex-wrap: wrap;
+}
+
+.suggestion-chip {
+  padding: 6px 12px;
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.suggestion-chip:hover {
+  background-color: var(--bg-tertiary);
+  border-color: var(--accent);
+  color: var(--text-primary);
 }

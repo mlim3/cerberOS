@@ -1,5 +1,6 @@
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import type { Task } from '../App'
+import type { UISettings } from './SettingsPanel'
 import './ChatWindow.css'
 
 interface ChatWindowProps {
@@ -7,10 +8,25 @@ interface ChatWindowProps {
   onSendMessage: (taskId: string, content: string) => void | Promise<void>
   isStreaming: boolean
   streamingContent: string
+  settings: UISettings
 }
 
-function ChatWindow({ task, onSendMessage, isStreaming, streamingContent }: ChatWindowProps) {
+const SUGGESTION_CHIPS = [
+  'Approve this plan',
+  'Request a summary',
+  'Ask for alternatives',
+  'Show me the risks',
+  'Proceed with changes',
+]
+
+function ChatWindow({ task, onSendMessage, isStreaming, streamingContent, settings }: ChatWindowProps) {
   const [inputValue, setInputValue] = useState('')
+  const inputRef = useRef<HTMLInputElement>(null)
+  const messagesEndRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [task.messages, streamingContent])
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
@@ -18,6 +34,12 @@ function ChatWindow({ task, onSendMessage, isStreaming, streamingContent }: Chat
     const text = inputValue.trim()
     setInputValue('')
     onSendMessage(task.id, text)
+  }
+
+  const handleChipClick = (text: string) => {
+    if (isStreaming) return
+    setInputValue(text)
+    inputRef.current?.focus()
   }
 
   return (
@@ -48,6 +70,12 @@ function ChatWindow({ task, onSendMessage, isStreaming, streamingContent }: Chat
         </div>
       </div>
 
+      {isStreaming && settings.showStreamingProgress && (
+        <div className="streaming-progress-bar">
+          <div className="streaming-progress-fill"></div>
+        </div>
+      )}
+
       <div className="messages-container">
         {task.messages.map(message => (
           <div key={message.id} className={`message ${message.role}`}>
@@ -66,12 +94,13 @@ function ChatWindow({ task, onSendMessage, isStreaming, streamingContent }: Chat
           </div>
         ))}
         {isStreaming && (
-          <div className="message agent">
+          <div className="message agent streaming">
             <div className="message-avatar">🤖</div>
             <div className="message-content">
               <div className="message-header">
                 <span className="message-sender">cerberOS</span>
                 <span className="message-time">{new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                <span className="streaming-badge">Streaming</span>
               </div>
               <div className="message-text">
                 {streamingContent || '…'}
@@ -80,20 +109,38 @@ function ChatWindow({ task, onSendMessage, isStreaming, streamingContent }: Chat
             </div>
           </div>
         )}
+        <div ref={messagesEndRef} />
       </div>
 
-      <form className="chat-input-form" onSubmit={handleSubmit}>
-        <input
-          type="text"
-          value={inputValue}
-          onChange={e => setInputValue(e.target.value)}
-          placeholder="Type your response..."
-          className="chat-input"
-        />
-        <button type="submit" className="send-button" disabled={isStreaming}>
-          {isStreaming ? '…' : 'Send'}
-        </button>
-      </form>
+      <div className="chat-input-area">
+        {settings.demoMode && !isStreaming && (
+          <div className="suggestion-chips">
+            {SUGGESTION_CHIPS.map(chip => (
+              <button
+                key={chip}
+                type="button"
+                className="suggestion-chip"
+                onClick={() => handleChipClick(chip)}
+              >
+                {chip}
+              </button>
+            ))}
+          </div>
+        )}
+        <form className="chat-input-form" onSubmit={handleSubmit}>
+          <input
+            ref={inputRef}
+            type="text"
+            value={inputValue}
+            onChange={e => setInputValue(e.target.value)}
+            placeholder="Type your response..."
+            className="chat-input"
+          />
+          <button type="submit" className="send-button" disabled={isStreaming}>
+            {isStreaming ? '…' : 'Send'}
+          </button>
+        </form>
+      </div>
     </div>
   )
 }

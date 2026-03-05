@@ -17,6 +17,17 @@
   --warning: #ffc107;
   --success: #4caf50;
   --border: #2a2a4a;
+  --font-scale: 1;
+}
+
+html[data-font-scale="large"] {
+  --font-scale: 1.15;
+}
+
+html[data-high-contrast="true"] {
+  --text-primary: #ffffff;
+  --text-secondary: #c0c0c0;
+  --border: #4a4a6a;
 }
 
 body {
