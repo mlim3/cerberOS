@@ -1,12 +1,15 @@
 package vm
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 )
 
@@ -133,6 +136,53 @@ func (q *QEMU) cpu() string {
 		return "max"
 	}
 	return "host"
+}
+
+// Run starts the VM, waits for it to exit, and returns captured output.
+// The guest init script is expected to power off via sysrq-trigger when done,
+// which causes QEMU to exit and cmd.Wait() to return.
+func (q *QEMU) Run(ctx context.Context) (*RunResult, error) {
+	if q.cfg.KernelImagePath == "" {
+		return nil, fmt.Errorf("KERNEL_IMAGE_PATH is not set")
+	}
+	if q.cfg.InitrdPath == "" {
+		return nil, fmt.Errorf("INITRD_PATH is not set")
+	}
+
+	bin := q.binary()
+	args := q.buildArgs()
+	log.Printf("launching (run): %s %s", bin, strings.Join(args, " "))
+
+	q.cmd = exec.CommandContext(ctx, bin, args...)
+
+	var buf bytes.Buffer
+	q.cmd.Stdout = &buf
+	q.cmd.Stderr = &buf
+
+	if err := q.cmd.Start(); err != nil {
+		return nil, err
+	}
+
+	// Wait for QEMU to exit (triggered by guest sysrq poweroff).
+	// Non-zero exit is expected when guest powers off — not an error.
+	_ = q.cmd.Wait()
+
+	output := buf.String()
+	return &RunResult{
+		Output:   output,
+		ExitCode: parseExitCode(output),
+	}, nil
+}
+
+var exitCodeRe = regexp.MustCompile(`=== cerberOS job exit_code=(\d+) ===`)
+
+func parseExitCode(output string) int {
+	m := exitCodeRe.FindStringSubmatch(output)
+	if len(m) < 2 {
+		return -1
+	}
+	code, _ := strconv.Atoi(m[1])
+	return code
 }
 
 // buildArgs constructs the full QEMU command-line argument list.
