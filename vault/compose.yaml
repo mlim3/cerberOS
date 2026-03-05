@@ -1,6 +1,7 @@
 services:
   engine:
     build:
+      dockerfile: "Dockerfile.qemu"
       context: "./engine"
     ports:
       - "8000:8000"
