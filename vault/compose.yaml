@@ -5,5 +5,5 @@ services:
     ports:
       - "8000:8000"
     privileged: true
-    devices:
-      - /dev/kvm:/dev/kvm
+    # devices:
+    #   - /dev/kvm:/dev/kvm
