@@ -16,8 +16,16 @@ type Config struct {
 	MemoryMiB int64
 }
 
+// RunResult holds the output from a completed VM execution.
+type RunResult struct {
+	Output   string // combined stdout/stderr from the VM console
+	ExitCode int    // exit code from the job script (-1 if unknown)
+}
+
 // VM is the interface that all hypervisor backends must implement.
 type VM interface {
 	Start(ctx context.Context) error
 	Stop() error
+	// Run starts the VM, waits for it to exit, and returns captured output.
+	Run(ctx context.Context) (*RunResult, error)
 }
