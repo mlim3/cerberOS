@@ -56,6 +56,11 @@ function timeLabel(): string {
   return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 
+/** Random 2000–4000 ms in 100 ms increments (mock heartbeat interval). */
+function randomHeartbeatMs(): number {
+  return Math.floor(Math.random() * 21) * 100 + 2000
+}
+
 const mockTasks: Task[] = [
   {
     id: '1',
@@ -200,6 +205,8 @@ function App() {
   const [uiSettings, setUISettings] = useState<UISettings>(loadSettings)
   const [logEntries, setLogEntries] = useState<LogEntry[]>([])
   const heartbeatIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const [taskHeartbeats, setTaskHeartbeats] = useState<Record<string, number>>({})
+  const taskNextHeartbeatAtRef = useRef<Record<string, number>>({})
 
   const selectedTask = tasks.find(t => t.id === selectedTaskId)
 
@@ -220,6 +227,28 @@ function App() {
     document.documentElement.setAttribute('data-font-scale', uiSettings.fontSizeScale)
     document.documentElement.setAttribute('data-high-contrast', uiSettings.highContrast ? 'true' : 'false')
   }, [uiSettings.fontSizeScale, uiSettings.highContrast])
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      const now = Date.now()
+      const working = tasks.filter(t => t.status === 'working')
+      let updated = false
+      const nextUpdates: Record<string, number> = {}
+      for (const task of working) {
+        const nextAt = taskNextHeartbeatAtRef.current[task.id]
+        if (nextAt === undefined || nextAt === 0 || now >= nextAt) {
+          const next = now + randomHeartbeatMs()
+          taskNextHeartbeatAtRef.current[task.id] = next
+          nextUpdates[task.id] = now
+          updated = true
+        }
+      }
+      if (updated) {
+        setTaskHeartbeats(prev => ({ ...prev, ...nextUpdates }))
+      }
+    }, 100)
+    return () => clearInterval(id)
+  }, [tasks])
 
   useEffect(() => {
     if (!uiSettings.showActivityLog) {
@@ -357,6 +386,7 @@ function App() {
         selectedTaskId={selectedTaskId}
         onSelectTask={setSelectedTaskId}
         settings={uiSettings}
+        taskHeartbeats={taskHeartbeats}
       />
       <main className="main-content">
         <header className="header">

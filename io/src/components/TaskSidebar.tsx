@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect } from 'react'
 import type { Task } from '../App'
 import type { UISettings } from './SettingsPanel'
 import './TaskSidebar.css'
@@ -8,6 +8,7 @@ interface TaskSidebarProps {
   selectedTaskId: string
   onSelectTask: (id: string) => void
   settings: UISettings
+  taskHeartbeats: Record<string, number>
 }
 
 function parseETA(eta: string): number {
@@ -17,11 +18,10 @@ function parseETA(eta: string): number {
   return 999
 }
 
-function TaskSidebar({ tasks, selectedTaskId, onSelectTask, settings }: TaskSidebarProps) {
+function TaskSidebar({ tasks, selectedTaskId, onSelectTask, settings, taskHeartbeats }: TaskSidebarProps) {
   const [showFinishedOnly, setShowFinishedOnly] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
-  const [secondsSinceHeartbeat, setSecondsSinceHeartbeat] = useState(0)
-  const lastHeartbeatRef = useRef(Date.now())
+  const [tick, setTick] = useState(() => Date.now())
 
   const filteredByToggle = showFinishedOnly
     ? tasks.filter(t => t.status === 'completed')
@@ -45,9 +45,7 @@ function TaskSidebar({ tasks, selectedTaskId, onSelectTask, settings }: TaskSide
   })
 
   useEffect(() => {
-    const id = setInterval(() => {
-      setSecondsSinceHeartbeat((Date.now() - lastHeartbeatRef.current) / 1000)
-    }, 500)
+    const id = setInterval(() => setTick(Date.now()), 300)
     return () => clearInterval(id)
   }, [])
 
@@ -113,7 +111,7 @@ function TaskSidebar({ tasks, selectedTaskId, onSelectTask, settings }: TaskSide
               {task.status === 'working' && (
                 settings.showHeartbeatSeconds ? (
                   <span className="status-icon heartbeat" title="Seconds since last heartbeat">
-                    {secondsSinceHeartbeat.toFixed(1)}s
+                    {Math.max(0, (tick - (taskHeartbeats[task.id] ?? tick)) / 1000).toFixed(1)}s
                   </span>
                 ) : (
                   <span className="status-icon working-dot" title="Working">
@@ -129,7 +127,16 @@ function TaskSidebar({ tasks, selectedTaskId, onSelectTask, settings }: TaskSide
               <span className="task-title">{task.title}</span>
               <span className="task-update">{task.lastUpdate}</span>
             </div>
-            <div className="task-eta">
+            <div
+              className="task-eta"
+              title={
+                task.expectedNextInput === 'Now'
+                  ? 'Next user input: now'
+                  : task.expectedNextInput === 'Done'
+                    ? 'Task completed; no further input needed'
+                    : `Estimated next user input: in ${task.expectedNextInput}`
+              }
+            >
               <span className={task.status === 'awaiting_feedback' ? 'urgent' : ''}>
                 {task.expectedNextInput}
               </span>
