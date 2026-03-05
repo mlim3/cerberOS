@@ -182,3 +182,15 @@
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+.streaming-cursor {
+  display: inline-block;
+  animation: blink 1s step-end infinite;
+  margin-left: 2px;
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}

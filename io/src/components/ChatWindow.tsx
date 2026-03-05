@@ -4,16 +4,20 @@ import './ChatWindow.css'
 
 interface ChatWindowProps {
   task: Task
+  onSendMessage: (taskId: string, content: string) => void | Promise<void>
+  isStreaming: boolean
+  streamingContent: string
 }
 
-function ChatWindow({ task }: ChatWindowProps) {
+function ChatWindow({ task, onSendMessage, isStreaming, streamingContent }: ChatWindowProps) {
   const [inputValue, setInputValue] = useState('')
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
-    if (!inputValue.trim()) return
-    console.log('Sending message:', inputValue)
+    if (!inputValue.trim() || isStreaming) return
+    const text = inputValue.trim()
     setInputValue('')
+    onSendMessage(task.id, text)
   }
 
   return (
@@ -61,6 +65,21 @@ function ChatWindow({ task }: ChatWindowProps) {
             </div>
           </div>
         ))}
+        {isStreaming && (
+          <div className="message agent">
+            <div className="message-avatar">🤖</div>
+            <div className="message-content">
+              <div className="message-header">
+                <span className="message-sender">cerberOS</span>
+                <span className="message-time">{new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+              </div>
+              <div className="message-text">
+                {streamingContent || '…'}
+                <span className="streaming-cursor">▌</span>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       <form className="chat-input-form" onSubmit={handleSubmit}>
@@ -71,8 +90,8 @@ function ChatWindow({ task }: ChatWindowProps) {
           placeholder="Type your response..."
           className="chat-input"
         />
-        <button type="submit" className="send-button">
-          Send
+        <button type="submit" className="send-button" disabled={isStreaming}>
+          {isStreaming ? '…' : 'Send'}
         </button>
       </form>
     </div>

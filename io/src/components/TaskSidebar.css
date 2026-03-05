@@ -29,6 +29,60 @@
   font-size: 12px;
 }
 
+.sidebar-toggle {
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.toggle-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-secondary);
+  user-select: none;
+}
+
+.toggle-label:hover {
+  color: var(--text-primary);
+}
+
+.toggle-input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.toggle-text {
+  flex: 1;
+}
+
+.sidebar-search {
+  padding: 8px 20px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.search-input {
+  width: 100%;
+  padding: 8px 12px;
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.search-input::placeholder {
+  color: var(--text-secondary);
+}
+
+.search-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
 .task-list {
   flex: 1;
   overflow-y: auto;
@@ -60,7 +114,8 @@
 
 .task-status {
   flex-shrink: 0;
-  width: 24px;
+  min-width: 24px;
+  width: 36px;
   height: 24px;
   display: flex;
   align-items: center;
@@ -80,25 +135,12 @@
   font-weight: bold;
 }
 
-.status-icon.working {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.spinner {
-  width: 16px;
-  height: 16px;
-  border: 2px solid var(--bg-tertiary);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: spin 1s linear infinite;
-}
-
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
+.status-icon.heartbeat {
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  min-width: 28px;
+  text-align: center;
 }
 
 @keyframes pulse {
