@@ -89,6 +89,34 @@
   padding: 8px;
 }
 
+.task-list-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 12px 6px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.task-list-header-status {
+  flex-shrink: 0;
+  min-width: 24px;
+  width: 36px;
+}
+
+.task-list-header-title {
+  flex: 1;
+  min-width: 0;
+  text-align: center;
+}
+
+.task-list-header-next {
+  flex-shrink: 0;
+  text-align: right;
+}
+
 .task-item {
   width: 100%;
   display: flex;

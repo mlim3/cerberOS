@@ -63,6 +63,13 @@ function TaskSidebar({ tasks, selectedTaskId, onSelectTask }: TaskSidebarProps) 
         />
       </div>
       <div className="task-list">
+        {sortedTasks.length > 0 && (
+          <div className="task-list-header">
+            <span className="task-list-header-status">Status</span>
+            <span className="task-list-header-title">Task</span>
+            <span className="task-list-header-next">Next input</span>
+          </div>
+        )}
         {sortedTasks.map(task => (
           <button
             key={task.id}
