@@ -6,7 +6,7 @@ Database: PostgreSQL with pgvector
 
 ## 1. Architectural Overview
 
-The Memory Service acts as the central nervous system for the AI OS. It follows a logically distributed architecture on a single PostgreSQL instance (Distributed in the future). Externally, it exposes intuitive, domain-specific, and versioned REST/RPC endpoints. Internally, it routes these requests to isolated PostgreSQL schemas, ensuring strict service boundaries, security, and optimized querying.
+The Memory Service acts as the central storage layer for the AI OS. It follows a logically distributed architecture on a single PostgreSQL instance, with room to distribute later if needed. Externally, it exposes simple, versioned REST endpoints. Internally, it routes requests to isolated PostgreSQL schemas, keeping clear service boundaries while staying closely aligned to the underlying tables.
 
 All endpoints are versioned under `/api/v1/`.
 
@@ -15,6 +15,8 @@ All requests and responses use JSON.
 Timestamps use RFC3339 format (example: `2026-03-04T12:34:56Z`).
 
 All IDs use UUIDv7 for decentralized generation and time-ordered clustering.
+
+This service intentionally stays thin. It does not try to own complex data transformation logic. Callers are responsible for tasks like chunking, embedding generation, fact extraction, and payload shaping before writing data into the service. The service is primarily responsible for validation, persistence, retrieval, and basic concurrency checks.
 
 ## 2. Standard API Response Format
 
@@ -48,13 +50,15 @@ All endpoints return a standardized response envelope.
 
 We use path variables like `{sessionId}`, `{userId}`, `{taskId}`, and `{factId}` to clearly identify the resource being modified.
 
-### A. Health Store
+The API is intentionally simple and closely follows the database schemas. In general, the service accepts already-shaped data, writes it to the corresponding schema tables, and returns the inserted or queried records. Service users are responsible for higher-level transformations such as text chunking, embedding generation, semantic extraction, and deciding when to overwrite facts.
+
+### A. Health Endpoint
 
 **Purpose:** To provide service health information for monitoring and orchestration systems.
 
-**Endpoints:**
+**Endpoint:**
 
-- `GET /api/v1/healthz`: Returns service health state and database connectivity.
+- `GET /api/v1/healthz`
 
 **Arguments:**
 
@@ -77,42 +81,46 @@ We use path variables like `{sessionId}`, `{userId}`, `{taskId}`, and `{factId}`
 
 **Target Schema:** `chat_schema`
 
-**Purpose:** To maintain the exact, chronological transcript of conversations between the user and the AI.
+**Purpose:** To store the exact chronological transcript of conversations between the user and the AI.
 
 **Endpoints:**
 
-- `POST /api/v1/chat/{sessionId}/save`: Appends a new message (user or AI) to the transcript for a specific session.
-- `GET /api/v1/chat/{sessionId}/history`: Retrieves the conversation history, returning an ordered array of message objects.
+- `POST /api/v1/chat/{sessionId}/messages`
+- `GET /api/v1/chat/{sessionId}/messages`
 
-**Why it is needed:** LLMs need immediate conversational context to reply coherently. This store provides the literal short-term memory of exactly what was just said without any summarization or loss of detail.
+**Why it is needed:** This store provides exact short-term conversational memory with no summarization or transformation.
 
-#### `POST /api/v1/chat/{sessionId}/save`
+#### `POST /api/v1/chat/{sessionId}/messages`
 
 **Request arguments:**
 
 - `sessionId` — UUID of the conversation session from the path
 - `userId` — UUID of the user who owns the conversation
 - `role` — `user | assistant | system`
-- `content` — the exact message text
-- `tokenCount` — optional integer token count for metrics and billing
+- `content` — exact message text
+- `tokenCount` — optional integer token count
 - `idempotencyKey` — UUID used to prevent duplicate insertion on retry
 
 **Return values:**
 
-- `messageId` — UUID of stored message
-- `createdAt` — insertion timestamp
+- `messageId`
+- `sessionId`
+- `userId`
+- `role`
+- `content`
+- `tokenCount`
+- `idempotencyKey`
+- `createdAt`
 
 **Dataflow:**
 
 1. Request arrives with `sessionId` and message payload.
-2. Service validates the path variable and payload fields.
-3. Service verifies that the referenced user exists.
-4. Service checks the `idempotencyKey` to prevent duplicate insertion.
-5. Message is inserted into `chat_schema.messages`.
-6. Database returns the generated `messageId` and `createdAt`.
-7. Standardized response envelope is returned.
+2. Service validates required fields.
+3. Service checks `idempotencyKey` uniqueness.
+4. Service inserts the row into `chat_schema.messages`.
+5. The inserted record is returned in the standardized response envelope.
 
-#### `GET /api/v1/chat/{sessionId}/history`
+#### `GET /api/v1/chat/{sessionId}/messages`
 
 **Request arguments:**
 
@@ -121,140 +129,151 @@ We use path variables like `{sessionId}`, `{userId}`, `{taskId}`, and `{factId}`
 
 **Return values:**
 
-- `messages` — ordered array of chat message objects
+- `messages` — ordered array of message records
 
 Each message contains:
 
 - `messageId`
+- `sessionId`
 - `userId`
 - `role`
 - `content`
 - `tokenCount`
+- `idempotencyKey`
 - `createdAt`
 
 **Dataflow:**
 
-1. Service receives the session history request.
-2. Service queries `chat_schema.messages` where `session_id` matches the path variable.
-3. Results are ordered by `created_at` ascending.
-4. If `limit` is present, the result set is truncated.
-5. The messages array is returned in the standard response envelope.
+1. Service queries `chat_schema.messages` where `session_id` matches the path variable.
+2. Results are ordered by `created_at` ascending.
+3. If `limit` is provided, the result set is truncated.
+4. The records are returned in the standardized response envelope.
 
 ### C. Personal Info Store
 
-**Target Schema:** `personal_info_schema` (utilizing the `pgvector` extension)
+**Target Schema:** `personal_info_schema`
 
-**Purpose:** The core long-term intelligent memory. This is where the system extracts facts, stores semantic chunks, and enables semantic search across the user's history.
+**Purpose:** To store semantic chunks, structured facts, and traceability links for long-term memory.
 
 **Endpoints:**
 
-- `POST /api/v1/personal_info/{userId}/save`: Accepts raw text and a source reference. Internally, the Go service chunks the text, calls an embedding model, extracts hard facts, and saves the data linked to the source.
-- `POST /api/v1/personal_info/{userId}/query`: Takes a user query, vectorizes it, and performs a rapid cosine-similarity search against the pgvector store to return highly relevant context for the AI agent.
-- `GET /api/v1/personal_info/{userId}/all`: Returns a complete, structured JSON dump of all facts and semantic memory chunks for a specific user.
-- `PUT /api/v1/personal_info/{userId}/facts/{factId}`: Updates an existing structured fact for the user.
-- `DELETE /api/v1/personal_info/{userId}/facts/{factId}`: Deletes an existing structured fact for the user.
+- `POST /api/v1/personal_info/{userId}/chunks`
+- `GET /api/v1/personal_info/{userId}/chunks`
+- `POST /api/v1/personal_info/{userId}/facts`
+- `GET /api/v1/personal_info/{userId}/facts`
+- `PUT /api/v1/personal_info/{userId}/facts/{factId}`
+- `DELETE /api/v1/personal_info/{userId}/facts/{factId}`
+- `POST /api/v1/personal_info/{userId}/sources`
+- `GET /api/v1/personal_info/{userId}/sources`
 
-**Why it is needed:** This provides the semantic understanding of the user over months or years, ensuring the AI OS remembers user preferences, ongoing projects, and established facts.
+**Why it is needed:** This schema stores the long-term memory records used by other services. The memory service itself remains a persistence and retrieval layer, while callers handle transformation and extraction before writing data.
 
-#### `POST /api/v1/personal_info/{userId}/save`
-
-**Request arguments:**
-
-- `userId` — UUID of the user from the path
-- `content` — raw text content to store
-- `sourceType` — `chat | uploaded_file | document | web`
-- `sourceId` — UUID or external identifier of the original source
-- `extractFacts` — boolean indicating whether structured facts should be extracted
-- `categoryHint` — optional string category hint for fact extraction
-
-**Return values:**
-
-- `chunkIds` — array of UUIDs for inserted semantic chunks
-- `factIds` — array of UUIDs for inserted structured facts
-
-**Dataflow:**
-
-1. Service validates `userId` and confirms the user exists.
-2. Raw `content` is accepted by the save handler.
-3. The content is chunked into smaller semantic units.
-4. Each chunk is sent to the embedding model.
-5. Embedding vectors are returned and written into `personal_info_schema.personal_info_chunks` with the chunk text.
-6. If `extractFacts` is true, the service runs the fact extraction pipeline over the same content.
-7. Extracted facts are written into `personal_info_schema.user_facts`.
-8. `source_references` rows are inserted linking each chunk and fact back to the originating source.
-9. The service returns the created `chunkIds` and `factIds` in the standardized response envelope.
-
-#### `POST /api/v1/personal_info/{userId}/query`
+#### `POST /api/v1/personal_info/{userId}/chunks`
 
 **Request arguments:**
 
 - `userId` — UUID of the user from the path
-- `query` — natural language query string
-- `topK` — maximum number of results to return
+- `rawText` — chunk text to store
+- `embedding` — vector payload matching the configured pgvector dimension
+- `modelVersion` — embedding model version string
 
 **Return values:**
-
-- `results` — ordered list of semantic memory matches
-
-Each result contains:
 
 - `chunkId`
-- `text`
-- `similarityScore`
-- `sourceReference`
-
-Each `sourceReference` contains:
-
-- `sourceType`
-- `sourceId`
-- `targetType`
-- `targetId`
-
-**Dataflow:**
-
-1. Service validates the user exists.
-2. The query string is converted into an embedding vector.
-3. A pgvector cosine-similarity search is executed against `personal_info_schema.personal_info_chunks.embedding`.
-4. The top `K` matches are selected.
-5. Related `source_references` rows are joined in.
-6. Results are ordered by similarity score descending.
-7. Standardized response envelope is returned.
-
-#### `GET /api/v1/personal_info/{userId}/all`
-
-**Request arguments:**
-
-- `userId` — UUID of the user from the path
-
-**Return values:**
-
-- `facts` — array of structured fact objects
-- `chunks` — array of semantic chunk objects
-
-Each fact contains:
-
-- `factId`
-- `category`
-- `factKey`
-- `factValue`
-- `confidence`
-- `version`
-- `updatedAt`
-
-Each chunk contains:
-
-- `chunkId`
+- `userId`
 - `rawText`
 - `modelVersion`
 - `createdAt`
 
 **Dataflow:**
 
-1. Service validates the user exists.
-2. Service queries all rows in `personal_info_schema.user_facts` for the user.
-3. Service queries all rows in `personal_info_schema.personal_info_chunks` for the user.
-4. The two datasets are packaged into a single response.
-5. Standardized response envelope is returned.
+1. Service validates the request payload.
+2. Service inserts the row into `personal_info_schema.personal_info_chunks`.
+3. The inserted chunk record is returned.
+
+#### `GET /api/v1/personal_info/{userId}/chunks`
+
+**Request arguments:**
+
+- `userId` — UUID of the user from the path
+- `limit` — optional integer maximum number of rows
+
+**Return values:**
+
+- `chunks` — array of chunk records
+
+Each chunk contains:
+
+- `chunkId`
+- `userId`
+- `rawText`
+- `modelVersion`
+- `createdAt`
+
+**Dataflow:**
+
+1. Service queries `personal_info_schema.personal_info_chunks` by `user_id`.
+2. If `limit` is provided, the result set is truncated.
+3. The records are returned in the standardized response envelope.
+
+#### `POST /api/v1/personal_info/{userId}/facts`
+
+**Request arguments:**
+
+- `userId` — UUID of the user from the path
+- `category` — fact category string
+- `factKey` — key name
+- `factValue` — JSON value
+- `confidence` — confidence score
+
+**Return values:**
+
+- `factId`
+- `userId`
+- `category`
+- `factKey`
+- `factValue`
+- `confidence`
+- `version`
+- `updatedAt`
+- `createdAt`
+
+**Dataflow:**
+
+1. Service validates the request payload.
+2. Service inserts the row into `personal_info_schema.user_facts`.
+3. The inserted fact record is returned.
+
+#### `GET /api/v1/personal_info/{userId}/facts`
+
+**Request arguments:**
+
+- `userId` — UUID of the user from the path
+- `category` — optional category filter
+- `limit` — optional integer maximum number of rows
+
+**Return values:**
+
+- `facts` — array of fact records
+
+Each fact contains:
+
+- `factId`
+- `userId`
+- `category`
+- `factKey`
+- `factValue`
+- `confidence`
+- `version`
+- `updatedAt`
+- `createdAt`
+
+**Dataflow:**
+
+1. Service queries `personal_info_schema.user_facts` by `user_id`.
+2. If `category` is provided, the query adds a category filter.
+3. If `limit` is provided, the result set is truncated.
+4. The records are returned in the standardized response envelope.
 
 #### `PUT /api/v1/personal_info/{userId}/facts/{factId}`
 
@@ -266,23 +285,27 @@ Each chunk contains:
 - `factKey` — updated key name
 - `factValue` — updated JSON value
 - `confidence` — updated confidence score
-- `version` — current fact version for optimistic concurrency control
+- `version` — current version for optimistic concurrency control
 
 **Return values:**
 
-- `factId` — UUID of updated fact
-- `version` — incremented version after update
-- `updatedAt` — update timestamp
+- `factId`
+- `userId`
+- `category`
+- `factKey`
+- `factValue`
+- `confidence`
+- `version`
+- `updatedAt`
+- `createdAt`
 
 **Dataflow:**
 
-1. Service validates that the fact exists and belongs to the specified user.
-2. Service compares the submitted `version` against the current row version.
+1. Service loads the target fact by `factId` and `userId`.
+2. Service compares the submitted `version` against the stored version.
 3. If versions do not match, the service returns a `conflict` error.
-4. If versions match, the fact row is updated.
-5. The row version is incremented.
-6. `updated_at` is refreshed.
-7. Standardized response envelope is returned.
+4. If versions match, the row is updated and the version is incremented.
+5. The updated fact record is returned.
 
 #### `DELETE /api/v1/personal_info/{userId}/facts/{factId}`
 
@@ -298,10 +321,65 @@ Each chunk contains:
 
 **Dataflow:**
 
-1. Service validates that the fact exists and belongs to the specified user.
+1. Service validates that the fact exists for the specified user.
 2. The target row is deleted from `personal_info_schema.user_facts`.
-3. Any `source_references` rows targeting that fact are deleted as cleanup.
-4. Standardized response envelope is returned.
+3. Related `source_references` rows may be deleted as cleanup if configured by the service.
+4. The deletion result is returned.
+
+#### `POST /api/v1/personal_info/{userId}/sources`
+
+**Request arguments:**
+
+- `userId` — UUID of the user from the path
+- `targetId` — UUID of the chunk or fact
+- `targetType` — `chunk | fact`
+- `sourceId` — UUID of the source record
+- `sourceType` — `chat | uploaded_file | document | web`
+
+**Return values:**
+
+- `sourceReferenceId`
+- `targetId`
+- `targetType`
+- `sourceId`
+- `sourceType`
+- `createdAt`
+
+**Dataflow:**
+
+1. Service validates the request payload.
+2. Service inserts the row into `personal_info_schema.source_references`.
+3. The inserted traceability record is returned.
+
+#### `GET /api/v1/personal_info/{userId}/sources`
+
+**Request arguments:**
+
+- `userId` — UUID of the user from the path
+- `targetId` — optional UUID of the chunk or fact
+- `targetType` — optional `chunk | fact`
+- `sourceType` — optional source type filter
+- `limit` — optional integer maximum number of rows
+
+**Return values:**
+
+- `sources` — array of source reference records
+
+Each source reference contains:
+
+- `sourceReferenceId`
+- `targetId`
+- `targetType`
+- `sourceId`
+- `sourceType`
+- `createdAt`
+
+**Dataflow:**
+
+1. Service queries `personal_info_schema.source_references` for records associated with the specified user context.
+2. Optional filters are applied if provided.
+3. If `limit` is provided, the result set is truncated.
+4. The records are returned in the standardized response envelope.
 
 ### D. Agent Log Store
 
@@ -311,47 +389,53 @@ Each chunk contains:
 
 **Endpoints:**
 
-- `POST /api/v1/agent/{taskId}/log/save`: Records an agent's current task, the tools it attempted to use, and the success or failure state of that action.
-- `GET /api/v1/agent/{taskId}/log/history`: Retrieves the chronological history of all agent actions for a specific task.
+- `POST /api/v1/agent/{taskId}/executions`
+- `GET /api/v1/agent/{taskId}/executions`
 
-**Why it is needed:** Auditing and safety. If an agent executes an unexpected command or fails a task, developers need a precise audit trail of the agent's decision-making process.
+**Why it is needed:** This provides an audit trail of agent behavior without adding business logic on top of the stored records.
 
-#### `POST /api/v1/agent/{taskId}/log/save`
+#### `POST /api/v1/agent/{taskId}/executions`
 
 **Request arguments:**
 
 - `taskId` — UUID of the task from the path
 - `agentId` — identifier of the specific agent performing the step
-- `actionType` — `tool_call | reasoning_step | final_answer`
-- `payload` — exact machine-readable input/output of the step
+- `actionType` — action type string
+- `payload` — machine-readable input/output of the step
 - `status` — `pending | success | failed`
 - `errorContext` — optional text describing the failure
 
 **Return values:**
 
-- `logId` — UUID of inserted task execution row
-- `createdAt` — insertion timestamp
+- `executionId`
+- `taskId`
+- `agentId`
+- `actionType`
+- `payload`
+- `status`
+- `errorContext`
+- `createdAt`
 
 **Dataflow:**
 
-1. Agent emits execution details to the log endpoint.
-2. Service validates the payload and required identifiers.
-3. Entry is written to `agent_logs_schema.task_executions`.
-4. Standardized response envelope is returned.
+1. Service validates the request payload.
+2. Service inserts the row into `agent_logs_schema.task_executions`.
+3. The inserted execution record is returned.
 
-#### `GET /api/v1/agent/{taskId}/log/history`
+#### `GET /api/v1/agent/{taskId}/executions`
 
 **Request arguments:**
 
 - `taskId` — UUID of the task from the path
+- `limit` — optional integer maximum number of rows
 
 **Return values:**
 
-- `logs` — ordered array of task execution entries
+- `executions` — ordered array of execution records
 
-Each log entry contains:
+Each execution contains:
 
-- `logId`
+- `executionId`
 - `taskId`
 - `agentId`
 - `actionType`
@@ -364,22 +448,23 @@ Each log entry contains:
 
 1. Service queries `agent_logs_schema.task_executions` by `task_id`.
 2. Results are ordered by `created_at` ascending.
-3. Standardized response envelope is returned.
+3. If `limit` is provided, the result set is truncated.
+4. The records are returned in the standardized response envelope.
 
 ### E. Service Log Store
 
 **Target Schema:** `service_log_schema`
 
-**Purpose:** System-level telemetry and infrastructure visibility.
+**Purpose:** To store system-level telemetry and infrastructure visibility records.
 
 **Endpoints:**
 
-- `POST /api/v1/system/log/save`: Ingests system-level errors, bottlenecks, and database connection issues.
-- `GET /api/v1/system/log/history`: Retrieves system health metrics and error logs.
+- `POST /api/v1/system/events`
+- `GET /api/v1/system/events`
 
-**Why it is needed:** While Agent Logs track AI behavior, Service Logs track software behavior. This is essential for identifying memory leaks, latency spikes, and integration failures.
+**Why it is needed:** This provides software and infrastructure logs without mixing them into user memory or agent execution records.
 
-#### `POST /api/v1/system/log/save`
+#### `POST /api/v1/system/events`
 
 **Request arguments:**
 
@@ -391,29 +476,35 @@ Each log entry contains:
 
 **Return values:**
 
-- `logId` — UUID of inserted system event
-- `createdAt` — insertion timestamp
+- `eventId`
+- `traceId`
+- `serviceName`
+- `severity`
+- `message`
+- `metadata`
+- `createdAt`
 
 **Dataflow:**
 
-1. Internal service emits telemetry to the endpoint.
-2. Service validates payload fields.
-3. Entry is written to `service_log_schema.system_events`.
-4. Standardized response envelope is returned.
+1. Service validates the request payload.
+2. Service inserts the row into `service_log_schema.system_events`.
+3. The inserted system event record is returned.
 
-#### `GET /api/v1/system/log/history`
+#### `GET /api/v1/system/events`
 
 **Request arguments:**
 
-- `limit` — optional integer maximum number of events to return
+- `serviceName` — optional service name filter
+- `severity` — optional severity filter
+- `limit` — optional integer maximum number of rows
 
 **Return values:**
 
-- `logs` — ordered array of system event entries
+- `events` — ordered array of system event records
 
-Each log entry contains:
+Each event contains:
 
-- `logId`
+- `eventId`
 - `traceId`
 - `serviceName`
 - `severity`
@@ -424,13 +515,14 @@ Each log entry contains:
 **Dataflow:**
 
 1. Service queries `service_log_schema.system_events`.
-2. Results are ordered by `created_at` descending.
-3. If `limit` is present, the result set is truncated.
-4. Standardized response envelope is returned.
+2. Optional filters are applied if provided.
+3. Results are ordered by `created_at` descending.
+4. If `limit` is provided, the result set is truncated.
+5. The records are returned in the standardized response envelope.
 
 ## 4. Database Schema (Logical Distribution & Data Modeling)
 
-To satisfy the requirements of a highly concurrent, distributed AI operating system, the database is physically modeled to support zero-downtime migrations, optimistic concurrency control, and logical sharding. All primary keys utilize UUIDv7 for decentralized generation and time-ordered clustering.
+The database is modeled to stay simple, explicit, and closely aligned to the API. Each schema owns a clear type of record. Most endpoints map directly to rows in these tables, with only lightweight validation and concurrency checks in the service layer. All primary keys utilize UUIDv7 for decentralized generation and time-ordered clustering.
 
 ### Schema: identity_schema
 
