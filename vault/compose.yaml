@@ -9,8 +9,9 @@ services:
       - SECRET_STORE_TOKEN=value
       - SECRET_STORE_URL=http://secretstore:8001
     privileged: true
-    # devices:
-    #   - /dev/kvm:/dev/kvm
+    depends_on: 
+      - secretstore
+    restart: no
   
   secretstore:
     build:
@@ -19,3 +20,14 @@ services:
       - "8001:8001"
     environment:
       - ENGINE_TOKEN=value
+    restart: no
+
+  ui:
+    build:
+      context: "./internal-ui"
+    ports:
+      - "80:80"
+    depends_on:
+      - secretstore
+      - engine
+    restart: no
