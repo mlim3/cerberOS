@@ -145,7 +145,7 @@ func writeCPIOEntry(w *bytes.Buffer, name string, mode uint32, data []byte, ino 
 	hdr := fmt.Sprintf("070701"+
 		"%08X"+ // inode
 		"%08X"+ // mode
-"%08X"+ // uid
+		"%08X"+ // uid
 		"%08X"+ // gid
 		"%08X"+ // nlink
 		"%08X"+ // mtime
