@@ -47,6 +47,8 @@ All endpoints return a standardized response envelope.
 
 We use path variables like `{sessionId}`, `{userId}`, `{taskId}`, and `{factId}` to clearly identify the resource being modified.
 
+All user-scoped endpoints validate that the referenced `userId` exists in `identity_schema.users` before performing work. All resource lookups are constrained by `userId` ownership. If a requested resource does not exist for the specified user, the service returns `not_found` rather than exposing cross-user existence.
+
 ### A. Health Endpoint
 
 **Purpose:** To provide service health information for monitoring and orchestration systems.
@@ -76,9 +78,23 @@ We use path variables like `{sessionId}`, `{userId}`, `{taskId}`, and `{factId}`
 
 **Why it is needed:** This store provides exact short-term conversational memory with no summarization or transformation.
 
+Chat messages are append-only and immutable through this API. Update and delete operations are intentionally not exposed.
+
 #### `POST /api/v1/chat/{sessionId}/messages`
 
 **Request arguments:**
+
+- **Request JSON:**
+
+```json
+{
+  "userId": "0194d7b4-9d31-7d31-a111-111111111111",
+  "role": "user",
+  "content": "What did I say about PostgreSQL last week?",
+  "tokenCount": 12,
+  "idempotencyKey": "0194d7b4-9d31-7d31-a222-222222222222"
+}
+```
 
 - `sessionId` — UUID of the conversation session
 - `userId` — UUID of the user who owns the conversation
@@ -89,19 +105,62 @@ We use path variables like `{sessionId}`, `{userId}`, `{taskId}`, and `{factId}`
 
 **Return values:**
 
-- `messageId` — UUID of stored message
-- `createdAt` — insertion timestamp
+- `message` — inserted message record
+
+**Successful response JSON:**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "message": {
+      "messageId": "0194d7b4-9d31-7d31-a333-333333333333",
+      "sessionId": "0194d7b4-9d31-7d31-a444-444444444444",
+      "userId": "0194d7b4-9d31-7d31-a111-111111111111",
+      "role": "user",
+      "content": "What did I say about PostgreSQL last week?",
+      "tokenCount": 12,
+      "createdAt": "2026-03-04T12:34:56Z"
+    }
+  },
+  "error": null
+}
+```
 
 **Dataflow:**
 
-1. Request arrives; service validates required fields.
-2. Service checks `idempotencyKey` uniqueness to prevent retries from duplicating messages.
-3. Service inserts the row into `chat_schema.messages`.
-4. Returns the generated ID and timestamp.
+1. Request arrives; service validates required fields and verifies that the supplied `sessionId` belongs to the supplied `userId`.
+2. `idempotencyKey` uniqueness is enforced per session.
+3. If the same `idempotencyKey` is retried with the same payload, the existing message record is returned.
+4. If the same `idempotencyKey` is retried with a different payload, the service returns a `conflict` error.
+5. If the request is new, the service inserts the row into `chat_schema.messages`.
+6. The inserted or previously existing message record is returned.
 
 #### `GET /api/v1/chat/{sessionId}/messages`
 
 **Request arguments:**
+
+- **Successful response JSON:**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "messages": [
+      {
+        "messageId": "0194d7b4-9d31-7d31-a333-333333333333",
+        "sessionId": "0194d7b4-9d31-7d31-a444-444444444444",
+        "userId": "0194d7b4-9d31-7d31-a111-111111111111",
+        "role": "user",
+        "content": "What did I say about PostgreSQL last week?",
+        "tokenCount": 12,
+        "createdAt": "2026-03-04T12:34:56Z"
+      }
+    ]
+  },
+  "error": null
+}
+```
 
 - `sessionId` — UUID of the conversation session
 - `limit` — optional integer maximum number of messages to return
@@ -129,9 +188,22 @@ We use path variables like `{sessionId}`, `{userId}`, `{taskId}`, and `{factId}`
 
 **Purpose:** The core long-term intelligent memory. This is where the system handles semantic chunks, structured facts, and traceability links.
 
+This API intentionally exposes high-level memory operations rather than full CRUD over every underlying table. The primary workflow is save, semantic query, and full export, with direct fact correction available where structured edits are necessary.
+
 #### `POST /api/v1/personal_info/{userId}/save`
 
 **Request arguments:**
+
+- **Request JSON:**
+
+```json
+{
+  "content": "Colby prefers PostgreSQL with pgvector for agent memory because it keeps relational data and vector search in one system.",
+  "sourceType": "chat",
+  "sourceId": "0194d7b4-9d31-7d31-a555-555555555555",
+  "extractFacts": true
+}
+```
 
 - `userId` — UUID of the user
 - `content` — raw text content to intelligently store
@@ -145,20 +217,49 @@ We use path variables like `{sessionId}`, `{userId}`, `{taskId}`, and `{factId}`
 - `factIds` — array of UUIDs for inserted structured facts
 - `sourceReferenceIds` — array of UUIDs for inserted traceability links
 
+**Successful response JSON:**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "chunkIds": ["0194d7b4-9d31-7d31-a666-666666666666"],
+    "factIds": ["0194d7b4-9d31-7d31-a777-777777777777"],
+    "sourceReferenceIds": [
+      "0194d7b4-9d31-7d31-a888-888888888888",
+      "0194d7b4-9d31-7d31-a999-999999999999"
+    ]
+  },
+  "error": null
+}
+```
+
 **Dataflow:**
 
-1. Raw `content` is accepted.
-2. The Go service internally chunks the content into smaller semantic units.
-3. The service calls an embedding model to vectorize each chunk.
-4. Chunks and vectors are written into `personal_info_schema.personal_info_chunks`.
-5. If `extractFacts` is true, the service runs the LLM fact extraction pipeline over the content.
-6. Extracted facts are written into `personal_info_schema.user_facts`.
-7. `source_references` rows are inserted linking the chunks and facts back to the `sourceId`.
-8. The service returns the created chunk, fact, and source reference IDs.
+1. Service validates that `userId` exists and that the source payload is well-formed.
+2. Raw `content` is accepted.
+3. The Go service internally chunks the content into smaller semantic units.
+4. The service calls an embedding model to vectorize each chunk.
+5. Chunks and vectors are written into `personal_info_schema.personal_info_chunks`.
+6. Exactly one `source_references` row is created for each inserted chunk.
+7. If `extractFacts` is true, the service runs the fact extraction pipeline over the content.
+8. Extracted facts are written into `personal_info_schema.user_facts`.
+9. Exactly one `source_references` row is created for each inserted fact.
+10. Existing source reference rows are not reused during this operation; a new traceability row is inserted for each created chunk or fact.
+11. The service returns the created chunk, fact, and source reference IDs.
 
 #### `POST /api/v1/personal_info/{userId}/query`
 
 **Request arguments:**
+
+- **Request JSON:**
+
+```json
+{
+  "query": "What database choice has Colby preferred for memory service work?",
+  "topK": 5
+}
+```
 
 - `userId` — UUID of the user
 - `query` — natural language query string
@@ -169,16 +270,46 @@ We use path variables like `{sessionId}`, `{userId}`, `{taskId}`, and `{factId}`
 - `results` — ordered list of semantic memory matches. Each match contains:
   - `chunkId`
   - `text`
-  - `similarityScore` — cosine similarity score, where higher is better
+  - `similarityScore` — cosine similarity score in the range `[0, 1]`, where higher is better
   - `sourceReferences` — array of related source reference records
+
+**Successful response JSON:**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "results": [
+      {
+        "chunkId": "0194d7b4-9d31-7d31-a666-666666666666",
+        "text": "Colby prefers PostgreSQL with pgvector for agent memory because it keeps relational data and vector search in one system.",
+        "similarityScore": 0.93,
+        "sourceReferences": [
+          {
+            "sourceReferenceId": "0194d7b4-9d31-7d31-a888-888888888888",
+            "targetId": "0194d7b4-9d31-7d31-a666-666666666666",
+            "targetType": "chunk",
+            "sourceId": "0194d7b4-9d31-7d31-a555-555555555555",
+            "sourceType": "chat"
+          }
+        ]
+      }
+    ]
+  },
+  "error": null
+}
+```
 
 **Dataflow:**
 
 1. The query string is converted into an embedding vector internally.
-2. A pgvector cosine-similarity search is executed against `personal_info_chunks` for this `userId`.
-3. Results are ranked by similarity score, with higher scores treated as better matches.
-4. Related source reference rows are loaded and attached to each matched chunk.
-5. The top `K` ranked matches are returned.
+2. A pgvector approximate nearest-neighbor cosine-similarity search is executed against `personal_info_chunks` for this `userId`.
+3. Raw pgvector distance values are converted into cosine similarity scores in the range `[0, 1]` for the API response.
+4. Results are ranked by similarity score, with higher scores treated as better matches.
+5. Ties are broken by `created_at` descending.
+6. Related source reference rows are loaded and attached to each matched chunk.
+7. The top `K` ranked matches are returned.
+8. This endpoint returns chunk matches only; it does not directly return fact rows.
 
 #### `GET /api/v1/personal_info/{userId}/all`
 
@@ -188,8 +319,53 @@ We use path variables like `{sessionId}`, `{userId}`, `{taskId}`, and `{factId}`
 
 **Return values:**
 
-- `facts` — array of structured fact objects
-- `chunks` — array of semantic chunk objects (excluding the raw vector data)
+- `facts` — array of structured fact objects. Each object contains:
+  - `factId`
+  - `userId`
+  - `category`
+  - `factKey`
+  - `factValue`
+  - `confidence`
+  - `version`
+  - `updatedAt`
+- `chunks` — array of semantic chunk objects. Each object contains:
+  - `chunkId`
+  - `userId`
+  - `rawText`
+  - `modelVersion`
+  - `createdAt`
+
+**Successful response JSON:**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "facts": [
+      {
+        "factId": "0194d7b4-9d31-7d31-a777-777777777777",
+        "userId": "0194d7b4-9d31-7d31-a111-111111111111",
+        "category": "Preferences",
+        "factKey": "memory_database_choice",
+        "factValue": "PostgreSQL with pgvector",
+        "confidence": 0.94,
+        "version": 1,
+        "updatedAt": "2026-03-04T12:35:10Z"
+      }
+    ],
+    "chunks": [
+      {
+        "chunkId": "0194d7b4-9d31-7d31-a666-666666666666",
+        "userId": "0194d7b4-9d31-7d31-a111-111111111111",
+        "rawText": "Colby prefers PostgreSQL with pgvector for agent memory because it keeps relational data and vector search in one system.",
+        "modelVersion": "text-embedding-3-large",
+        "createdAt": "2026-03-04T12:35:00Z"
+      }
+    ]
+  },
+  "error": null
+}
+```
 
 **Dataflow:**
 
@@ -202,6 +378,18 @@ We use path variables like `{sessionId}`, `{userId}`, `{taskId}`, and `{factId}`
 
 **Request arguments:**
 
+- **Request JSON:**
+
+```json
+{
+  "category": "Preferences",
+  "factKey": "memory_database_choice",
+  "factValue": "PostgreSQL with pgvector",
+  "confidence": 0.97,
+  "version": 1
+}
+```
+
 - `userId` — UUID of the user
 - `factId` — UUID of the fact
 - `category` — updated category string
@@ -212,9 +400,28 @@ We use path variables like `{sessionId}`, `{userId}`, `{taskId}`, and `{factId}`
 
 **Return values:**
 
-- `factId`
-- `version` — incremented version
-- `updatedAt`
+- `fact` — updated fact record
+
+**Successful response JSON:**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "fact": {
+      "factId": "0194d7b4-9d31-7d31-a777-777777777777",
+      "userId": "0194d7b4-9d31-7d31-a111-111111111111",
+      "category": "Preferences",
+      "factKey": "memory_database_choice",
+      "factValue": "PostgreSQL with pgvector",
+      "confidence": 0.97,
+      "version": 2,
+      "updatedAt": "2026-03-05T09:00:00Z"
+    }
+  },
+  "error": null
+}
+```
 
 **Dataflow:**
 
@@ -223,6 +430,7 @@ We use path variables like `{sessionId}`, `{userId}`, `{taskId}`, and `{factId}`
 3. If versions do not match, the service returns a `conflict` error.
 4. If versions match, the fact row is updated and the version is incremented.
 5. The updated fact metadata is returned.
+6. PUT is treated as full replacement of the mutable fact fields; partial updates are not supported.
 
 #### `DELETE /api/v1/personal_info/{userId}/facts/{factId}`
 
@@ -234,7 +442,20 @@ We use path variables like `{sessionId}`, `{userId}`, `{taskId}`, and `{factId}`
 **Return values:**
 
 - `deleted` — boolean
-- `factId`
+- `factId` — UUID of deleted fact
+
+**Successful response JSON:**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "deleted": true,
+    "factId": "0194d7b4-9d31-7d31-a777-777777777777"
+  },
+  "error": null
+}
+```
 
 **Dataflow:**
 
@@ -247,6 +468,8 @@ We use path variables like `{sessionId}`, `{userId}`, `{taskId}`, and `{factId}`
 **Target Schema:** `agent_logs_schema`
 
 **Purpose:** To track the autonomous actions, tool executions, and reasoning paths of the internal AI agents.
+
+Task execution records are append-only audit records. Update and delete operations are intentionally not exposed through this API.
 
 #### `POST /api/v1/agent/{taskId}/executions`
 
@@ -273,13 +496,23 @@ We use path variables like `{sessionId}`, `{userId}`, `{taskId}`, and `{factId}`
 
 **Return values:**
 
-- `executions` — ordered array of execution records containing all payload data, ordered by `createdAt` ascending.
+- `executions` — ordered array of execution records. Each record contains:
+  - `executionId`
+  - `taskId`
+  - `agentId`
+  - `actionType`
+  - `payload`
+  - `status`
+  - `errorContext`
+  - `createdAt`
 
 ### E. Service Log Store
 
 **Target Schema:** `service_log_schema`
 
 **Purpose:** To store system-level telemetry and infrastructure visibility records.
+
+System events are append-only operational records. Update and delete operations are intentionally not exposed through this API. Retention and cleanup are handled outside this API boundary.
 
 #### `POST /api/v1/system/events`
 
@@ -306,7 +539,14 @@ We use path variables like `{sessionId}`, `{userId}`, `{taskId}`, and `{factId}`
 
 **Return values:**
 
-- `events` — ordered array of system event records, ordered by `createdAt` descending.
+- `events` — ordered array of system event records. Each record contains:
+  - `eventId`
+  - `traceId`
+  - `serviceName`
+  - `severity`
+  - `message`
+  - `metadata`
+  - `createdAt`
 
 ## 4. Database Schema (Logical Distribution & Data Modeling)
 
