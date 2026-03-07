@@ -71,8 +71,7 @@ func (c *controller) stopVM() {
 }
 
 type executeRequest struct {
-	Script string            `json:"script"`
-	Env    map[string]string `json:"env"`
+	Script string `json:"script"`
 }
 
 func (c *controller) handleExecute(w http.ResponseWriter, r *http.Request) {
@@ -88,7 +87,6 @@ func (c *controller) handleExecute(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := c.orch.Execute(r.Context(), orchestrator.Request{
 		Script: []byte(req.Script),
-		Env:    req.Env,
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)

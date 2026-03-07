@@ -55,10 +55,10 @@ The init script wraps execution in sentinel markers:
 
 A `VM` interface with a QEMU backend. Platform defaults are chosen automatically:
 
-| Architecture | QEMU binary          | Machine type | Console  |
-|-------------|----------------------|-------------|---------|
-| `aarch64`   | `qemu-system-aarch64`| `virt`      | `ttyAMA0` |
-| `x86_64`    | `qemu-system-x86_64` | `microvm`   | `ttyS0`  |
+| Architecture | QEMU binary           | Machine type | Console   |
+| ------------ | --------------------- | ------------ | --------- |
+| `aarch64`    | `qemu-system-aarch64` | `virt`       | `ttyAMA0` |
+| `x86_64`     | `qemu-system-x86_64`  | `microvm`    | `ttyS0`   |
 
 Accelerator priority: KVM (if `/dev/kvm` exists) → TCG software emulation.
 
@@ -79,18 +79,17 @@ Ties the pipeline together. For each request:
 
 Listens on `:8000`. Manages a single long-lived VM instance (for `start`/`stop`) separately from ephemeral execute requests.
 
-| Endpoint      | Method | Description                   |
-|--------------|--------|-------------------------------|
-| `/start`     | POST   | Boot the persistent VM        |
-| `/stop`      | POST   | Shut down the persistent VM   |
-| `/execute`   | POST   | Run a script in an ephemeral VM |
+| Endpoint   | Method | Description                         |
+| ---------- | ------ | ----------------------------------- |
+| `/start`   | POST   | Boot the persistent VM (debug)      |
+| `/stop`    | POST   | Shut down the persistent VM (debug) |
+| `/execute` | POST   | Run a script in an ephemeral VM     |
 
 `/execute` request body:
 
 ```json
 {
-  "script": "#!/bin/sh\necho {{API_KEY}}",
-  "env": {}
+  "script": "#!/bin/sh\necho {{API_KEY}}"
 }
 ```
 
