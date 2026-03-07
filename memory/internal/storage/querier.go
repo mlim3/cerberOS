@@ -14,16 +14,19 @@ type Querier interface {
 	CreateChatMessage(ctx context.Context, arg CreateChatMessageParams) (ChatSchemaMessage, error)
 	CreateSourceReference(ctx context.Context, arg CreateSourceReferenceParams) (PersonalInfoSchemaSourceReference, error)
 	CreateSystemEvent(ctx context.Context, arg CreateSystemEventParams) (ServiceLogSchemaSystemEvent, error)
+	CreateTaskExecution(ctx context.Context, arg CreateTaskExecutionParams) error
 	DeleteFact(ctx context.Context, arg DeleteFactParams) (int64, error)
 	GetAllChunks(ctx context.Context, userID pgtype.UUID) ([]GetAllChunksRow, error)
 	GetAllFacts(ctx context.Context, userID pgtype.UUID) ([]PersonalInfoSchemaUserFact, error)
 	GetChatMessageByIdempotencyKey(ctx context.Context, arg GetChatMessageByIdempotencyKeyParams) (ChatSchemaMessage, error)
 	GetFactByID(ctx context.Context, arg GetFactByIDParams) (PersonalInfoSchemaUserFact, error)
+	GetSecretByKey(ctx context.Context, arg GetSecretByKeyParams) (VaultSchemaSecret, error)
 	GetSourceReferencesByTarget(ctx context.Context, arg GetSourceReferencesByTargetParams) ([]PersonalInfoSchemaSourceReference, error)
 	InsertChunk(ctx context.Context, arg InsertChunkParams) (PersonalInfoSchemaPersonalInfoChunk, error)
 	ListChatMessagesBySession(ctx context.Context, arg ListChatMessagesBySessionParams) ([]ChatSchemaMessage, error)
 	ListSystemEvents(ctx context.Context, arg ListSystemEventsParams) ([]ServiceLogSchemaSystemEvent, error)
 	QueryChunks(ctx context.Context, arg QueryChunksParams) ([]PersonalInfoSchemaPersonalInfoChunk, error)
+	SaveSecret(ctx context.Context, arg SaveSecretParams) error
 	UpdateFactWithVersion(ctx context.Context, arg UpdateFactWithVersionParams) (PersonalInfoSchemaUserFact, error)
 	UpsertFact(ctx context.Context, arg UpsertFactParams) (PersonalInfoSchemaUserFact, error)
 }

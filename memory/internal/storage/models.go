@@ -75,3 +75,12 @@ type ServiceLogSchemaSystemEvent struct {
 	Metadata    []byte             `json:"metadata"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
+
+type VaultSchemaSecret struct {
+	ID             pgtype.UUID        `json:"id"`
+	UserID         pgtype.UUID        `json:"user_id"`
+	KeyName        string             `json:"key_name"`
+	EncryptedValue []byte             `json:"encrypted_value"`
+	Nonce          []byte             `json:"nonce"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+}

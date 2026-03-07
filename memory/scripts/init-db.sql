@@ -109,3 +109,20 @@ CREATE TABLE service_log_schema.system_events (
 CREATE INDEX idx_system_events_trace_id ON service_log_schema.system_events(trace_id);
 CREATE INDEX idx_system_events_service_name ON service_log_schema.system_events(service_name);
 CREATE INDEX idx_system_events_severity ON service_log_schema.system_events(severity);
+
+-- ==========================================
+-- vault_schema
+-- ==========================================
+CREATE SCHEMA IF NOT EXISTS vault_schema;
+
+CREATE TABLE vault_schema.secrets (
+    id UUID PRIMARY KEY,
+    user_id UUID NOT NULL,
+    key_name VARCHAR(255) NOT NULL,
+    encrypted_value BYTEA NOT NULL,
+    nonce BYTEA NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(user_id, key_name)
+);
+
+CREATE INDEX idx_secrets_user_id ON vault_schema.secrets(user_id);

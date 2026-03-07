@@ -49,7 +49,16 @@ func main() {
 	pool := db.GetPool()
 	chatRepo := storage.NewChatRepository(pool)
 	logRepo := storage.NewLogRepository(pool)
-	
+	vaultRepo := storage.NewVaultRepository(pool)
+	agentLogsRepo := storage.NewAgentLogsRepository(pool)
+
+	// Initialize Vault Manager
+	vaultManager, err := logic.NewVaultManager()
+	if err != nil {
+		logger.Error("failed to initialize vault manager", "error", err)
+		os.Exit(1)
+	}
+
 	// Note: We'll implement a proper repository wrapper for Personal Info
 	piRepo := &storage.BaseRepository{Pool: pool}
 	mockEmbedder := &logic.MockEmbedder{}
@@ -59,6 +68,8 @@ func main() {
 	chatHandler := api.NewChatHandler(chatRepo)
 	logHandler := api.NewSystemLogHandler(logRepo)
 	piHandler := api.NewPersonalInfoHandler(piProcessor, piRepo)
+	vaultHandler := api.NewVaultHandler(vaultRepo, vaultManager)
+	agentHandler := api.NewAgentHandler(agentLogsRepo)
 
 	// Set up the router using Go 1.22's enhanced mux
 	mux := http.NewServeMux()
@@ -103,11 +114,18 @@ func main() {
 	mux.HandleFunc("POST /api/v1/system/events", logHandler.HandleCreateSystemEvent)
 	mux.HandleFunc("GET /api/v1/system/events", logHandler.HandleListSystemEvents)
 
+	// Vault endpoints (Internal Only)
+	mux.HandleFunc("POST /api/v1/vault/{userId}/secrets", vaultHandler.HandleSaveSecret)
+	mux.HandleFunc("GET /api/v1/vault/{userId}/secrets", vaultHandler.HandleGetSecret)
+
+	// Agent Log endpoints
+	mux.HandleFunc("POST /api/v1/agents/tasks/{taskId}/executions", agentHandler.HandleCreateTaskExecution)
+
 	// 4. Start the HTTP server
 	port := getEnvOrDefault("PORT", "8080")
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%s", port),
-		Handler: loggingMiddleware(logger, mux),
+		Handler: api.TraceIDMiddleware(logger, logRepo, loggingMiddleware(logger, mux)),
 	}
 
 	// Start server in a goroutine
