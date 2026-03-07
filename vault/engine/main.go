@@ -13,6 +13,7 @@ import (
 	"github.com/mlim3/cerberOS/vault/engine/initrd"
 	"github.com/mlim3/cerberOS/vault/engine/orchestrator"
 	"github.com/mlim3/cerberOS/vault/engine/preprocessor"
+	"github.com/mlim3/cerberOS/vault/engine/secretclient"
 	engine "github.com/mlim3/cerberOS/vault/engine/vm"
 )
 
@@ -111,14 +112,16 @@ func main() {
 		cfg.Accel = v
 	}
 
-	// Set up preprocessor with mock secrets
-	store := &preprocessor.MockStore{
-		Secrets: map[string]string{
-			"API_KEY":    "mock-api-key-12345",
-			"DB_PASS":    "mock-db-password",
-			"SECRET_KEY": "mock-secret-key",
-		},
+	secretStoreURL := os.Getenv("SECRET_STORE_URL")
+	if secretStoreURL == "" {
+		secretStoreURL = "http://localhost:8001"
 	}
+	secretStoreToken := os.Getenv("SECRET_STORE_TOKEN")
+	if secretStoreToken == "" {
+		log.Fatal("SECRET_STORE_TOKEN env var is required")
+	}
+
+	store := secretclient.New(secretStoreURL, secretStoreToken)
 	pp := preprocessor.New(store)
 	builder := initrd.New(cfg.InitrdPath)
 	orch := orchestrator.New(pp, builder, cfg)
