@@ -1,9 +1,11 @@
 package vm
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -29,7 +31,7 @@ func DefaultQEMUConfig() QEMUConfig {
 	if runtime.GOARCH == "arm64" {
 		kernelArgs = "console=ttyAMA0 reboot=k panic=1 init=/init"
 	} else {
-		kernelArgs = "console=ttyS0 pci=off reboot=k panic=1 init=/init"
+		kernelArgs = "console=ttyS0 reboot=k panic=1 init=/init"
 	}
 	return QEMUConfig{
 		Config: Config{
@@ -156,16 +158,30 @@ func (q *QEMU) Run(ctx context.Context) (*RunResult, error) {
 	q.cmd = exec.CommandContext(ctx, bin, args...)
 
 	var buf bytes.Buffer
-	q.cmd.Stdout = &buf
-	q.cmd.Stderr = &buf
+	pr, pw := io.Pipe()
+	q.cmd.Stdout = pw
+	q.cmd.Stderr = pw
+
+	// Tee VM output: capture to buf and stream to stderr with [vm] prefix in real time.
+	go func() {
+		scanner := bufio.NewScanner(pr)
+		for scanner.Scan() {
+			line := scanner.Text()
+			buf.WriteString(line + "\n")
+			log.Printf("[vm] %s", line)
+		}
+	}()
 
 	if err := q.cmd.Start(); err != nil {
+		pw.Close()
+		pr.Close()
 		return nil, err
 	}
 
 	// Wait for QEMU to exit (triggered by guest sysrq poweroff).
 	// Non-zero exit is expected when guest powers off — not an error.
 	_ = q.cmd.Wait()
+	pw.Close()
 
 	output := buf.String()
 	return &RunResult{
@@ -197,5 +213,7 @@ func (q *QEMU) buildArgs() []string {
 		"-initrd", q.cfg.InitrdPath,
 		"-append", q.cfg.KernelArgs,
 		"-nographic",
+		"-netdev", "user,id=net0",
+		"-device", "virtio-net-pci,netdev=net0",
 	}
 }
