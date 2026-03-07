@@ -5,6 +5,17 @@ services:
       context: "./engine"
     ports:
       - "8000:8000"
+    environment:
+      - SECRET_STORE_TOKEN=value
+      - SECRET_STORE_URL=http://secretstore:8001
     privileged: true
     # devices:
     #   - /dev/kvm:/dev/kvm
+  
+  secretstore:
+    build:
+      context: "./secretstore"
+    ports:
+      - "8001:8001"
+    environment:
+      - ENGINE_TOKEN=value
