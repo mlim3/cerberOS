@@ -6,7 +6,7 @@ Database: PostgreSQL with pgvector
 
 ## 1. Architectural Overview
 
-The Memory Service acts as the central nervous system for the AI OS. It follows a logically distributed architecture on a single PostgreSQL instance (with strict sharding keys to allow physical distribution in the future). Externally, it exposes intuitive, domain-specific, and versioned REST endpoints. Internally, it routes these requests to isolated PostgreSQL schemas, ensuring strict service boundaries, security, and optimized querying.
+The Memory Service acts as the central memory layer for the AI OS. It follows a logically distributed architecture on a single PostgreSQL instance, with strict sharding keys that allow physical distribution in the future. Externally, it exposes domain-specific, versioned REST endpoints. Internally, it routes these requests to isolated PostgreSQL schemas, ensuring clear service boundaries, security, and optimized querying.
 
 All endpoints are versioned under `/api/v1/`.
 All requests and responses use JSON.
@@ -56,11 +56,13 @@ We use path variables like `{sessionId}`, `{userId}`, `{taskId}`, and `{factId}`
 **Arguments:** None
 
 **Return values:**
+
 - `status` — `healthy` or `degraded`
 - `database` — `connected` or `disconnected`
 - `timestamp` — current server time
 
 **Dataflow:**
+
 1. The request enters the HTTP handler.
 2. The handler performs a lightweight database ping.
 3. If the ping succeeds, the service returns `healthy`.
@@ -77,6 +79,7 @@ We use path variables like `{sessionId}`, `{userId}`, `{taskId}`, and `{factId}`
 #### `POST /api/v1/chat/{sessionId}/messages`
 
 **Request arguments:**
+
 - `sessionId` — UUID of the conversation session
 - `userId` — UUID of the user who owns the conversation
 - `role` — `user | assistant | system`
@@ -85,10 +88,12 @@ We use path variables like `{sessionId}`, `{userId}`, `{taskId}`, and `{factId}`
 - `idempotencyKey` — UUID used to prevent duplicate insertion on retry
 
 **Return values:**
+
 - `messageId` — UUID of stored message
 - `createdAt` — insertion timestamp
 
 **Dataflow:**
+
 1. Request arrives; service validates required fields.
 2. Service checks `idempotencyKey` uniqueness to prevent retries from duplicating messages.
 3. Service inserts the row into `chat_schema.messages`.
@@ -97,10 +102,12 @@ We use path variables like `{sessionId}`, `{userId}`, `{taskId}`, and `{factId}`
 #### `GET /api/v1/chat/{sessionId}/messages`
 
 **Request arguments:**
+
 - `sessionId` — UUID of the conversation session
 - `limit` — optional integer maximum number of messages to return
 
 **Return values:**
+
 - `messages` — ordered array of message records. Each record contains:
   - `messageId`
   - `sessionId`
@@ -111,6 +118,7 @@ We use path variables like `{sessionId}`, `{userId}`, `{taskId}`, and `{factId}`
   - `createdAt`
 
 **Dataflow:**
+
 1. Service queries `chat_schema.messages` where `session_id` matches the path variable.
 2. Results are ordered by `created_at` ascending.
 3. If `limit` is provided, the result set is truncated.
@@ -124,6 +132,7 @@ We use path variables like `{sessionId}`, `{userId}`, `{taskId}`, and `{factId}`
 #### `POST /api/v1/personal_info/{userId}/save`
 
 **Request arguments:**
+
 - `userId` — UUID of the user
 - `content` — raw text content to intelligently store
 - `sourceType` — `chat | uploaded_file | document | web`
@@ -131,49 +140,68 @@ We use path variables like `{sessionId}`, `{userId}`, `{taskId}`, and `{factId}`
 - `extractFacts` — boolean indicating whether to run the structured fact extraction pipeline
 
 **Return values:**
+
 - `chunkIds` — array of UUIDs for inserted semantic chunks
 - `factIds` — array of UUIDs for inserted structured facts
+- `sourceReferenceIds` — array of UUIDs for inserted traceability links
 
 **Dataflow:**
+
 1. Raw `content` is accepted.
 2. The Go service internally chunks the content into smaller semantic units.
 3. The service calls an embedding model to vectorize each chunk.
 4. Chunks and vectors are written into `personal_info_schema.personal_info_chunks`.
 5. If `extractFacts` is true, the service runs the LLM fact extraction pipeline over the content.
 6. Extracted facts are written into `personal_info_schema.user_facts`.
-7. `source_references` rows are inserted linking the chunks/facts back to the `sourceId`.
+7. `source_references` rows are inserted linking the chunks and facts back to the `sourceId`.
+8. The service returns the created chunk, fact, and source reference IDs.
 
 #### `POST /api/v1/personal_info/{userId}/query`
 
 **Request arguments:**
+
 - `userId` — UUID of the user
 - `query` — natural language query string
 - `topK` — maximum number of vector results to return
 
 **Return values:**
+
 - `results` — ordered list of semantic memory matches. Each match contains:
   - `chunkId`
   - `text`
-  - `similarityScore`
-  - `sourceReference`
+  - `similarityScore` — cosine similarity score, where higher is better
+  - `sourceReferences` — array of related source reference records
 
 **Dataflow:**
+
 1. The query string is converted into an embedding vector internally.
-2. A pgvector cosine-similarity search (`<=>`) is executed against `personal_info_chunks` for this `userId`.
-3. The top `K` matches are returned alongside their joined source references.
+2. A pgvector cosine-similarity search is executed against `personal_info_chunks` for this `userId`.
+3. Results are ranked by similarity score, with higher scores treated as better matches.
+4. Related source reference rows are loaded and attached to each matched chunk.
+5. The top `K` ranked matches are returned.
 
 #### `GET /api/v1/personal_info/{userId}/all`
 
 **Request arguments:**
+
 - `userId` — UUID of the user from the path
 
 **Return values:**
+
 - `facts` — array of structured fact objects
 - `chunks` — array of semantic chunk objects (excluding the raw vector data)
+
+**Dataflow:**
+
+1. Service queries all rows in `personal_info_schema.user_facts` for the specified `userId`.
+2. Service queries all rows in `personal_info_schema.personal_info_chunks` for the specified `userId`.
+3. Vector payloads are excluded from the response.
+4. The two datasets are packaged into a single response envelope.
 
 #### `PUT /api/v1/personal_info/{userId}/facts/{factId}`
 
 **Request arguments:**
+
 - `userId` — UUID of the user
 - `factId` — UUID of the fact
 - `category` — updated category string
@@ -183,19 +211,36 @@ We use path variables like `{sessionId}`, `{userId}`, `{taskId}`, and `{factId}`
 - `version` — current version for optimistic concurrency control
 
 **Return values:**
+
 - `factId`
 - `version` — incremented version
 - `updatedAt`
 
+**Dataflow:**
+
+1. Service loads the target fact by `factId` and `userId`.
+2. Service compares the submitted `version` against the stored version.
+3. If versions do not match, the service returns a `conflict` error.
+4. If versions match, the fact row is updated and the version is incremented.
+5. The updated fact metadata is returned.
+
 #### `DELETE /api/v1/personal_info/{userId}/facts/{factId}`
 
 **Request arguments:**
+
 - `userId` — UUID of the user
 - `factId` — UUID of the fact
 
 **Return values:**
+
 - `deleted` — boolean
 - `factId`
+
+**Dataflow:**
+
+1. Service validates that the fact exists for the specified user.
+2. The target row is deleted from `personal_info_schema.user_facts`.
+3. The service returns the deletion result.
 
 ### D. Agent Log Store
 
@@ -206,6 +251,7 @@ We use path variables like `{sessionId}`, `{userId}`, `{taskId}`, and `{factId}`
 #### `POST /api/v1/agent/{taskId}/executions`
 
 **Request arguments:**
+
 - `taskId` — UUID of the task
 - `agentId` — identifier of the specific agent performing the step
 - `actionType` — `tool_call | reasoning_step | final_answer`
@@ -214,16 +260,19 @@ We use path variables like `{sessionId}`, `{userId}`, `{taskId}`, and `{factId}`
 - `errorContext` — optional text describing the failure
 
 **Return values:**
+
 - `executionId`
 - `createdAt`
 
 #### `GET /api/v1/agent/{taskId}/executions`
 
 **Request arguments:**
+
 - `taskId` — UUID of the task
 - `limit` — optional integer maximum number of rows
 
 **Return values:**
+
 - `executions` — ordered array of execution records containing all payload data, ordered by `createdAt` ascending.
 
 ### E. Service Log Store
@@ -235,6 +284,7 @@ We use path variables like `{sessionId}`, `{userId}`, `{taskId}`, and `{factId}`
 #### `POST /api/v1/system/events`
 
 **Request arguments:**
+
 - `traceId` — optional UUID used to correlate distributed requests
 - `serviceName` — name of the emitting service
 - `severity` — `INFO | WARN | ERROR | FATAL`
@@ -242,17 +292,20 @@ We use path variables like `{sessionId}`, `{userId}`, `{taskId}`, and `{factId}`
 - `metadata` — structured machine-readable context
 
 **Return values:**
+
 - `eventId`
 - `createdAt`
 
 #### `GET /api/v1/system/events`
 
 **Request arguments:**
+
 - `serviceName` — optional service name filter
 - `severity` — optional severity filter
 - `limit` — optional integer maximum number of rows
 
 **Return values:**
+
 - `events` — ordered array of system event records, ordered by `createdAt` descending.
 
 ## 4. Database Schema (Logical Distribution & Data Modeling)
@@ -260,6 +313,8 @@ We use path variables like `{sessionId}`, `{userId}`, `{taskId}`, and `{factId}`
 All schemas reside in a logically distributed PostgreSQL instance. Primary keys utilize UUIDv7. Logical sharding keys (`user_id`, `session_id`) are strictly enforced on all tables to allow future physical distribution.
 
 ### Schema: identity_schema
+
+**Table: users**
 
 | Column Name | Data Type    | Constraints / Indexes  | Distributed Purpose / Description                |
 | :---------- | :----------- | :--------------------- | :----------------------------------------------- |
@@ -269,18 +324,20 @@ All schemas reside in a logically distributed PostgreSQL instance. Primary keys 
 
 ### Schema: chat_schema (Table: messages)
 
-| Column Name     | Data Type   | Constraints / Indexes | Distributed Purpose / Description                                                    |
-| :-------------- | :---------- | :-------------------- | :----------------------------------------------------------------------------------- |
-| id              | UUID        | PRIMARY KEY           | Generated via UUIDv7.                                                                |
-| session_id      | UUID        | INDEX, NOT NULL       | **Logical sharding key**. All messages for a session stay on the same shard.         |
-| user_id         | UUID        | INDEX, NOT NULL       | Links the session to the canonical identity record.                                  |
-| role            | VARCHAR(50) | NOT NULL              | `user`, `assistant`, or `system`.                                                    |
-| content         | TEXT        | NOT NULL              | The exact text of the message.                                                       |
-| token_count     | INT         |                       | Optional computed token count.                                                       |
-| idempotency_key | UUID        | UNIQUE INDEX          | Prevents duplicate insertion.                                                        |
-| created_at      | TIMESTAMPTZ | DEFAULT NOW()         | Immutable timestamp of the event.                                                    |
+| Column Name     | Data Type   | Constraints / Indexes | Distributed Purpose / Description                                            |
+| :-------------- | :---------- | :-------------------- | :--------------------------------------------------------------------------- |
+| id              | UUID        | PRIMARY KEY           | Generated via UUIDv7.                                                        |
+| session_id      | UUID        | INDEX, NOT NULL       | **Logical sharding key**. All messages for a session stay on the same shard. |
+| user_id         | UUID        | INDEX, NOT NULL       | Links the session to the canonical identity record.                          |
+| role            | VARCHAR(50) | NOT NULL              | `user`, `assistant`, or `system`.                                            |
+| content         | TEXT        | NOT NULL              | The exact text of the message.                                               |
+| token_count     | INT         |                       | Optional computed token count.                                               |
+| idempotency_key | UUID        | UNIQUE INDEX          | Prevents duplicate insertion.                                                |
+| created_at      | TIMESTAMPTZ | DEFAULT NOW()         | Immutable timestamp of the event.                                            |
 
-### Schema: personal_info_schema 
+### Schema: personal_info_schema
+
+This schema stores long-term memory records and is the primary schema where the service performs chunking, embedding-backed retrieval, fact persistence, and traceability linking.
 
 **Table: personal_info_chunks**
 
@@ -295,49 +352,49 @@ All schemas reside in a logically distributed PostgreSQL instance. Primary keys 
 
 **Table: user_facts**
 
-| Column Name | Data Type    | Constraints / Indexes                           | Distributed Purpose / Description                                                         |
-| :---------- | :----------- | :---------------------------------------------- | :---------------------------------------------------------------------------------------- |
-| id          | UUID         | PRIMARY KEY                                     | Generated via UUIDv7.                                                                     |
-| user_id     | UUID         | INDEX, NOT NULL                                 | **Logical sharding key**.                                                                 |
-| category    | VARCHAR(50)  | INDEX                                           | `Diet`, `Code_Preference`, `Relationships`, etc.                                          |
-| fact_key    | VARCHAR(100) | NOT NULL                                        | Example: `allergy`.                                                                       |
-| fact_value  | JSONB        | NOT NULL                                        | Flexible structured value.                                                                |
-| confidence  | FLOAT        | CHECK (confidence >= 0.0 AND confidence <= 1.0) | AI certainty score.                                                                       |
+| Column Name | Data Type    | Constraints / Indexes                           | Distributed Purpose / Description                                                             |
+| :---------- | :----------- | :---------------------------------------------- | :-------------------------------------------------------------------------------------------- |
+| id          | UUID         | PRIMARY KEY                                     | Generated via UUIDv7.                                                                         |
+| user_id     | UUID         | INDEX, NOT NULL                                 | **Logical sharding key**.                                                                     |
+| category    | VARCHAR(50)  | INDEX                                           | `Diet`, `Code_Preference`, `Relationships`, etc.                                              |
+| fact_key    | VARCHAR(100) | NOT NULL                                        | Example: `allergy`.                                                                           |
+| fact_value  | JSONB        | NOT NULL                                        | Flexible structured value.                                                                    |
+| confidence  | FLOAT        | CHECK (confidence >= 0.0 AND confidence <= 1.0) | AI certainty score.                                                                           |
 | version     | INT          | DEFAULT 1                                       | **Optimistic concurrency control** field. Prevents race conditions during concurrent updates. |
-| updated_at  | TIMESTAMPTZ  | DEFAULT NOW()                                   | Last update timestamp.                                                                    |
+| updated_at  | TIMESTAMPTZ  | DEFAULT NOW()                                   | Last update timestamp.                                                                        |
 
 **Table: source_references**
 
-| Column Name | Data Type   | Constraints / Indexes | Distributed Purpose / Description                                       |
-| :---------- | :---------- | :-------------------- | :---------------------------------------------------------------------- |
-| id          | UUID        | PRIMARY KEY           | Generated via UUIDv7.                                                   |
-| user_id     | UUID        | INDEX, NOT NULL       | **Logical sharding key**. Ensures references reside on the user's shard.|
-| target_id   | UUID        | INDEX, NOT NULL       | ID of the chunk or fact being referenced.                               |
-| target_type | VARCHAR(50) | NOT NULL              | `chunk` or `fact`.                                                      |
-| source_id   | UUID        | INDEX, NOT NULL       | ID of the chat message, uploaded file, document, etc.                   |
-| source_type | VARCHAR(50) | NOT NULL              | `chat`, `uploaded_file`, `document`, `web`.                             |
+| Column Name | Data Type   | Constraints / Indexes | Distributed Purpose / Description                                        |
+| :---------- | :---------- | :-------------------- | :----------------------------------------------------------------------- |
+| id          | UUID        | PRIMARY KEY           | Generated via UUIDv7.                                                    |
+| user_id     | UUID        | INDEX, NOT NULL       | **Logical sharding key**. Ensures references reside on the user's shard. |
+| target_id   | UUID        | INDEX, NOT NULL       | ID of the chunk or fact being referenced.                                |
+| target_type | VARCHAR(50) | NOT NULL              | `chunk` or `fact`.                                                       |
+| source_id   | UUID        | INDEX, NOT NULL       | ID of the chat message, uploaded file, document, etc.                    |
+| source_type | VARCHAR(50) | NOT NULL              | `chat`, `uploaded_file`, `document`, `web`.                              |
 
 ### Schema: agent_logs_schema (Table: task_executions)
 
-| Column Name   | Data Type    | Constraints / Indexes | Distributed Purpose / Description                            |
-| :------------ | :----------- | :-------------------- | :----------------------------------------------------------- |
-| id            | UUID         | PRIMARY KEY           | Generated via UUIDv7.                                        |
+| Column Name   | Data Type    | Constraints / Indexes | Distributed Purpose / Description                                |
+| :------------ | :----------- | :-------------------- | :--------------------------------------------------------------- |
+| id            | UUID         | PRIMARY KEY           | Generated via UUIDv7.                                            |
 | task_id       | UUID         | INDEX, NOT NULL       | **Correlation ID** grouping all agent actions for the same task. |
-| agent_id      | VARCHAR(100) | INDEX, NOT NULL       | Specific agent executing the step.                           |
-| action_type   | VARCHAR(50)  | NOT NULL              | `tool_call`, `reasoning_step`, or `final_answer`.            |
-| payload       | JSONB        | NOT NULL              | Exact input/output of the tool call or reasoning step.       |
-| status        | VARCHAR(20)  | NOT NULL              | `pending`, `success`, or `failed`.                           |
-| error_context | TEXT         |                       | Stack trace or model failure reason.                         |
-| created_at    | TIMESTAMPTZ  | DEFAULT NOW()         | Event timestamp.                                             |
+| agent_id      | VARCHAR(100) | INDEX, NOT NULL       | Specific agent executing the step.                               |
+| action_type   | VARCHAR(50)  | NOT NULL              | `tool_call`, `reasoning_step`, or `final_answer`.                |
+| payload       | JSONB        | NOT NULL              | Exact input/output of the tool call or reasoning step.           |
+| status        | VARCHAR(20)  | NOT NULL              | `pending`, `success`, or `failed`.                               |
+| error_context | TEXT         |                       | Stack trace or model failure reason.                             |
+| created_at    | TIMESTAMPTZ  | DEFAULT NOW()         | Event timestamp.                                                 |
 
 ### Schema: service_log_schema (Table: system_events)
 
-| Column Name  | Data Type    | Constraints / Indexes | Distributed Purpose / Description                                                       |
-| :----------- | :----------- | :-------------------- | :-------------------------------------------------------------------------------------- |
-| id           | UUID         | PRIMARY KEY           | Generated via UUIDv7.                                                                   |
-| trace_id     | UUID         | INDEX                 | **Distributed trace ID** passed through service boundaries.                             |
-| service_name | VARCHAR(100) | INDEX                 | Emitting service name.                                                                  |
-| severity     | VARCHAR(20)  | INDEX                 | `INFO`, `WARN`, `ERROR`, or `FATAL`.                                                    |
-| message      | TEXT         | NOT NULL              | Human-readable log message.                                                             |
-| metadata     | JSONB        |                       | Structured machine-readable context (e.g., latency, memory usage).                      |
-| created_at   | TIMESTAMPTZ  | DEFAULT NOW()         | Time-series optimized event timestamp.                                                  |
+| Column Name  | Data Type    | Constraints / Indexes | Distributed Purpose / Description                                  |
+| :----------- | :----------- | :-------------------- | :----------------------------------------------------------------- |
+| id           | UUID         | PRIMARY KEY           | Generated via UUIDv7.                                              |
+| trace_id     | UUID         | INDEX                 | **Distributed trace ID** passed through service boundaries.        |
+| service_name | VARCHAR(100) | INDEX                 | Emitting service name.                                             |
+| severity     | VARCHAR(20)  | INDEX                 | `INFO`, `WARN`, `ERROR`, or `FATAL`.                               |
+| message      | TEXT         | NOT NULL              | Human-readable log message.                                        |
+| metadata     | JSONB        |                       | Structured machine-readable context (e.g., latency, memory usage). |
+| created_at   | TIMESTAMPTZ  | DEFAULT NOW()         | Time-series optimized event timestamp.                             |
