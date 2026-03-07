@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/mlim3/cerberOS/memory/internal/api"
+	"github.com/mlim3/cerberOS/memory/internal/logic"
 	"github.com/mlim3/cerberOS/memory/internal/storage"
 )
 
@@ -48,10 +49,16 @@ func main() {
 	pool := db.GetPool()
 	chatRepo := storage.NewChatRepository(pool)
 	logRepo := storage.NewLogRepository(pool)
+	
+	// Note: We'll implement a proper repository wrapper for Personal Info
+	piRepo := &storage.BaseRepository{Pool: pool}
+	mockEmbedder := &logic.MockEmbedder{}
+	piProcessor := logic.NewProcessor(piRepo, mockEmbedder)
 
 	// 3. Initialize the Handlers
 	chatHandler := api.NewChatHandler(chatRepo)
 	logHandler := api.NewSystemLogHandler(logRepo)
+	piHandler := api.NewPersonalInfoHandler(piProcessor, piRepo)
 
 	// Set up the router using Go 1.22's enhanced mux
 	mux := http.NewServeMux()
@@ -85,6 +92,12 @@ func main() {
 	// Chat endpoints
 	mux.HandleFunc("POST /api/v1/chat/{sessionId}/messages", chatHandler.HandleCreateMessage)
 	mux.HandleFunc("GET /api/v1/chat/{sessionId}/messages", chatHandler.HandleListMessages)
+
+	// Personal Info endpoints
+	mux.HandleFunc("POST /api/v1/personal_info/{userId}/save", piHandler.Save)
+	mux.HandleFunc("POST /api/v1/personal_info/{userId}/query", piHandler.Query)
+	mux.HandleFunc("GET /api/v1/personal_info/{userId}/all", piHandler.GetAll)
+	mux.HandleFunc("PUT /api/v1/personal_info/{userId}/facts/{factId}", piHandler.UpdateFact)
 
 	// System Log endpoints
 	mux.HandleFunc("POST /api/v1/system/events", logHandler.HandleCreateSystemEvent)
