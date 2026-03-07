@@ -31,10 +31,10 @@ FROM alpine:3.23.3 AS artifacts
 # linux-virt: Alpine's paravirtualized kernel
 # busybox-static: statically linked — no shared libs needed in the initramfs
 # cpio: packs the rootfs directory into a cpio archive (no loop device, no disk driver needed)
-RUN apk add --no-cache linux-virt busybox-static
+RUN apk add --no-cache linux-virt busybox-static bash curl ca-certificates
 
 # Build minimal rootfs directory (no brace expansion — alpine sh is POSIX only)
-RUN mkdir -p /rootfs/bin /rootfs/dev /rootfs/etc /rootfs/proc /rootfs/sys /rootfs/tmp /rootfs/run && \
+RUN mkdir -p /rootfs/bin /rootfs/dev /rootfs/etc /rootfs/proc /rootfs/sys /rootfs/tmp /rootfs/run /rootfs/lib /rootfs/usr/lib && \
   cp /bin/busybox.static /rootfs/bin/busybox && \
   ln -sf busybox /rootfs/bin/sh && \
   ln -sf busybox /rootfs/bin/ash && \
@@ -46,15 +46,65 @@ RUN mkdir -p /rootfs/bin /rootfs/dev /rootfs/etc /rootfs/proc /rootfs/sys /rootf
   ln -sf busybox /rootfs/bin/mkdir && \
   ln -sf busybox /rootfs/bin/env && \
   ln -sf busybox /rootfs/bin/sleep && \
-  ln -sf busybox /rootfs/bin/poweroff
+  ln -sf busybox /rootfs/bin/poweroff && \
+  ln -sf busybox /rootfs/bin/ip && \
+  ln -sf busybox /rootfs/bin/udhcpc && \
+  ln -sf busybox /rootfs/bin/grep && \
+  ln -sf busybox /rootfs/bin/hostname && \
+  ln -sf busybox /rootfs/bin/modprobe && \
+  ln -sf busybox /rootfs/bin/insmod && \
+  ln -sf busybox /rootfs/bin/lsmod && \
+  ln -sf busybox /rootfs/bin/find && \
+  ln -sf busybox /rootfs/bin/head && \
+  mkdir -p /rootfs/usr/share/udhcpc && \
+  printf '#!/bin/sh\ncase "$1" in bound|renew) ip addr add "$ip/$mask" dev "$interface" && ip route add default via "$router";; esac\n' > /rootfs/usr/share/udhcpc/default.script && \
+  chmod +x /rootfs/usr/share/udhcpc/default.script
+
+# Copy virtio network kernel modules, decompress, and generate depmod metadata
+RUN set -e && \
+  KVER=$(ls /lib/modules) && \
+  cd / && \
+  find lib/modules/$KVER/kernel \( \
+  -name "virtio*.ko*" -o \
+  -name "failover.ko*" -o \
+  -name "net_failover.ko*" \
+  \) | while read f; do \
+  mkdir -p "/rootfs/$(dirname "$f")" && \
+  case "$f" in \
+  *.gz)  gunzip -c "$f" > "/rootfs/${f%.gz}" ;; \
+  *.zst) zstd -dq "$f" -o "/rootfs/${f%.zst}" ;; \
+  *)     cp "$f" "/rootfs/$f" ;; \
+  esac; \
+  done && \
+  depmod -b /rootfs $KVER
+
+# Copy dynamic binaries (bash, curl) and all their shared library deps into the rootfs
+RUN set -e && \
+  cp /lib/ld-musl-*.so.1 /rootfs/lib/ && \
+  for bin in bash curl; do \
+  src=$(which "$bin") && \
+  cp "$src" /rootfs/bin/ && \
+  ldd "$src" 2>/dev/null | awk '/=>/{print $3}' | sort -u | while read lib; do \
+  dir=$(dirname "$lib") && \
+  mkdir -p "/rootfs$dir" && \
+  cp "$lib" "/rootfs$dir/"; \
+  done; \
+  done && \
+  mkdir -p /rootfs/etc/ssl/certs && \
+  cp /etc/ssl/certs/ca-certificates.crt /rootfs/etc/ssl/certs/
 
 # Init script: mounts essential pseudo-filesystems then drops to a shell
 RUN printf '#!/bin/sh\n\
   mount -t proc proc /proc\n\
   mount -t sysfs sysfs /sys\n\
   mount -t devtmpfs devtmpfs /dev 2>/dev/null || true\n\
+  modprobe virtio_net 2>/dev/null\n\
+  ip link set eth0 up\n\
+  ip addr add 10.0.2.15/24 dev eth0\n\
+  ip route add default via 10.0.2.2\n\
+  echo "nameserver 10.0.2.3" > /etc/resolv.conf\n\
   echo "=== cerberOS VM ready ==="\n\
-  exec /bin/sh\n' > /rootfs/init && \
+  exec /bin/bash\n' > /rootfs/init && \
   chmod +x /rootfs/init
 
 # Pack rootfs into a gzipped cpio initramfs.
