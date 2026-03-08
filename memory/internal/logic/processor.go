@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"math/rand"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/pgvector/pgvector-go"
 
@@ -110,10 +111,8 @@ func (p *Processor) SavePersonalInfo(ctx context.Context, req SaveRequest) (*Sav
 			}
 
 			var chunkID pgtype.UUID
-			chunkID.Scan(pgtype.UUID{}) // Generate new UUID (in reality UUIDv7)
-			// For simplicity in mock, just generate a dummy UUID
-			chunkIDStr := "0194d7b4-9d31-7d31-a000-000000000000" // We should probably use a real UUID generator
-			chunkID.Scan(chunkIDStr)
+			newChunkID, _ := uuid.NewV7()
+			chunkID.Scan(newChunkID.String())
 
 			chunk, err := q.InsertChunk(ctx, storage.InsertChunkParams{
 				ID:           chunkID,
@@ -132,7 +131,9 @@ func (p *Processor) SavePersonalInfo(ctx context.Context, req SaveRequest) (*Sav
 
 			// Source Reference for Chunk
 			var refID pgtype.UUID
-			refID.Scan("0194d7b4-9d31-7d31-a000-000000000001") // Mock UUID
+			newRefID, _ := uuid.NewV7()
+			refID.Scan(newRefID.String())
+			
 			ref, err := q.CreateSourceReference(ctx, storage.CreateSourceReferenceParams{
 				ID:         refID,
 				UserID:     userUUID,
@@ -151,8 +152,9 @@ func (p *Processor) SavePersonalInfo(ctx context.Context, req SaveRequest) (*Sav
 		if req.ExtractFacts {
 			// Mock fact extraction
 			var factID pgtype.UUID
-			factID.Scan("0194d7b4-9d31-7d31-a000-000000000002") // Mock UUID
-			
+			newFactID, _ := uuid.NewV7()
+			factID.Scan(newFactID.String())
+
 			factVal, _ := json.Marshal(map[string]string{"extracted_from": "mock"})
 			
 			var cat pgtype.Text
@@ -162,7 +164,7 @@ func (p *Processor) SavePersonalInfo(ctx context.Context, req SaveRequest) (*Sav
 				ID:         factID,
 				UserID:     userUUID,
 				Category:   cat,
-				FactKey:    "auto_extracted",
+				FactKey:    "auto_extracted_" + uuid.NewString()[:8], // Make it somewhat unique
 				FactValue:  factVal,
 				Confidence: pgtype.Float8{Float64: 0.9, Valid: true},
 				Version:    pgtype.Int4{Int32: 1, Valid: true},
@@ -174,7 +176,9 @@ func (p *Processor) SavePersonalInfo(ctx context.Context, req SaveRequest) (*Sav
 
 			// Source Reference for Fact
 			var refID pgtype.UUID
-			refID.Scan("0194d7b4-9d31-7d31-a000-000000000003") // Mock UUID
+			newFactRefID, _ := uuid.NewV7()
+			refID.Scan(newFactRefID.String())
+			
 			ref, err := q.CreateSourceReference(ctx, storage.CreateSourceReferenceParams{
 				ID:         refID,
 				UserID:     userUUID,

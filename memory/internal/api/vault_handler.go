@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -110,7 +111,7 @@ func (h *VaultHandler) HandleSaveSecret(w http.ResponseWriter, r *http.Request) 
 
 	if err := h.repo.SaveSecret(r.Context(), params); err != nil {
 		h.logAccessEvent(r.Context(), userIdStr, "denied", r.URL.Path)
-		http.Error(w, "failed to save secret", http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("failed to save secret: %v", err), http.StatusInternalServerError)
 		return
 	}
 
