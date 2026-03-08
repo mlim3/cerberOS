@@ -31,10 +31,11 @@ const (
 	ErrCodeStorageUnavailable = "STORAGE_UNAVAILABLE"
 	ErrCodeDuplicateTask      = "DUPLICATE_TASK"
 	ErrCodeAgentsUnavailable  = "AGENTS_UNAVAILABLE"
-	ErrCodeScopeViolation     = "SCOPE_VIOLATION"
-	ErrCodeScopeExpired       = "SCOPE_EXPIRED"
+	ErrCodeScopeViolation      = "SCOPE_VIOLATION"
+	ErrCodeScopeExpired        = "SCOPE_EXPIRED"
 	ErrCodeStateRecoveryFailed = "STATE_RECOVERY_FAILED"
-	ErrCodeProvisioningFailed = "PROVISIONING_FAILED"
+	ErrCodeProvisioningFailed  = "PROVISIONING_FAILED"
+	ErrCodeTimedOut            = "TIMED_OUT"
 )
 
 // ─── PolicyScope ──────────────────────────────────────────────────────────────
