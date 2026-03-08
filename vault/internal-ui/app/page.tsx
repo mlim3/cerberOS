@@ -7,6 +7,7 @@ import {
   ScriptEditor,
   OutputPanel,
   ExecuteButton,
+  CurlPreview,
   ExecutionStatus,
 } from "./components";
 
@@ -56,10 +57,11 @@ export default function Home() {
       }
 
       const data = await res.json();
-      setOutput(data.output ?? "");
-      setExitCode(data.exit_code ?? null);
+      const result = data.response ?? data;
+      setOutput(result.output ?? "");
+      setExitCode(result.exit_code ?? null);
       setDurationMs(elapsed);
-      setStatus(data.exit_code === 0 ? "success" : "error");
+      setStatus(result.exit_code === 0 ? "success" : "error");
     } catch (err) {
       const elapsed = Date.now() - startTime;
       setOutput(err instanceof Error ? err.message : String(err));
@@ -79,6 +81,7 @@ export default function Home() {
             onChange={setScript}
             onClear={handleClearScript}
           />
+          <CurlPreview script={script} />
           <div className={styles.actions}>
             <ExecuteButton
               status={status}
