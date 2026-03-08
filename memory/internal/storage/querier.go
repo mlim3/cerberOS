@@ -20,6 +20,7 @@ type Querier interface {
 	GetAllChunks(ctx context.Context, userID pgtype.UUID) ([]GetAllChunksRow, error)
 	GetAllFacts(ctx context.Context, userID pgtype.UUID) ([]PersonalInfoSchemaUserFact, error)
 	GetChatMessageByIdempotencyKey(ctx context.Context, arg GetChatMessageByIdempotencyKeyParams) (ChatSchemaMessage, error)
+	GetExecutionsByTaskID(ctx context.Context, taskID pgtype.UUID) ([]AgentLogsSchemaTaskExecution, error)
 	GetFactByID(ctx context.Context, arg GetFactByIDParams) (PersonalInfoSchemaUserFact, error)
 	GetSecretByKey(ctx context.Context, arg GetSecretByKeyParams) (VaultSchemaSecret, error)
 	GetSourceReferencesByTarget(ctx context.Context, arg GetSourceReferencesByTargetParams) ([]PersonalInfoSchemaSourceReference, error)

@@ -16,6 +16,42 @@ const docTemplate = `{
     "basePath": "{{.BasePath}}",
     "paths": {
         "/api/v1/agents/tasks/{taskId}/executions": {
+            "get": {
+                "description": "Fetches and returns the chronological log of an agent's work for a specific taskId",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "agents"
+                ],
+                "summary": "Get task executions",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Task ID",
+                        "name": "taskId",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "List of task executions",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/github_com_mlim3_cerberOS_memory_internal_storage.AgentLogsSchemaTaskExecution"
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request"
+                    },
+                    "500": {
+                        "description": "Internal Server Error"
+                    }
+                }
+            },
             "post": {
                 "description": "Creates a new task execution log for an agent",
                 "consumes": [
@@ -92,7 +128,7 @@ const docTemplate = `{
                             "additionalProperties": {
                                 "type": "array",
                                 "items": {
-                                    "$ref": "#/definitions/api.MessageResponse"
+                                    "$ref": "#/definitions/internal_api.MessageResponse"
                                 }
                             }
                         }
@@ -139,7 +175,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/api.CreateMessageRequest"
+                            "$ref": "#/definitions/internal_api.CreateMessageRequest"
                         }
                     }
                 ],
@@ -147,7 +183,7 @@ const docTemplate = `{
                     "201": {
                         "description": "Created",
                         "schema": {
-                            "$ref": "#/definitions/api.MessageResponse"
+                            "$ref": "#/definitions/internal_api.MessageResponse"
                         }
                     },
                     "400": {
@@ -245,7 +281,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/api.UpdateFactRequest"
+                            "$ref": "#/definitions/internal_api.UpdateFactRequest"
                         }
                     }
                 ],
@@ -315,7 +351,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/api.QueryPersonalInfoRequest"
+                            "$ref": "#/definitions/internal_api.QueryPersonalInfoRequest"
                         }
                     }
                 ],
@@ -371,7 +407,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/api.SavePersonalInfoRequest"
+                            "$ref": "#/definitions/internal_api.SavePersonalInfoRequest"
                         }
                     }
                 ],
@@ -438,7 +474,7 @@ const docTemplate = `{
                             "additionalProperties": {
                                 "type": "array",
                                 "items": {
-                                    "$ref": "#/definitions/api.SystemEventResponse"
+                                    "$ref": "#/definitions/internal_api.SystemEventResponse"
                                 }
                             }
                         }
@@ -478,7 +514,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/api.CreateSystemEventRequest"
+                            "$ref": "#/definitions/internal_api.CreateSystemEventRequest"
                         }
                     }
                 ],
@@ -509,6 +545,11 @@ const docTemplate = `{
         },
         "/api/v1/vault/{userId}/secrets": {
             "get": {
+                "security": [
+                    {
+                        "ApiKeyAuth": []
+                    }
+                ],
                 "description": "Retrieves and decrypts a secret for a user",
                 "produces": [
                     "application/json"
@@ -552,14 +593,14 @@ const docTemplate = `{
                     "500": {
                         "description": "Internal Server Error"
                     }
-                },
+                }
+            },
+            "post": {
                 "security": [
                     {
                         "ApiKeyAuth": []
                     }
-                ]
-            },
-            "post": {
+                ],
                 "description": "Saves a new encrypted secret for a user",
                 "consumes": [
                     "application/json"
@@ -602,16 +643,16 @@ const docTemplate = `{
                     "500": {
                         "description": "Internal Server Error"
                     }
-                },
-                "security": [
-                    {
-                        "ApiKeyAuth": []
-                    }
-                ]
+                }
             }
         },
         "/api/v1/vault/{userId}/secrets/{keyName}": {
             "put": {
+                "security": [
+                    {
+                        "ApiKeyAuth": []
+                    }
+                ],
                 "description": "Updates an encrypted secret for a user",
                 "consumes": [
                     "application/json"
@@ -661,14 +702,14 @@ const docTemplate = `{
                     "500": {
                         "description": "Internal Server Error"
                     }
-                },
+                }
+            },
+            "delete": {
                 "security": [
                     {
                         "ApiKeyAuth": []
                     }
-                ]
-            },
-            "delete": {
+                ],
                 "description": "Deletes an encrypted secret for a user",
                 "tags": [
                     "vault"
@@ -700,17 +741,44 @@ const docTemplate = `{
                     "500": {
                         "description": "Internal Server Error"
                     }
-                },
-                "security": [
-                    {
-                        "ApiKeyAuth": []
-                    }
-                ]
+                }
             }
         }
     },
     "definitions": {
-        "api.CreateMessageRequest": {
+        "github_com_mlim3_cerberOS_memory_internal_storage.AgentLogsSchemaTaskExecution": {
+            "type": "object",
+            "properties": {
+                "action_type": {
+                    "type": "string"
+                },
+                "agent_id": {
+                    "type": "string"
+                },
+                "created_at": {
+                    "$ref": "#/definitions/pgtype.Timestamptz"
+                },
+                "error_context": {
+                    "$ref": "#/definitions/pgtype.Text"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "payload": {
+                    "type": "array",
+                    "items": {
+                        "type": "integer"
+                    }
+                },
+                "status": {
+                    "type": "string"
+                },
+                "task_id": {
+                    "type": "string"
+                }
+            }
+        },
+        "internal_api.CreateMessageRequest": {
             "type": "object",
             "properties": {
                 "content": {
@@ -730,7 +798,7 @@ const docTemplate = `{
                 }
             }
         },
-        "api.CreateSystemEventRequest": {
+        "internal_api.CreateSystemEventRequest": {
             "type": "object",
             "properties": {
                 "message": {
@@ -751,7 +819,7 @@ const docTemplate = `{
                 }
             }
         },
-        "api.MessageResponse": {
+        "internal_api.MessageResponse": {
             "type": "object",
             "properties": {
                 "content": {
@@ -777,7 +845,7 @@ const docTemplate = `{
                 }
             }
         },
-        "api.QueryPersonalInfoRequest": {
+        "internal_api.QueryPersonalInfoRequest": {
             "type": "object",
             "properties": {
                 "query": {
@@ -788,7 +856,7 @@ const docTemplate = `{
                 }
             }
         },
-        "api.SavePersonalInfoRequest": {
+        "internal_api.SavePersonalInfoRequest": {
             "type": "object",
             "properties": {
                 "content": {
@@ -805,7 +873,7 @@ const docTemplate = `{
                 }
             }
         },
-        "api.SystemEventResponse": {
+        "internal_api.SystemEventResponse": {
             "type": "object",
             "properties": {
                 "createdAt": {
@@ -832,7 +900,7 @@ const docTemplate = `{
                 }
             }
         },
-        "api.UpdateFactRequest": {
+        "internal_api.UpdateFactRequest": {
             "type": "object",
             "properties": {
                 "category": {
@@ -847,6 +915,45 @@ const docTemplate = `{
                 "factValue": {},
                 "version": {
                     "type": "integer"
+                }
+            }
+        },
+        "pgtype.InfinityModifier": {
+            "type": "integer",
+            "format": "int32",
+            "enum": [
+                1,
+                0,
+                -1
+            ],
+            "x-enum-varnames": [
+                "Infinity",
+                "Finite",
+                "NegativeInfinity"
+            ]
+        },
+        "pgtype.Text": {
+            "type": "object",
+            "properties": {
+                "string": {
+                    "type": "string"
+                },
+                "valid": {
+                    "type": "boolean"
+                }
+            }
+        },
+        "pgtype.Timestamptz": {
+            "type": "object",
+            "properties": {
+                "infinityModifier": {
+                    "$ref": "#/definitions/pgtype.InfinityModifier"
+                },
+                "time": {
+                    "type": "string"
+                },
+                "valid": {
+                    "type": "boolean"
                 }
             }
         }

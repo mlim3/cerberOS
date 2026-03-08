@@ -1,5 +1,26 @@
 definitions:
-  api.CreateMessageRequest:
+  github_com_mlim3_cerberOS_memory_internal_storage.AgentLogsSchemaTaskExecution:
+    properties:
+      action_type:
+        type: string
+      agent_id:
+        type: string
+      created_at:
+        $ref: '#/definitions/pgtype.Timestamptz'
+      error_context:
+        $ref: '#/definitions/pgtype.Text'
+      id:
+        type: string
+      payload:
+        items:
+          type: integer
+        type: array
+      status:
+        type: string
+      task_id:
+        type: string
+    type: object
+  internal_api.CreateMessageRequest:
     properties:
       content:
         type: string
@@ -12,7 +33,7 @@ definitions:
       userId:
         type: string
     type: object
-  api.CreateSystemEventRequest:
+  internal_api.CreateSystemEventRequest:
     properties:
       message:
         type: string
@@ -26,7 +47,7 @@ definitions:
       traceId:
         type: string
     type: object
-  api.MessageResponse:
+  internal_api.MessageResponse:
     properties:
       content:
         type: string
@@ -43,14 +64,14 @@ definitions:
       userId:
         type: string
     type: object
-  api.QueryPersonalInfoRequest:
+  internal_api.QueryPersonalInfoRequest:
     properties:
       query:
         type: string
       topK:
         type: integer
     type: object
-  api.SavePersonalInfoRequest:
+  internal_api.SavePersonalInfoRequest:
     properties:
       content:
         type: string
@@ -61,7 +82,7 @@ definitions:
       sourceType:
         type: string
     type: object
-  api.SystemEventResponse:
+  internal_api.SystemEventResponse:
     properties:
       createdAt:
         type: string
@@ -79,7 +100,7 @@ definitions:
       traceId:
         type: string
     type: object
-  api.UpdateFactRequest:
+  internal_api.UpdateFactRequest:
     properties:
       category:
         type: string
@@ -91,10 +112,62 @@ definitions:
       version:
         type: integer
     type: object
+  pgtype.InfinityModifier:
+    enum:
+    - 1
+    - 0
+    - -1
+    format: int32
+    type: integer
+    x-enum-varnames:
+    - Infinity
+    - Finite
+    - NegativeInfinity
+  pgtype.Text:
+    properties:
+      string:
+        type: string
+      valid:
+        type: boolean
+    type: object
+  pgtype.Timestamptz:
+    properties:
+      infinityModifier:
+        $ref: '#/definitions/pgtype.InfinityModifier'
+      time:
+        type: string
+      valid:
+        type: boolean
+    type: object
 info:
   contact: {}
 paths:
   /api/v1/agents/tasks/{taskId}/executions:
+    get:
+      description: Fetches and returns the chronological log of an agent's work for
+        a specific taskId
+      parameters:
+      - description: Task ID
+        in: path
+        name: taskId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: List of task executions
+          schema:
+            items:
+              $ref: '#/definitions/github_com_mlim3_cerberOS_memory_internal_storage.AgentLogsSchemaTaskExecution'
+            type: array
+        "400":
+          description: Bad Request
+        "500":
+          description: Internal Server Error
+      summary: Get task executions
+      tags:
+      - agents
     post:
       consumes:
       - application/json
@@ -144,7 +217,7 @@ paths:
           schema:
             additionalProperties:
               items:
-                $ref: '#/definitions/api.MessageResponse'
+                $ref: '#/definitions/internal_api.MessageResponse'
               type: array
             type: object
         "400":
@@ -175,14 +248,14 @@ paths:
         name: request
         required: true
         schema:
-          $ref: '#/definitions/api.CreateMessageRequest'
+          $ref: '#/definitions/internal_api.CreateMessageRequest'
       produces:
       - application/json
       responses:
         "201":
           description: Created
           schema:
-            $ref: '#/definitions/api.MessageResponse'
+            $ref: '#/definitions/internal_api.MessageResponse'
         "400":
           description: Bad Request
           schema:
@@ -247,7 +320,7 @@ paths:
         name: request
         required: true
         schema:
-          $ref: '#/definitions/api.UpdateFactRequest'
+          $ref: '#/definitions/internal_api.UpdateFactRequest'
       produces:
       - application/json
       responses:
@@ -295,7 +368,7 @@ paths:
         name: request
         required: true
         schema:
-          $ref: '#/definitions/api.QueryPersonalInfoRequest'
+          $ref: '#/definitions/internal_api.QueryPersonalInfoRequest'
       produces:
       - application/json
       responses:
@@ -333,7 +406,7 @@ paths:
         name: request
         required: true
         schema:
-          $ref: '#/definitions/api.SavePersonalInfoRequest'
+          $ref: '#/definitions/internal_api.SavePersonalInfoRequest'
       produces:
       - application/json
       responses:
@@ -379,7 +452,7 @@ paths:
           schema:
             additionalProperties:
               items:
-                $ref: '#/definitions/api.SystemEventResponse'
+                $ref: '#/definitions/internal_api.SystemEventResponse'
               type: array
             type: object
         "400":
@@ -405,7 +478,7 @@ paths:
         name: request
         required: true
         schema:
-          $ref: '#/definitions/api.CreateSystemEventRequest'
+          $ref: '#/definitions/internal_api.CreateSystemEventRequest'
       produces:
       - application/json
       responses:

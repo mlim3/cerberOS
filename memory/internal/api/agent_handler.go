@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/mlim3/cerberOS/memory/internal/storage"
 )
 
@@ -82,4 +83,45 @@ func (h *AgentHandler) HandleCreateTaskExecution(w http.ResponseWriter, r *http.
 	}
 
 	w.WriteHeader(http.StatusCreated)
+}
+
+// HandleGetExecutions fetches and returns the chronological log of an agent's work for a specific taskId
+// @Summary Get task executions
+// @Description Fetches and returns the chronological log of an agent's work for a specific taskId
+// @Tags agents
+// @Produce json
+// @Param taskId path string true "Task ID"
+// @Success 200 {array} storage.AgentLogsSchemaTaskExecution "List of task executions"
+// @Failure 400 "Bad Request"
+// @Failure 500 "Internal Server Error"
+// @Router /api/v1/agents/tasks/{taskId}/executions [get]
+func (h *AgentHandler) HandleGetExecutions(w http.ResponseWriter, r *http.Request) {
+	taskId := r.PathValue("taskId")
+	if taskId == "" {
+		http.Error(w, "taskId is required", http.StatusBadRequest)
+		return
+	}
+
+	var parsedTaskID pgtype.UUID
+	if err := parsedTaskID.Scan(taskId); err != nil {
+		http.Error(w, "invalid taskId format", http.StatusBadRequest)
+		return
+	}
+
+	executions, err := h.repo.GetExecutionsByTaskID(r.Context(), parsedTaskID)
+	if err != nil {
+		http.Error(w, "failed to get task executions", http.StatusInternalServerError)
+		return
+	}
+
+	// Handle empty result
+	if executions == nil {
+		executions = []storage.AgentLogsSchemaTaskExecution{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(executions); err != nil {
+		http.Error(w, "failed to encode response", http.StatusInternalServerError)
+		return
+	}
 }

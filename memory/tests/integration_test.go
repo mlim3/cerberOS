@@ -95,6 +95,7 @@ func TestMain(m *testing.M) {
 	mux.Handle("/api/v1/vault/", http.StripPrefix("", api.RequireVaultKey(vaultMux)))
 
 	mux.HandleFunc("POST /api/v1/agents/tasks/{taskId}/executions", agentHandler.HandleCreateTaskExecution)
+	mux.HandleFunc("GET /api/v1/agents/tasks/{taskId}/executions", agentHandler.HandleGetExecutions)
 
 	handler := api.TraceIDMiddleware(logger, logRepo, mux)
 
@@ -534,3 +535,64 @@ func TestSystemAndTracing(t *testing.T) {
 		}
 	})
 }
+
+// ==========================================
+// SCENARIO 6: TASK EXECUTION LOGS
+// ==========================================
+func TestTaskExecutionLogs(t *testing.T) {
+	taskID := uuid.New().String()
+	agentID := uuid.New().String()
+
+	t.Run("Chronological Task Execution Logs", func(t *testing.T) {
+		// 1. POST 3 execution steps
+		steps := []struct {
+			ActionType string
+			Status     string
+		}{
+			{"analysis", "completed"},
+			{"execution", "in_progress"},
+			{"execution", "completed"},
+		}
+
+		for _, step := range steps {
+			reqBody := map[string]interface{}{
+				"id":          uuid.New().String(),
+				"agent_id":    agentID,
+				"action_type": step.ActionType,
+				"payload":     []byte(`{"key":"value"}`),
+				"status":      step.Status,
+			}
+
+			resp := doRequest(t, "POST", fmt.Sprintf("/api/v1/agents/tasks/%s/executions", taskID), reqBody, nil)
+			if resp.StatusCode != http.StatusCreated {
+				t.Fatalf("Failed to create task execution: expected 201, got %d", resp.StatusCode)
+			}
+		}
+
+		// 2. Call GET endpoint
+		resp := doRequest(t, "GET", fmt.Sprintf("/api/v1/agents/tasks/%s/executions", taskID), nil, nil)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("Failed to get task executions: expected 200, got %d", resp.StatusCode)
+		}
+
+		var executions []map[string]interface{}
+		parseResponse(t, resp, &executions)
+
+		// 3. Verify that 3 steps are returned
+		if len(executions) != 3 {
+			t.Fatalf("Expected 3 task executions, got %d", len(executions))
+		}
+
+		// 4. Verify chronological order (and that they match the inserted steps)
+		for i, step := range steps {
+			exec := executions[i]
+			if exec["action_type"] != step.ActionType {
+				t.Errorf("Step %d: expected action_type %s, got %v", i, step.ActionType, exec["action_type"])
+			}
+			if exec["status"] != step.Status {
+				t.Errorf("Step %d: expected status %s, got %v", i, step.Status, exec["status"])
+			}
+		}
+	})
+}
+

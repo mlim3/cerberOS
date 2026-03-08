@@ -142,6 +142,7 @@ func main() {
 
 	// Agent Log endpoints
 	mux.HandleFunc("POST /api/v1/agents/tasks/{taskId}/executions", agentHandler.HandleCreateTaskExecution)
+	mux.HandleFunc("GET /api/v1/agents/tasks/{taskId}/executions", agentHandler.HandleGetExecutions)
 
 	// Metrics endpoint
 	mux.Handle("/internal/metrics", promhttp.Handler())

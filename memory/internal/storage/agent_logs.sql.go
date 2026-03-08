@@ -41,3 +41,38 @@ func (q *Queries) CreateTaskExecution(ctx context.Context, arg CreateTaskExecuti
 	)
 	return err
 }
+
+const getExecutionsByTaskID = `-- name: GetExecutionsByTaskID :many
+SELECT id, task_id, agent_id, action_type, payload, status, error_context, created_at FROM agent_logs_schema.task_executions
+WHERE task_id = $1
+ORDER BY created_at ASC
+`
+
+func (q *Queries) GetExecutionsByTaskID(ctx context.Context, taskID pgtype.UUID) ([]AgentLogsSchemaTaskExecution, error) {
+	rows, err := q.db.Query(ctx, getExecutionsByTaskID, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []AgentLogsSchemaTaskExecution
+	for rows.Next() {
+		var i AgentLogsSchemaTaskExecution
+		if err := rows.Scan(
+			&i.ID,
+			&i.TaskID,
+			&i.AgentID,
+			&i.ActionType,
+			&i.Payload,
+			&i.Status,
+			&i.ErrorContext,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
