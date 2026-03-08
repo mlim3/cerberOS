@@ -1,24 +1,30 @@
 // Package policy implements M3: Policy Enforcer.
 //
 // The Policy Enforcer validates every task against the Vault (OpenBao) policy
-// set before dispatch. It derives and attaches a policy_scope to every approved
-// task_spec. This scope is the immutable ceiling for all agent credential requests.
+// set before dispatch. It derives and returns a policy_scope for every approved
+// task. This scope is the immutable ceiling for all agent credential requests.
 //
 // Responsibilities (§4.1 M3):
 //   - Query OpenBao to validate user permission scope covers required_skill_domains
-//   - Derive and attach policy_scope to validated task_spec
+//   - Derive and return policy_scope for validated task_spec
 //   - Reject tasks with out-of-scope skill domains (returns POLICY_VIOLATION)
-//   - Log every policy decision (ALLOW/DENY) as a structured audit event — always
+//   - Log every policy decision (ALLOW/DENY) as a structured audit event — always attempted
 //   - Maintain a TTL-based policy cache (see cache.go)
 //   - Handle Vault unavailability per vault_failure_mode (FAIL_CLOSED default)
 //   - Trigger credential revocation on every terminal task outcome
 //
 // CRITICAL (§2.2): Policy enforcement is not advisory.
 // DENY → POLICY_VIOLATION to User I/O. Never silently dropped. No partial execution.
-// CRITICAL (§FR-PE-03): Every policy decision writes an audit_event, ALLOW or DENY.
+// CRITICAL (§FR-PE-03): Every policy decision attempts to write an audit_event, ALLOW or DENY.
 package policy
 
 import (
+	"encoding/json"
+	"fmt"
+	"log"
+	"os"
+	"time"
+
 	"github.com/mlim3/cerberOS/orchestrator/internal/config"
 	"github.com/mlim3/cerberOS/orchestrator/internal/interfaces"
 	"github.com/mlim3/cerberOS/orchestrator/internal/types"
@@ -31,35 +37,102 @@ type Enforcer struct {
 	memory interfaces.MemoryClient
 	cache  *PolicyCache
 	nodeID string
+	logger *log.Logger
 }
 
 // New creates a new Policy Enforcer.
-func New(cfg *config.OrchestratorConfig, vault interfaces.VaultClient, memory interfaces.MemoryClient) *Enforcer {
+func New(
+	cfg *config.OrchestratorConfig,
+	vault interfaces.VaultClient,
+	memory interfaces.MemoryClient,
+	logger *log.Logger,
+) *Enforcer {
+	if logger == nil {
+		logger = log.New(os.Stdout, "[policy-enforcer] ", log.LstdFlags|log.LUTC)
+	}
+
 	return &Enforcer{
 		cfg:    cfg,
 		vault:  vault,
 		memory: memory,
 		cache:  NewPolicyCache(cfg.VaultPolicyCacheTTL),
 		nodeID: cfg.NodeID,
+		logger: logger,
 	}
 }
 
-// ValidateAndScope validates the task against Vault and returns the derived policy_scope.
-// On ALLOW: writes policy_allow audit event, returns PolicyScope.
-// On DENY:  writes policy_deny audit event, returns error with human-readable reason.
-// On Vault unreachable: applies vault_failure_mode (FAIL_CLOSED by default).
-//
-// CRITICAL: Audit event is written regardless of outcome (§FR-PE-03).
-//
-// TODO Phase 2: implement full logic:
-//   - Check cache first (cache key: userID + sorted(skillDomains))
-//   - On cache miss: call vault.ValidateAndScope()
-//   - On Vault error: apply vault_failure_mode
-//   - Write audit_event to memory (always)
-//   - On success: store in cache, return scope
-func (e *Enforcer) ValidateAndScope(userID string, requiredSkillDomains []string, timeoutSeconds int) (types.PolicyScope, error) {
-	// TODO Phase 2
-	return types.PolicyScope{}, nil
+// ValidateAndScope validates a specific task against Vault and returns the
+// derived policy_scope for that task.
+// taskID and orchestratorTaskRef are included so every ALLOW/DENY decision
+// can be written as a task-linked audit event to Memory.
+func (e *Enforcer) ValidateAndScope(
+	taskID string,
+	orchestratorTaskRef string,
+	userID string,
+	requiredSkillDomains []string,
+	timeoutSeconds int,
+) (types.PolicyScope, error) {
+	if cachedScope, ok := e.cache.Get(userID, requiredSkillDomains); ok {
+		auditErr := e.writeAuditEvent(taskID, orchestratorTaskRef, userID, types.OutcomeSuccess, "cache_hit")
+		if auditErr != nil {
+			e.logger.Printf(
+				"failed to write policy audit event on cache hit: task_id=%s orchestrator_task_ref=%s user_id=%s error=%v",
+				taskID,
+				orchestratorTaskRef,
+				userID,
+				auditErr,
+			)
+		}
+		return cachedScope, nil
+	}
+
+	scope, err := e.vault.ValidateAndScope(userID, requiredSkillDomains, timeoutSeconds)
+	if err != nil {
+		if e.cfg.VaultFailureMode == config.VaultFailureModeOpen {
+			if cachedScope, ok := e.cache.Get(userID, requiredSkillDomains); ok {
+				auditErr := e.writeAuditEvent(taskID, orchestratorTaskRef, userID, types.OutcomeSuccess, "cache_fallback")
+				if auditErr != nil {
+					e.logger.Printf(
+						"failed to write policy audit event on cache fallback: task_id=%s orchestrator_task_ref=%s user_id=%s error=%v",
+						taskID,
+						orchestratorTaskRef,
+						userID,
+						auditErr,
+					)
+				}
+				return cachedScope, nil
+			}
+		}
+
+		auditErr := e.writeAuditEvent(taskID, orchestratorTaskRef, userID, types.OutcomeDenied, err.Error())
+		if auditErr != nil {
+			// TODO Phase 1: emit metric for audit write failure.
+			e.logger.Printf(
+				"failed to write policy audit event on deny: task_id=%s orchestrator_task_ref=%s user_id=%s error=%v",
+				taskID,
+				orchestratorTaskRef,
+				userID,
+				auditErr,
+			)
+		}
+		return types.PolicyScope{}, err
+	}
+
+	e.cache.Set(userID, requiredSkillDomains, scope)
+
+	auditErr := e.writeAuditEvent(taskID, orchestratorTaskRef, userID, types.OutcomeSuccess, "")
+	if auditErr != nil {
+		// TODO Phase 1: emit metric for audit write failure.
+		e.logger.Printf(
+			"failed to write policy audit event on allow: task_id=%s orchestrator_task_ref=%s user_id=%s error=%v",
+			taskID,
+			orchestratorTaskRef,
+			userID,
+			auditErr,
+		)
+	}
+
+	return scope, nil
 }
 
 // VerifyScopeStillValid confirms a policy_scope has not expired before recovery re-dispatch.
@@ -92,10 +165,50 @@ func (e *Enforcer) InvalidateCacheForPolicy(policyName string) {
 	e.cache.InvalidateAll() // conservative: invalidate all on any Vault policy change
 }
 
-// writeAuditEvent persists a policy decision to the Memory Component.
-// Must be called on every policy check, regardless of outcome (§FR-PE-03).
-//
-// TODO Phase 2: implement
-func (e *Enforcer) writeAuditEvent(taskID, orchestratorTaskRef, userID string, outcome string, reason string) {
-	// TODO Phase 2
+// writeAuditEvent persists a policy ALLOW or DENY decision to Memory as a
+// policy_event audit record.
+// In phase 1, callers treat audit persistence as best effort: write failures
+// are returned to the caller but do not override the primary Vault decision.
+func (e *Enforcer) writeAuditEvent(taskID, orchestratorTaskRef, userID string, outcome string, reason string) error {
+	eventType := types.EventPolicyAllow
+	if outcome != types.OutcomeSuccess {
+		eventType = types.EventPolicyDeny
+	}
+
+	detail := map[string]any{"reason": reason}
+	rawDetail, err := json.Marshal(detail)
+	if err != nil {
+		rawDetail = json.RawMessage(`{"reason":"failed to marshal policy event detail"}`)
+	}
+
+	timestamp := time.Now().UTC()
+	event := types.AuditEvent{
+		LogID:               fmt.Sprintf("policy-%d", timestamp.UnixNano()),
+		OrchestratorTaskRef: orchestratorTaskRef,
+		EventType:           eventType,
+		InitiatingModule:    types.ModulePolicyEnforcer,
+		Outcome:             outcome,
+		EventDetail:         rawDetail,
+		Timestamp:           timestamp,
+		NodeID:              e.nodeID,
+		TaskID:              taskID,
+		UserID:              userID,
+	}
+
+	payload, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("marshal audit event: %w", err)
+	}
+
+	if err := e.memory.Write(types.OrchestratorMemoryWritePayload{
+		OrchestratorTaskRef: orchestratorTaskRef,
+		TaskID:              taskID,
+		DataType:            types.DataTypePolicyEvent,
+		Timestamp:           timestamp,
+		Payload:             payload,
+	}); err != nil {
+		return fmt.Errorf("write policy audit event: %w", err)
+	}
+
+	return nil
 }

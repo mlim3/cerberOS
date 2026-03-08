@@ -10,7 +10,7 @@ import (
 type VaultFailureMode string
 
 const (
-	VaultFailureModeClosd VaultFailureMode = "FAIL_CLOSED" // Default — deny all tasks
+	VaultFailureModeClosed VaultFailureMode = "FAIL_CLOSED" // Default — deny all tasks
 	VaultFailureModeOpen  VaultFailureMode = "FAIL_OPEN"   // Use cached policy if within TTL
 )
 
@@ -81,7 +81,7 @@ func Load() (*OrchestratorConfig, error) {
 	case VaultFailureModeOpen:
 		cfg.VaultFailureMode = VaultFailureModeOpen
 	default:
-		cfg.VaultFailureMode = VaultFailureModeClosd // Default: FAIL_CLOSED
+		cfg.VaultFailureMode = VaultFailureModeClosed // Default: FAIL_CLOSED
 	}
 
 	cfg.VaultPolicyCacheTTL = envInt("VAULT_POLICY_CACHE_TTL_SECONDS", 60)
