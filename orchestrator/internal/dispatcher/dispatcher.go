@@ -121,9 +121,10 @@ func New(
 //  3. Generate orchestrator_task_ref (distinct UUID)
 //  4. Policy validation — POLICY_VIOLATION on deny; no agent is ever touched on deny
 //  5. Capability query to Agents Component
-//  6. Persist DISPATCHED state to Memory (BEFORE dispatch — §14.1)
+//  6. Persist DISPATCH_PENDING state to Memory (BEFORE dispatch — §14.1)
 //  7. Dispatch task_spec to Agents Component
-//  8. Confirm task_accepted to User I/O
+//  8. On success, persist DISPATCHED state; on failure, persist DELIVERY_FAILED
+//  9. Confirm task_accepted to User I/O
 func (d *Dispatcher) HandleInboundTask(task types.UserTask) error {
 	atomic.AddInt64(&d.tasksReceived, 1)
 
@@ -151,7 +152,7 @@ func (d *Dispatcher) HandleInboundTask(task types.UserTask) error {
 			ErrorCode:   types.ErrCodeDuplicateTask,
 			UserMessage: fmt.Sprintf("task already submitted — current state: %s", existing.State),
 		})
-		return nil // not a processing error; idempotent response
+		return nil
 	}
 
 	// ── Step 3: Generate orchestrator_task_ref ─────────────────────────────
@@ -187,7 +188,7 @@ func (d *Dispatcher) HandleInboundTask(task types.UserTask) error {
 		return fmt.Errorf("capability query: %w", err)
 	}
 
-	// ── Build task state ───────────────────────────────────────────────────
+	// ── Build initial task state as DISPATCH_PENDING ───────────────────────
 	now := time.Now().UTC()
 	timeoutAt := now.Add(time.Duration(task.TimeoutSeconds) * time.Second)
 
@@ -195,11 +196,10 @@ func (d *Dispatcher) HandleInboundTask(task types.UserTask) error {
 		OrchestratorTaskRef:  orchRef,
 		TaskID:               task.TaskID,
 		UserID:               task.UserID,
-		State:                types.StateDispatched,
+		State:                types.StateDispatchPending,
 		RequiredSkillDomains: task.RequiredSkillDomains,
 		PolicyScope:          scope,
 		AgentID:              capResp.AgentID,
-		DispatchedAt:         &now,
 		TimeoutAt:            &timeoutAt,
 		CallbackTopic:        task.CallbackTopic,
 		UserContextID:        task.UserContextID,
@@ -207,29 +207,19 @@ func (d *Dispatcher) HandleInboundTask(task types.UserTask) error {
 		Payload:              task.Payload,
 		StateHistory: []types.StateEvent{
 			{State: types.StateReceived, Timestamp: now, NodeID: d.cfg.NodeID},
-			{State: types.StateDispatched, Timestamp: now, NodeID: d.cfg.NodeID},
+			{State: types.StateDispatchPending, Timestamp: now, NodeID: d.cfg.NodeID},
 		},
 	}
 
-	// ── Step 6: Persist state to Memory BEFORE dispatch (§14.1) ───────────
-	statePayload, err := json.Marshal(ts)
-	if err != nil {
-		return fmt.Errorf("marshal task state: %w", err)
-	}
-	if err := d.memory.Write(types.OrchestratorMemoryWritePayload{
-		OrchestratorTaskRef: orchRef,
-		TaskID:              task.TaskID,
-		DataType:            types.DataTypeTaskState,
-		Timestamp:           now,
-		Payload:             statePayload,
-	}); err != nil {
+	// ── Step 6: Persist DISPATCH_PENDING BEFORE dispatch ───────────────────
+	if err := d.persistTaskState(ts, now); err != nil {
 		d.logger.Printf("memory write failed before dispatch: task_id=%s error=%v", task.TaskID, err)
 		_ = d.gateway.PublishError(task.CallbackTopic, types.ErrorResponse{
 			TaskID:      task.TaskID,
 			ErrorCode:   types.ErrCodeStorageUnavailable,
 			UserMessage: "Unable to persist task state. Task not dispatched.",
 		})
-		return fmt.Errorf("persist task state: %w", err)
+		return fmt.Errorf("persist dispatch pending state: %w", err)
 	}
 
 	// Register with in-memory tracking and monitor.
@@ -250,15 +240,76 @@ func (d *Dispatcher) HandleInboundTask(task types.UserTask) error {
 		CallbackTopic:        task.CallbackTopic,
 		UserContextID:        task.UserContextID,
 	}
+
 	if err := d.gateway.PublishTaskSpec(spec); err != nil {
+		failTime := time.Now().UTC()
+
+		ts.State = types.StateDeliveryFailed
+		ts.ErrorCode = types.ErrCodeAgentsUnavailable
+		ts.StateHistory = append(ts.StateHistory, types.StateEvent{
+			State:     types.StateDeliveryFailed,
+			Timestamp: failTime,
+			Reason:    err.Error(),
+			NodeID:    d.cfg.NodeID,
+		})
+
+		if persistErr := d.persistTaskState(ts, failTime); persistErr != nil {
+			d.logger.Printf(
+				"failed to persist DELIVERY_FAILED state: task_id=%s orchestrator_task_ref=%s error=%v",
+				task.TaskID, orchRef, persistErr,
+			)
+		}
+
+		if revokeErr := d.policy.RevokeCredentials(orchRef); revokeErr != nil {
+			d.logger.Printf(
+				"credential revocation failed after dispatch failure: orchestrator_task_ref=%s error=%v",
+				orchRef, revokeErr,
+			)
+		}
+
+		d.activeTasks.Delete(task.TaskID)
+		d.orchRefIndex.Delete(orchRef)
+		d.monitor.UntrackTask(task.TaskID)
+		atomic.AddInt64(&d.queueDepth, -1)
+
+		d.logger.Printf(
+			"task dispatch failed: task_id=%s orchestrator_task_ref=%s agent_id=%s error=%v",
+			task.TaskID, orchRef, capResp.AgentID, err,
+		)
+
+		_ = d.gateway.PublishError(task.CallbackTopic, types.ErrorResponse{
+			TaskID:      task.TaskID,
+			ErrorCode:   types.ErrCodeAgentsUnavailable,
+			UserMessage: "Task could not be delivered to an available agent.",
+		})
+
 		return fmt.Errorf("dispatch task_spec: %w", err)
 	}
 
-	// ── Step 8: Confirm task_accepted to User I/O ──────────────────────────
+	// ── Step 8: Persist DISPATCHED after successful publish ────────────────
+	dispatchTime := time.Now().UTC()
+	ts.State = types.StateDispatched
+	ts.DispatchedAt = &dispatchTime
+	ts.StateHistory = append(ts.StateHistory, types.StateEvent{
+		State:     types.StateDispatched,
+		Timestamp: dispatchTime,
+		NodeID:    d.cfg.NodeID,
+	})
+
+	if err := d.persistTaskState(ts, dispatchTime); err != nil {
+		d.logger.Printf(
+			"failed to persist DISPATCHED state after publish: task_id=%s orchestrator_task_ref=%s error=%v",
+			task.TaskID, orchRef, err,
+		)
+		// Do not fail the request here — the agent has already received the task.
+		// This should be handled by recovery / reconciliation later.
+	}
+
+	// ── Step 9: Confirm task_accepted to User I/O ──────────────────────────
 	accepted := types.TaskAccepted{
 		OrchestratorTaskRef: orchRef,
 		AgentID:             capResp.AgentID,
-		EstimatedCompletion: now.Add(time.Duration(task.TimeoutSeconds) * time.Second),
+		EstimatedCompletion: dispatchTime.Add(time.Duration(task.TimeoutSeconds) * time.Second),
 	}
 	if err := d.gateway.PublishTaskAccepted(task.CallbackTopic, accepted); err != nil {
 		d.logger.Printf("publish task_accepted failed: task_id=%s error=%v", task.TaskID, err)
@@ -307,16 +358,8 @@ func (d *Dispatcher) HandleTaskResult(result types.TaskResult) error {
 	})
 
 	// Write terminal state to Memory.
-	statePayload, _ := json.Marshal(ts)
-	if err := d.memory.Write(types.OrchestratorMemoryWritePayload{
-		OrchestratorTaskRef: ts.OrchestratorTaskRef,
-		TaskID:              taskID,
-		DataType:            types.DataTypeTaskState,
-		Timestamp:           now,
-		Payload:             statePayload,
-	}); err != nil {
+	if err := d.persistTaskState(ts, now); err != nil {
 		d.logger.Printf("memory write failed on task result: task_id=%s error=%v", taskID, err)
-		// Continue — deliver result and revoke credentials regardless.
 	}
 
 	// Deliver result to callback_topic.
@@ -391,6 +434,21 @@ func (d *Dispatcher) dedupCheck(taskID string, windowSeconds int) *types.TaskSta
 	return &ts
 }
 
+func (d *Dispatcher) persistTaskState(ts *types.TaskState, timestamp time.Time) error {
+	statePayload, err := json.Marshal(ts)
+	if err != nil {
+		return fmt.Errorf("marshal task state: %w", err)
+	}
+
+	return d.memory.Write(types.OrchestratorMemoryWritePayload{
+		OrchestratorTaskRef: ts.OrchestratorTaskRef,
+		TaskID:              ts.TaskID,
+		DataType:            types.DataTypeTaskState,
+		Timestamp:           timestamp,
+		Payload:             statePayload,
+	})
+}
+
 // validateSchema checks all required fields on a UserTask (§5.1, §FR-TRK-02, §FR-TRK-04).
 //
 // Rules:
@@ -406,7 +464,7 @@ func validateSchema(task types.UserTask) error {
 		return fmt.Errorf("task_id is required")
 	}
 	if !isValidUUID(task.TaskID) {
-		return fmt.Errorf("task_id must be a valid UUID v4: %q", task.TaskID)
+		return fmt.Errorf("task_id must be a valid UUID-formatted string: %q", task.TaskID)
 	}
 	if task.UserID == "" {
 		return fmt.Errorf("user_id is required")
@@ -432,8 +490,9 @@ func validateSchema(task types.UserTask) error {
 	return nil
 }
 
-// isValidUUID returns true if s is a syntactically valid UUID v4
-// (8-4-4-4-12 hex with dashes, version nibble = 4).
+// isValidUUID returns true if s matches the general UUID string format
+// (8-4-4-4-12 hex characters with dashes).
+// check valid UUID v4 in subsequent phase
 func isValidUUID(s string) bool {
 	if len(s) != 36 {
 		return false
