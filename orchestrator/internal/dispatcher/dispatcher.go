@@ -57,7 +57,7 @@ type Gateway interface {
 
 // PolicyEnforcer defines the policy operations the Dispatcher needs from M3.
 type PolicyEnforcer interface {
-	ValidateAndScope(userID string, requiredSkillDomains []string, timeoutSeconds int) (types.PolicyScope, error)
+	ValidateAndScope(taskID string, orchestratorTaskRef string, userID string, requiredSkillDomains []string, timeoutSeconds int) (types.PolicyScope, error)
 	RevokeCredentials(orchestratorTaskRef string) error
 }
 
