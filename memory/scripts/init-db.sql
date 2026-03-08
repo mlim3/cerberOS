@@ -31,8 +31,8 @@ CREATE TABLE chat_schema.messages (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX idx_chat_messages_session_id ON chat_schema.messages(session_id);
-CREATE INDEX idx_chat_messages_user_id ON chat_schema.messages(user_id);
+CREATE INDEX idx_messages_session_id ON chat_schema.messages(session_id);
+CREATE INDEX idx_messages_user_id ON chat_schema.messages(user_id);
 
 -- ==========================================
 -- personal_info_schema

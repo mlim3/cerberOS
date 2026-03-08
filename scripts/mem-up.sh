@@ -13,6 +13,14 @@ trap cleanup EXIT INT TERM
 # Change to the memory directory
 cd "$(dirname "$0")/memory"
 
+# Parse arguments
+SEED_DB=false
+for arg in "$@"; do
+    if [ "$arg" == "--seed" ]; then
+        SEED_DB=true
+    fi
+done
+
 echo "Starting Docker containers..."
 docker-compose up -d
 
@@ -32,6 +40,11 @@ until docker exec "$DB_CONTAINER" pg_isready -U user -d memory_db >/dev/null 2>&
 done
 
 echo "Database is ready, wait for all the components to come up!"
+
+if [ "$SEED_DB" = true ]; then
+    echo "Running seed script..."
+    docker exec -i "$DB_CONTAINER" psql -U user -d memory_db < scripts/seed.sql
+fi
 
 echo "Running go mod tidy..."
 go mod tidy

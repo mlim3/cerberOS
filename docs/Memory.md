@@ -10,6 +10,11 @@ cd scripts
 bash mem-up.sh
 ```
 
+You can also run the script with the `--seed` flag to populate the database with mock data:
+```bash
+bash mem-up.sh --seed
+```
+
 This will ensure you have all the necessary dependencies and tools installed.
 
 ## API Documentation (Swagger)
