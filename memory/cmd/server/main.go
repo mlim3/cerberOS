@@ -15,12 +15,19 @@ import (
 	"github.com/mlim3/cerberOS/memory/internal/api"
 	"github.com/mlim3/cerberOS/memory/internal/logic"
 	"github.com/mlim3/cerberOS/memory/internal/storage"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	httpSwagger "github.com/swaggo/http-swagger"
 )
 
 func main() {
 	// Initialize structured logging
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
+
+	// Load .env file if it exists
+	if err := godotenv.Load(); err != nil {
+		logger.Info("No .env file found or error loading it, proceeding with environment variables")
+	}
 
 	// Fast-fail if required vault keys are missing
 	if os.Getenv("VAULT_MASTER_KEY") == "" {
@@ -32,12 +39,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Load .env file if it exists
-	if err := godotenv.Load(); err != nil {
-		logger.Info("No .env file found or error loading it, proceeding with environment variables")
-	}
-
-	// Create root context that listens for signals
+	// 1. Initialize Database root context that listens for signals
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
@@ -141,11 +143,23 @@ func main() {
 	// Agent Log endpoints
 	mux.HandleFunc("POST /api/v1/agents/tasks/{taskId}/executions", agentHandler.HandleCreateTaskExecution)
 
+	// Metrics endpoint
+	mux.Handle("/internal/metrics", promhttp.Handler())
+
+	// Swagger UI endpoint
+	mux.Handle("/swagger/", httpSwagger.Handler(
+		httpSwagger.URL("/swagger/doc.json"), //The url pointing to API definition
+	))
+	// Serve static files for swagger docs
+	mux.Handle("/swagger/doc.json", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, "./docs/swagger.json")
+	}))
+
 	// 4. Start the HTTP server
 	port := getEnvOrDefault("PORT", "8080")
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%s", port),
-		Handler: api.TraceIDMiddleware(logger, logRepo, loggingMiddleware(logger, mux)),
+		Handler: api.TraceIDMiddleware(logger, logRepo, loggingMiddleware(logger, api.MetricsMiddleware(mux))),
 	}
 
 	// Start server in a goroutine

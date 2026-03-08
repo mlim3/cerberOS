@@ -39,6 +39,17 @@ type SystemEventResponse struct {
 	CreatedAt   time.Time      `json:"createdAt"`
 }
 
+// HandleCreateSystemEvent creates a new system event log
+// @Summary Create a system event
+// @Description Creates a new system event log entry
+// @Tags system_events
+// @Accept json
+// @Produce json
+// @Param request body CreateSystemEventRequest true "Event Payload"
+// @Success 201 {object} map[string]interface{} "Created"
+// @Failure 400 {object} map[string]interface{} "Bad Request"
+// @Failure 500 {object} map[string]interface{} "Internal Server Error"
+// @Router /api/v1/system/events [post]
 func (h *SystemLogHandler) HandleCreateSystemEvent(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -137,6 +148,18 @@ func (h *SystemLogHandler) HandleCreateSystemEvent(w http.ResponseWriter, r *htt
 	}))
 }
 
+// HandleListSystemEvents lists system event logs
+// @Summary List system events
+// @Description Retrieves a list of system event logs
+// @Tags system_events
+// @Produce json
+// @Param limit query int false "Limit number of events (default: 100)"
+// @Param serviceName query string false "Filter by service name"
+// @Param severity query string false "Filter by severity"
+// @Success 200 {object} map[string][]SystemEventResponse "OK"
+// @Failure 400 {object} map[string]interface{} "Bad Request"
+// @Failure 500 {object} map[string]interface{} "Internal Server Error"
+// @Router /api/v1/system/events [get]
 func (h *SystemLogHandler) HandleListSystemEvents(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 

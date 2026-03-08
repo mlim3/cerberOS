@@ -190,7 +190,7 @@ func TestChatAndIdempotency(t *testing.T) {
 		if !ok {
 			t.Fatalf("Missing data field in response")
 		}
-		
+
 		msg, ok := data["message"].(map[string]interface{})
 		if !ok {
 			t.Fatalf("Missing message field in data")
@@ -230,7 +230,7 @@ func TestChatAndIdempotency(t *testing.T) {
 
 		// Send exact same request again
 		resp := doRequest(t, "POST", fmt.Sprintf("/api/v1/chat/%s/messages", sessionID), reqBody, nil)
-		
+
 		// Wait for idempotency logic or check response
 		if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
 			t.Fatalf("Expected status 201 or 200, got %d", resp.StatusCode)
@@ -243,10 +243,10 @@ func TestChatAndIdempotency(t *testing.T) {
 		getResp := doRequest(t, "GET", fmt.Sprintf("/api/v1/chat/%s/messages", sessionID), nil, nil)
 		var getResult map[string]interface{}
 		parseResponse(t, getResp, &getResult)
-		
+
 		getData := getResult["data"].(map[string]interface{})
 		messages := getData["messages"].([]interface{})
-		
+
 		if len(messages) != 1 {
 			t.Errorf("Expected 1 message (idempotency should prevent duplicate), got %d", len(messages))
 		}
@@ -255,7 +255,7 @@ func TestChatAndIdempotency(t *testing.T) {
 	t.Run("Cross-User Security", func(t *testing.T) {
 		// Attempt to get chat history for sessionID but the API might check UserID if we passed it in some way
 		// Note: The current chat API structure uses /api/v1/chat/{sessionId}/messages and doesn't explicitly authenticate the user for GET
-		// Based on requirements, we should verify cross-user security returns 404 or 401. 
+		// Based on requirements, we should verify cross-user security returns 404 or 401.
 		// If the API isn't built to restrict session to user, this test will document the current behavior.
 		t.Log("Note: Currently the chat handler doesn't enforce user ownership of sessions on GET")
 		// We'll just verify the GET still works for now, but to fully pass the strict requirement we may need to modify the server code later
@@ -300,7 +300,7 @@ func TestPersonalInfoAndConcurrency(t *testing.T) {
 			"query": "Where do I live?",
 			"topK":  1,
 		}
-		
+
 		resp := doRequest(t, "POST", fmt.Sprintf("/api/v1/personal_info/%s/query", userID), queryReq, nil)
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("Failed to query chunks: expected 200, got %d", resp.StatusCode)
@@ -308,10 +308,10 @@ func TestPersonalInfoAndConcurrency(t *testing.T) {
 
 		var result map[string]interface{}
 		parseResponse(t, resp, &result)
-		
+
 		data := result["data"].(map[string]interface{})
 		resultChunks := data["results"].([]interface{})
-		
+
 		if len(resultChunks) > 0 {
 			firstChunk := resultChunks[0].(map[string]interface{})
 			// Verify similarityScore is present
@@ -345,17 +345,17 @@ func TestPersonalInfoAndConcurrency(t *testing.T) {
 		getResp := doRequest(t, "GET", fmt.Sprintf("/api/v1/personal_info/%s/all", userID), nil, nil)
 		var getResult map[string]interface{}
 		parseResponse(t, getResp, &getResult)
-		
+
 		data := getResult["data"].(map[string]interface{})
 		facts := data["facts"].([]interface{})
-		
+
 		if len(facts) == 0 {
 			t.Fatalf("No facts found after save")
 		}
-		
+
 		fact := facts[0].(map[string]interface{})
 		factID := fact["factId"].(string)
-		
+
 		// Convert version to int
 		versionFloat, ok := fact["version"].(float64)
 		if !ok {
@@ -371,7 +371,7 @@ func TestPersonalInfoAndConcurrency(t *testing.T) {
 			"confidence": 0.9,
 			"version":    version1,
 		}
-		
+
 		updateRespA := doRequest(t, "PUT", fmt.Sprintf("/api/v1/personal_info/%s/facts/%s", userID, factID), updateReqA, nil)
 		if updateRespA.StatusCode != http.StatusOK {
 			t.Fatalf("Agent A failed to update fact: expected 200, got %d", updateRespA.StatusCode)
@@ -385,9 +385,9 @@ func TestPersonalInfoAndConcurrency(t *testing.T) {
 			"confidence": 0.8,
 			"version":    version1, // STALE VERSION
 		}
-		
+
 		updateRespB := doRequest(t, "PUT", fmt.Sprintf("/api/v1/personal_info/%s/facts/%s", userID, factID), updateReqB, nil)
-		
+
 		// 4. VERIFY the server returns a 409 Conflict error code
 		if updateRespB.StatusCode != http.StatusConflict {
 			t.Errorf("Expected 409 Conflict for stale update, got %d", updateRespB.StatusCode)
@@ -406,17 +406,17 @@ func TestVaultSecurity(t *testing.T) {
 			"key_name": "api_key",
 			"value":    "super_secret_value",
 		}
-		
+
 		// Call POST without X-API-KEY
 		resp := doRequest(t, "POST", fmt.Sprintf("/api/v1/vault/%s/secrets", userID), reqBody, nil)
-		
+
 		if resp.StatusCode != http.StatusUnauthorized {
 			t.Errorf("Expected 401 Unauthorized for missing API key, got %d", resp.StatusCode)
 		}
-		
+
 		var errResp map[string]interface{}
 		parseResponse(t, resp, &errResp)
-		
+
 		if errResp["error"] == nil {
 			t.Errorf("Expected error envelope in response")
 		} else {
@@ -432,12 +432,12 @@ func TestVaultSecurity(t *testing.T) {
 			"key_name": "api_key",
 			"value":    "super_secret_value",
 		}
-		
+
 		headers := map[string]string{
-			"X-API-KEY": vaultKey,
+			"X-API-KEY":  vaultKey,
 			"X-Trace-ID": uuid.New().String(), // Add custom trace ID to find it
 		}
-		
+
 		// Make an authorized request
 		resp := doRequest(t, "POST", fmt.Sprintf("/api/v1/vault/%s/secrets", userID), reqBody, headers)
 		if resp.StatusCode != http.StatusCreated {
@@ -458,10 +458,10 @@ func TestVaultSecurity(t *testing.T) {
 
 		var result map[string]interface{}
 		parseResponse(t, eventsResp, &result)
-		
+
 		data := result["data"].(map[string]interface{})
 		events := data["events"].([]interface{})
-		
+
 		found := false
 		for _, e := range events {
 			event := e.(map[string]interface{})
@@ -475,7 +475,7 @@ func TestVaultSecurity(t *testing.T) {
 				}
 			}
 		}
-		
+
 		if !found {
 			t.Errorf("Could not find VAULT_ACCESS audit log for the authorized request")
 		}
@@ -488,18 +488,18 @@ func TestVaultSecurity(t *testing.T) {
 func TestSystemAndTracing(t *testing.T) {
 	t.Run("TraceID Propagation", func(t *testing.T) {
 		customTraceID := uuid.New().String()
-		
+
 		reqBody := map[string]interface{}{
-			"message": "Test tracing message",
-			"severity": "info",
+			"message":     "Test tracing message",
+			"severity":    "info",
 			"serviceName": "test-suite",
-			"traceId": customTraceID, // Also send in body to ensure it's saved
+			"traceId":     customTraceID, // Also send in body to ensure it's saved
 		}
-		
+
 		headers := map[string]string{
 			"X-Trace-ID": customTraceID,
 		}
-		
+
 		resp := doRequest(t, "POST", "/api/v1/system/events", reqBody, headers)
 		if resp.StatusCode != http.StatusCreated {
 			t.Fatalf("Failed to create system event: expected 201, got %d", resp.StatusCode)
@@ -507,19 +507,19 @@ func TestSystemAndTracing(t *testing.T) {
 
 		var result map[string]interface{}
 		parseResponse(t, resp, &result)
-		
+
 		_ = result["data"].(map[string]interface{})
-		
+
 		// The API doesn't seem to return the TraceID in the response header in the current implementation,
 		// but we can query for the event and check its traceId
-		
+
 		eventsResp := doRequest(t, "GET", "/api/v1/system/events?serviceName=test-suite", nil, nil)
 		var eventsResult map[string]interface{}
 		parseResponse(t, eventsResp, &eventsResult)
-		
+
 		eventsData := eventsResult["data"].(map[string]interface{})
 		events := eventsData["events"].([]interface{})
-		
+
 		found := false
 		for _, e := range events {
 			event := e.(map[string]interface{})
@@ -528,7 +528,7 @@ func TestSystemAndTracing(t *testing.T) {
 				break
 			}
 		}
-		
+
 		if !found {
 			t.Errorf("Could not find system event with custom TraceID in database")
 		}

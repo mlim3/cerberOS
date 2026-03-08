@@ -29,6 +29,18 @@ type SavePersonalInfoRequest struct {
 	ExtractFacts bool   `json:"extractFacts"`
 }
 
+// Save extracts and saves personal information from a chat message
+// @Summary Save personal information
+// @Description Extracts and saves personal information from text
+// @Tags personal_info
+// @Accept json
+// @Produce json
+// @Param userId path string true "User ID"
+// @Param request body SavePersonalInfoRequest true "Save Request Payload"
+// @Success 200 {object} map[string]interface{} "OK"
+// @Failure 400 {object} map[string]interface{} "Bad Request"
+// @Failure 500 {object} map[string]interface{} "Internal Server Error"
+// @Router /api/v1/personal_info/{userId}/save [post]
 func (h *PersonalInfoHandler) Save(w http.ResponseWriter, r *http.Request) {
 	userId := r.PathValue("userId")
 	if userId == "" {
@@ -76,6 +88,18 @@ type QueryPersonalInfoRequest struct {
 	TopK  int    `json:"topK"`
 }
 
+// Query searches for personal information based on a query
+// @Summary Query personal information
+// @Description Searches for relevant personal information and facts
+// @Tags personal_info
+// @Accept json
+// @Produce json
+// @Param userId path string true "User ID"
+// @Param request body QueryPersonalInfoRequest true "Query Request Payload"
+// @Success 200 {object} map[string]interface{} "OK"
+// @Failure 400 {object} map[string]interface{} "Bad Request"
+// @Failure 500 {object} map[string]interface{} "Internal Server Error"
+// @Router /api/v1/personal_info/{userId}/query [post]
 func (h *PersonalInfoHandler) Query(w http.ResponseWriter, r *http.Request) {
 	userId := r.PathValue("userId")
 	if userId == "" {
@@ -140,6 +164,16 @@ func (h *PersonalInfoHandler) Query(w http.ResponseWriter, r *http.Request) {
 	}))
 }
 
+// GetAll retrieves all personal information and facts for a user
+// @Summary Get all personal information
+// @Description Retrieves all stored facts and chunks for a user
+// @Tags personal_info
+// @Produce json
+// @Param userId path string true "User ID"
+// @Success 200 {object} map[string]interface{} "OK"
+// @Failure 400 {object} map[string]interface{} "Bad Request"
+// @Failure 500 {object} map[string]interface{} "Internal Server Error"
+// @Router /api/v1/personal_info/{userId}/all [get]
 func (h *PersonalInfoHandler) GetAll(w http.ResponseWriter, r *http.Request) {
 	userId := r.PathValue("userId")
 	if userId == "" {
@@ -236,6 +270,21 @@ type UpdateFactRequest struct {
 	Version    int32       `json:"version"`
 }
 
+// UpdateFact updates an existing fact with OCC
+// @Summary Update a fact
+// @Description Updates a fact for a user with optimistic concurrency control
+// @Tags personal_info
+// @Accept json
+// @Produce json
+// @Param userId path string true "User ID"
+// @Param factId path string true "Fact ID"
+// @Param request body UpdateFactRequest true "Update Fact Payload"
+// @Success 200 {object} map[string]interface{} "OK"
+// @Failure 400 {object} map[string]interface{} "Bad Request"
+// @Failure 404 {object} map[string]interface{} "Not Found"
+// @Failure 409 {object} map[string]interface{} "Conflict"
+// @Failure 500 {object} map[string]interface{} "Internal Server Error"
+// @Router /api/v1/personal_info/{userId}/facts/{factId} [put]
 func (h *PersonalInfoHandler) UpdateFact(w http.ResponseWriter, r *http.Request) {
 	userId := r.PathValue("userId")
 	factId := r.PathValue("factId")

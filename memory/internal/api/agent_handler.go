@@ -11,10 +11,23 @@ type AgentHandler struct {
 	repo *storage.AgentLogsRepository
 }
 
+// NewAgentHandler returns a new instance of AgentHandler
 func NewAgentHandler(repo *storage.AgentLogsRepository) *AgentHandler {
 	return &AgentHandler{repo: repo}
 }
 
+// HandleCreateTaskExecution creates a new task execution log
+// @Summary Create task execution log
+// @Description Creates a new task execution log for an agent
+// @Tags agents
+// @Accept json
+// @Produce json
+// @Param taskId path string true "Task ID"
+// @Param request body object true "Task Execution Payload"
+// @Success 201 "Created"
+// @Failure 400 "Bad Request"
+// @Failure 500 "Internal Server Error"
+// @Router /api/v1/agents/tasks/{taskId}/executions [post]
 func (h *AgentHandler) HandleCreateTaskExecution(w http.ResponseWriter, r *http.Request) {
 	taskId := r.PathValue("taskId")
 	if taskId == "" {

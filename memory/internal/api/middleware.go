@@ -6,12 +6,54 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/mlim3/cerberOS/memory/internal/storage"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+)
+
+var (
+	httpRequestsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "http_requests_total",
+			Help: "Total number of HTTP requests",
+		},
+		[]string{"method", "path", "status"},
+	)
+
+	httpRequestDuration = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "http_request_duration_seconds",
+			Help:    "Duration of HTTP requests in seconds",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"method", "path"},
+	)
 )
 
 type TraceIDKey struct{}
+
+// MetricsMiddleware records HTTP request metrics
+func MetricsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+
+		rw := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+		next.ServeHTTP(rw, r)
+
+		duration := time.Since(start).Seconds()
+
+		// Use r.URL.Path or a cleaned up version of it
+		// In Go 1.22 mux, r.Pattern might be useful, but r.URL.Path is simpler for now
+		path := r.URL.Path
+
+		httpRequestsTotal.WithLabelValues(r.Method, path, strconv.Itoa(rw.statusCode)).Inc()
+		httpRequestDuration.WithLabelValues(r.Method, path).Observe(duration)
+	})
+}
 
 // TraceIDMiddleware generates a TraceID for every request and adds it to the context.
 // It also logs an 'ACCESS_GRANTED' event to the system_events table if the request is for the Vault.

@@ -39,6 +39,18 @@ type MessageResponse struct {
 	CreatedAt  time.Time `json:"createdAt"`
 }
 
+// HandleCreateMessage creates a new chat message
+// @Summary Create a new chat message
+// @Description Creates a new message in a chat session
+// @Tags chat
+// @Accept json
+// @Produce json
+// @Param sessionId path string true "Session ID"
+// @Param request body CreateMessageRequest true "Message Payload"
+// @Success 201 {object} MessageResponse "Created"
+// @Failure 400 {object} map[string]interface{} "Bad Request"
+// @Failure 500 {object} map[string]interface{} "Internal Server Error"
+// @Router /api/v1/chat/{sessionId}/messages [post]
 func (h *ChatHandler) HandleCreateMessage(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	sessionIDStr := r.PathValue("sessionId")
@@ -119,6 +131,17 @@ func (h *ChatHandler) HandleCreateMessage(w http.ResponseWriter, r *http.Request
 	json.NewEncoder(w).Encode(SuccessResponse(map[string]any{"message": resp}))
 }
 
+// HandleListMessages lists messages in a chat session
+// @Summary List chat messages
+// @Description Retrieves a list of messages for a specific chat session
+// @Tags chat
+// @Produce json
+// @Param sessionId path string true "Session ID"
+// @Param limit query int false "Limit number of messages (default: 100)"
+// @Success 200 {object} map[string][]MessageResponse "OK"
+// @Failure 400 {object} map[string]interface{} "Bad Request"
+// @Failure 500 {object} map[string]interface{} "Internal Server Error"
+// @Router /api/v1/chat/{sessionId}/messages [get]
 func (h *ChatHandler) HandleListMessages(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	sessionIDStr := r.PathValue("sessionId")

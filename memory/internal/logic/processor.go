@@ -46,28 +46,28 @@ func simpleChunker(text string) []string {
 	if text == "" {
 		return nil
 	}
-	
+
 	const chunkSize = 500
 	const overlap = 50
-	
+
 	var chunks []string
 	runes := []rune(text)
-	
+
 	for i := 0; i < len(runes); {
 		end := i + chunkSize
 		if end > len(runes) {
 			end = len(runes)
 		}
-		
+
 		chunks = append(chunks, string(runes[i:end]))
-		
+
 		if end == len(runes) {
 			break
 		}
-		
+
 		i += chunkSize - overlap
 	}
-	
+
 	return chunks
 }
 
@@ -133,7 +133,7 @@ func (p *Processor) SavePersonalInfo(ctx context.Context, req SaveRequest) (*Sav
 			var refID pgtype.UUID
 			newRefID, _ := uuid.NewV7()
 			refID.Scan(newRefID.String())
-			
+
 			ref, err := q.CreateSourceReference(ctx, storage.CreateSourceReferenceParams{
 				ID:         refID,
 				UserID:     userUUID,
@@ -156,7 +156,7 @@ func (p *Processor) SavePersonalInfo(ctx context.Context, req SaveRequest) (*Sav
 			factID.Scan(newFactID.String())
 
 			factVal, _ := json.Marshal(map[string]string{"extracted_from": "mock"})
-			
+
 			var cat pgtype.Text
 			cat.Scan("General")
 
@@ -178,7 +178,7 @@ func (p *Processor) SavePersonalInfo(ctx context.Context, req SaveRequest) (*Sav
 			var refID pgtype.UUID
 			newFactRefID, _ := uuid.NewV7()
 			refID.Scan(newFactRefID.String())
-			
+
 			ref, err := q.CreateSourceReference(ctx, storage.CreateSourceReferenceParams{
 				ID:         refID,
 				UserID:     userUUID,

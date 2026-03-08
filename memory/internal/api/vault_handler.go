@@ -62,6 +62,19 @@ func (h *VaultHandler) logAccessEvent(ctx context.Context, userID, status, path 
 	}
 }
 
+// HandleSaveSecret creates a new secret
+// @Summary Create a secret
+// @Description Saves a new encrypted secret for a user
+// @Tags vault
+// @Accept json
+// @Produce json
+// @Security ApiKeyAuth
+// @Param userId path string true "User ID"
+// @Param request body map[string]string true "Secret Payload (key_name, value)"
+// @Success 201 "Created"
+// @Failure 400 "Bad Request"
+// @Failure 500 "Internal Server Error"
+// @Router /api/v1/vault/{userId}/secrets [post]
 func (h *VaultHandler) HandleSaveSecret(w http.ResponseWriter, r *http.Request) {
 	userIdStr := r.PathValue("userId")
 	if userIdStr == "" {
@@ -119,6 +132,19 @@ func (h *VaultHandler) HandleSaveSecret(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(http.StatusCreated)
 }
 
+// HandleGetSecret retrieves a secret
+// @Summary Get a secret
+// @Description Retrieves and decrypts a secret for a user
+// @Tags vault
+// @Produce json
+// @Security ApiKeyAuth
+// @Param userId path string true "User ID"
+// @Param key_name query string true "Key Name"
+// @Success 200 {object} map[string]string "OK"
+// @Failure 400 "Bad Request"
+// @Failure 404 "Not Found"
+// @Failure 500 "Internal Server Error"
+// @Router /api/v1/vault/{userId}/secrets [get]
 func (h *VaultHandler) HandleGetSecret(w http.ResponseWriter, r *http.Request) {
 	userIdStr := r.PathValue("userId")
 	if userIdStr == "" {
@@ -165,6 +191,20 @@ func (h *VaultHandler) HandleGetSecret(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// HandleUpdateSecret updates an existing secret
+// @Summary Update a secret
+// @Description Updates an encrypted secret for a user
+// @Tags vault
+// @Accept json
+// @Produce json
+// @Security ApiKeyAuth
+// @Param userId path string true "User ID"
+// @Param keyName path string true "Key Name"
+// @Param request body map[string]string true "Secret Payload (value)"
+// @Success 200 "OK"
+// @Failure 400 "Bad Request"
+// @Failure 500 "Internal Server Error"
+// @Router /api/v1/vault/{userId}/secrets/{keyName} [put]
 func (h *VaultHandler) HandleUpdateSecret(w http.ResponseWriter, r *http.Request) {
 	userIdStr := r.PathValue("userId")
 	if userIdStr == "" {
@@ -229,6 +269,17 @@ func (h *VaultHandler) HandleUpdateSecret(w http.ResponseWriter, r *http.Request
 	w.WriteHeader(http.StatusOK)
 }
 
+// HandleDeleteSecret deletes an existing secret
+// @Summary Delete a secret
+// @Description Deletes an encrypted secret for a user
+// @Tags vault
+// @Security ApiKeyAuth
+// @Param userId path string true "User ID"
+// @Param keyName path string true "Key Name"
+// @Success 200 "OK"
+// @Failure 400 "Bad Request"
+// @Failure 500 "Internal Server Error"
+// @Router /api/v1/vault/{userId}/secrets/{keyName} [delete]
 func (h *VaultHandler) HandleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 	userIdStr := r.PathValue("userId")
 	if userIdStr == "" {
