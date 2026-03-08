@@ -18,6 +18,7 @@ type resolveResponse struct {
 type server struct {
 	manager SecretManager
 	token   string
+	auditor *auditLogger
 }
 
 // engineOnly is middleware that rejects any request not carrying the shared
@@ -55,6 +56,12 @@ func (s *server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.auditor.log(auditEvent{
+		Kind:   "secret_access",
+		Keys:   req.Keys,
+		Source: r.RemoteAddr,
+	})
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resolveResponse{Secrets: secrets})
 }
@@ -73,6 +80,7 @@ func main() {
 	s := &server{
 		manager: NewMockSecretManager(),
 		token:   token,
+		auditor: newAuditLogger(newJSONAuditExporter(os.Stdout)),
 	}
 
 	mux := http.NewServeMux()

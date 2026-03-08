@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/mlim3/cerberOS/vault/engine/audit"
 	"github.com/mlim3/cerberOS/vault/engine/initrd"
 	"github.com/mlim3/cerberOS/vault/engine/preprocessor"
 	"github.com/mlim3/cerberOS/vault/engine/vm"
@@ -13,6 +14,7 @@ import (
 
 // Request represents an incoming script execution request.
 type Request struct {
+	Agent  string            // identifier of the requesting agent
 	Script []byte            // raw script with {{PLACEHOLDER}} markers
 	Env    map[string]string // additional env vars (reserved for future use)
 }
@@ -29,21 +31,29 @@ type Orchestrator struct {
 	pp      *preprocessor.Preprocessor
 	builder *initrd.Builder
 	baseCfg vm.QEMUConfig
+	logger  *audit.Logger
 }
 
-func New(pp *preprocessor.Preprocessor, builder *initrd.Builder, baseCfg vm.QEMUConfig) *Orchestrator {
+func New(pp *preprocessor.Preprocessor, builder *initrd.Builder, baseCfg vm.QEMUConfig, logger *audit.Logger) *Orchestrator {
 	return &Orchestrator{
 		pp:      pp,
 		builder: builder,
 		baseCfg: baseCfg,
+		logger:  logger,
 	}
 }
 
 // Execute runs the full pipeline for a single script execution.
 // Each call is stateless and safe for concurrent use.
 func (o *Orchestrator) Execute(ctx context.Context, req Request) (*Response, error) {
+	o.logger.Log(audit.Event{
+		Kind:    audit.KindExecution,
+		Agent:   req.Agent,
+		Message: "agent submitted script for execution",
+	})
+
 	// 1. Preprocess: inject secrets into placeholders
-	result, err := o.pp.Process(req.Script)
+	result, err := o.pp.Process(req.Agent, req.Script)
 	if err != nil {
 		return nil, fmt.Errorf("preprocess: %w", err)
 	}

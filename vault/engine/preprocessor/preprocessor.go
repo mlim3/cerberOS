@@ -2,6 +2,8 @@ package preprocessor
 
 import (
 	"regexp"
+
+	"github.com/mlim3/cerberOS/vault/engine/audit"
 )
 
 // SecretStore resolves a batch of secret keys in a single call.
@@ -19,11 +21,12 @@ type Result struct {
 
 // Preprocessor handles script transformation before VM execution.
 type Preprocessor struct {
-	store SecretStore
+	store  SecretStore
+	logger *audit.Logger
 }
 
-func New(store SecretStore) *Preprocessor {
-	return &Preprocessor{store: store}
+func New(store SecretStore, logger *audit.Logger) *Preprocessor {
+	return &Preprocessor{store: store, logger: logger}
 }
 
 var placeholderRe = regexp.MustCompile(`\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}`)
@@ -31,7 +34,8 @@ var placeholderRe = regexp.MustCompile(`\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}`)
 // Process performs placeholder substitution on the raw script.
 // It collects all unique {{KEY}} placeholders, resolves them in a single
 // batch call to the SecretStore, then substitutes the values.
-func (p *Preprocessor) Process(raw []byte) (*Result, error) {
+// agent is the identifier of the requesting agent and is included in the audit log.
+func (p *Preprocessor) Process(agent string, raw []byte) (*Result, error) {
 	// 1. Collect all unique placeholder keys (preserve insertion order)
 	seen := make(map[string]struct{})
 	var keys []string
@@ -53,7 +57,15 @@ func (p *Preprocessor) Process(raw []byte) (*Result, error) {
 		return nil, err
 	}
 
-	// 3. Substitute placeholders
+	// 3. Emit audit event: agent identity + secret names (never values)
+	p.logger.Log(audit.Event{
+		Kind:    audit.KindSecretAccess,
+		Agent:   agent,
+		Keys:    keys,
+		Message: "agent requested secrets",
+	})
+
+	// 4. Substitute placeholders
 	script := placeholderRe.ReplaceAllFunc(raw, func(match []byte) []byte {
 		key := string(placeholderRe.FindSubmatch(match)[1])
 		if val, ok := secrets[key]; ok {
@@ -62,7 +74,7 @@ func (p *Preprocessor) Process(raw []byte) (*Result, error) {
 		return match
 	})
 
-	// 4. Collect resolved values for output scrubbing
+	// 5. Collect resolved values for output scrubbing
 	values := make([]string, 0, len(secrets))
 	for _, v := range secrets {
 		values = append(values, v)

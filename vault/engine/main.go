@@ -10,6 +10,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/mlim3/cerberOS/vault/engine/audit"
 	"github.com/mlim3/cerberOS/vault/engine/initrd"
 	"github.com/mlim3/cerberOS/vault/engine/orchestrator"
 	"github.com/mlim3/cerberOS/vault/engine/preprocessor"
@@ -87,6 +88,7 @@ func (c *controller) handleExecute(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp, err := c.orch.Execute(r.Context(), orchestrator.Request{
+		Agent:  req.Agent,
 		Script: []byte(req.Script),
 	})
 	if err != nil {
@@ -123,10 +125,12 @@ func main() {
 		log.Fatal("SECRET_STORE_TOKEN env var is required")
 	}
 
+	auditor := audit.New(audit.NewJSONExporter(os.Stdout))
+
 	store := secretclient.New(secretStoreURL, secretStoreToken)
-	pp := preprocessor.New(store)
+	pp := preprocessor.New(store, auditor)
 	builder := initrd.New(cfg.InitrdPath)
-	orch := orchestrator.New(pp, builder, cfg)
+	orch := orchestrator.New(pp, builder, cfg, auditor)
 
 	ctrl := &controller{
 		vm:   engine.NewQEMU(cfg),
