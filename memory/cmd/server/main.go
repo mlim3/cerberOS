@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/joho/godotenv"
 	"github.com/mlim3/cerberOS/memory/internal/api"
 	"github.com/mlim3/cerberOS/memory/internal/logic"
 	"github.com/mlim3/cerberOS/memory/internal/storage"
@@ -20,6 +21,11 @@ func main() {
 	// Initialize structured logging
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
+
+	// Load .env file if it exists
+	if err := godotenv.Load(); err != nil {
+		logger.Info("No .env file found or error loading it, proceeding with environment variables")
+	}
 
 	// Create root context that listens for signals
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
