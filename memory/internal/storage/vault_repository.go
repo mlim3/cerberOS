@@ -25,3 +25,8 @@ func (r *VaultRepository) SaveSecret(ctx context.Context, arg SaveSecretParams) 
 	queries := New(r.Pool)
 	return queries.SaveSecret(ctx, arg)
 }
+
+func (r *VaultRepository) DeleteSecret(ctx context.Context, arg DeleteSecretParams) error {
+	queries := New(r.Pool)
+	return queries.DeleteSecret(ctx, arg)
+}

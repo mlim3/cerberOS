@@ -2,13 +2,12 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
-	"strings"
-	"time"
+	"os"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/mlim3/cerberOS/memory/internal/storage"
 )
 
@@ -22,34 +21,34 @@ func TraceIDMiddleware(logger *slog.Logger, logRepo *storage.LogRepository, next
 		ctx := context.WithValue(r.Context(), TraceIDKey{}, traceID)
 		r = r.WithContext(ctx)
 
-		// Check if it's a Vault request
-		if strings.HasPrefix(r.URL.Path, "/api/v1/vault") {
-			// Log ACCESS_GRANTED event
-			eventID, _ := uuid.NewRandom()
-			traceUUID, _ := uuid.Parse(traceID)
-			
-			now := pgtype.Timestamptz{}
-			now.Valid = true
-			now.Time = time.Now()
-
-			_, err := logRepo.CreateSystemEvent(ctx, storage.CreateSystemEventParams{
-				ID: pgtype.UUID{Bytes: eventID, Valid: true},
-				TraceID: pgtype.UUID{Bytes: traceUUID, Valid: true},
-				ServiceName: pgtype.Text{String: "VaultService", Valid: true},
-				Severity: pgtype.Text{String: "INFO", Valid: true},
-				Message: "ACCESS_GRANTED",
-				Metadata: []byte(`{"path": "` + r.URL.Path + `"}`),
-				CreatedAt: now,
-			})
-
-			if err != nil {
-				logger.Error("failed to log vault access event", "error", err, "traceID", traceID)
-			}
-		}
-
 		// Create a custom response writer to capture status code
 		rw := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 		next.ServeHTTP(rw, r)
+	})
+}
+
+// RequireVaultKey is a middleware that checks for the X-API-KEY header
+// and validates it against the INTERNAL_VAULT_API_KEY environment variable.
+func RequireVaultKey(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		expectedKey := os.Getenv("INTERNAL_VAULT_API_KEY")
+		if expectedKey == "" {
+			// If not set, deny everything to be safe
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(ErrorResponse("INTERNAL_ERROR", "Internal server configuration error", nil))
+			return
+		}
+
+		apiKey := r.Header.Get("X-API-KEY")
+		if apiKey != expectedKey {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(ErrorResponse("UNAUTHORIZED", "Invalid or missing API Key", nil))
+			return
+		}
+
+		next.ServeHTTP(w, r)
 	})
 }
 

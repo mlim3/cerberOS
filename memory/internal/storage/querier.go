@@ -16,6 +16,7 @@ type Querier interface {
 	CreateSystemEvent(ctx context.Context, arg CreateSystemEventParams) (ServiceLogSchemaSystemEvent, error)
 	CreateTaskExecution(ctx context.Context, arg CreateTaskExecutionParams) error
 	DeleteFact(ctx context.Context, arg DeleteFactParams) (int64, error)
+	DeleteSecret(ctx context.Context, arg DeleteSecretParams) error
 	GetAllChunks(ctx context.Context, userID pgtype.UUID) ([]GetAllChunksRow, error)
 	GetAllFacts(ctx context.Context, userID pgtype.UUID) ([]PersonalInfoSchemaUserFact, error)
 	GetChatMessageByIdempotencyKey(ctx context.Context, arg GetChatMessageByIdempotencyKeyParams) (ChatSchemaMessage, error)

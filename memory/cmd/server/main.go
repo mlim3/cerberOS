@@ -22,6 +22,16 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
+	// Fast-fail if required vault keys are missing
+	if os.Getenv("VAULT_MASTER_KEY") == "" {
+		logger.Error("VAULT_MASTER_KEY environment variable is missing")
+		os.Exit(1)
+	}
+	if os.Getenv("INTERNAL_VAULT_API_KEY") == "" {
+		logger.Error("INTERNAL_VAULT_API_KEY environment variable is missing")
+		os.Exit(1)
+	}
+
 	// Load .env file if it exists
 	if err := godotenv.Load(); err != nil {
 		logger.Info("No .env file found or error loading it, proceeding with environment variables")
@@ -74,7 +84,7 @@ func main() {
 	chatHandler := api.NewChatHandler(chatRepo)
 	logHandler := api.NewSystemLogHandler(logRepo)
 	piHandler := api.NewPersonalInfoHandler(piProcessor, piRepo)
-	vaultHandler := api.NewVaultHandler(vaultRepo, vaultManager)
+	vaultHandler := api.NewVaultHandler(vaultRepo, vaultManager, logRepo)
 	agentHandler := api.NewAgentHandler(agentLogsRepo)
 
 	// Set up the router using Go 1.22's enhanced mux
@@ -121,8 +131,12 @@ func main() {
 	mux.HandleFunc("GET /api/v1/system/events", logHandler.HandleListSystemEvents)
 
 	// Vault endpoints (Internal Only)
-	mux.HandleFunc("POST /api/v1/vault/{userId}/secrets", vaultHandler.HandleSaveSecret)
-	mux.HandleFunc("GET /api/v1/vault/{userId}/secrets", vaultHandler.HandleGetSecret)
+	vaultMux := http.NewServeMux()
+	vaultMux.HandleFunc("POST /api/v1/vault/{userId}/secrets", vaultHandler.HandleSaveSecret)
+	vaultMux.HandleFunc("PUT /api/v1/vault/{userId}/secrets/{keyName}", vaultHandler.HandleUpdateSecret)
+	vaultMux.HandleFunc("GET /api/v1/vault/{userId}/secrets", vaultHandler.HandleGetSecret)
+	vaultMux.HandleFunc("DELETE /api/v1/vault/{userId}/secrets/{keyName}", vaultHandler.HandleDeleteSecret)
+	mux.Handle("/api/v1/vault/", http.StripPrefix("", api.RequireVaultKey(vaultMux)))
 
 	// Agent Log endpoints
 	mux.HandleFunc("POST /api/v1/agents/tasks/{taskId}/executions", agentHandler.HandleCreateTaskExecution)

@@ -11,6 +11,21 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const deleteSecret = `-- name: DeleteSecret :exec
+DELETE FROM vault_schema.secrets
+WHERE user_id = $1 AND key_name = $2
+`
+
+type DeleteSecretParams struct {
+	UserID  pgtype.UUID `json:"user_id"`
+	KeyName string      `json:"key_name"`
+}
+
+func (q *Queries) DeleteSecret(ctx context.Context, arg DeleteSecretParams) error {
+	_, err := q.db.Exec(ctx, deleteSecret, arg.UserID, arg.KeyName)
+	return err
+}
+
 const getSecretByKey = `-- name: GetSecretByKey :one
 SELECT id, user_id, key_name, encrypted_value, nonce, created_at
 FROM vault_schema.secrets

@@ -11,3 +11,7 @@ SET encrypted_value = EXCLUDED.encrypted_value,
 SELECT id, user_id, key_name, encrypted_value, nonce, created_at
 FROM vault_schema.secrets
 WHERE user_id = $1 AND key_name = $2;
+
+-- name: DeleteSecret :exec
+DELETE FROM vault_schema.secrets
+WHERE user_id = $1 AND key_name = $2;
