@@ -11,7 +11,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # Change to the memory directory
-cd "$(dirname "$0")/memory"
+cd "$(dirname "$0")/../memory"
 
 # Parse arguments
 SEED_DB=false
