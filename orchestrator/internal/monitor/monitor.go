@@ -1,24 +1,10 @@
-// Package monitor implements M4: Task Monitor.
-//
-// The Task Monitor is the SOLE AUTHORITY for task state transitions.
-// It tracks every active task from dispatch to completion or failure,
-// enforces timeouts, and rehydrates state on startup.
-//
-// Responsibilities (§4.1 M4):
-//   - Maintain in-memory task state map (rehydrated from Memory Component on startup)
-//   - Enforce per-task timeout: signal Recovery Manager when timeout_at is exceeded
-//   - Subscribe to agent_status_update events from Agents Component via Gateway
-//   - Detect RECOVERING/TERMINATED agent events and escalate to Recovery Manager
-//   - Emit task_progress events when agents publish intermediate progress
-//   - StateTransition() is the sole entry point for all state changes
-//
-// Startup sequence (§FR-SH-05):
-//   RehydrateFromMemory() MUST complete before new tasks are accepted.
-//   Target: < 10 seconds (§NFR-06).
 package monitor
 
 import (
+	"encoding/json"
+	"fmt"
 	"sync"
+	"time"
 
 	"github.com/mlim3/cerberOS/orchestrator/internal/config"
 	"github.com/mlim3/cerberOS/orchestrator/internal/interfaces"
@@ -27,8 +13,7 @@ import (
 
 // RecoveryManager defines the escalation operations M4 needs from M5.
 type RecoveryManager interface {
-	HandleRecovery(taskID string, retryCount int, policyScope types.PolicyScope)
-	HandleTimeout(ts *types.TaskState)
+	HandleRecovery(ts *types.TaskState, reason types.RecoveryReason)
 }
 
 // Monitor is M4: Task Monitor.
@@ -57,23 +42,50 @@ func New(cfg *config.OrchestratorConfig, memory interfaces.MemoryClient, recover
 //
 // CRITICAL: Must complete before the Orchestrator accepts new tasks.
 // Returns error if rehydration takes longer than 10 seconds (§NFR-06).
-//
-// TODO Phase 5: implement
 func (m *Monitor) RehydrateFromMemory() error {
-	// TODO Phase 5:
-	// 1. Read all task_state records where state != terminal
-	// 2. Populate activeTasks map
-	// 3. Spawn monitorTaskTimeout() goroutine for each
-	// 4. Return error if duration exceeds 10s
+	start := time.Now()
+
+	records, err := m.memory.Read(types.MemoryQuery{
+		DataType: types.DataTypeTaskState,
+		Filter:   map[string]string{"state": "not_terminal"},
+	})
+	if err != nil {
+		return fmt.Errorf("rehydrate task states: %w", err)
+	}
+
+	latestByTask := make(map[string]*types.TaskState)
+	for _, record := range records {
+		var ts types.TaskState
+		if err := json.Unmarshal(record.Payload, &ts); err != nil {
+			return fmt.Errorf("decode rehydrated task state for task_id=%s: %w", record.TaskID, err)
+		}
+
+		existing, ok := latestByTask[ts.TaskID]
+		if !ok || isStateNewer(&ts, existing) {
+			tsCopy := ts
+			latestByTask[ts.TaskID] = &tsCopy
+		}
+	}
+
+	for _, ts := range latestByTask {
+		m.activeTasks.Store(ts.TaskID, ts)
+		go m.monitorTaskTimeout(ts)
+	}
+
+	if time.Since(start) > 10*time.Second {
+		return fmt.Errorf("rehydration exceeded 10 second startup budget")
+	}
 	return nil
 }
 
 // TrackTask begins monitoring a newly dispatched task.
 // Called by Task Dispatcher after successful dispatch (§4.1 M4).
-//
-// TODO Phase 5: implement — add to activeTasks, spawn monitorTaskTimeout()
 func (m *Monitor) TrackTask(ts *types.TaskState) {
-	// TODO Phase 5
+	if ts == nil {
+		return
+	}
+	m.activeTasks.Store(ts.TaskID, ts)
+	go m.monitorTaskTimeout(ts)
 }
 
 // UntrackTask removes a task from the active monitoring map.
@@ -88,23 +100,91 @@ func (m *Monitor) UntrackTask(taskID string) {
 // Validates the transition is legal per the state machine (§9),
 // updates the task record, appends to state_history, and
 // persists the new state to Memory Component.
-//
-// TODO Phase 5: implement with state machine validation
 func (m *Monitor) StateTransition(taskID, newState, reason string) error {
-	// TODO Phase 5
+	tsRaw, ok := m.activeTasks.Load(taskID)
+	if !ok {
+		return fmt.Errorf("task %s is not actively tracked", taskID)
+	}
+
+	ts, ok := tsRaw.(*types.TaskState)
+	if !ok {
+		return fmt.Errorf("tracked task %s has invalid type", taskID)
+	}
+
+	if !isValidTransition(ts.State, newState) {
+		return fmt.Errorf("invalid state transition: %s -> %s", ts.State, newState)
+	}
+
+	now := time.Now().UTC()
+	ts.State = newState
+	if types.IsTerminalState(newState) {
+		ts.CompletedAt = &now
+		switch newState {
+		case types.StateTimedOut:
+			ts.ErrorCode = types.ErrCodeTimedOut
+		case types.StateFailed:
+			if ts.ErrorCode == "" {
+				ts.ErrorCode = types.ErrCodeProvisioningFailed
+			}
+		case types.StatePolicyViolation:
+			ts.ErrorCode = types.ErrCodePolicyViolation
+		case types.StateDeliveryFailed:
+			ts.ErrorCode = types.ErrCodeAgentsUnavailable
+		}
+	}
+
+	ts.StateHistory = append(ts.StateHistory, types.StateEvent{
+		State:     newState,
+		Timestamp: now,
+		Reason:    reason,
+		NodeID:    m.nodeID,
+	})
+
+	payload, err := json.Marshal(ts)
+	if err != nil {
+		return fmt.Errorf("marshal task state transition for task %s: %w", taskID, err)
+	}
+	if err := m.memory.Write(types.OrchestratorMemoryWritePayload{
+		OrchestratorTaskRef: ts.OrchestratorTaskRef,
+		TaskID:              ts.TaskID,
+		DataType:            types.DataTypeTaskState,
+		Timestamp:           now,
+		Payload:             payload,
+	}); err != nil {
+		return fmt.Errorf("persist task state transition for task %s: %w", taskID, err)
+	}
+
+	if types.IsTerminalState(newState) {
+		m.activeTasks.Delete(taskID)
+	}
 	return nil
 }
 
 // HandleAgentStatusUpdate processes an inbound agent_status_update from the Gateway.
 // Routes to the correct action based on agent state (§4.1 M4).
-//
-// TODO Phase 5: implement routing:
-//   - ACTIVE     → StateTransition(taskID, StateRunning, "")
-//   - RECOVERING → signal Recovery Manager
-//   - TERMINATED → signal Recovery Manager if task not already terminal
 func (m *Monitor) HandleAgentStatusUpdate(update types.AgentStatusUpdate) error {
-	// TODO Phase 5
-	return nil
+	switch update.State {
+	case types.AgentStateActive:
+		return m.StateTransition(update.TaskID, types.StateRunning, "")
+
+	case types.AgentStateRecovering:
+		if err := m.StateTransition(update.TaskID, types.StateRecovering, update.Reason); err != nil {
+			return err
+		}
+		if ts := m.getTask(update.TaskID); ts != nil {
+			m.recovery.HandleRecovery(ts, types.RecoveryReasonAgentRecovering)
+		}
+		return nil
+
+	case types.AgentStateTerminated:
+		if ts := m.getTask(update.TaskID); ts != nil && !types.IsTerminalState(ts.State) {
+			m.recovery.HandleRecovery(ts, types.RecoveryReasonAgentTerminated)
+		}
+		return nil
+
+	default:
+		return fmt.Errorf("unknown agent state: %s", update.State)
+	}
 }
 
 // GetActiveTaskCount returns the number of tasks currently in non-terminal states.
@@ -120,8 +200,78 @@ func (m *Monitor) GetActiveTaskCount() int {
 
 // monitorTaskTimeout enforces the per-task timeout deadline (§FR-SH-01, §17.3).
 // Runs as a goroutine per active task. Signals Recovery Manager on timeout.
-//
-// TODO Phase 5: implement using time.After(remaining) pattern from §17.3
 func (m *Monitor) monitorTaskTimeout(ts *types.TaskState) {
-	// TODO Phase 5
+	if ts == nil || ts.TimeoutAt == nil {
+		return
+	}
+
+	remaining := time.Until(*ts.TimeoutAt)
+	if remaining <= 0 {
+		if current := m.getTask(ts.TaskID); current != nil && !types.IsTerminalState(current.State) {
+			m.recovery.HandleRecovery(current, types.RecoveryReasonTimeout)
+		}
+		return
+	}
+
+	select {
+	case <-time.After(remaining):
+		if current := m.getTask(ts.TaskID); current != nil && !types.IsTerminalState(current.State) {
+			m.recovery.HandleRecovery(current, types.RecoveryReasonTimeout)
+		}
+	}
+}
+
+func (m *Monitor) getTask(taskID string) *types.TaskState {
+	tsRaw, ok := m.activeTasks.Load(taskID)
+	if !ok {
+		return nil
+	}
+	ts, ok := tsRaw.(*types.TaskState)
+	if !ok {
+		return nil
+	}
+	return ts
+}
+
+func isValidTransition(currentState, newState string) bool {
+	if currentState == newState {
+		return true
+	}
+
+	switch currentState {
+	case types.StateDispatchPending:
+		return newState == types.StateDispatched || newState == types.StateDeliveryFailed
+	case types.StateDispatched:
+		return newState == types.StateRunning || newState == types.StateRecovering || types.IsTerminalState(newState)
+	case types.StateRunning:
+		return newState == types.StateRecovering || types.IsTerminalState(newState)
+	case types.StateRecovering:
+		return newState == types.StateRunning || types.IsTerminalState(newState)
+	case types.StateReceived, types.StatePolicyCheck:
+		return newState == types.StateDispatchPending || types.IsTerminalState(newState)
+	default:
+		return false
+	}
+}
+
+func isStateNewer(a, b *types.TaskState) bool {
+	aTime := latestStateTimestamp(a)
+	bTime := latestStateTimestamp(b)
+	return aTime.After(bTime)
+}
+
+func latestStateTimestamp(ts *types.TaskState) time.Time {
+	if ts == nil {
+		return time.Time{}
+	}
+	if len(ts.StateHistory) > 0 {
+		return ts.StateHistory[len(ts.StateHistory)-1].Timestamp
+	}
+	if ts.CompletedAt != nil {
+		return *ts.CompletedAt
+	}
+	if ts.DispatchedAt != nil {
+		return *ts.DispatchedAt
+	}
+	return time.Time{}
 }
