@@ -40,6 +40,18 @@ const (
 	ErrCodeTimedOut            = "TIMED_OUT"
 )
 
+// ─── Recovery Reason Constants ────────────────────────────────────────────────
+// Passed from Task Monitor to Recovery Manager so recovery logic can distinguish
+// why a task needs recovery.
+
+type RecoveryReason string
+
+const (
+	RecoveryReasonAgentRecovering RecoveryReason = "AGENT_RECOVERING"
+	RecoveryReasonAgentTerminated RecoveryReason = "AGENT_TERMINATED"
+	RecoveryReasonTimeout         RecoveryReason = "TIMEOUT"
+)
+
 // ─── PolicyScope ──────────────────────────────────────────────────────────────
 // Derived by Policy Enforcer from Vault. Immutable once attached to a task_spec.
 // Defines the ceiling for all credential requests during task execution (§13.2).
