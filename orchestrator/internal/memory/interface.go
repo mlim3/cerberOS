@@ -24,6 +24,9 @@
 package memory
 
 import (
+	"fmt"
+	"time"
+
 	"github.com/mlim3/cerberOS/orchestrator/internal/config"
 	"github.com/mlim3/cerberOS/orchestrator/internal/interfaces"
 	"github.com/mlim3/cerberOS/orchestrator/internal/types"
@@ -44,6 +47,11 @@ type Interface struct {
 	onWriteFailure WriteFailureHandler
 }
 
+const (
+	writeMaxAttempts     = 3
+	initialRetryBackoff  = 50 * time.Millisecond
+)
+
 // New creates a new Memory Interface wrapping the given MemoryClient.
 func New(client interfaces.MemoryClient, cfg *config.OrchestratorConfig) *Interface {
 	return &Interface{
@@ -61,36 +69,64 @@ func (i *Interface) SetWriteFailureHandler(h WriteFailureHandler) {
 // Write persists a tagged payload to the Memory Component.
 // Validates data_type before writing. Retries up to 3 times with exponential backoff.
 // On persistent failure: calls onWriteFailure handler and returns error.
-//
-// TODO Phase 1: implement with retry logic and data_type validation
 func (i *Interface) Write(payload types.OrchestratorMemoryWritePayload) error {
-	// TODO Phase 1
-	return nil
+	if err := validateWritePayload(payload); err != nil {
+		return err
+	}
+
+	var lastErr error
+	backoff := initialRetryBackoff
+
+	for attempt := 1; attempt <= writeMaxAttempts; attempt++ {
+		if err := i.client.Write(payload); err != nil {
+			lastErr = err
+			if attempt < writeMaxAttempts {
+				time.Sleep(backoff)
+				backoff *= 2
+			}
+			continue
+		}
+		return nil
+	}
+
+	err := fmt.Errorf("memory write failed after %d attempts: %w", writeMaxAttempts, lastErr)
+	if i.onWriteFailure != nil {
+		i.onWriteFailure(payload, err)
+	}
+	return err
 }
 
 // Read retrieves all matching records ordered by timestamp ascending (§11.4).
-//
-// TODO Phase 1: implement
 func (i *Interface) Read(query types.MemoryQuery) ([]types.MemoryRecord, error) {
-	// TODO Phase 1
-	return nil, nil
+	if !isValidDataType(query.DataType) {
+		return nil, fmt.Errorf("invalid data_type: %q", query.DataType)
+	}
+	if query.TaskID == "" && query.OrchestratorTaskRef == "" && len(query.Filter) == 0 {
+		return nil, fmt.Errorf("read query requires task_id, orchestrator_task_ref, or filter")
+	}
+	if query.FromTimestamp != nil && query.ToTimestamp != nil && query.FromTimestamp.After(*query.ToTimestamp) {
+		return nil, fmt.Errorf("from_timestamp must be before to_timestamp")
+	}
+
+	return i.client.Read(query)
 }
 
 // ReadLatest retrieves the most recent record for a given task_id and data_type.
 // Used by Recovery Manager to restore the last valid task state (§FR-SH-02).
-//
-// TODO Phase 1: implement
 func (i *Interface) ReadLatest(taskID string, dataType string) (*types.MemoryRecord, error) {
-	// TODO Phase 1
-	return nil, nil
+	if taskID == "" {
+		return nil, fmt.Errorf("task_id is required")
+	}
+	if !isValidDataType(dataType) {
+		return nil, fmt.Errorf("invalid data_type: %q", dataType)
+	}
+
+	return i.client.ReadLatest(taskID, dataType)
 }
 
 // Ping checks Memory Component reachability (§12.1).
-//
-// TODO Phase 1: implement
 func (i *Interface) Ping() error {
-	// TODO Phase 1
-	return nil
+	return i.client.Ping()
 }
 
 // MigrateSchema ensures all required tables exist with the correct schema.
@@ -101,4 +137,32 @@ func (i *Interface) Ping() error {
 func (i *Interface) MigrateSchema() error {
 	// TODO Phase 1
 	return nil
+}
+
+func validateWritePayload(payload types.OrchestratorMemoryWritePayload) error {
+	if payload.OrchestratorTaskRef == "" {
+		return fmt.Errorf("orchestrator_task_ref is required")
+	}
+	if payload.TaskID == "" {
+		return fmt.Errorf("task_id is required")
+	}
+	if !isValidDataType(payload.DataType) {
+		return fmt.Errorf("invalid data_type: %q", payload.DataType)
+	}
+	if payload.Timestamp.IsZero() {
+		return fmt.Errorf("timestamp is required")
+	}
+	if len(payload.Payload) == 0 {
+		return fmt.Errorf("payload is required")
+	}
+	return nil
+}
+
+func isValidDataType(dataType string) bool {
+	switch dataType {
+	case types.DataTypeTaskState, types.DataTypeAuditLog, types.DataTypeRecoveryEvent, types.DataTypePolicyEvent:
+		return true
+	default:
+		return false
+	}
 }
