@@ -4,8 +4,9 @@ A highly secure, distributed memory and agent orchestration service.
 
 For new teammates, getting started is easy. We've provided a bootstrap script to set up your environment:
 
-From the root directory of the project:
+From the root directory of the project
 ```bash
+cd scripts
 bash mem-up.sh
 ```
 
