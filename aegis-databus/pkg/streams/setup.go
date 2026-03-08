@@ -13,7 +13,13 @@ const (
 	dedupWindow120Sec = 120 * time.Second
 )
 
+// EnsureStreams creates or updates the six Aegis JetStream streams (3 replicas for cluster).
 func EnsureStreams(nc *nats.Conn) error {
+	return EnsureStreamsWithReplicas(nc, 3)
+}
+
+// EnsureStreamsWithReplicas is for single-node tests; use replicas=1.
+func EnsureStreamsWithReplicas(nc *nats.Conn, replicas int) error {
 	js, err := nc.JetStream()
 	if err != nil {
 		return err
@@ -25,7 +31,16 @@ func EnsureStreams(nc *nats.Conn) error {
 			Subjects:   []string{bus.SubjectTasks},
 			MaxAge:     maxAgeSevenDays,
 			MaxBytes:   maxBytesTenGB,
-			Replicas:   3,
+			Replicas:   replicas,
+			Discard:    nats.DiscardOld,
+			Duplicates: dedupWindow120Sec,
+		},
+		{
+			Name:       bus.StreamUI,
+			Subjects:   []string{bus.SubjectUI},
+			MaxAge:     maxAgeSevenDays,
+			MaxBytes:   maxBytesTenGB,
+			Replicas:   replicas,
 			Discard:    nats.DiscardOld,
 			Duplicates: dedupWindow120Sec,
 		},
@@ -34,7 +49,7 @@ func EnsureStreams(nc *nats.Conn) error {
 			Subjects:   []string{bus.SubjectAgents},
 			MaxAge:     maxAgeSevenDays,
 			MaxBytes:   maxBytesTenGB,
-			Replicas:   3,
+			Replicas:   replicas,
 			Discard:    nats.DiscardOld,
 			Duplicates: dedupWindow120Sec,
 		},
@@ -43,7 +58,7 @@ func EnsureStreams(nc *nats.Conn) error {
 			Subjects:   []string{bus.SubjectRuntime},
 			MaxAge:     maxAgeSevenDays,
 			MaxBytes:   maxBytesTenGB,
-			Replicas:   3,
+			Replicas:   replicas,
 			Discard:    nats.DiscardOld,
 			Duplicates: dedupWindow120Sec,
 		},
@@ -52,7 +67,7 @@ func EnsureStreams(nc *nats.Conn) error {
 			Subjects:   []string{bus.SubjectVault},
 			MaxAge:     maxAgeSevenDays,
 			MaxBytes:   maxBytesTenGB,
-			Replicas:   3,
+			Replicas:   replicas,
 			Discard:    nats.DiscardOld,
 			Duplicates: dedupWindow120Sec,
 		},
@@ -61,7 +76,7 @@ func EnsureStreams(nc *nats.Conn) error {
 			Subjects:   []string{bus.SubjectMemory},
 			MaxAge:     maxAgeSevenDays,
 			MaxBytes:   maxBytesTenGB,
-			Replicas:   3,
+			Replicas:   replicas,
 			Discard:    nats.DiscardOld,
 			Duplicates: dedupWindow120Sec,
 		},
@@ -70,7 +85,7 @@ func EnsureStreams(nc *nats.Conn) error {
 			Subjects:   []string{bus.SubjectMonitoring},
 			MaxAge:     maxAgeSevenDays,
 			MaxBytes:   maxBytesTenGB,
-			Replicas:   3,
+			Replicas:   replicas,
 			Discard:    nats.DiscardOld,
 			Duplicates: dedupWindow120Sec,
 		},
