@@ -245,6 +245,118 @@ func TestPingReturnsUnderlyingClientError(t *testing.T) {
 	}
 }
 
+// TestMemoryInterfaceDemoFlow is a demo-style integration test for the
+// orchestrator-side Memory Interface.
+//
+// This test intentionally exercises the public M6 methods in the same order
+// a simple task lifecycle would use them during a demo:
+// 1. Create a mock MemoryClient to stand in for the external Memory Component.
+// 2. Write two task_state snapshots for the same task to simulate state changes.
+// 3. Read all task_state records back and verify ordering + filtering behavior.
+// 4. Read the latest task_state record and verify the newest snapshot is returned.
+// 5. Ping the dependency to verify the health-check path works.
+//
+// What this test does NOT do:
+// - It does not call a real memory service API.
+// - It does not write to a real database.
+// - It does not validate storage-layer append-only triggers.
+//
+// Instead, it demonstrates that the orchestrator's M6 layer correctly uses a
+// contract-compatible MemoryClient implementation, which is exactly what we
+// want for the current mock-data demo phase.
+func TestMemoryInterfaceDemoFlow(t *testing.T) {
+	mem := mocks.NewMemoryMock()
+	iface := memoryiface.New(mem, &config.OrchestratorConfig{})
+
+	// Step 1: simulate the first persisted task snapshot right after dispatch.
+	// The payload is a structured task_state record, not a raw transcript.
+	dispatchedAt := time.Now().UTC().Add(-2 * time.Minute)
+	dispatchedPayload := types.OrchestratorMemoryWritePayload{
+		OrchestratorTaskRef: "orch-demo-1",
+		TaskID:              "task-demo-1",
+		DataType:            types.DataTypeTaskState,
+		Timestamp:           dispatchedAt,
+		Payload: mustJSON(t, map[string]any{
+			"state":      "DISPATCHED",
+			"retry_count": 0,
+			"agent_id":   "agent-42",
+		}),
+	}
+	if err := iface.Write(dispatchedPayload); err != nil {
+		t.Fatalf("Write(dispatchedPayload) error = %v", err)
+	}
+
+	// Step 2: simulate a later snapshot for the same task after the agent starts.
+	// Using the same task_id but a later timestamp lets us verify ReadLatest.
+	runningAt := dispatchedAt.Add(1 * time.Minute)
+	runningPayload := types.OrchestratorMemoryWritePayload{
+		OrchestratorTaskRef: "orch-demo-1",
+		TaskID:              "task-demo-1",
+		DataType:            types.DataTypeTaskState,
+		Timestamp:           runningAt,
+		Payload: mustJSON(t, map[string]any{
+			"state":      "RUNNING",
+			"retry_count": 0,
+			"agent_id":   "agent-42",
+		}),
+	}
+	if err := iface.Write(runningPayload); err != nil {
+		t.Fatalf("Write(runningPayload) error = %v", err)
+	}
+
+	// Step 3: read back all task_state records for the task.
+	// This demonstrates the normal dedup/rehydration style read path used by
+	// other orchestrator modules.
+	records, err := iface.Read(types.MemoryQuery{
+		TaskID:   "task-demo-1",
+		DataType: types.DataTypeTaskState,
+	})
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("Read() returned %d records, want 2", len(records))
+	}
+	if !records[0].Timestamp.Equal(dispatchedAt) {
+		t.Fatalf("records[0].Timestamp = %v, want %v", records[0].Timestamp, dispatchedAt)
+	}
+	if !records[1].Timestamp.Equal(runningAt) {
+		t.Fatalf("records[1].Timestamp = %v, want %v", records[1].Timestamp, runningAt)
+	}
+
+	// Step 4: ask for the latest snapshot only.
+	// This is the recovery-oriented read path where orchestrator wants the most
+	// recent structured state for a task.
+	latest, err := iface.ReadLatest("task-demo-1", types.DataTypeTaskState)
+	if err != nil {
+		t.Fatalf("ReadLatest() error = %v", err)
+	}
+	if !latest.Timestamp.Equal(runningAt) {
+		t.Fatalf("latest.Timestamp = %v, want %v", latest.Timestamp, runningAt)
+	}
+	if !strings.Contains(string(latest.Payload), "RUNNING") {
+		t.Fatalf("latest.Payload = %s, want payload containing RUNNING", string(latest.Payload))
+	}
+
+	// Step 5: verify dependency health probing.
+	// In production this path is used by the orchestrator health monitor.
+	if err := iface.Ping(); err != nil {
+		t.Fatalf("Ping() error = %v", err)
+	}
+
+	// Final sanity checks: because this is a demo-style flow test, we also assert
+	// that the mock observed the expected number of underlying client calls.
+	if mem.WriteCallCount != 2 {
+		t.Fatalf("WriteCallCount = %d, want 2", mem.WriteCallCount)
+	}
+	if mem.ReadCallCount != 2 {
+		t.Fatalf("ReadCallCount = %d, want 2", mem.ReadCallCount)
+	}
+	if mem.PingCallCount != 1 {
+		t.Fatalf("PingCallCount = %d, want 1", mem.PingCallCount)
+	}
+}
+
 // newWritePayload creates a minimal valid OrchestratorMemoryWritePayload
 // for tests. The caller provides the DataType so tests can simulate either
 // valid or invalid payloads while keeping all other fields well-formed.
