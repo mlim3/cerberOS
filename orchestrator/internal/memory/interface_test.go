@@ -268,6 +268,9 @@ func TestMemoryInterfaceDemoFlow(t *testing.T) {
 	mem := mocks.NewMemoryMock()
 	iface := memoryiface.New(mem, &config.OrchestratorConfig{})
 
+	t.Log("demo setup: created MemoryMock as the mock Memory Component backend")
+	t.Log("demo setup: created memory.Interface as the orchestrator-side M6 wrapper")
+
 	// Step 1: simulate the first persisted task snapshot right after dispatch.
 	// The payload is a structured task_state record, not a raw transcript.
 	dispatchedAt := time.Now().UTC().Add(-2 * time.Minute)
@@ -282,9 +285,11 @@ func TestMemoryInterfaceDemoFlow(t *testing.T) {
 			"agent_id":   "agent-42",
 		}),
 	}
+	t.Logf("step 1: writing first task_state snapshot for task_id=%s state=DISPATCHED at %s", dispatchedPayload.TaskID, dispatchedPayload.Timestamp.Format(time.RFC3339))
 	if err := iface.Write(dispatchedPayload); err != nil {
 		t.Fatalf("Write(dispatchedPayload) error = %v", err)
 	}
+	t.Logf("step 1 complete: first write succeeded, total persisted mock records=%d", len(mem.Records))
 
 	// Step 2: simulate a later snapshot for the same task after the agent starts.
 	// Using the same task_id but a later timestamp lets us verify ReadLatest.
@@ -300,13 +305,16 @@ func TestMemoryInterfaceDemoFlow(t *testing.T) {
 			"agent_id":   "agent-42",
 		}),
 	}
+	t.Logf("step 2: writing second task_state snapshot for task_id=%s state=RUNNING at %s", runningPayload.TaskID, runningPayload.Timestamp.Format(time.RFC3339))
 	if err := iface.Write(runningPayload); err != nil {
 		t.Fatalf("Write(runningPayload) error = %v", err)
 	}
+	t.Logf("step 2 complete: second write succeeded, total persisted mock records=%d", len(mem.Records))
 
 	// Step 3: read back all task_state records for the task.
 	// This demonstrates the normal dedup/rehydration style read path used by
 	// other orchestrator modules.
+	t.Log("step 3: reading all task_state records for task-demo-1")
 	records, err := iface.Read(types.MemoryQuery{
 		TaskID:   "task-demo-1",
 		DataType: types.DataTypeTaskState,
@@ -323,10 +331,14 @@ func TestMemoryInterfaceDemoFlow(t *testing.T) {
 	if !records[1].Timestamp.Equal(runningAt) {
 		t.Fatalf("records[1].Timestamp = %v, want %v", records[1].Timestamp, runningAt)
 	}
+	t.Logf("step 3 complete: read returned %d records in ascending order", len(records))
+	t.Logf("step 3 result: record[0]=%s payload=%s", records[0].Timestamp.Format(time.RFC3339), string(records[0].Payload))
+	t.Logf("step 3 result: record[1]=%s payload=%s", records[1].Timestamp.Format(time.RFC3339), string(records[1].Payload))
 
 	// Step 4: ask for the latest snapshot only.
 	// This is the recovery-oriented read path where orchestrator wants the most
 	// recent structured state for a task.
+	t.Log("step 4: reading latest task_state snapshot for task-demo-1")
 	latest, err := iface.ReadLatest("task-demo-1", types.DataTypeTaskState)
 	if err != nil {
 		t.Fatalf("ReadLatest() error = %v", err)
@@ -337,12 +349,15 @@ func TestMemoryInterfaceDemoFlow(t *testing.T) {
 	if !strings.Contains(string(latest.Payload), "RUNNING") {
 		t.Fatalf("latest.Payload = %s, want payload containing RUNNING", string(latest.Payload))
 	}
+	t.Logf("step 4 complete: latest snapshot timestamp=%s payload=%s", latest.Timestamp.Format(time.RFC3339), string(latest.Payload))
 
 	// Step 5: verify dependency health probing.
 	// In production this path is used by the orchestrator health monitor.
+	t.Log("step 5: pinging the mock Memory Component through memory.Interface")
 	if err := iface.Ping(); err != nil {
 		t.Fatalf("Ping() error = %v", err)
 	}
+	t.Log("step 5 complete: ping succeeded")
 
 	// Final sanity checks: because this is a demo-style flow test, we also assert
 	// that the mock observed the expected number of underlying client calls.
@@ -355,6 +370,8 @@ func TestMemoryInterfaceDemoFlow(t *testing.T) {
 	if mem.PingCallCount != 1 {
 		t.Fatalf("PingCallCount = %d, want 1", mem.PingCallCount)
 	}
+	t.Logf("demo summary: writes=%d reads=%d pings=%d", mem.WriteCallCount, mem.ReadCallCount, mem.PingCallCount)
+	t.Log("demo summary: Memory Interface successfully completed write, read, read-latest, and ping against mock data")
 }
 
 // newWritePayload creates a minimal valid OrchestratorMemoryWritePayload
