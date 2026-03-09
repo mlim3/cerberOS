@@ -75,7 +75,43 @@ Ties the pipeline together. For each request:
 5. Replaces every injected secret value with `[REDACTED]`
 6. Returns `Response{Output, ExitCode}`
 
-### 5. HTTP Server (`main.go`)
+### 5. Audit Logger (`audit/`)
+
+Structured audit logging for agent interactions. Every `POST /execute` call produces two events in order:
+
+| Event | `kind` | What it records |
+| --- | --- | --- |
+| Script submitted | `execution` | agent identifier |
+| Secrets resolved | `secret_access` | agent identifier + secret **names** (never values) |
+
+Events are written as newline-delimited JSON to stdout by default:
+
+```json
+{"time":"2026-03-08T12:00:00Z","kind":"execution","agent":"my-agent","message":"agent submitted script for execution"}
+{"time":"2026-03-08T12:00:00Z","kind":"secret_access","agent":"my-agent","keys":["API_KEY","DB_PASS"],"message":"agent requested secrets"}
+```
+
+The logger is pluggable — ship events anywhere by implementing `audit.Exporter`:
+
+```go
+type Exporter interface {
+    Export(e Event) error
+}
+```
+
+Pass one or more exporters to `audit.New` in `main.go`:
+
+```go
+audit.New(
+    audit.NewJSONExporter(os.Stdout), // stdout (default)
+    &PostgresExporter{db: db},        // database
+    &WebhookExporter{url: "..."},     // HTTP ingest, Splunk, etc.
+)
+```
+
+No changes to `Orchestrator`, `Preprocessor`, or any other package are needed when adding a new destination.
+
+### 6. HTTP Server (`main.go`)
 
 Listens on `:8000`. Manages a single long-lived VM instance (for `start`/`stop`) separately from ephemeral execute requests.
 
@@ -89,6 +125,7 @@ Listens on `:8000`. Manages a single long-lived VM instance (for `start`/`stop`)
 
 ```json
 {
+  "agent": "my-agent",
   "script": "#!/bin/sh\necho {{API_KEY}}"
 }
 ```
@@ -123,4 +160,5 @@ None. The entire engine is standard library Go (`go 1.24`).
 - **Secret scrubbing** — injected secret values are replaced with `[REDACTED]` before output is returned
 - **Minimal rootfs** — only busybox in the guest; no package manager, no shell history, no network stack
 - **Non-root container** — engine process runs as UID 1001
+- **Audit trail** — every execution and secret access is logged with agent identity and secret names (never values); exporters are pluggable
 - **No external dependencies** — reduced supply chain surface
