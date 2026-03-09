@@ -79,8 +79,17 @@ func main() {
 
 	// Note: We'll implement a proper repository wrapper for Personal Info
 	piRepo := &storage.BaseRepository{Pool: pool}
-	mockEmbedder := &logic.MockEmbedder{}
-	piProcessor := logic.NewProcessor(piRepo, mockEmbedder)
+
+	var embedder logic.Embedder
+	if apiKey := os.Getenv("OPENAI_API_KEY"); apiKey != "" {
+		logger.Info("using OpenAI embedder")
+		embedder = logic.NewOpenAIEmbedder(apiKey)
+	} else {
+		logger.Info("OPENAI_API_KEY not set, falling back to MockEmbedder")
+		embedder = &logic.MockEmbedder{}
+	}
+
+	piProcessor := logic.NewProcessor(piRepo, embedder)
 
 	// 3. Initialize the Handlers
 	chatHandler := api.NewChatHandler(chatRepo)
