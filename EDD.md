@@ -117,7 +117,7 @@ The Orchestrator consists of **six internal modules**. Each module has a single,
 
 | | |
 |---|---|
-| **Responsibilities** | Central coordinator for all incoming task routing decisions. Validates `task_spec` schema completeness; rejects invalid specs immediately. Performs deduplication check via Memory Component using `task_id`. Routes to Policy Enforcer for permission validation before any agent interaction. Dispatches validated, scoped `task_spec` to Agents Component. Tracks active tasks and correlates incoming results to the originating `user_task`. |
+| **Responsibilities** | Central coordinator for all incoming task routing decisions. Validates `task_spec` schema completeness; rejects invalid specs immediately. Performs deduplication check via Memory Component using `task_id`. Routes to Policy Enforcer for permission validation before any agent interaction. Persists `DISPATCH_PENDING` before publishing to Agents Component, then persists `DISPATCHED` after successful publish. Tracks active tasks and correlates incoming results to the originating `user_task`. |
 | **Inputs** | Parsed `user_task` from Communications Gateway; `policy_result` from Policy Enforcer; `task_result`/`agent_status_update` from Comms Gateway; `dedup_result` from Memory Interface |
 | **Outputs** | `policy_check_request` to Policy Enforcer; `task_spec` to Communications Gateway (for Agents Component); `task_accepted`/`task_failed`/`policy_violation` to Communications Gateway (for User I/O) |
 | **Interfaces With** | Communications Gateway, Policy Enforcer, Memory Interface, Recovery Manager |
@@ -135,7 +135,7 @@ The Orchestrator consists of **six internal modules**. Each module has a single,
 
 | | |
 |---|---|
-| **Responsibilities** | Tracks every active task from dispatch to completion or failure. Maintains an in-memory task state map (rehydrated from Memory Component on startup). Enforces task-level timeout: if a task exceeds `timeout_seconds`, signals Recovery Manager to terminate the agent and return `TIMED_OUT`. Subscribes to `agent_status_update` events from the Agents Component. Detects RECOVERING/TERMINATED events and escalates to Recovery Manager. Emits `task_progress` events when agents publish intermediate progress. |
+| **Responsibilities** | Tracks every active task from dispatch to completion or failure. Maintains an in-memory task state map (rehydrated from Memory Component on startup). Enforces task-level timeout: if a task exceeds `timeout_seconds`, signals Recovery Manager to terminate the agent and return `TIMED_OUT`. Subscribes to `agent_status_update` events from the Agents Component. Detects RECOVERING/TERMINATED events and escalates to Recovery Manager. Emits `task_progress` events when agents publish intermediate progress. Transitions RECOVERING tasks into a monitored waiting state; timeout remains the safety net if self-recovery does not complete. |
 | **Inputs** | Task dispatch confirmation from Task Dispatcher; `agent_status_update` from Comms Gateway; `timeout_tick` from internal scheduler |
 | **Outputs** | `timeout_signal` to Recovery Manager; `task_progress` to Communications Gateway; `state_write` to Memory Interface (on every state change) |
 | **Interfaces With** | Task Dispatcher, Communications Gateway, Recovery Manager, Memory Interface |
@@ -144,7 +144,7 @@ The Orchestrator consists of **six internal modules**. Each module has a single,
 
 | | |
 |---|---|
-| **Responsibilities** | Responds to all non-nominal task events: agent failure, timeout, policy violation, Vault/Memory unavailability. On agent failure: determines recovery strategy based on failure count and failure type. Coordinates with Memory Component to retrieve last valid task state before recovery attempt. Issues `agent_terminate` or `task_cancel` instructions to Communications Gateway. Escalates irrecoverable failures as `task_failed` messages. Manages retry budget: tracks per-task retry count; does not exceed configurable `max_retries`. Ensures credential revocation is triggered on Vault for any terminated agent. |
+| **Responsibilities** | Responds to all non-nominal task events: agent failure, timeout, policy violation, Vault/Memory unavailability. On agent failure: determines recovery strategy based on failure count and failure type. If an agent is in `RECOVERING`, the Recovery Manager does not immediately re-dispatch; it trusts the existing agent to self-heal and relies on timeout or a later `TERMINATED` event as the safety net. If an agent is `TERMINATED`, coordinates with Memory Component to retrieve last valid task state before recovery attempt. Issues `agent_terminate` or `task_cancel` instructions to Communications Gateway. Escalates irrecoverable failures as `task_failed` messages. Manages retry budget: tracks per-task retry count; does not exceed configurable `max_retries`. Ensures credential revocation is triggered on Vault for any terminated agent. |
 | **Inputs** | `timeout_signal` from Task Monitor; `agent_status_update` (RECOVERING/TERMINATED) from Comms Gateway; `component_failure` event from Memory Interface or Policy Enforcer |
 | **Outputs** | `agent_terminate`/`task_cancel` to Comms Gateway; `task_failed` to Comms Gateway (for User I/O); `revoke_credentials` to Policy Enforcer; `recovery_audit_event` to Memory Interface |
 | **Interfaces With** | Task Monitor, Communications Gateway, Policy Enforcer, Memory Interface |
@@ -265,7 +265,7 @@ The Orchestrator consists of **six internal modules**. Each module has a single,
 2. Agents Component returns `capability_response`: `match | partial_match | no_match`.
 3. Task Dispatcher assembles final `task_spec` and publishes to `aegis.agents.tasks.inbound`.
 4. Agents Component responds with `task_accepted (agent_id, estimated_completion)` or `provisioning_error`.
-5. Task Dispatcher persists task state (DISPATCHED) to Memory Interface **before** publishing `task_spec`, then confirms `task_accepted` to User I/O Component.
+5. Task Dispatcher persists task state (`DISPATCH_PENDING`) to Memory Interface **before** publishing `task_spec`. After successful publish, it persists `DISPATCHED` and confirms `task_accepted` to User I/O Component. If publish fails, it persists `DELIVERY_FAILED`.
 
 ### Flow 5: Task Monitoring and Completion
 1. Task Monitor subscribes to `agent_status_update` events on `aegis.agents.status.events`.
@@ -275,11 +275,12 @@ The Orchestrator consists of **six internal modules**. Each module has a single,
 
 ### Flow 6: Recovery Flow
 1. Agent RECOVERING event received from Agents Component.
-2. Recovery Manager checks retry count. If count < `max_task_retries`:
+2. Recovery Manager treats `RECOVERING` as a self-healing signal and does not immediately re-dispatch. The existing agent may return to `ACTIVE`; otherwise timeout remains the safety net.
+3. If the agent later reports `TERMINATED`, Recovery Manager checks retry count. If count < `max_task_retries`:
    - Memory Interface read for last task state snapshot.
    - Vault checked (policy still valid for recovery scope).
    - Updated `task_spec` re-dispatched to Agents Component (same `policy_scope`).
-3. If count >= `max_task_retries`: task marked FAILED, User I/O notified, credentials revoked.
+4. If count >= `max_task_retries`: task marked FAILED, User I/O notified, credentials revoked.
 
 ---
 
@@ -300,15 +301,16 @@ The Orchestrator consists of **six internal modules**. Each module has a single,
 9. Policy Enforcer → Task Dispatcher: `policy_result {ALLOWED, policy_scope}`
 10. Task Dispatcher → Agents Component: `capability_query` (`aegis.agents.capability.query`)
 11. Agents Component → Task Dispatcher: `capability_response {no_match, provisioning_estimate: 28s}`
-12. Task Dispatcher → Memory Interface: write `task_state {DISPATCHED, task_id, timestamp}`
+12. Task Dispatcher → Memory Interface: write `task_state {DISPATCH_PENDING, task_id, timestamp}`
 13. Task Dispatcher → Agents Component: `task_spec` (`aegis.agents.tasks.inbound`) with `policy_scope` attached
-14. Task Dispatcher → User I/O: `task_accepted {task_id, agent_id, estimated_completion_at}`
-15. *(agent provisions, executes, returns result)*
-16. Agents Component → Comms Gateway: `task_result` (callback_topic)
-17. Task Dispatcher → Memory Interface: write `task_state {COMPLETED}`
-18. Task Dispatcher → Policy Enforcer: trigger credential revocation for `agent_id`
-19. Policy Enforcer → OpenBao (HTTP): `POST /v1/auth/token/revoke`
-20. Comms Gateway → User I/O: `task_result` delivered to `callback_topic`
+14. Task Dispatcher → Memory Interface: write `task_state {DISPATCHED, task_id, timestamp}`
+15. Task Dispatcher → User I/O: `task_accepted {task_id, agent_id, estimated_completion_at}`
+16. *(agent provisions, executes, returns result)*
+17. Agents Component → Comms Gateway: `task_result` (callback_topic)
+18. Task Dispatcher → Memory Interface: write `task_state {COMPLETED}`
+19. Task Dispatcher → Policy Enforcer: trigger credential revocation for `agent_id`
+20. Policy Enforcer → OpenBao (HTTP): `POST /v1/auth/token/revoke`
+21. Comms Gateway → User I/O: `task_result` delivered to `callback_topic`
 
 ### 8.2 Task — Existing Agent (Fast Path)
 
@@ -316,28 +318,31 @@ Steps 1–9 identical to 8.1 (schema validation, dedup, policy check).
 
 10. Task Dispatcher → Agents Component: `capability_query`
 11. Agents Component → Task Dispatcher: `capability_response {match, agent_id: A3, state: IDLE}`
-12. Task Dispatcher → Memory Interface: write `task_state {DISPATCHED}`
+12. Task Dispatcher → Memory Interface: write `task_state {DISPATCH_PENDING}`
 13. Task Dispatcher → Agents Component: `task_spec` (same agent activated, no new provisioning)
-14. Task Dispatcher → User I/O: `task_accepted {task_id, agent_id: A3, estimated_completion_at}`
-15. Agents Component → Comms Gateway: `task_result`
-16. Task Dispatcher → Memory Interface: write `task_state {COMPLETED}`; trigger credential revocation
-17. Comms Gateway → User I/O: `task_result` delivered
+14. Task Dispatcher → Memory Interface: write `task_state {DISPATCHED}`
+15. Task Dispatcher → User I/O: `task_accepted {task_id, agent_id: A3, estimated_completion_at}`
+16. Agents Component → Comms Gateway: `task_result`
+17. Task Dispatcher → Memory Interface: write `task_state {COMPLETED}`; trigger credential revocation
+18. Comms Gateway → User I/O: `task_result` delivered
 
 ### 8.3 Self-Healing Recovery Flow
 
-*Triggered when: `agent_status_update {state: RECOVERING}` received from Agents Component*
+*Triggered when: `agent_status_update {state: RECOVERING}` or later `agent_status_update {state: TERMINATED}` is received from Agents Component*
 
 1. Task Monitor receives `agent_status_update {agent_id, state: RECOVERING, task_id}`
-2. Task Monitor → Recovery Manager: `recovery_signal {task_id, retry_count, policy_scope}`
-3. Recovery Manager checks `retry_count`: if < `max_task_retries` → proceed; else → FAIL
-4. Recovery Manager → Memory Interface: read `task_state` snapshot `{task_id, latest}`
-5. Memory Interface → Recovery Manager: `task_state {progress_summary, policy_scope, original_task_spec}`
-6. Recovery Manager → Policy Enforcer: re-validate policy scope `{task_id, policy_scope}`
-7. Policy Enforcer → OpenBao: verify scope still valid
-8. OpenBao → Policy Enforcer: VALID (or EXPIRED → Recovery Manager escalates to FAIL)
-9. Recovery Manager → Comms Gateway: re-dispatch `task_spec` to `aegis.agents.tasks.inbound`
-10. Recovery Manager → Memory Interface: write `recovery_event {attempt_n, timestamp}`
-11. Agents Component responds with `task_accepted` — monitoring resumes at Task Monitor
+2. Task Monitor → Recovery Manager: `recovery_signal {task_id, retry_count, policy_scope, reason: AGENT_RECOVERING}`
+3. Recovery Manager logs the self-healing condition and does not immediately re-dispatch.
+4. If the agent later reports `TERMINATED`, Task Monitor → Recovery Manager: `recovery_signal {task_id, retry_count, policy_scope, reason: AGENT_TERMINATED}`
+5. Recovery Manager checks `retry_count`: if < `max_task_retries` → proceed; else → FAIL
+6. Recovery Manager → Memory Interface: read `task_state` snapshot `{task_id, latest}`
+7. Memory Interface → Recovery Manager: `task_state {progress_summary, policy_scope, original_task_spec}`
+8. Recovery Manager → Policy Enforcer: re-validate policy scope `{task_id, policy_scope}`
+9. Policy Enforcer → OpenBao: verify scope still valid
+10. OpenBao → Policy Enforcer: VALID (or EXPIRED → Recovery Manager escalates to FAIL)
+11. Recovery Manager → Comms Gateway: re-dispatch `task_spec` to `aegis.agents.tasks.inbound`
+12. Recovery Manager → Memory Interface: write `recovery_event {attempt_n, timestamp}`
+13. Agents Component responds with `task_accepted` — monitoring resumes at Task Monitor
 
 > **🔴 CRITICAL:** On `max_retries` exceeded: Recovery Manager issues `agent_terminate`, writes FAILED state, triggers credential revocation, and returns `task_failed {error_code: MAX_RETRIES_EXCEEDED}` to User I/O.
 
@@ -366,10 +371,12 @@ The Task Monitor is the **sole authority** for state transitions.
 | State | Description | Entry Condition | Valid Transitions |
 |---|---|---|---|
 | RECEIVED | Task arrived, schema validated | `user_task` passes envelope validation | → DEDUP_CHECK → POLICY_CHECK → REJECTED (schema fail) |
-| POLICY_CHECK | Awaiting Vault policy validation | Passed dedup check; `policy_check_request` sent | → DISPATCHED (ALLOW) → POLICY_VIOLATION (DENY) |
-| DISPATCHED | `task_spec` sent to Agents Component; `task_accepted` confirmed | `policy_result` ALLOWED; `task_accepted` received | → RUNNING → PROVISIONING_FAILED |
+| POLICY_CHECK | Awaiting Vault policy validation | Passed dedup check; `policy_check_request` sent | → DISPATCH_PENDING (ALLOW) → POLICY_VIOLATION (DENY) |
+| DISPATCH_PENDING | Task state persisted before agent publish | `policy_result` ALLOWED; pre-dispatch persistence succeeded | → DISPATCHED → DELIVERY_FAILED |
+| DISPATCHED | `task_spec` successfully published to Agents Component; `task_accepted` confirmed | Agent publish succeeded | → RUNNING → RECOVERING → TIMED_OUT |
 | RUNNING | Agent actively executing the task | Agent ACTIVE confirmed by Agents Component | → COMPLETED → RECOVERING → TIMED_OUT |
-| RECOVERING | Agent failed; Orchestrator attempting recovery | `agent_status_update` RECOVERING received | → RUNNING (re-dispatch) → FAILED (max retries) |
+| RECOVERING | Agent self-healing; Orchestrator monitoring without immediate re-dispatch | `agent_status_update` RECOVERING received | → RUNNING (agent recovers) → FAILED (later TERMINATED / max retries) → TIMED_OUT |
+| DELIVERY_FAILED | Task could not be published to an agent after pre-dispatch persistence | `task_spec` publish failed | **Terminal.** Credentials revoked; cleanup performed. |
 | TIMED_OUT | Task exceeded `timeout_seconds` | Task Monitor `timeout_signal` fires | **Terminal.** Agent terminated; credentials revoked. |
 | POLICY_VIOLATION | Task denied by policy validation | `policy_result` DENIED from Policy Enforcer | **Terminal.** No agent touched. |
 | FAILED | Irrecoverable task failure | Max retries exceeded or provisioning failure | **Terminal.** Credentials revoked; audit written. |
@@ -388,7 +395,7 @@ Stored in the Memory Component via Memory Interface. One record per task, update
 | `orchestrator_task_ref` | UUID (string) | Orchestrator-internal reference. Distinct from user-provided `task_id`. |
 | `task_id` | UUID (string) | User-provided task identifier. Used for deduplication and correlation. |
 | `user_id` | string | Identifier of the user or session that submitted the task. |
-| `state` | enum | `RECEIVED \| POLICY_CHECK \| DISPATCHED \| RUNNING \| RECOVERING \| COMPLETED \| FAILED \| TIMED_OUT \| POLICY_VIOLATION` |
+| `state` | enum | `RECEIVED \| POLICY_CHECK \| DISPATCH_PENDING \| DISPATCHED \| RUNNING \| RECOVERING \| COMPLETED \| FAILED \| DELIVERY_FAILED \| TIMED_OUT \| POLICY_VIOLATION` |
 | `required_skill_domains` | string[] | Skill domains declared by the task. Validated against Vault policy. |
 | `policy_scope` | object | Effective permission scope derived from Vault. Attached to `task_spec`. Never expanded during execution. |
 | `agent_id` | UUID \| null | Assigned agent ID from Agents Component. Null until DISPATCHED. |
