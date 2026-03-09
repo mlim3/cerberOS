@@ -213,19 +213,41 @@ func TestHandleRecovery_Timeout_TerminatesWithTimedOut(t *testing.T) {
 
 // ── Recovery Within Budget ────────────────────────────────────────────────────
 
-func TestHandleRecovery_WithinBudget_ReDispatches(t *testing.T) {
-	// retry_count=0 < max_retries=3 → re-dispatch with same policy_scope (§FR-SH-02, §FR-SH-06).
-	m, gw, _, _, mem := newManager(t)
+func TestHandleRecovery_AgentRecovering_DoesNotRedispatch(t *testing.T) {
+	// AgentRecovering: agent is alive and self-healing — M5 trusts it and does NOT re-dispatch.
+	// A competing agent would duplicate work while the original is still alive.
+	// Safety net: per-task timeout goroutine in Monitor catches the hung-agent case.
+	m, gw, _, _, _ := newManager(t)
 	ts := activeTask("task-2", "orch-2", 0)
-	seedMemory(t, mem, ts)
 
 	m.HandleRecovery(ts, types.RecoveryReasonAgentRecovering)
+
+	// Must NOT re-dispatch — agent is still alive.
+	if len(gw.TaskSpecCalls) != 0 {
+		t.Fatalf("TaskSpecCalls = %d, want 0 — must not re-dispatch while agent is self-recovering", len(gw.TaskSpecCalls))
+	}
+	// Must NOT terminate — task is still alive.
+	if len(gw.ErrorCalls) != 0 {
+		t.Fatalf("unexpected error published: %+v — task should still be alive", gw.ErrorCalls)
+	}
+	if len(gw.TerminateCalls) != 0 {
+		t.Fatalf("unexpected agent_terminate sent: %+v — agent is still alive", gw.TerminateCalls)
+	}
+}
+
+func TestHandleRecovery_AgentTerminated_WithinBudget_ReDispatches(t *testing.T) {
+	// AgentTerminated: agent is dead — act immediately. retry_count=0 < max=3 → re-dispatch.
+	m, gw, _, _, mem := newManager(t)
+	ts := activeTask("task-3", "orch-3", 0)
+	seedMemory(t, mem, ts)
+
+	m.HandleRecovery(ts, types.RecoveryReasonAgentTerminated)
 
 	// task_spec must be re-dispatched.
 	if len(gw.TaskSpecCalls) != 1 {
 		t.Fatalf("TaskSpecCalls = %d, want 1 (re-dispatch)", len(gw.TaskSpecCalls))
 	}
-	// Policy scope must NOT be expanded — same TokenRef.
+	// Policy scope must NOT be expanded — same TokenRef (§FR-SH-06).
 	if gw.TaskSpecCalls[0].PolicyScope.TokenRef != ts.PolicyScope.TokenRef {
 		t.Fatalf("re-dispatch policy_scope.token_ref = %q, want %q",
 			gw.TaskSpecCalls[0].PolicyScope.TokenRef, ts.PolicyScope.TokenRef)
@@ -251,10 +273,10 @@ func TestHandleRecovery_WithinBudget_ReDispatches(t *testing.T) {
 	}
 }
 
-func TestHandleRecovery_WithinBudget_AgentTerminated_ReDispatches(t *testing.T) {
-	// AgentTerminated reason also triggers retry when within budget.
+func TestHandleRecovery_AgentTerminated_SecondAttempt_ReDispatches(t *testing.T) {
+	// retry_count=1, still within max=3 → re-dispatch on second termination.
 	m, gw, _, _, mem := newManager(t)
-	ts := activeTask("task-3", "orch-3", 1) // retry_count=1, still within 3
+	ts := activeTask("task-4", "orch-4", 1)
 	seedMemory(t, mem, ts)
 
 	m.HandleRecovery(ts, types.RecoveryReasonAgentTerminated)
@@ -268,10 +290,11 @@ func TestHandleRecovery_WithinBudget_AgentTerminated_ReDispatches(t *testing.T) 
 
 func TestHandleRecovery_MaxRetriesExceeded_TerminatesWithFailed(t *testing.T) {
 	// retry_count == max_retries → terminate with MAX_RETRIES_EXCEEDED (§FR-SH-03).
+	// Uses AgentTerminated because only a dead agent triggers the re-dispatch path.
 	m, gw, pol, mon, _ := newManager(t)
-	ts := activeTask("task-4", "orch-4", 3) // retry_count=3 == max_retries=3
+	ts := activeTask("task-5", "orch-5", 3) // retry_count=3 == max_retries=3
 
-	m.HandleRecovery(ts, types.RecoveryReasonAgentRecovering)
+	m.HandleRecovery(ts, types.RecoveryReasonAgentTerminated)
 
 	// Must NOT re-dispatch.
 	if len(gw.TaskSpecCalls) != 0 {
@@ -296,12 +319,13 @@ func TestHandleRecovery_MaxRetriesExceeded_TerminatesWithFailed(t *testing.T) {
 
 func TestHandleRecovery_ScopeExpired_TerminatesWithScopeExpired(t *testing.T) {
 	// VerifyScopeStillValid fails → SCOPE_EXPIRED, no re-dispatch (§FR-SH-06).
+	// Uses AgentTerminated because only a dead agent triggers the re-dispatch path.
 	m, gw, pol, mon, mem := newManager(t)
 	pol.ScopeExpired = true
-	ts := activeTask("task-5", "orch-5", 0)
+	ts := activeTask("task-6", "orch-6", 0)
 	seedMemory(t, mem, ts)
 
-	m.HandleRecovery(ts, types.RecoveryReasonAgentRecovering)
+	m.HandleRecovery(ts, types.RecoveryReasonAgentTerminated)
 
 	if len(gw.TaskSpecCalls) != 0 {
 		t.Fatal("task_spec published despite scope expired — scope must not expand during recovery")
@@ -322,11 +346,12 @@ func TestHandleRecovery_ScopeExpired_TerminatesWithScopeExpired(t *testing.T) {
 
 func TestHandleRecovery_MemoryReadFails_TerminatesWithStateRecoveryFailed(t *testing.T) {
 	// If ReadLatest fails, recovery cannot proceed → STATE_RECOVERY_FAILED.
+	// Uses AgentTerminated because only a dead agent triggers the re-dispatch path.
 	m, gw, _, mon, mem := newManager(t)
 	mem.ShouldFailReads = true
-	ts := activeTask("task-6", "orch-6", 0)
+	ts := activeTask("task-7", "orch-7", 0)
 
-	m.HandleRecovery(ts, types.RecoveryReasonAgentRecovering)
+	m.HandleRecovery(ts, types.RecoveryReasonAgentTerminated)
 
 	if len(gw.TaskSpecCalls) != 0 {
 		t.Fatal("task_spec published despite memory read failure")
@@ -344,12 +369,13 @@ func TestHandleRecovery_MemoryReadFails_TerminatesWithStateRecoveryFailed(t *tes
 
 func TestHandleRecovery_ReDispatchFails_TerminatesWithAgentsUnavailable(t *testing.T) {
 	// PublishTaskSpec fails during re-dispatch → AGENTS_UNAVAILABLE.
+	// Uses AgentTerminated because only a dead agent triggers the re-dispatch path.
 	m, gw, _, mon, mem := newManager(t)
 	gw.PublishSpecError = errors.New("nats broker unavailable")
-	ts := activeTask("task-7", "orch-7", 0)
+	ts := activeTask("task-8", "orch-8", 0)
 	seedMemory(t, mem, ts)
 
-	m.HandleRecovery(ts, types.RecoveryReasonAgentRecovering)
+	m.HandleRecovery(ts, types.RecoveryReasonAgentTerminated)
 
 	tr := lastTransition(mon)
 	if tr.NewState != types.StateFailed {
@@ -421,11 +447,12 @@ func TestTerminateTask_VaultDown_ContinuesTermination(t *testing.T) {
 // Scenarios covered (in order):
 //
 //	Step 1 — Timeout:              task times out → TIMED_OUT, credentials revoked, agent terminated
-//	Step 2 — Agent Recovering:     agent reports RECOVERING → re-dispatch with same policy_scope (attempt 1)
-//	Step 3 — Second Recovery:      second RECOVERING → re-dispatch (attempt 2); recovery_event written
-//	Step 4 — Max Retries:          third RECOVERING → MAX_RETRIES_EXCEEDED; no re-dispatch
-//	Step 5 — Scope Expired:        policy scope expired during recovery → SCOPE_EXPIRED; no re-dispatch
-//	Step 6 — Vault Down:           revocation fails → retry scheduled; termination not blocked
+//	Step 2 — Agent Self-Recovering: agent reports RECOVERING → M5 trusts it (no re-dispatch); timeout is safety net
+//	Step 3 — Agent Terminated:     agent dies → M5 re-dispatches (attempt 1) with same policy_scope
+//	Step 4 — Agent Terminated:     agent dies again → M5 re-dispatches (attempt 2); retry_count=1→2
+//	Step 5 — Max Retries:          agent dies a third time → MAX_RETRIES_EXCEEDED; no re-dispatch
+//	Step 6 — Scope Expired:        policy scope expired during recovery → SCOPE_EXPIRED; no re-dispatch
+//	Step 7 — Vault Down:           revocation fails → retry scheduled; termination not blocked
 //
 // What this test does NOT do:
 //   - Does not call a real Vault, NATS broker, or database
@@ -439,6 +466,10 @@ func TestRecoveryManagerDemoFlow(t *testing.T) {
 	mem := mocks.NewMemoryMock()
 	cfg := &config.OrchestratorConfig{NodeID: "demo-node", MaxTaskRetries: 3}
 	m := recovery.New(cfg, mem, gw, pol, mon)
+
+	// totalRedispatches tracks how many times M5 successfully re-dispatched a task.
+	// (Terminal outcomes are NOT counted — only successful re-dispatches are.)
+	totalRedispatches := 0
 
 	t.Log("demo setup: Recovery Manager wired to mocks for Gateway, PolicyEnforcer, Monitor, and MemoryClient")
 	t.Log("demo setup: MaxTaskRetries=3")
@@ -474,54 +505,97 @@ func TestRecoveryManagerDemoFlow(t *testing.T) {
 	mon.Transitions = nil
 	mon.UntrackedIDs = nil
 
-	// ── Step 2: Agent Recovering — Attempt 1 ──────────────────────────────
-	// Agent enters RECOVERING state. retry_count=0 < max=3 → re-dispatch.
+	// ── Step 2: Agent Self-Recovering — M5 Trusts It ─────────────────────
+	// Agent reports RECOVERING (it is alive and self-healing).
+	// M5 does NOT re-dispatch — spinning up a competing agent while the original
+	// is still alive would waste resources and could corrupt task state.
+	// Safety nets already in place:
+	//   - Agent recovers → reports ACTIVE → Monitor transitions RUNNING (no M5 action)
+	//   - Agent gives up → reports TERMINATED → M5 re-dispatches (Step 3 below)
+	//   - Agent hangs forever → timeout fires → M5 terminates (TIMED_OUT)
 	t.Log("─────────────────────────────────────────────────────")
-	t.Log("step 2: agent recovering — attempt 1 (retry_count=0, budget=3)")
+	t.Log("step 2: agent self-recovering — M5 trusts it (does NOT re-dispatch)")
+	t.Log("step 2: safety net: timeout goroutine catches the hung-agent case")
 
-	tsRecov := activeTask("task-recov-1", "orch-recov-1", 0)
-	seedMemory(t, mem, tsRecov)
+	tsSelfRecov := activeTask("task-self-recov-1", "orch-self-recov-1", 0)
 
-	m.HandleRecovery(tsRecov, types.RecoveryReasonAgentRecovering)
+	m.HandleRecovery(tsSelfRecov, types.RecoveryReasonAgentRecovering)
+
+	// Must NOT re-dispatch — agent is still alive.
+	if len(gw.TaskSpecCalls) != 0 {
+		t.Fatalf("step 2: TaskSpecCalls = %d, want 0 — must not re-dispatch while agent is self-recovering", len(gw.TaskSpecCalls))
+	}
+	// Must NOT terminate — task is still active.
+	if len(gw.ErrorCalls) != 0 {
+		t.Fatalf("step 2: unexpected error published — task should still be alive")
+	}
+	if len(gw.TerminateCalls) != 0 {
+		t.Fatalf("step 2: unexpected agent_terminate — agent is still alive")
+	}
+	t.Log("step 2: no re-dispatch, no termination — M5 is monitoring without intervening")
+	t.Log("step 2: [simulated] agent recovers → reports ACTIVE → Monitor.HandleAgentStatusUpdate → RUNNING")
+	t.Log("step 2 complete: M5 correctly trusted a self-recovering agent ✓")
+
+	// ── Step 3: Agent Terminated — Re-dispatch Attempt 1 ──────────────────
+	// Agent dies (TERMINATED). retry_count=0 < max=3 → M5 re-dispatches immediately.
+	t.Log("─────────────────────────────────────────────────────")
+	t.Log("step 3: agent terminated (dead) — M5 re-dispatches immediately (attempt 1, retry_count=0)")
+
+	tsTerminated1 := activeTask("task-terminated-1", "orch-terminated-1", 0)
+	seedMemory(t, mem, tsTerminated1)
+
+	m.HandleRecovery(tsTerminated1, types.RecoveryReasonAgentTerminated)
 
 	if len(gw.TaskSpecCalls) != 1 {
-		t.Fatalf("step 2: TaskSpecCalls = %d, want 1 (re-dispatch)", len(gw.TaskSpecCalls))
+		t.Fatalf("step 3: TaskSpecCalls = %d, want 1 (re-dispatch)", len(gw.TaskSpecCalls))
 	}
-	if gw.TaskSpecCalls[0].PolicyScope.TokenRef != tsRecov.PolicyScope.TokenRef {
-		t.Fatalf("step 2: policy_scope changed — scope must not expand during recovery")
+	if gw.TaskSpecCalls[0].PolicyScope.TokenRef != tsTerminated1.PolicyScope.TokenRef {
+		t.Fatalf("step 3: policy_scope changed — scope must not expand (§FR-SH-06)")
 	}
-	// Count recovery_event records written.
+	if len(gw.ErrorCalls) != 0 {
+		t.Fatalf("step 3: unexpected error — task still has retry budget")
+	}
+	if len(mon.UntrackedIDs) != 0 {
+		t.Fatalf("step 3: task untracked — should remain active after re-dispatch")
+	}
+	// Verify recovery_event written to Memory for audit trail.
 	recoveryEvents := 0
 	for _, rec := range mem.Records {
-		if rec.DataType == types.DataTypeRecoveryEvent {
+		if rec.DataType == types.DataTypeRecoveryEvent && rec.TaskID == tsTerminated1.TaskID {
 			recoveryEvents++
 		}
 	}
-	t.Logf("step 2: re-dispatched task_spec — policy_scope.token_ref=%s progress=%q",
-		gw.TaskSpecCalls[0].PolicyScope.TokenRef, gw.TaskSpecCalls[0].ProgressSummary)
-	t.Logf("step 2: recovery_events written to Memory = %d", recoveryEvents)
-	t.Log("step 2 complete: task re-dispatched with original policy_scope ✓")
+	if recoveryEvents == 0 {
+		t.Fatal("step 3: no recovery_event written to Memory — audit trail required")
+	}
+	totalRedispatches++
+	t.Logf("step 3: re-dispatched — token_ref=%s progress=%q recovery_events_in_memory=%d",
+		gw.TaskSpecCalls[0].PolicyScope.TokenRef, gw.TaskSpecCalls[0].ProgressSummary, recoveryEvents)
+	t.Log("step 3 complete: dead agent → re-dispatched with original policy_scope ✓")
 
 	gw.TaskSpecCalls = nil
 	mon.Transitions = nil
+	mem.Records = mem.Records[:0]
 
-	// ── Step 3: Agent Recovering — Attempt 2 ──────────────────────────────
-	// Same task fails again. retry_count=1 → attempt 2.
+	// ── Step 4: Agent Terminated — Re-dispatch Attempt 2 ──────────────────
+	// Same task: new agent also dies. retry_count=1 → attempt 2 still within budget.
 	t.Log("─────────────────────────────────────────────────────")
-	t.Log("step 3: agent recovering again — attempt 2 (retry_count=1)")
+	t.Log("step 4: agent terminated again — M5 re-dispatches (attempt 2, retry_count=1)")
 
-	tsRecov2 := activeTask("task-recov-1", "orch-recov-1", 1)
-	// Update memory with incremented retry count.
-	mem.Records = mem.Records[:0] // clear, re-seed
-	seedMemory(t, mem, tsRecov2)
+	tsTerminated2 := activeTask("task-terminated-1", "orch-terminated-1", 1)
+	seedMemory(t, mem, tsTerminated2)
 
-	m.HandleRecovery(tsRecov2, types.RecoveryReasonAgentRecovering)
+	m.HandleRecovery(tsTerminated2, types.RecoveryReasonAgentTerminated)
 
 	if len(gw.TaskSpecCalls) != 1 {
-		t.Fatalf("step 3: TaskSpecCalls = %d, want 1", len(gw.TaskSpecCalls))
+		t.Fatalf("step 4: TaskSpecCalls = %d, want 1", len(gw.TaskSpecCalls))
 	}
-	t.Logf("step 3: re-dispatched — progress=%q", gw.TaskSpecCalls[0].ProgressSummary)
-	t.Log("step 3 complete: second recovery attempt succeeded ✓")
+	if len(gw.ErrorCalls) != 0 {
+		t.Fatalf("step 4: unexpected error — retry budget still has 1 remaining")
+	}
+	totalRedispatches++
+	t.Logf("step 4: re-dispatched again — progress=%q (attempt 2 of 3)", gw.TaskSpecCalls[0].ProgressSummary)
+	t.Log("step 4 complete: second re-dispatch within budget ✓")
 
 	gw.TaskSpecCalls = nil
 	gw.ErrorCalls = nil
@@ -529,30 +603,31 @@ func TestRecoveryManagerDemoFlow(t *testing.T) {
 	pol.RevokeCallCount = 0
 	pol.RevokedRefs = nil
 	mon.UntrackedIDs = nil
+	mem.Records = mem.Records[:0]
 
-	// ── Step 4: Max Retries Exceeded ──────────────────────────────────────
-	// retry_count=3 == max_retries=3 → no more retries; terminate.
+	// ── Step 5: Max Retries Exceeded ──────────────────────────────────────
+	// retry_count=3 == max_retries=3 → budget exhausted; terminate.
 	t.Log("─────────────────────────────────────────────────────")
-	t.Log("step 4: max retries exceeded — retry_count=3 reaches max; task terminated")
+	t.Log("step 5: max retries exceeded — retry_count=3 hits max=3; task terminated")
 
 	tsMaxed := activeTask("task-maxed-1", "orch-maxed-1", 3)
 	seedMemory(t, mem, tsMaxed)
 
-	m.HandleRecovery(tsMaxed, types.RecoveryReasonAgentRecovering)
+	m.HandleRecovery(tsMaxed, types.RecoveryReasonAgentTerminated)
 
 	if len(gw.TaskSpecCalls) != 0 {
-		t.Fatal("step 4: task_spec published — must not re-dispatch when budget exhausted")
+		t.Fatal("step 5: task_spec published — must not re-dispatch when budget exhausted")
 	}
 	if lastTransition(mon).NewState != types.StateFailed {
-		t.Fatalf("step 4: state = %q, want FAILED", lastTransition(mon).NewState)
+		t.Fatalf("step 5: state = %q, want FAILED", lastTransition(mon).NewState)
 	}
 	if len(gw.ErrorCalls) != 1 || gw.ErrorCalls[0].ErrorCode != types.ErrCodeMaxRetriesExceeded {
-		t.Fatalf("step 4: error_code = %q, want MAX_RETRIES_EXCEEDED", safeErrorCode(gw))
+		t.Fatalf("step 5: error_code = %q, want MAX_RETRIES_EXCEEDED", safeErrorCode(gw))
 	}
-	t.Logf("step 4: task terminated — state=FAILED error_code=%s", gw.ErrorCalls[0].ErrorCode)
-	t.Logf("step 4: revocation triggered=%v untracked=%v",
+	t.Logf("step 5: task terminated — state=FAILED error_code=%s", gw.ErrorCalls[0].ErrorCode)
+	t.Logf("step 5: revocation triggered=%v untracked=%v",
 		pol.RevokeCallCount > 0, len(mon.UntrackedIDs) > 0)
-	t.Log("step 4 complete: retry budget enforced; task failed gracefully ✓")
+	t.Log("step 5 complete: retry budget enforced; task failed gracefully ✓")
 
 	gw.ErrorCalls = nil
 	gw.TaskSpecCalls = nil
@@ -562,25 +637,25 @@ func TestRecoveryManagerDemoFlow(t *testing.T) {
 	mon.UntrackedIDs = nil
 	mem.Records = mem.Records[:0]
 
-	// ── Step 5: Scope Expired ──────────────────────────────────────────────
-	// VerifyScopeStillValid fails during recovery — scope cannot expand (§FR-SH-06).
+	// ── Step 6: Scope Expired ──────────────────────────────────────────────
+	// VerifyScopeStillValid fails during re-dispatch — scope cannot expand (§FR-SH-06).
 	t.Log("─────────────────────────────────────────────────────")
-	t.Log("step 5: scope expired — Vault reports policy scope no longer valid during recovery")
+	t.Log("step 6: scope expired — Vault reports policy scope no longer valid during recovery")
 
 	pol.ScopeExpired = true
 	tsScope := activeTask("task-scope-1", "orch-scope-1", 0)
 	seedMemory(t, mem, tsScope)
 
-	m.HandleRecovery(tsScope, types.RecoveryReasonAgentRecovering)
+	m.HandleRecovery(tsScope, types.RecoveryReasonAgentTerminated)
 
 	if len(gw.TaskSpecCalls) != 0 {
-		t.Fatal("step 5: task re-dispatched despite scope expiry — scope must not expand")
+		t.Fatal("step 6: task re-dispatched despite scope expiry — scope must not expand")
 	}
 	if len(gw.ErrorCalls) != 1 || gw.ErrorCalls[0].ErrorCode != types.ErrCodeScopeExpired {
-		t.Fatalf("step 5: error_code = %q, want SCOPE_EXPIRED", safeErrorCode(gw))
+		t.Fatalf("step 6: error_code = %q, want SCOPE_EXPIRED", safeErrorCode(gw))
 	}
-	t.Logf("step 5: task terminated — error_code=%s policy_enforcement=strict", gw.ErrorCalls[0].ErrorCode)
-	t.Log("step 5 complete: scope expiry enforced; task not re-dispatched with expired credentials ✓")
+	t.Logf("step 6: task terminated — error_code=%s policy_enforcement=strict", gw.ErrorCalls[0].ErrorCode)
+	t.Log("step 6 complete: scope expiry enforced; task not re-dispatched with expired credentials ✓")
 
 	pol.ScopeExpired = false
 	gw.ErrorCalls = nil
@@ -590,10 +665,10 @@ func TestRecoveryManagerDemoFlow(t *testing.T) {
 	mon.UntrackedIDs = nil
 	mem.Records = mem.Records[:0]
 
-	// ── Step 6: Vault Down During Revocation ──────────────────────────────
+	// ── Step 7: Vault Down During Revocation ──────────────────────────────
 	// Revocation fails but termination must NOT be blocked (§13.3).
 	t.Log("─────────────────────────────────────────────────────")
-	t.Log("step 6: Vault unavailable — revocation fails; termination must not block")
+	t.Log("step 7: Vault unavailable — revocation fails; termination must not block")
 
 	pol.RevokeFails = true
 	tsVaultDown := activeTask("task-vault-1", "orch-vault-1", 0)
@@ -608,24 +683,32 @@ func TestRecoveryManagerDemoFlow(t *testing.T) {
 	case <-done:
 		// Good — HandleRecovery returned despite Vault being down.
 	case <-time.After(2 * time.Second):
-		t.Fatal("step 6: HandleRecovery blocked — must not block on revocation failure")
+		t.Fatal("step 7: HandleRecovery blocked — must not block on revocation failure")
 	}
 
 	if lastTransition(mon).NewState != types.StateTimedOut {
-		t.Fatalf("step 6: state = %q, want TIMED_OUT — termination must proceed", lastTransition(mon).NewState)
+		t.Fatalf("step 7: state = %q, want TIMED_OUT — termination must proceed", lastTransition(mon).NewState)
 	}
 	if len(gw.TerminateCalls) == 0 {
-		t.Fatal("step 6: agent_terminate not sent — termination must proceed even when Vault is down")
+		t.Fatal("step 7: agent_terminate not sent — termination must proceed even when Vault is down")
 	}
-	t.Logf("step 6: terminated despite Vault failure — state=TIMED_OUT agent_terminate_sent=true")
-	t.Log("step 6: revocation retry scheduled in background (non-blocking)")
-	t.Log("step 6 complete: Vault outage did not block task termination ✓")
+	t.Logf("step 7: terminated despite Vault failure — state=TIMED_OUT agent_terminate_sent=true")
+	t.Log("step 7: revocation retry scheduled in background goroutine (non-blocking)")
+	t.Log("step 7 complete: Vault outage did not block task termination ✓")
 
 	t.Log("─────────────────────────────────────────────────────")
-	t.Log("demo summary: Recovery Manager completed all 6 steps against mock dependencies")
+	t.Log("demo summary: Recovery Manager completed all 7 steps against mock dependencies")
 	t.Log("demo summary: no real Vault, NATS broker, or database was used")
-	t.Logf("demo summary: total recovery attempts=%d | revocations=%d | agent terminates=%d",
-		0, // counted per step
+	t.Log("demo summary:")
+	t.Log("  step 1 — timeout:           TIMED_OUT (timeout is always terminal, never retried)")
+	t.Log("  step 2 — agent recovering:  no re-dispatch (M5 trusts self-healing agent)")
+	t.Log("  step 3 — agent terminated:  re-dispatched (attempt 1); policy_scope unchanged")
+	t.Log("  step 4 — agent terminated:  re-dispatched (attempt 2); retry budget preserved")
+	t.Log("  step 5 — max retries:       FAILED/MAX_RETRIES_EXCEEDED (budget=3 exhausted)")
+	t.Log("  step 6 — scope expired:     FAILED/SCOPE_EXPIRED (Vault invalidated credentials)")
+	t.Log("  step 7 — vault down:        TIMED_OUT; revocation retried in background goroutine")
+	t.Logf("demo summary: total successful re-dispatches=%d | step-7 revocations=%d | step-7 agent terminates=%d",
+		totalRedispatches,
 		pol.RevokeCallCount,
 		len(gw.TerminateCalls),
 	)

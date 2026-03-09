@@ -114,7 +114,20 @@ func (m *Manager) HandleRecovery(ts *types.TaskState, reason types.RecoveryReaso
 		m.terminateTask(ts, types.ErrCodeTimedOut, types.StateTimedOut,
 			fmt.Sprintf("task exceeded timeout_seconds after %d retries", ts.RetryCount))
 
-	case types.RecoveryReasonAgentRecovering, types.RecoveryReasonAgentTerminated:
+	case types.RecoveryReasonAgentRecovering:
+		// Agent is alive and self-healing — trust it. Do NOT re-dispatch a competing agent.
+		// The existing per-task timeout goroutine in Monitor is the safety net:
+		//   - If the agent recovers → it reports ACTIVE → Monitor transitions RUNNING (no M5 action needed)
+		//   - If the agent gives up → it reports TERMINATED → M5 re-dispatches via AgentTerminated below
+		//   - If the agent hangs forever → timeout fires → M5 terminates (TIMED_OUT, no retry)
+		// Re-dispatching here would spin up a duplicate agent while the original is still alive.
+		m.logger.Printf(
+			"agent self-recovering: task_id=%s orchestrator_task_ref=%s — monitoring without intervening",
+			ts.TaskID, ts.OrchestratorTaskRef,
+		)
+
+	case types.RecoveryReasonAgentTerminated:
+		// Agent is dead — act immediately. Check retry budget and re-dispatch.
 		m.attemptRecovery(ts, reason)
 
 	default:
