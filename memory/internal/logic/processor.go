@@ -222,12 +222,8 @@ func (p *Processor) SemanticQuery(ctx context.Context, userID, query string, top
 		return nil, err
 	}
 
-	// 2. Search
-	chunks, err := p.repo.Querier().QueryChunks(ctx, storage.QueryChunksParams{
-		UserID:    userUUID,
-		Embedding: embedding,
-		Limit:     int32(topK),
-	})
+	// 2. Search (ordered by distance ASC, then created_at DESC)
+	chunks, err := p.repo.QueryChunksBySimilarity(ctx, userUUID, embedding, int32(topK))
 	if err != nil {
 		return nil, err
 	}
@@ -235,21 +231,25 @@ func (p *Processor) SemanticQuery(ctx context.Context, userID, query string, top
 	// 3. Populate Results
 	var results []QueryResult
 	for _, c := range chunks {
-		// Calculate similarity (mocked as random since distance from <=> isn't returned by pgx natively without extra select fields)
-		// Real impl would select the distance and convert to similarity: 1 - distance
-		sim := rand.Float64()
+		sim := 1.0 - c.Distance
+		if sim < 0 {
+			sim = 0
+		}
+		if sim > 1 {
+			sim = 1
+		}
 
 		refs, err := p.repo.Querier().GetSourceReferencesByTarget(ctx, storage.GetSourceReferencesByTargetParams{
 			UserID:   userUUID,
-			TargetID: c.ID,
+			TargetID: c.Chunk.ID,
 		})
 		if err != nil {
 			return nil, err
 		}
 
 		results = append(results, QueryResult{
-			ChunkID:          formatUUID(c.ID),
-			Text:             c.RawText,
+			ChunkID:          formatUUID(c.Chunk.ID),
+			Text:             c.Chunk.RawText,
 			SimilarityScore:  sim,
 			SourceReferences: refs,
 		})
