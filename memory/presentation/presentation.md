@@ -120,6 +120,18 @@ How do we give agents **useful memory** and provide a clean API to the other ser
 
 ---
 
+## Personal Info Flow
+
+![Personal Info Flow](/Users/colbydobson/cs/cerberOS/memory/personal_info_flow.png)
+
+---
+
+## Query and Ranking Flow
+
+![Query Ranking Flow](/Users/colbydobson/cs/cerberOS/memory/query_ranking_flow.png)
+
+---
+
 ## Why This Covers What We Need
 
 - Conversation recall: chat transcript
@@ -155,6 +167,7 @@ How do we give agents **useful memory** and provide a clean API to the other ser
 
 ## Concurrency and Correctness
 
+- The service is designed to be concurrent and scalable.
 - Fact updates use optimistic concurrency (`version`) to avoid lost updates
 - Retries use idempotency keys so network retries do not duplicate writes
 - Mismatched retries return explicit `409 conflict`
@@ -188,14 +201,6 @@ How do we give agents **useful memory** and provide a clean API to the other ser
 - Naive/unoptimized implementations for the sake of simplicity early
 
 <small>We optimized for stable interfaces first, perfect internals second.</small>
-
----
-
-## Evolution Plan
-
-1. Expand tests around ownership, conflict, ordering, and scoring
-2. Keep README + Swagger synced as the contract source
-3. Add explicit migration playbook for schema/index updates
 
 ---
 

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math/rand"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -17,17 +16,6 @@ import (
 // Embedder represents a service that can generate vector embeddings
 type Embedder interface {
 	Embed(ctx context.Context, text string) (pgvector.Vector, error)
-}
-
-// MockEmbedder implements a fake Embedder returning random 1536-dim vectors
-type MockEmbedder struct{}
-
-func (m *MockEmbedder) Embed(ctx context.Context, text string) (pgvector.Vector, error) {
-	v := make([]float32, 1536)
-	for i := range v {
-		v[i] = rand.Float32()
-	}
-	return pgvector.NewVector(v), nil
 }
 
 // OpenAIEmbedder implements Embedder using the OpenAI API
