@@ -53,4 +53,4 @@ The IO component implements interfaces defined in `io/io-interfaces.md`:
 
 ## Context
 
-Claude's context files are stored in `llmContext/` at the project root.
+Claude's context files are stored in `context/` at the project root.

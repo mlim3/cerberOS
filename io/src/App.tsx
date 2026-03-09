@@ -7,6 +7,7 @@ import type { UISettings } from './components/SettingsPanel'
 import ActivityLog from './components/ActivityLog'
 import type { LogEntry } from './components/ActivityLog'
 import { streamOrchestratorReply } from './api/orchestrator'
+import { createWebSurface, type SurfaceAdapter } from './surface'
 import './App.css'
 
 const SETTINGS_STORAGE_KEY = 'cerberos-io-settings'
@@ -228,6 +229,126 @@ function App() {
     document.documentElement.setAttribute('data-high-contrast', uiSettings.highContrast ? 'true' : 'false')
   }, [uiSettings.fontSizeScale, uiSettings.highContrast])
 
+  // Refs to hold callbacks for SurfaceAdapter integration
+  const tasksRef = useRef(tasks)
+  const uiSettingsRef = useRef(uiSettings)
+  const addLogEntryRef = useRef(addLogEntry)
+
+  // Keep refs updated
+  tasksRef.current = tasks
+  uiSettingsRef.current = uiSettings
+
+  // This needs to be after addLogEntry is defined
+  useEffect(() => {
+    addLogEntryRef.current = addLogEntry
+  }, [addLogEntry])
+
+  // Initialize SurfaceAdapter for orchestrator integration
+  // This does NOT change existing React behavior - it's an optional bridge
+  useEffect(() => {
+    const surface = createWebSurface({ surfaceId: 'cerberos-web-dashboard' })
+
+    // Create wrapper that has access to current state
+    const handleSendMessageWrapper = async (taskId: string, userContent: string) => {
+      const currentTasks = tasksRef.current
+      const task = currentTasks.find(t => t.id === taskId)
+      if (!task) return
+      const userMsg: Message = {
+        id: nextId(),
+        role: 'user',
+        content: userContent,
+        timestamp: timeLabel(),
+      }
+      setTasks(prev =>
+        prev.map(t =>
+          t.id === taskId ? { ...t, messages: [...t.messages, userMsg] } : t
+        )
+      )
+
+      const settings = uiSettingsRef.current
+      if (settings.showActivityLog) {
+        addLogEntryRef.current?.({
+          type: 'user_message',
+          taskId,
+          taskTitle: task.title.slice(0, 20),
+          message: `User: "${userContent.slice(0, 50)}${userContent.length > 50 ? '…' : ''}"`,
+        })
+      }
+
+      setStreamingForTaskId(taskId)
+      setStreamingContent('')
+      const history = task.messages.map(m => ({
+        role: m.role as 'user' | 'assistant',
+        content: m.content,
+      }))
+      let full = ''
+      try {
+        for await (const chunk of streamOrchestratorReply(
+          taskId,
+          userContent,
+          [...history, { role: 'user', content: userContent }]
+        )) {
+          full = chunk
+          setStreamingContent(chunk)
+        }
+      } finally {
+        setStreamingForTaskId(null)
+        setStreamingContent('')
+        if (full) {
+          const agentMsg: Message = {
+            id: nextId(),
+            role: 'agent',
+            content: full,
+            timestamp: timeLabel(),
+          }
+          setTasks(prev =>
+            prev.map(t =>
+              t.id === taskId ? { ...t, messages: [...t.messages, agentMsg] } : t
+            )
+          )
+
+          if (settings.showActivityLog) {
+            addLogEntryRef.current?.({
+              type: 'agent_response',
+              taskId,
+              taskTitle: task.title.slice(0, 20),
+              message: `Agent replied (${full.length} chars)`,
+            })
+          }
+        }
+      }
+    }
+
+    // Register React callbacks with the adapter
+    // The adapter can now be used by external orchestrator code
+    surface.registerTaskCallbacks({
+      onSelectTask: setSelectedTaskId,
+      onSendMessage: handleSendMessageWrapper,
+    })
+
+    // Also expose the tasks for the adapter to read
+    surface.updateTasks(tasks)
+
+    // Keep tasks in sync
+    const unsubscribe = surface.onStatusUpdate((update) => {
+      // When status updates come in, we could update tasks here
+      // For now, just log
+      console.log('[App] Surface status update:', update.taskId, update.status)
+    })
+
+    // Expose the adapter globally for orchestrator integration
+    // @ts-expect-error - Adding to window for external access
+    window.__cerberosSurface = surface
+
+    console.log('[App] SurfaceAdapter initialized')
+    return () => {
+      unsubscribe()
+      surface.shutdown()
+      // @ts-expect-error
+      delete window.__cerberosSurface
+    }
+  }, []) // Empty deps - only runs once on mount
+
   useEffect(() => {
     const id = setInterval(() => {
       const now = Date.now()
@@ -307,6 +428,16 @@ function App() {
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [tasks, selectedTaskId, showSettings])
+
+  // Keep surface adapter synced with tasks
+  useEffect(() => {
+    // @ts-expect-error - window property for external access
+    const surface = window.__cerberosSurface as SurfaceAdapter | undefined
+    if (surface && 'updateTasks' in surface) {
+      // @ts-expect-error - WebSurfaceAdapter has updateTasks
+      surface.updateTasks(tasks)
+    }
+  }, [tasks])
 
   const onSendMessage = useCallback(
     async (taskId: string, userContent: string) => {
