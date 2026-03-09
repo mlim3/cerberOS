@@ -73,63 +73,89 @@ style: |
 ---
 
 # Memory Service
-## Design Thinking, not just endpoints
 
-<small>How we chose shape, boundaries, and tradeoffs</small>
+## Our Design Thinking
+
+<small>How we decided architecture, boundaries, and tradeoffs</small>
 
 ---
 
 ## The Core Question
 
-How do we give agents **useful memory** without making every caller become a retrieval engineer?
+How do we give agents **useful memory** and provide a clean API to the other services?
 
-> Design target: low caller complexity, high internal rigor.
+> Our goal: simple API for callers, strong logic inside the memory service, don't try to handle too much.
 
 ---
 
 ## Design Lens
 
-- Keep API intent-focused: `save`, `query`, `all`, targeted fact correction
-- Keep architecture future-ready: logical sharding keys from day one
-- Keep behavior predictable: standard envelope + typed errors
-- Keep ownership strict: user-scoped access and `not_found` masking
+- API should match user intent, conforming to other service's requirements
+- Schema should be future-friendly: sharding keys from day one
+- Responses should be uniform: envelope + typed errors
+- Ownership should be strict: user-scoped access + `not_found` masking
 
 ---
 
 ## Why a Facade API?
 
-- Callers send **raw content**, not chunking/embedding params
-- Service owns pipeline choices and can evolve internally
-- Fewer integration mistakes across the OS
-- Easier to enforce traceability and observability centrally
+- We let callers send **raw text**, not chunk sizes or embedding config
+- This keeps other teams fast and reduces integration bugs
+- We can improve internals later without breaking API consumers
+- Traceability is easier because one service owns the full pipeline
 
 ---
 
-## Data Model Choices
+## Schema Design (What + Why)
 
-- `chat_schema`: immutable transcript, append-only
-- `personal_info_schema`: semantic chunks + structured facts + source links
-- `agent_logs_schema`: auditable agent execution timeline
-- `service_log_schema`: operational telemetry
+- `identity_schema`: canonical users for ownership checks
+- `chat_schema`: immutable conversation timeline (short-term recall)
+- `personal_info_schema`: chunks + facts + source links (long-term memory)
+- `agent_logs_schema`: task execution/audit trail (agent transparency)
+- `service_log_schema`: operational events and diagnostics (observability)
 
-<small>Separation by intent keeps query patterns clean.</small>
+<small>One schema per responsibility keeps boundaries clear and migrations safer.</small>
+
+---
+
+## Why This Covers What We Need
+
+- Conversation recall: chat transcript
+- Semantic retrieval: chunk + vector search
+- Fact correction: versioned fact updates/deletes
+- Source traceability: source reference links
+- Agent auditability: task execution logs
+- Platform observability: system events
+
+<small>This split ensures every major memory-system use case has a clear home.</small>
 
 ---
 
 ## Retrieval Strategy
 
-- pgvector in Postgres keeps relational + semantic retrieval together
-- ANN search for practical latency at scale
-- API returns **similarity score [0,1]**, not raw distance
-- Tie-break with `created_at DESC` for deterministic responses
+- We use `pgvector` inside Postgres so relational + semantic data stay in one system.
+- We use ANN search because exact vector search gets slow as data grows.
+- Query returns a ranked list of matches, and each match includes a **similarity score [0,1]**.
+- Results are sorted by relevance first; if two are equally relevant, the newer one comes first for stable output.
+
+<small>In short: one database, fast enough search, easy scores, deterministic results.</small>
+
+---
+
+## What These Mean In Practice
+
+- **One DB (`pgvector` + SQL):** simpler ops, fewer sync problems.
+- **ANN search:** small precision tradeoff for lower latency.
+- **Score [0,1]:** easier for clients to read and threshold.
+- **Tie-break by recency:** when two chunks are equally close, newer context is usually more useful.
 
 ---
 
 ## Concurrency and Correctness
 
-- Fact updates use optimistic concurrency (`version`)
-- Retry-safe writes use idempotency keys
-- Conflict is explicit (`409`) when intent diverges
+- Fact updates use optimistic concurrency (`version`) to avoid lost updates
+- Retries use idempotency keys so network retries do not duplicate writes
+- Mismatched retries return explicit `409 conflict`
 
 > We prefer explicit conflict over silent overwrite.
 
@@ -155,9 +181,9 @@ How do we give agents **useful memory** without making every caller become a ret
 
 ## Tradeoffs We Accepted
 
-- More complexity inside service, less at the edge
-- Slightly stricter API contract, better long-term consistency
-- Initial mock components (embedder/extractor) to unblock shape validation
+- More complexity inside memory service, less complexity for every caller
+- Strict contracts now to reduce drift later
+- Mock embedding/extraction early so we could validate API shape first
 
 <small>We optimized for stable interfaces first, perfect internals second.</small>
 
@@ -166,15 +192,45 @@ How do we give agents **useful memory** without making every caller become a ret
 ## Evolution Plan
 
 1. Replace mock embedding/fact extraction with production adapters
-2. Expand test matrix around ownership, conflicts, and retrieval ranking
-3. Tighten docs/swagger as contract source of truth
-4. Add migration discipline for schema/index changes
+2. Expand tests around ownership, conflict, ordering, and scoring
+3. Keep README + Swagger synced as the contract source
+4. Add explicit migration playbook for schema/index updates
+
+---
+
+## Demo Set We Built
+
+- `demo/01_health.sh`
+- Shows service and database readiness.
+- `demo/02_chat_idempotency.sh`
+- Shows message insert, retry safety, and conflict handling.
+- `demo/03_personal_info_lifecycle.sh`
+- Shows save, semantic query, fact update, and fact delete.
+- `demo/04_agent_logs.sh`
+- Shows task execution timeline write/read.
+- `demo/05_system_and_vault.sh`
+- Shows system telemetry + vault access control behavior.
+
+---
+
+## What The Demos Prove
+
+- API contracts are usable end-to-end from a client perspective.
+- Core data paths work: chat, memory, facts, agent logs, system logs.
+- Guardrails work where expected:
+- idempotency conflict detection
+- optimistic concurrency behavior
+- vault key enforcement
+- The service is explainable in a live walkthrough, not just in docs.
+
+<small>Run sequence: `demo/00_prepare.sh` then `demo/run_all.sh`.</small>
 
 ---
 
 # Final Principle
 
-## Memory should feel simple to use,
-## but never simplistic under the hood.
+## Memory should feel simple to call,
 
-<small>Design for trustworthy behavior before feature volume.</small>
+## but deliberate under the hood.
+
+<small>Our principle: trustworthy behavior first, then feature expansion.</small>
