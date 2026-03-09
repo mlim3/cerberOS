@@ -76,6 +76,8 @@ style: |
 
 ## Our Design Thinking
 
+<small>Colby Dobson and Aniket Thakker</small>
+<br/>
 <small>How we decided architecture, boundaries, and tradeoffs</small>
 
 ---
@@ -183,7 +185,7 @@ How do we give agents **useful memory** and provide a clean API to the other ser
 
 - More complexity inside memory service, less complexity for every caller
 - Strict contracts now to reduce drift later
-- Mock embedding/extraction early so we could validate API shape first
+- Naive/unoptimized implementations for the sake of simplicity early
 
 <small>We optimized for stable interfaces first, perfect internals second.</small>
 
@@ -191,10 +193,9 @@ How do we give agents **useful memory** and provide a clean API to the other ser
 
 ## Evolution Plan
 
-1. Replace mock embedding/fact extraction with production adapters
-2. Expand tests around ownership, conflict, ordering, and scoring
-3. Keep README + Swagger synced as the contract source
-4. Add explicit migration playbook for schema/index updates
+1. Expand tests around ownership, conflict, ordering, and scoring
+2. Keep README + Swagger synced as the contract source
+3. Add explicit migration playbook for schema/index updates
 
 ---
 
