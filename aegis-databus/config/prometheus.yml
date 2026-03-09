@@ -6,3 +6,8 @@ scrape_configs:
     static_configs:
       - targets:
           - "nats-exporter:7777"
+  # DataBus metrics (when running on host: host.docker.internal; or add databus to docker-compose)
+  - job_name: "aegis-databus"
+    static_configs:
+      - targets:
+          - "host.docker.internal:9091"

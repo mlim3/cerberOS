@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"time"
 
+	"aegis-databus/pkg/security"
+
 	"github.com/nats-io/nats.go"
 )
 
@@ -50,6 +52,17 @@ type RequestReplyHandler func(subject string, request []byte) (reply []byte, err
 
 // SubscribeRequestReply subscribes to a subject and replies to requests.
 func SubscribeRequestReply(ctx context.Context, nc *nats.Conn, subject string, handler RequestReplyHandler) error {
+	return SubscribeRequestReplyWithACL(ctx, nc, "", subject, handler)
+}
+
+// SubscribeRequestReplyWithACL subscribes with ACL check (component must be allowed to subscribe).
+// Use for request-reply responders to enforce SR-DB-003 subject-level ACL.
+func SubscribeRequestReplyWithACL(ctx context.Context, nc *nats.Conn, component, subject string, handler RequestReplyHandler) error {
+	if component != "" {
+		if err := security.CheckSubscribe(component, subject); err != nil {
+			return err
+		}
+	}
 	sub, err := nc.Subscribe(subject, func(m *nats.Msg) {
 		if m.Reply == "" {
 			return

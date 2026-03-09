@@ -161,6 +161,23 @@ func (m *MockMemoryClient) AppendAuditLog(ctx context.Context, entry AuditLogEnt
 	return nil
 }
 
+func (m *MockMemoryClient) ListAuditLogs(ctx context.Context, limit int) ([]AuditLogEntry, error) {
+	_ = ctx
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	n := len(m.auditLogs)
+	if limit <= 0 || limit > n {
+		limit = n
+	}
+	start := n - limit
+	if start < 0 {
+		start = 0
+	}
+	out := make([]AuditLogEntry, limit)
+	copy(out, m.auditLogs[start:n])
+	return out, nil
+}
+
 func (m *MockMemoryClient) GetNKey(ctx context.Context, component string) (string, error) {
 	_ = ctx
 	m.mu.RLock()

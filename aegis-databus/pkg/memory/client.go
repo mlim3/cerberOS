@@ -42,6 +42,7 @@ type AuditLogEntry struct {
 	Subject       string
 	Component     string
 	CorrelationID string
+	TraceID       string // Design Principle 4: observable operations — trace for message flows
 	Timestamp     time.Time
 	SizeBytes     int
 }
@@ -60,6 +61,7 @@ type MemoryClient interface {
 	MarkOutboxSent(ctx context.Context, id string, sequence uint64) error
 
 	AppendAuditLog(ctx context.Context, entry AuditLogEntry) error
+	ListAuditLogs(ctx context.Context, limit int) ([]AuditLogEntry, error)
 	GetNKey(ctx context.Context, component string) (string, error)
 	Ping(ctx context.Context) error
 }

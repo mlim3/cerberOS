@@ -89,6 +89,15 @@ func EnsureStreamsWithReplicas(nc *nats.Conn, replicas int) error {
 			Discard:    nats.DiscardOld,
 			Duplicates: dedupWindow120Sec,
 		},
+		{
+			Name:       bus.StreamDLQ,
+			Subjects:   []string{bus.SubjectDLQ, bus.SubjectDLQPattern},
+			MaxAge:     maxAgeSevenDays,
+			MaxBytes:   1 * 1024 * 1024 * 1024, // 1 GB
+			Replicas:   replicas,
+			Discard:    nats.DiscardOld,
+			Duplicates: dedupWindow120Sec,
+		},
 	}
 
 	for _, cfg := range configs {

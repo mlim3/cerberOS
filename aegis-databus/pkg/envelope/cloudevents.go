@@ -12,6 +12,7 @@ import (
 var ErrInvalidEnvelope = errors.New("invalid CloudEvent envelope")
 
 // CloudEvent represents CloudEvents 1.0 envelope.
+// TraceID supports Design Principle 4 (observable operations / tracing).
 type CloudEvent struct {
 	SpecVersion     string      `json:"specversion"`
 	ID              string      `json:"id"`
@@ -19,8 +20,29 @@ type CloudEvent struct {
 	Type            string      `json:"type"`
 	Time            string      `json:"time"`
 	CorrelationID   string      `json:"correlationid"`
+	TraceID         string      `json:"traceid,omitempty"` // W3C Trace Context or custom trace ID
 	DataContentType string      `json:"datacontenttype"`
 	Data            interface{} `json:"data"`
+}
+
+// ParseMetadata extracts source, correlationid, and traceid from CloudEvents JSON.
+// Used for audit logging — never log payload content.
+// traceid supports Design Principle 4 (observable operations / tracing).
+func ParseMetadata(data []byte) (source, correlationID, traceID string) {
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		return "", "", ""
+	}
+	if s, ok := m["source"].(string); ok {
+		source = s
+	}
+	if c, ok := m["correlationid"].(string); ok {
+		correlationID = c
+	}
+	if t, ok := m["traceid"].(string); ok {
+		traceID = t
+	}
+	return source, correlationID, traceID
 }
 
 // Validate returns nil if the envelope is valid CloudEvents 1.0.
@@ -45,6 +67,7 @@ func Validate(data []byte) error {
 }
 
 // Build creates a valid CloudEvent with defaults.
+// Optionally pass a traceID for distributed tracing (Design Principle 4).
 func Build(source, eventType string, data interface{}) CloudEvent {
 	return CloudEvent{
 		SpecVersion:     "1.0",
@@ -53,9 +76,15 @@ func Build(source, eventType string, data interface{}) CloudEvent {
 		Type:            eventType,
 		Time:            time.Now().UTC().Format(time.RFC3339Nano),
 		CorrelationID:   NewID(),
+		TraceID:         "", // Set via SetTraceID for observable flows
 		DataContentType: "application/json",
 		Data:            data,
 	}
+}
+
+// SetTraceID sets the trace ID for distributed tracing.
+func (e *CloudEvent) SetTraceID(traceID string) {
+	e.TraceID = traceID
 }
 
 // MustMarshal returns JSON bytes or panics (use only in controlled paths).

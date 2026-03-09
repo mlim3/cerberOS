@@ -12,14 +12,16 @@ import (
 	"time"
 
 	"aegis-databus/pkg/bus"
+	"aegis-databus/pkg/security"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 )
 
 const (
-	defaultNatsURL  = "nats://127.0.0.1:4222"
-	defaultInterval = 2 * time.Second
-	monitorInterval = 5 * time.Second
+	defaultNatsURL   = "nats://127.0.0.1:4222"
+	defaultInterval  = 2 * time.Second
+	monitorInterval  = 5 * time.Second
+	stubComponentName = "aegis-stubs"
 )
 
 type CloudEvent struct {
@@ -65,12 +67,15 @@ func connect(ctx context.Context, logger *log.Logger) (*nats.Conn, nats.JetStrea
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(500 * time.Millisecond),
 	}
-	if seed := os.Getenv("AEGIS_NKEY_SEED"); seed != "" {
+	if seed, _ := security.GetNKeyFromOpenBao(ctx, "aegis-stubs"); seed != "" {
 		nkeyOpt, err := nkeyAuthOption(seed)
 		if err != nil {
 			return nil, nil, err
 		}
 		options = append([]nats.Option{nkeyOpt}, options...)
+	}
+	if cfg, err := security.TLSConfigFromEnv(); err == nil && cfg != nil {
+		options = append(options, nats.Secure(cfg))
 	}
 
 	nc, err := nats.Connect(url, options...)
@@ -129,7 +134,7 @@ func runTaskRouter(ctx context.Context, logger *log.Logger, js nats.JetStreamCon
 				continue
 			}
 
-			if _, err := js.Publish(bus.SubjectTasksRouted, data); err != nil {
+			if _, err := bus.PublishWithACL(js, stubComponentName, bus.SubjectTasksRouted, data); err != nil {
 				logger.Printf("task-router publish failed subject=%s size=%d err=%v", bus.SubjectTasksRouted, len(data), err)
 				continue
 			}
@@ -139,7 +144,7 @@ func runTaskRouter(ctx context.Context, logger *log.Logger, js nats.JetStreamCon
 }
 
 func runOrchestrator(ctx context.Context, logger *log.Logger, js nats.JetStreamContext) {
-	sub, err := js.Subscribe(bus.SubjectTasksRouted, func(msg *nats.Msg) {
+	sub, err := bus.SubscribeWithACL(js, stubComponentName, bus.SubjectTasksRouted, func(msg *nats.Msg) {
 		correlation := extractCorrelationID(msg.Data)
 		logger.Printf("orchestrator received subject=%s size=%d correlation=%s", msg.Subject, len(msg.Data), correlation)
 		msg.Ack()
@@ -162,7 +167,7 @@ func runOrchestrator(ctx context.Context, logger *log.Logger, js nats.JetStreamC
 			logger.Printf("orchestrator marshal failed: %v", err)
 			return
 		}
-		if _, err := js.Publish(bus.SubjectAgentsCreated, data); err != nil {
+		if _, err := bus.PublishWithACL(js, stubComponentName, bus.SubjectAgentsCreated, data); err != nil {
 			logger.Printf("orchestrator publish failed subject=%s size=%d err=%v", bus.SubjectAgentsCreated, len(data), err)
 			return
 		}
@@ -178,7 +183,7 @@ func runOrchestrator(ctx context.Context, logger *log.Logger, js nats.JetStreamC
 }
 
 func runAgentFactory(ctx context.Context, logger *log.Logger, js nats.JetStreamContext) {
-	sub, err := js.Subscribe(bus.SubjectAgentsCreated, func(msg *nats.Msg) {
+	sub, err := bus.SubscribeWithACL(js, stubComponentName, bus.SubjectAgentsCreated, func(msg *nats.Msg) {
 		correlation := extractCorrelationID(msg.Data)
 		logger.Printf("agent-factory received subject=%s size=%d correlation=%s", msg.Subject, len(msg.Data), correlation)
 		msg.Ack()
@@ -201,7 +206,7 @@ func runAgentFactory(ctx context.Context, logger *log.Logger, js nats.JetStreamC
 			logger.Printf("agent-factory marshal failed: %v", err)
 			return
 		}
-		if _, err := js.Publish(bus.SubjectRuntimeCompleted, data); err != nil {
+		if _, err := bus.PublishWithACL(js, stubComponentName, bus.SubjectRuntimeCompleted, data); err != nil {
 			logger.Printf("agent-factory publish failed subject=%s size=%d err=%v", bus.SubjectRuntimeCompleted, len(data), err)
 			return
 		}
@@ -217,7 +222,7 @@ func runAgentFactory(ctx context.Context, logger *log.Logger, js nats.JetStreamC
 }
 
 func runVault(ctx context.Context, logger *log.Logger, js nats.JetStreamContext) {
-	sub, err := js.Subscribe(bus.SubjectVault, func(msg *nats.Msg) {
+	sub, err := bus.SubscribeWithACL(js, stubComponentName, bus.SubjectVault, func(msg *nats.Msg) {
 		correlation := extractCorrelationID(msg.Data)
 		logger.Printf("vault received subject=%s size=%d correlation=%s", msg.Subject, len(msg.Data), correlation)
 		msg.Ack()
@@ -238,7 +243,7 @@ func runMonitoring(ctx context.Context, logger *log.Logger, js nats.JetStreamCon
 		{bus.SubjectTasks, "mon-tasks"}, {bus.SubjectAgents, "mon-agents"}, {bus.SubjectRuntime, "mon-runtime"},
 		{bus.SubjectVault, "mon-vault"}, {bus.SubjectMemory, "mon-mem"}, {bus.SubjectMonitoring, "mon-mon"},
 	} {
-		sub, err := js.Subscribe(s.subj, func(msg *nats.Msg) {
+		sub, err := bus.SubscribeWithACL(js, stubComponentName, s.subj, func(msg *nats.Msg) {
 			atomic.AddUint64(&total, 1)
 			msg.Ack()
 		}, nats.Durable(s.dura), nats.ManualAck())

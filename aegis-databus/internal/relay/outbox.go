@@ -7,6 +7,9 @@ import (
 	"os"
 	"time"
 
+	"aegis-databus/internal/metrics"
+	"aegis-databus/pkg/bus"
+	"aegis-databus/pkg/envelope"
 	"aegis-databus/pkg/memory"
 	"github.com/nats-io/nats.go"
 )
@@ -45,13 +48,8 @@ func (r *OutboxRelay) Start(ctx context.Context) {
 
 	backoff := initialBackoff
 
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-
+	// Process once immediately, then on each tick
+	doFetch := func() {
 		entries, err := r.MemoryClient.FetchPendingOutbox(ctx, r.MaxBatch)
 		if err != nil {
 			r.Logger.Printf("fetch failed: %v", err)
@@ -59,7 +57,7 @@ func (r *OutboxRelay) Start(ctx context.Context) {
 				return
 			}
 			backoff = nextBackoff(backoff)
-			continue
+			return
 		}
 		backoff = initialBackoff
 
@@ -68,7 +66,7 @@ func (r *OutboxRelay) Start(ctx context.Context) {
 				return
 			}
 
-			ack, err := r.JS.Publish(entry.Subject, entry.Payload)
+			ack, err := bus.PublishValidated(r.JS, entry.Subject, entry.Payload)
 			if err != nil {
 				r.Logger.Printf("publish failed subject=%s size=%d attempt=%d err=%v",
 					entry.Subject,
@@ -84,8 +82,31 @@ func (r *OutboxRelay) Start(ctx context.Context) {
 
 			if err := r.MemoryClient.MarkOutboxSent(ctx, entry.ID, ack.Sequence); err != nil {
 				r.Logger.Printf("mark sent failed id=%s err=%v", entry.ID, err)
+			} else {
+				metrics.OutboxRelayProcessed.Inc()
+				// Audit log: metadata only, no payload (SR-DB-005); traceid for Design Principle 4
+				source, corrID, traceID := envelope.ParseMetadata(entry.Payload)
+				_ = r.MemoryClient.AppendAuditLog(ctx, memory.AuditLogEntry{
+					ID:            entry.ID,
+					Subject:       entry.Subject,
+					Component:     source,
+					CorrelationID: corrID,
+					TraceID:       traceID,
+					Timestamp:     time.Now().UTC(),
+					SizeBytes:     len(entry.Payload),
+				})
 			}
 		}
+	}
+
+	doFetch() // Process immediately (audit demo seeds)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		doFetch()
 	}
 }
 

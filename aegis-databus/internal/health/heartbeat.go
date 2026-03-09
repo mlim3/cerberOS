@@ -6,6 +6,7 @@ import (
 	"log"
 	"time"
 
+	"aegis-databus/internal/metrics"
 	"aegis-databus/pkg/bus"
 	"github.com/nats-io/nats.go"
 )
@@ -41,6 +42,8 @@ func (h *Heartbeat) Start(ctx context.Context) {
 			})
 			if err := h.nc.Publish(bus.SubjectHealthDatabus, payload); err != nil {
 				h.logger.Printf("heartbeat publish failed: %v", err)
+			} else {
+				metrics.HeartbeatsPublished.Inc()
 			}
 		}
 	}

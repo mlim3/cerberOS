@@ -1,6 +1,6 @@
 services:
   nats-1:
-    image: nats:2.10-alpine
+    image: nats:2.9-alpine
     container_name: nats-1
     command: ["-c", "/config/nats-node1.conf"]
     volumes:
@@ -18,7 +18,7 @@ services:
       retries: 3
 
   nats-2:
-    image: nats:2.10-alpine
+    image: nats:2.9-alpine
     container_name: nats-2
     command: ["-c", "/config/nats-node2.conf"]
     volumes:
@@ -33,7 +33,7 @@ services:
       - nats-1
 
   nats-3:
-    image: nats:2.10-alpine
+    image: nats:2.9-alpine
     container_name: nats-3
     command: ["-c", "/config/nats-node3.conf"]
     volumes:

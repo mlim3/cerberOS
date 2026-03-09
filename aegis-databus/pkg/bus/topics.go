@@ -8,6 +8,7 @@ const (
 	StreamVault      = "AEGIS_VAULT"
 	StreamMemory     = "AEGIS_MEMORY"
 	StreamMonitoring = "AEGIS_MONITORING"
+	StreamDLQ        = "AEGIS_DLQ"
 )
 
 const (
@@ -29,6 +30,9 @@ const (
 	SubjectUIAction         = "aegis.ui.action"
 	SubjectHealthDatabus    = "aegis.health.databus"
 	SubjectHealthRecovery   = "aegis.health.recovery_completed"
-	SubjectDLQ              = "aegis.dlq"
-	SubjectPersonalization  = "aegis.personalization.get"
+	SubjectDLQ                 = "aegis.dlq"
+	SubjectDLQPattern          = "aegis.dlq.>" // SR-DB-006: admin-only subscribe
+	SubjectPersonalization     = "aegis.personalization.get"
+	SubjectMonitoringHealth    = "aegis.monitoring.health.>"   // FR-DB-006: high priority
+	SubjectMonitoringResource  = "aegis.monitoring.resource.>" // FR-DB-006: standard priority
 )

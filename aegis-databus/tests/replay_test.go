@@ -44,3 +44,53 @@ func TestReplay(t *testing.T) {
 	}
 	t.Logf("replay: got %d messages", len(msgs))
 }
+
+// TestPullFetch demonstrates Interface 2: pull_fetch for Data Ingestion Pipeline.
+func TestPullFetch(t *testing.T) {
+	ctx := context.Background()
+	container, err := tcnats.RunContainer(ctx)
+	if err != nil {
+		t.Fatalf("start NATS: %v", err)
+	}
+	t.Cleanup(func() { _ = container.Terminate(ctx) })
+	uri, _ := container.ConnectionString(ctx)
+
+	nc, _ := nats.Connect(uri)
+	t.Cleanup(func() { nc.Close() })
+	_ = streams.EnsureStreamsWithReplicas(nc, 1)
+
+	js, _ := nc.JetStream()
+	stream := bus.StreamTasks
+	consumer := "pull-fetch-test"
+	subject := "aegis.tasks.pullfetch"
+
+	// Create durable pull consumer
+	_, err = js.AddConsumer(stream, &nats.ConsumerConfig{
+		Durable:       consumer,
+		DeliverPolicy: nats.DeliverAllPolicy,
+		AckPolicy:     nats.AckExplicitPolicy,
+	})
+	if err != nil {
+		t.Fatalf("add consumer: %v", err)
+	}
+
+	// Publish 3 messages
+	for i := 0; i < 3; i++ {
+		js.Publish(subject, []byte("pull-msg"))
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	// PullFetch batch of 5
+	ctx2, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	msgs, err := bus.PullFetch(ctx2, js, stream, consumer, 5)
+	if err != nil {
+		t.Fatalf("PullFetch: %v", err)
+	}
+	if len(msgs) != 3 {
+		t.Errorf("expected 3 messages, got %d", len(msgs))
+	}
+	for _, m := range msgs {
+		m.Ack()
+	}
+}
