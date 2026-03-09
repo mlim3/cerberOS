@@ -122,13 +122,15 @@ How do we give agents **useful memory** and provide a clean API to the other ser
 
 ## Personal Info Flow
 
-![Personal Info Flow](/Users/colbydobson/cs/cerberOS/memory/personal_info_flow.png)
+<div align="center">
+  <img src="personal_info_flow.png" width="500" alt="Personal Info Flow" />
+</div>
 
 ---
 
 ## Query and Ranking Flow
 
-![Query Ranking Flow](/Users/colbydobson/cs/cerberOS/memory/query_ranking_flow.png)
+![Query Ranking Flow](query_ranking_flow.png)
 
 ---
 
@@ -167,7 +169,8 @@ How do we give agents **useful memory** and provide a clean API to the other ser
 
 ## Concurrency and Correctness
 
-- The service is designed to be concurrent and scalable.
+- Go HTTP server handles requests concurrently (goroutine-per-request).
+- DB access uses a connection pool (`pgxpool`) for safe parallel queries.
 - Fact updates use optimistic concurrency (`version`) to avoid lost updates
 - Retries use idempotency keys so network retries do not duplicate writes
 - Mismatched retries return explicit `409 conflict`
@@ -182,6 +185,26 @@ How do we give agents **useful memory** and provide a clean API to the other ser
 - Constrain lookups by owner keys
 - Return `not_found` to avoid cross-user information leaks
 - Internal vault access protected and audited
+
+---
+
+## Vault Security Model
+
+- Vault endpoints are internal-only and require `X-API-KEY` (`INTERNAL_VAULT_API_KEY`).
+- Secret values are never stored as plaintext in Postgres.
+- Encryption uses AES-256-GCM in the service layer (`VaultManager`).
+- `VAULT_MASTER_KEY` is required at startup and kept outside the database.
+- For each secret write:
+  - generate a fresh nonce,
+  - encrypt plaintext -> ciphertext,
+  - store ciphertext + nonce in `vault_schema.secrets`.
+  - Every vault access is logged to `service_log_schema.system_events` as `VAULT_ACCESS`.
+
+---
+
+## Vault Encryption Flow
+
+![Vault Flow](vault_flow.png)
 
 ---
 
@@ -216,6 +239,19 @@ How do we give agents **useful memory** and provide a clean API to the other ser
 - Shows task execution timeline write/read.
 - `demo/05_system_and_vault.sh`
 - Shows system telemetry + vault access control behavior.
+
+---
+
+## Upcoming Features
+
+- Certificate store (managed cert metadata and secure references)
+- CLI experience for memory/vault operations and diagnostics
+- Skills store for reusable agent capabilities and metadata
+- General document store so other services can persist arbitrary docs/notes they need
+- Additional hardening, observability, and orchestration integrations
+- And much, much more as the AI OS platform expands
+
+<small>Design goal: keep one coherent memory/security platform while adding new capability domains.</small>
 
 ---
 
