@@ -115,36 +115,11 @@ func (h *SystemLogHandler) HandleCreateSystemEvent(w http.ResponseWriter, r *htt
 		return
 	}
 
-	resp := SystemEventResponse{
-		EventID:   event.ID.Bytes,
-		Message:   event.Message,
-		CreatedAt: event.CreatedAt.Time,
-	}
-
-	if event.TraceID.Valid {
-		traceID := uuid.UUID(event.TraceID.Bytes)
-		resp.TraceID = &traceID
-	}
-	if event.ServiceName.Valid {
-		serviceName := event.ServiceName.String
-		resp.ServiceName = &serviceName
-	}
-	if event.Severity.Valid {
-		severity := event.Severity.String
-		resp.Severity = &severity
-	}
-	if len(event.Metadata) > 0 {
-		var metadata map[string]any
-		if err := json.Unmarshal(event.Metadata, &metadata); err == nil {
-			resp.Metadata = metadata
-		}
-	}
-
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(SuccessResponse(map[string]any{
-		"eventId":   resp.EventID,
-		"createdAt": resp.CreatedAt,
+		"eventId":   event.ID.Bytes,
+		"createdAt": event.CreatedAt.Time,
 	}))
 }
 
