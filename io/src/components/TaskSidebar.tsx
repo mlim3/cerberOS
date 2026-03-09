@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import type { Task } from '../App'
 import type { UISettings } from './SettingsPanel'
+import SidebarLogo from './SidebarLogo'
 import './TaskSidebar.css'
 
 interface TaskSidebarProps {
@@ -144,6 +145,7 @@ function TaskSidebar({ tasks, selectedTaskId, onSelectTask, settings, taskHeartb
           </button>
         ))}
       </div>
+      <SidebarLogo />
     </aside>
   )
 }

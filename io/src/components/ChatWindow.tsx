@@ -80,7 +80,7 @@ function ChatWindow({ task, onSendMessage, isStreaming, streamingContent, settin
         {task.messages.map(message => (
           <div key={message.id} className={`message ${message.role}`}>
             <div className="message-avatar">
-              {message.role === 'user' ? '👤' : '🤖'}
+              {message.role === 'user' ? '👤' : <img src="/cerberOS_ASCII.png" alt="cerberOS" className="avatar-img" />}
             </div>
             <div className="message-content">
               <div className="message-header">
@@ -95,7 +95,7 @@ function ChatWindow({ task, onSendMessage, isStreaming, streamingContent, settin
         ))}
         {isStreaming && (
           <div className="message agent streaming">
-            <div className="message-avatar">🤖</div>
+            <div className="message-avatar"><img src="/cerberOS_ASCII.png" alt="cerberOS" className="avatar-img" /></div>
             <div className="message-content">
               <div className="message-header">
                 <span className="message-sender">cerberOS</span>
