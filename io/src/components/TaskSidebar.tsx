@@ -10,6 +10,7 @@ interface TaskSidebarProps {
   onSelectTask: (id: string) => void
   settings: UISettings
   taskHeartbeats: Record<string, number>
+  onCreateTask: () => void
 }
 
 function parseETA(eta: string): number {
@@ -19,7 +20,7 @@ function parseETA(eta: string): number {
   return 999
 }
 
-function TaskSidebar({ tasks, selectedTaskId, onSelectTask, settings, taskHeartbeats }: TaskSidebarProps) {
+function TaskSidebar({ tasks, selectedTaskId, onSelectTask, settings, taskHeartbeats, onCreateTask }: TaskSidebarProps) {
   const [showFinishedOnly, setShowFinishedOnly] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [tick, setTick] = useState(() => Date.now())
@@ -63,15 +64,24 @@ function TaskSidebar({ tasks, selectedTaskId, onSelectTask, settings, taskHeartb
         <span className="task-count">{filteredTasks.length}</span>
       </div>
       <div className="sidebar-controls">
-        <label className="toggle-label">
-          <input
-            type="checkbox"
-            checked={showFinishedOnly}
-            onChange={() => setShowFinishedOnly(!showFinishedOnly)}
-            className="toggle-input"
-          />
-          <span className="toggle-text">Finished only</span>
-        </label>
+        <div className="sidebar-controls-row">
+          <label className="toggle-label">
+            <input
+              type="checkbox"
+              checked={showFinishedOnly}
+              onChange={() => setShowFinishedOnly(!showFinishedOnly)}
+              className="toggle-input"
+            />
+            <span className="toggle-text">Finished only</span>
+          </label>
+          <button
+            type="button"
+            className="new-task-button"
+            onClick={onCreateTask}
+          >
+            Create New Task
+          </button>
+        </div>
       </div>
       <div className="sidebar-search">
         <input

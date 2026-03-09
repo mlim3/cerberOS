@@ -28,6 +28,11 @@ function ChatWindow({ task, onSendMessage, isStreaming, streamingContent, settin
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [task.messages, streamingContent])
 
+  useEffect(() => {
+    // When switching tasks (including creating a new one), start with a blank input
+    setInputValue('')
+  }, [task.id])
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
     if (!inputValue.trim() || isStreaming) return
@@ -113,7 +118,7 @@ function ChatWindow({ task, onSendMessage, isStreaming, streamingContent, settin
       </div>
 
       <div className="chat-input-area">
-        {settings.demoMode && !isStreaming && (
+        {settings.demoMode && !isStreaming && !(task.title === 'New Task' && task.messages.length === 0) && (
           <div className="suggestion-chips">
             {SUGGESTION_CHIPS.map(chip => (
               <button
@@ -133,7 +138,7 @@ function ChatWindow({ task, onSendMessage, isStreaming, streamingContent, settin
             type="text"
             value={inputValue}
             onChange={e => setInputValue(e.target.value)}
-            placeholder="Type your response..."
+            placeholder={task.messages.length === 0 ? 'Describe the new task…' : 'Type your response...'}
             className="chat-input"
           />
           <button type="submit" className="send-button" disabled={isStreaming}>

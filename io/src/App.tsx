@@ -400,6 +400,31 @@ function App() {
     }
   }, [uiSettings.showActivityLog, tasks, addLogEntry])
 
+  const handleCreateTask = () => {
+    const newTaskId = nextId()
+
+    const newTask: Task = {
+      id: newTaskId,
+      title: 'New Task',
+      status: 'awaiting_feedback',
+      lastUpdate: 'Describe what you want the agent to work on.',
+      expectedNextInput: 'Now',
+      messages: [],
+    }
+
+    setTasks(prev => [newTask, ...prev])
+    setSelectedTaskId(newTaskId)
+
+    if (uiSettings.showActivityLog) {
+      addLogEntry({
+        type: 'status_change',
+        taskId: newTaskId,
+        taskTitle: newTask.title.slice(0, 20),
+        message: 'New task created. Awaiting your description.',
+      })
+    }
+  }
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
@@ -464,6 +489,49 @@ function App() {
         })
       }
 
+      // Special handling for a brand new task: no streamed reply,
+      // just acknowledge and move it into the working state with ~1 min ETA.
+      if (task.title === 'New Task' && task.messages.length === 0 && task.status === 'awaiting_feedback') {
+        const summarySnippet = userContent.length > 80 ? `${userContent.slice(0, 77)}…` : userContent
+        const agentMsg: Message = {
+          id: nextId(),
+          role: 'agent',
+          content: `cerberOS: I've noted your input («${summarySnippet}»). I'm working on a concrete plan now; expect a proposal in about a minute.`,
+          timestamp: timeLabel(),
+        }
+
+        setTasks(prev =>
+          prev.map(t =>
+            t.id === taskId
+              ? {
+                  ...t,
+                  status: 'working',
+                  lastUpdate: 'Agent is drafting a plan…',
+                  expectedNextInput: '~1 min',
+                  messages: [...t.messages, agentMsg],
+                }
+              : t
+          )
+        )
+
+        if (uiSettings.showActivityLog) {
+          addLogEntry({
+            type: 'agent_response',
+            taskId,
+            taskTitle: task.title.slice(0, 20),
+            message: 'Agent acknowledged new task and is planning.',
+          })
+          addLogEntry({
+            type: 'status_change',
+            taskId,
+            taskTitle: task.title.slice(0, 20),
+            message: 'Task moved to working; next input expected in ~1 min.',
+          })
+        }
+
+        return
+      }
+
       setStreamingForTaskId(taskId)
       setStreamingContent('')
       const history = task.messages.map(m => ({
@@ -518,6 +586,7 @@ function App() {
         onSelectTask={setSelectedTaskId}
         settings={uiSettings}
         taskHeartbeats={taskHeartbeats}
+        onCreateTask={handleCreateTask}
       />
       <main className="main-content">
         <header className="header">
