@@ -3,11 +3,13 @@ package logic
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math/rand"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/pgvector/pgvector-go"
+	"github.com/sashabaranov/go-openai"
 
 	"github.com/mlim3/cerberOS/memory/internal/storage"
 )
@@ -26,6 +28,35 @@ func (m *MockEmbedder) Embed(ctx context.Context, text string) (pgvector.Vector,
 		v[i] = rand.Float32()
 	}
 	return pgvector.NewVector(v), nil
+}
+
+// OpenAIEmbedder implements Embedder using the OpenAI API
+type OpenAIEmbedder struct {
+	client *openai.Client
+}
+
+func NewOpenAIEmbedder(apiKey string) *OpenAIEmbedder {
+	return &OpenAIEmbedder{
+		client: openai.NewClient(apiKey),
+	}
+}
+
+func (o *OpenAIEmbedder) Embed(ctx context.Context, text string) (pgvector.Vector, error) {
+	req := openai.EmbeddingRequest{
+		Input: []string{text},
+		Model: openai.SmallEmbedding3,
+	}
+
+	resp, err := o.client.CreateEmbeddings(ctx, req)
+	if err != nil {
+		return pgvector.Vector{}, fmt.Errorf("failed to create embeddings: %w", err)
+	}
+
+	if len(resp.Data) == 0 {
+		return pgvector.Vector{}, fmt.Errorf("no embeddings returned")
+	}
+
+	return pgvector.NewVector(resp.Data[0].Embedding), nil
 }
 
 // Processor coordinates the logic for personal info storage and retrieval
@@ -105,7 +136,8 @@ func (p *Processor) SavePersonalInfo(ctx context.Context, req SaveRequest) (*Sav
 	err := p.repo.WithTx(ctx, func(q *storage.Queries) error {
 		// 1. Process Chunks
 		for _, text := range chunks {
-			embedding, err := p.embedder.Embed(ctx, text)
+			embedText := fmt.Sprintf("Type: %s | Content: %s", req.SourceType, text)
+			embedding, err := p.embedder.Embed(ctx, embedText)
 			if err != nil {
 				return err
 			}
@@ -119,7 +151,7 @@ func (p *Processor) SavePersonalInfo(ctx context.Context, req SaveRequest) (*Sav
 				UserID:       userUUID,
 				RawText:      text,
 				Embedding:    embedding,
-				ModelVersion: "mock-model-v1",
+				ModelVersion: "text-embedding-3-small",
 			})
 			if err != nil {
 				return err
