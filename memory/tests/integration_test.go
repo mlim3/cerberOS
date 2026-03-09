@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,7 @@ import (
 	"github.com/mlim3/cerberOS/memory/internal/api"
 	"github.com/mlim3/cerberOS/memory/internal/logic"
 	"github.com/mlim3/cerberOS/memory/internal/storage"
+	"github.com/pgvector/pgvector-go"
 )
 
 var (
@@ -25,6 +27,21 @@ var (
 	dbPool     *pgxpool.Pool
 	vaultKey   string
 )
+
+type deterministicTestEmbedder struct{}
+
+func (d *deterministicTestEmbedder) Embed(ctx context.Context, text string) (pgvector.Vector, error) {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(text))
+	seed := h.Sum64()
+
+	v := make([]float32, 1536)
+	for i := range v {
+		// Stable pseudo-vector for deterministic test behavior.
+		v[i] = float32((seed+uint64(i*97))%1000) / 1000.0
+	}
+	return pgvector.NewVector(v), nil
+}
 
 func TestMain(m *testing.M) {
 	// Load environment variables for the test
@@ -70,8 +87,8 @@ func TestMain(m *testing.M) {
 	}
 
 	piRepo := &storage.BaseRepository{Pool: dbPool}
-	mockEmbedder := &logic.MockEmbedder{}
-	piProcessor := logic.NewProcessor(piRepo, mockEmbedder)
+	testEmbedder := &deterministicTestEmbedder{}
+	piProcessor := logic.NewProcessor(piRepo, testEmbedder)
 
 	// Initialize handlers
 	chatHandler := api.NewChatHandler(chatRepo)

@@ -85,10 +85,9 @@ func main() {
 		logger.Info("using OpenAI embedder")
 		embedder = logic.NewOpenAIEmbedder(apiKey)
 	} else {
-		logger.Info("OPENAI_API_KEY not set, falling back to MockEmbedder")
-		embedder = &logic.MockEmbedder{}
+		logger.Warn("OPENAI_API_KEY not set, using local embedder")
+		embedder = &logic.LocalEmbedder{}
 	}
-
 	piProcessor := logic.NewProcessor(piRepo, embedder)
 
 	// 3. Initialize the Handlers
