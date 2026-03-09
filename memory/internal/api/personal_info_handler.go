@@ -1,14 +1,19 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/mlim3/cerberOS/memory/internal/logic"
 	"github.com/mlim3/cerberOS/memory/internal/storage"
 )
+
+var errInvalidUserID = errors.New("invalid user id format")
 
 type PersonalInfoHandler struct {
 	processor *logic.Processor
@@ -50,6 +55,26 @@ func (h *PersonalInfoHandler) Save(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	userUUID, exists, err := h.ensureUserExists(r.Context(), userId)
+	if err != nil {
+		if errors.Is(err, errInvalidUserID) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "Invalid User ID format", nil))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(ErrorResponse("internal", "Failed to validate user", err.Error()))
+		return
+	}
+	if !exists {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(ErrorResponse("not_found", "User not found", nil))
+		return
+	}
+
 	var req SavePersonalInfoRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.Header().Set("Content-Type", "application/json")
@@ -57,9 +82,21 @@ func (h *PersonalInfoHandler) Save(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "Invalid JSON payload", nil))
 		return
 	}
+	if req.Content == "" || req.SourceID == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "content and sourceId are required", nil))
+		return
+	}
+	if req.SourceType != "chat" && req.SourceType != "uploaded_file" && req.SourceType != "document" && req.SourceType != "web" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "sourceType must be chat, uploaded_file, document, or web", nil))
+		return
+	}
 
 	saveReq := logic.SaveRequest{
-		UserID:       userId,
+		UserID:       h.formatUUID(userUUID),
 		Content:      req.Content,
 		SourceType:   req.SourceType,
 		SourceID:     req.SourceID,
@@ -109,6 +146,26 @@ func (h *PersonalInfoHandler) Query(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	userUUID, exists, err := h.ensureUserExists(r.Context(), userId)
+	if err != nil {
+		if errors.Is(err, errInvalidUserID) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "Invalid User ID format", nil))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(ErrorResponse("internal", "Failed to validate user", err.Error()))
+		return
+	}
+	if !exists {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(ErrorResponse("not_found", "User not found", nil))
+		return
+	}
+
 	var req QueryPersonalInfoRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.Header().Set("Content-Type", "application/json")
@@ -116,12 +173,18 @@ func (h *PersonalInfoHandler) Query(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "Invalid JSON payload", nil))
 		return
 	}
+	if req.Query == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "query is required", nil))
+		return
+	}
 
 	if req.TopK <= 0 {
 		req.TopK = 5
 	}
 
-	results, err := h.processor.SemanticQuery(r.Context(), userId, req.Query, req.TopK)
+	results, err := h.processor.SemanticQuery(r.Context(), h.formatUUID(userUUID), req.Query, req.TopK)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -183,8 +246,27 @@ func (h *PersonalInfoHandler) GetAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var userUUID pgtype.UUID
-	if err := userUUID.Scan(userId); err != nil {
+	userUUID, exists, err := h.ensureUserExists(r.Context(), userId)
+	if err != nil {
+		if errors.Is(err, errInvalidUserID) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "Invalid User ID format", nil))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(ErrorResponse("internal", "Failed to validate user", err.Error()))
+		return
+	}
+	if !exists {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(ErrorResponse("not_found", "User not found", nil))
+		return
+	}
+
+	if !userUUID.Valid {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "Invalid User ID format", nil))
@@ -304,8 +386,28 @@ func (h *PersonalInfoHandler) UpdateFact(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	var userUUID, factUUID pgtype.UUID
-	if err := userUUID.Scan(userId); err != nil {
+	userUUID, exists, err := h.ensureUserExists(r.Context(), userId)
+	if err != nil {
+		if errors.Is(err, errInvalidUserID) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "Invalid User ID format", nil))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(ErrorResponse("internal", "Failed to validate user", err.Error()))
+		return
+	}
+	if !exists {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(ErrorResponse("not_found", "User not found", nil))
+		return
+	}
+
+	var factUUID pgtype.UUID
+	if !userUUID.Valid {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "Invalid User ID format", nil))
@@ -340,7 +442,7 @@ func (h *PersonalInfoHandler) UpdateFact(w http.ResponseWriter, r *http.Request)
 	})
 
 	if err != nil {
-		if err.Error() == "no rows in result set" {
+		if errors.Is(err, pgx.ErrNoRows) || err.Error() == "no rows in result set" {
 			// Check if it exists at all to differentiate NotFound from Conflict
 			_, checkErr := h.repo.Querier().GetFactByID(r.Context(), storage.GetFactByIDParams{
 				UserID: userUUID,
@@ -381,6 +483,83 @@ func (h *PersonalInfoHandler) UpdateFact(w http.ResponseWriter, r *http.Request)
 			"updatedAt":  fact.UpdatedAt.Time.Format("2006-01-02T15:04:05Z"),
 		},
 	}))
+}
+
+// DeleteFact deletes a fact for a user
+func (h *PersonalInfoHandler) DeleteFact(w http.ResponseWriter, r *http.Request) {
+	userId := r.PathValue("userId")
+	factId := r.PathValue("factId")
+
+	if userId == "" || factId == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "User ID and Fact ID are required", nil))
+		return
+	}
+
+	userUUID, exists, err := h.ensureUserExists(r.Context(), userId)
+	if err != nil {
+		if errors.Is(err, errInvalidUserID) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "Invalid User ID format", nil))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(ErrorResponse("internal", "Failed to validate user", err.Error()))
+		return
+	}
+	if !exists {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(ErrorResponse("not_found", "User not found", nil))
+		return
+	}
+
+	var factUUID pgtype.UUID
+	if err := factUUID.Scan(factId); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "Invalid Fact ID format", nil))
+		return
+	}
+
+	deleted, err := h.repo.Querier().DeleteFact(r.Context(), storage.DeleteFactParams{
+		UserID: userUUID,
+		ID:     factUUID,
+	})
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(ErrorResponse("internal", "Failed to delete fact", err.Error()))
+		return
+	}
+	if deleted == 0 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(ErrorResponse("not_found", "Fact not found", nil))
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(SuccessResponse(map[string]interface{}{
+		"deleted": true,
+		"factId":  factId,
+	}))
+}
+
+func (h *PersonalInfoHandler) ensureUserExists(ctx context.Context, userID string) (pgtype.UUID, bool, error) {
+	var userUUID pgtype.UUID
+	if err := userUUID.Scan(userID); err != nil {
+		return pgtype.UUID{}, false, errInvalidUserID
+	}
+	exists, err := h.repo.UserExists(ctx, userUUID)
+	if err != nil {
+		return pgtype.UUID{}, false, err
+	}
+	return userUUID, exists, nil
 }
 
 func (h *PersonalInfoHandler) formatUUID(u pgtype.UUID) string {

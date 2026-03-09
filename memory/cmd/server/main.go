@@ -127,6 +127,7 @@ func main() {
 	mux.HandleFunc("POST /api/v1/personal_info/{userId}/query", piHandler.Query)
 	mux.HandleFunc("GET /api/v1/personal_info/{userId}/all", piHandler.GetAll)
 	mux.HandleFunc("PUT /api/v1/personal_info/{userId}/facts/{factId}", piHandler.UpdateFact)
+	mux.HandleFunc("DELETE /api/v1/personal_info/{userId}/facts/{factId}", piHandler.DeleteFact)
 
 	// System Log endpoints
 	mux.HandleFunc("POST /api/v1/system/events", logHandler.HandleCreateSystemEvent)
@@ -141,6 +142,9 @@ func main() {
 	mux.Handle("/api/v1/vault/", http.StripPrefix("", api.RequireVaultKey(vaultMux)))
 
 	// Agent Log endpoints
+	mux.HandleFunc("POST /api/v1/agent/{taskId}/executions", agentHandler.HandleCreateTaskExecution)
+	mux.HandleFunc("GET /api/v1/agent/{taskId}/executions", agentHandler.HandleGetExecutions)
+	// Legacy routes retained temporarily for backward compatibility.
 	mux.HandleFunc("POST /api/v1/agents/tasks/{taskId}/executions", agentHandler.HandleCreateTaskExecution)
 	mux.HandleFunc("GET /api/v1/agents/tasks/{taskId}/executions", agentHandler.HandleGetExecutions)
 

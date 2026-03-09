@@ -28,6 +28,10 @@ func NewVaultHandler(repo *storage.VaultRepository, manager *logic.VaultManager,
 	}
 }
 
+func (h *VaultHandler) validateUserExists(ctx context.Context, userUUID uuid.UUID) (bool, error) {
+	return h.repo.UserExists(ctx, pgtype.UUID{Bytes: userUUID, Valid: true})
+}
+
 func (h *VaultHandler) logAccessEvent(ctx context.Context, userID, status, path string) {
 	traceIDStr, ok := ctx.Value(TraceIDKey{}).(string)
 	if !ok || traceIDStr == "" {
@@ -86,6 +90,17 @@ func (h *VaultHandler) HandleSaveSecret(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		h.logAccessEvent(r.Context(), userIdStr, "denied", r.URL.Path)
 		http.Error(w, "invalid userId format", http.StatusBadRequest)
+		return
+	}
+	exists, err := h.validateUserExists(r.Context(), userUUID)
+	if err != nil {
+		h.logAccessEvent(r.Context(), userIdStr, "denied", r.URL.Path)
+		http.Error(w, "failed to validate user", http.StatusInternalServerError)
+		return
+	}
+	if !exists {
+		h.logAccessEvent(r.Context(), userIdStr, "denied", r.URL.Path)
+		http.Error(w, "user not found", http.StatusNotFound)
 		return
 	}
 
@@ -158,6 +173,17 @@ func (h *VaultHandler) HandleGetSecret(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid userId format", http.StatusBadRequest)
 		return
 	}
+	exists, err := h.validateUserExists(r.Context(), userUUID)
+	if err != nil {
+		h.logAccessEvent(r.Context(), userIdStr, "denied", r.URL.Path)
+		http.Error(w, "failed to validate user", http.StatusInternalServerError)
+		return
+	}
+	if !exists {
+		h.logAccessEvent(r.Context(), userIdStr, "denied", r.URL.Path)
+		http.Error(w, "user not found", http.StatusNotFound)
+		return
+	}
 
 	keyName := r.URL.Query().Get("key_name")
 	if keyName == "" {
@@ -216,6 +242,17 @@ func (h *VaultHandler) HandleUpdateSecret(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		h.logAccessEvent(r.Context(), userIdStr, "denied", r.URL.Path)
 		http.Error(w, "invalid userId format", http.StatusBadRequest)
+		return
+	}
+	exists, err := h.validateUserExists(r.Context(), userUUID)
+	if err != nil {
+		h.logAccessEvent(r.Context(), userIdStr, "denied", r.URL.Path)
+		http.Error(w, "failed to validate user", http.StatusInternalServerError)
+		return
+	}
+	if !exists {
+		h.logAccessEvent(r.Context(), userIdStr, "denied", r.URL.Path)
+		http.Error(w, "user not found", http.StatusNotFound)
 		return
 	}
 
@@ -291,6 +328,17 @@ func (h *VaultHandler) HandleDeleteSecret(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		h.logAccessEvent(r.Context(), userIdStr, "denied", r.URL.Path)
 		http.Error(w, "invalid userId format", http.StatusBadRequest)
+		return
+	}
+	exists, err := h.validateUserExists(r.Context(), userUUID)
+	if err != nil {
+		h.logAccessEvent(r.Context(), userIdStr, "denied", r.URL.Path)
+		http.Error(w, "failed to validate user", http.StatusInternalServerError)
+		return
+	}
+	if !exists {
+		h.logAccessEvent(r.Context(), userIdStr, "denied", r.URL.Path)
+		http.Error(w, "user not found", http.StatusNotFound)
 		return
 	}
 

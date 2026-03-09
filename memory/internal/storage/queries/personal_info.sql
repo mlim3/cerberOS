@@ -10,7 +10,7 @@ RETURNING *;
 SELECT *
 FROM personal_info_schema.personal_info_chunks
 WHERE user_id = $1
-ORDER BY embedding <=> $2
+ORDER BY embedding <=> $2, created_at DESC
 LIMIT $3;
 
 -- name: UpsertFact :one

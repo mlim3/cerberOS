@@ -16,6 +16,11 @@ type ChatRepository struct {
 	queries *Queries
 }
 
+var (
+	ErrIdempotencyConflict = errors.New("idempotency key replayed with different payload")
+	ErrSessionOwnership    = errors.New("session does not belong to user")
+)
+
 // NewChatRepository creates a new ChatRepository instance.
 func NewChatRepository(pool *pgxpool.Pool) *ChatRepository {
 	return &ChatRepository{
@@ -36,6 +41,9 @@ func (r *ChatRepository) CreateMessage(ctx context.Context, arg CreateChatMessag
 
 		// If a message was found, return it immediately without error to implement idempotency.
 		if err == nil {
+			if !sameMessagePayload(existingMsg, arg) {
+				return ChatSchemaMessage{}, ErrIdempotencyConflict
+			}
 			return existingMsg, nil
 		}
 
@@ -52,6 +60,46 @@ func (r *ChatRepository) CreateMessage(ctx context.Context, arg CreateChatMessag
 	}
 
 	return msg, nil
+}
+
+func sameMessagePayload(existing ChatSchemaMessage, incoming CreateChatMessageParams) bool {
+	if existing.UserID != incoming.UserID {
+		return false
+	}
+	if existing.Role != incoming.Role || existing.Content != incoming.Content {
+		return false
+	}
+	if existing.TokenCount.Valid != incoming.TokenCount.Valid {
+		return false
+	}
+	if existing.TokenCount.Valid && existing.TokenCount.Int32 != incoming.TokenCount.Int32 {
+		return false
+	}
+	return true
+}
+
+func (r *ChatRepository) UserExists(ctx context.Context, userID pgtype.UUID) (bool, error) {
+	const q = `SELECT EXISTS(SELECT 1 FROM identity_schema.users WHERE id = $1)`
+	var exists bool
+	err := r.pool.QueryRow(ctx, q, userID).Scan(&exists)
+	return exists, err
+}
+
+func (r *ChatRepository) ValidateSessionOwnership(ctx context.Context, sessionID, userID pgtype.UUID) error {
+	const q = `
+SELECT EXISTS(
+    SELECT 1
+    FROM chat_schema.messages
+    WHERE session_id = $1 AND user_id <> $2
+)`
+	var ownedByOther bool
+	if err := r.pool.QueryRow(ctx, q, sessionID, userID).Scan(&ownedByOther); err != nil {
+		return err
+	}
+	if ownedByOther {
+		return ErrSessionOwnership
+	}
+	return nil
 }
 
 // ListMessagesBySession returns a list of messages for a given session.
