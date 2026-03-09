@@ -5,20 +5,16 @@
  *
  * Core concepts:
  * - SurfaceAdapter: Interface that all surfaces implement
- * - SurfaceFactory: Creates surface instances
- * - WebSurfaceAdapter: The React web dashboard implementation
+ * - SurfaceFactory: Registry-driven factory for creating surfaces
+ * - Built-in adapters: WebSurfaceAdapter, CLISurfaceAdapter
  *
  * Usage:
- *   import { SurfaceFactory, getSurfaceAdapter } from './surface'
+ *   import { createSurface, registerSurface } from './surface'
  *
- *   // Create a new surface
- *   const surface = await SurfaceFactory.create({ type: 'web' })
- *
- *   // Get the existing web surface
- *   const webSurface = getSurfaceAdapter()
+ *   const surface = await createSurface({ type: 'web' })
  */
 
-// Re-export everything
 export * from './SurfaceAdapter'
 export * from './WebSurfaceAdapter'
+export * from './CLISurfaceAdapter'
 export * from './SurfaceFactory'

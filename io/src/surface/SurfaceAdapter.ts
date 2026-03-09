@@ -2,10 +2,10 @@
  * Surface Adapter Interface
  *
  * Defines the contract for all IO surface implementations.
- * Each surface (web, telegram, whatsapp, cli, wearable) implements this interface.
+ * Any surface registers itself with the SurfaceFactory and implements this interface.
  *
  * This is the core abstraction that enables the Surface Factory pattern,
- * allowing the IO layer to support multiple input/output surfaces
+ * allowing the IO layer to support an open-ended set of surfaces
  * while maintaining a consistent API for the orchestrator.
  */
 
@@ -73,7 +73,7 @@ export interface SurfaceAdapter {
   readonly surfaceId: string
   /** Human-readable name for this surface */
   readonly surfaceName: string
-  /** Type of surface (web, telegram, whatsapp, cli, wearable) */
+  /** Type of surface (matches the key used to register with SurfaceFactory) */
   readonly surfaceType: string
   /** Capabilities of this surface */
   readonly capabilities: SurfaceCapabilities
@@ -149,13 +149,13 @@ export const WEB_DASHBOARD_CAPABILITIES: SurfaceCapabilities = {
   voiceCalls: false,
 }
 
-/** Capabilities for a messaging platform (Telegram, WhatsApp) */
+/** Capabilities preset for messaging-style surfaces (push notifications, media, no rich cards) */
 export const MESSAGING_CAPABILITIES: SurfaceCapabilities = {
   text: true,
-  voice: true,     // Voice notes
-  image: true,     // Photo sharing
-  video: true,     // Video sharing
-  richCards: false, // Limited rich cards (Telegram has some, WhatsApp less)
+  voice: true,
+  image: true,
+  video: true,
+  richCards: false,
   pushNotifications: true,
   voiceCalls: false,
 }
