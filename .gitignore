@@ -83,3 +83,11 @@ htmlcov/
 *.tmp
 *.temp
 *.orig
+.todos/
+
+# Claude Code
+.sidecar/
+CLAUDE.md
+todo/
+*.td*
+td.json
