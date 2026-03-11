@@ -1,22 +1,11 @@
 {
-  "name": "midterm-demo",
+  "name": "cerberos-io",
   "private": true,
-  "version": "0.0.0",
-  "type": "module",
+  "workspaces": ["core", "api", "surfaces/*"],
   "scripts": {
-    "dev": "vite",
-    "build": "tsc && vite build",
-    "preview": "vite preview"
-  },
-  "devDependencies": {
-    "@types/react": "^19.2.14",
-    "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react": "^5.1.4",
-    "typescript": "~5.9.3",
-    "vite": "^7.3.1"
-  },
-  "dependencies": {
-    "react": "^19.2.4",
-    "react-dom": "^19.2.4"
+    "dev": "bun run --filter @cerberos/surfaces-web dev",
+    "build": "bun run --filter @cerberos/surfaces-web build",
+    "api": "bun run --filter @cerberos/io-api dev",
+    "cli": "bun run --filter @cerberos/surfaces-cli start"
   }
 }
