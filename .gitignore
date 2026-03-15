@@ -1,0 +1,10 @@
+# IDEs
+.idea/
+*.iml
+.vscode/
+.DS_Store
+
+# Go
+bin/
+dist/
+vendor/
