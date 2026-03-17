@@ -2,18 +2,16 @@
 //
 // The binary is invoked by the Lifecycle Manager at spawn. It receives its initial
 // context from stdin as a JSON-encoded SpawnContext, executes the task using the
-// Anthropic API, and writes a JSON-encoded TaskOutput to stdout. All diagnostic
-// logs go to stderr so they do not contaminate the JSON output stream.
-//
-// M2 scope: single Anthropic API call (no ReAct loop). The full ReAct loop is
-// implemented in the next milestone.
+// four-phase ReAct loop (EDD §13.1), and writes a JSON-encoded TaskOutput to
+// stdout. All diagnostic logs go to stderr so they do not contaminate the JSON
+// output stream.
 //
 // Inputs (stdin):
 //
 //	{
 //	  "task_id":         "uuid",
 //	  "skill_domain":    "web",
-//	  "permission_token": "opaque-ref",   // credential_ref registered at spawn
+//	  "permission_token": "opaque-ref",
 //	  "instructions":    "Fetch the page at https://example.com",
 //	  "trace_id":        "uuid"
 //	}
@@ -39,9 +37,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/option"
 )
 
 // SpawnContext is the initial context injected by the Lifecycle Manager at spawn.
@@ -66,30 +61,30 @@ type TaskOutput struct {
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 
-	var ctx SpawnContext
-	if err := json.NewDecoder(os.Stdin).Decode(&ctx); err != nil {
+	var spawnCtx SpawnContext
+	if err := json.NewDecoder(os.Stdin).Decode(&spawnCtx); err != nil {
 		writeError(log, "", "", fmt.Sprintf("decode spawn context: %v", err))
 		os.Exit(1)
 	}
 
-	log = log.With("task_id", ctx.TaskID, "trace_id", ctx.TraceID)
+	log = log.With("task_id", spawnCtx.TaskID, "trace_id", spawnCtx.TraceID)
 
-	if err := validate(&ctx); err != nil {
-		writeError(log, ctx.TaskID, ctx.TraceID, err.Error())
+	if err := validate(&spawnCtx); err != nil {
+		writeError(log, spawnCtx.TaskID, spawnCtx.TraceID, err.Error())
 		os.Exit(1)
 	}
 
-	log.Info("agent-process started", "skill_domain", ctx.SkillDomain)
+	log.Info("agent-process started", "skill_domain", spawnCtx.SkillDomain)
 
-	result, err := executeTask(log, &ctx)
+	result, err := RunLoop(context.Background(), log, &spawnCtx)
 	if err != nil {
-		writeError(log, ctx.TaskID, ctx.TraceID, err.Error())
+		writeError(log, spawnCtx.TaskID, spawnCtx.TraceID, err.Error())
 		os.Exit(1)
 	}
 
 	out := TaskOutput{
-		TaskID:  ctx.TaskID,
-		TraceID: ctx.TraceID,
+		TaskID:  spawnCtx.TaskID,
+		TraceID: spawnCtx.TraceID,
 		Success: true,
 		Result:  result,
 	}
@@ -118,63 +113,6 @@ func validate(ctx *SpawnContext) error {
 	return nil
 }
 
-// executeTask makes a single Anthropic API call and returns the model response.
-// M2 scope only — ReAct loop is a separate milestone.
-func executeTask(log *slog.Logger, ctx *SpawnContext) (string, error) {
-	apiKey := os.Getenv("ANTHROPIC_API_KEY")
-	if apiKey == "" {
-		return "", fmt.Errorf("ANTHROPIC_API_KEY environment variable is not set")
-	}
-
-	client := anthropic.NewClient(option.WithAPIKey(apiKey))
-
-	systemPrompt := buildSystemPrompt(ctx.SkillDomain)
-
-	log.Info("calling Anthropic API")
-
-	resp, err := client.Messages.New(context.Background(), anthropic.MessageNewParams{
-		Model:     anthropic.ModelClaudeHaiku4_5,
-		MaxTokens: 4096,
-		System: []anthropic.TextBlockParam{
-			{Text: systemPrompt},
-		},
-		Messages: []anthropic.MessageParam{
-			anthropic.NewUserMessage(
-				anthropic.NewTextBlock(ctx.Instructions),
-			),
-		},
-	})
-	if err != nil {
-		return "", fmt.Errorf("anthropic API call: %w", err)
-	}
-
-	if len(resp.Content) == 0 {
-		return "", fmt.Errorf("anthropic API returned empty response")
-	}
-
-	// Extract text from the first content block.
-	text := resp.Content[0].Text
-	log.Info("anthropic API call completed",
-		"stop_reason", resp.StopReason,
-		"input_tokens", resp.Usage.InputTokens,
-		"output_tokens", resp.Usage.OutputTokens,
-	)
-
-	return text, nil
-}
-
-// buildSystemPrompt constructs a system prompt that scopes the agent to its
-// assigned skill domain. In M3 this will be driven by the Skill Hierarchy Manager
-// and include the full domain command manifest at spawn time.
-func buildSystemPrompt(skillDomain string) string {
-	return fmt.Sprintf(
-		`You are an Aegis OS agent scoped to the "%s" skill domain. `+
-			`Execute the assigned task using only the capabilities available within that domain. `+
-			`Be concise and factual. Return only the task result — no preamble, no commentary.`,
-		skillDomain,
-	)
-}
-
 // writeError writes a failed TaskOutput to stdout and logs the error to stderr.
 func writeError(log *slog.Logger, taskID, traceID, errMsg string) {
 	log.Error("agent-process failed", "error", errMsg)
@@ -184,6 +122,5 @@ func writeError(log *slog.Logger, taskID, traceID, errMsg string) {
 		Success: false,
 		Error:   errMsg,
 	}
-	// Best-effort — if stdout encode fails here there is nothing more we can do.
 	_ = json.NewEncoder(os.Stdout).Encode(out)
 }
