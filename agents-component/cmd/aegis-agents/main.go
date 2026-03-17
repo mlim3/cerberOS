@@ -1,15 +1,11 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
-	"time"
 
 	"github.com/cerberOS/agents-component/config"
 	"github.com/cerberOS/agents-component/internal/comms"
@@ -36,13 +32,18 @@ func main() {
 		"nats_url", cfg.NATSURL,
 	)
 
-	// Wire dependencies.
-	commsClient := comms.NewStubClient() // TODO: replace with NATS-backed client
+	// Wire NATS JetStream client.
+	commsClient, err := comms.NewNATSClient(cfg.NATSURL, cfg.ComponentID)
+	if err != nil {
+		log.Error("comms init failed", "error", err)
+		os.Exit(1)
+	}
+
 	reg := registry.New()
 	skillMgr := skills.New()
-	credBroker := credentials.New(nil) // TODO: wire OpenBao secrets
-	lifecycleMgr := lifecycle.New()    // TODO: wire Firecracker
-	memClient := memory.New()          // TODO: replace with HTTP client to Memory Component
+	credBroker := credentials.New(nil) // TODO: wire Vault-backed broker (M3)
+	lifecycleMgr := lifecycle.New()    // TODO: wire Firecracker (M3)
+	memClient := memory.New()          // TODO: wire NATS-backed Memory Interface (M3)
 
 	seedSkills(skillMgr, log)
 
@@ -59,181 +60,88 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Subscribe to inbound task_spec messages from the Orchestrator.
-	if err := commsClient.Subscribe("task_spec", func(msg *comms.Message) {
-		var env types.Envelope
-		if err := json.Unmarshal(msg.Data, &env); err != nil {
-			log.Error("malformed envelope", "error", err)
-			return
-		}
+	// Subscribe to inbound task assignments from the Orchestrator (at-least-once).
+	// Handlers MUST call msg.Ack() on success or msg.Nak() on failure.
+	if err := commsClient.SubscribeDurable(
+		"aegis.agents.task.inbound",
+		"agents-task-inbound",
+		func(msg *comms.Message) {
+			var spec types.TaskSpec
+			if err := json.Unmarshal(msg.Data, &spec); err != nil {
+				log.Error("task.inbound unmarshal failed",
+					"correlation_id", msg.CorrelationID,
+					"error", err,
+				)
+				_ = msg.Nak()
+				return
+			}
 
-		// Payload unmarshals as map[string]interface{}; re-encode to extract TaskSpec.
-		payloadBytes, err := json.Marshal(env.Payload)
-		if err != nil {
-			log.Error("envelope payload marshal failed", "trace_id", env.TraceID, "error", err)
-			return
-		}
-
-		var spec types.TaskSpec
-		if err := json.Unmarshal(payloadBytes, &spec); err != nil {
-			log.Error("task_spec unmarshal failed", "trace_id", env.TraceID, "error", err)
-			return
-		}
-
-		log.Info("task_spec received", "task_id", spec.TaskID, "trace_id", spec.TraceID)
-
-		if err := f.HandleTaskSpec(&spec); err != nil {
-			log.Error("handle task_spec failed",
+			log.Info("task.inbound received",
 				"task_id", spec.TaskID,
-				"trace_id", spec.TraceID,
-				"error", err,
+				"correlation_id", msg.CorrelationID,
 			)
-		}
-	}); err != nil {
-		log.Error("subscribe task_spec failed", "error", err)
+
+			if err := f.HandleTaskSpec(&spec); err != nil {
+				log.Error("HandleTaskSpec failed",
+					"task_id", spec.TaskID,
+					"error", err,
+				)
+				_ = msg.Nak()
+				return
+			}
+			_ = msg.Ack()
+		},
+	); err != nil {
+		log.Error("subscribe task.inbound failed", "error", err)
 		os.Exit(1)
 	}
 
-	// Subscribe to capability_query — Orchestrator asking whether a capable agent exists.
-	if err := commsClient.Subscribe("capability_query", func(msg *comms.Message) {
-		var env types.Envelope
-		if err := json.Unmarshal(msg.Data, &env); err != nil {
-			log.Error("malformed envelope", "error", err)
-			return
-		}
+	// Subscribe to capability queries from the Orchestrator (at-most-once).
+	if err := commsClient.Subscribe(
+		"aegis.agents.capability.query",
+		func(msg *comms.Message) {
+			var query types.CapabilityQuery
+			if err := json.Unmarshal(msg.Data, &query); err != nil {
+				log.Error("capability.query unmarshal failed", "error", err)
+				return
+			}
 
-		payloadBytes, err := json.Marshal(env.Payload)
-		if err != nil {
-			log.Error("capability_query payload marshal failed", "trace_id", env.TraceID, "error", err)
-			return
-		}
+			candidates, err := reg.FindBySkills(query.Domains)
+			if err != nil {
+				log.Error("capability.query registry lookup failed",
+					"query_id", query.QueryID,
+					"error", err,
+				)
+				return
+			}
 
-		var query types.CapabilityQuery
-		if err := json.Unmarshal(payloadBytes, &query); err != nil {
-			log.Error("capability_query unmarshal failed", "trace_id", env.TraceID, "error", err)
-			return
-		}
-
-		candidates, err := reg.FindBySkills(query.Domains)
-		if err != nil {
-			log.Error("capability_query registry lookup failed", "trace_id", query.TraceID, "error", err)
-			return
-		}
-
-		resp := types.CapabilityResponse{
-			QueryID:  query.QueryID,
-			Domains:  query.Domains,
-			HasMatch: len(candidates) > 0,
-			TraceID:  query.TraceID,
-		}
-		if err := commsClient.Publish("capability_response", resp); err != nil {
-			log.Error("publish capability_response failed", "trace_id", query.TraceID, "error", err)
-		}
-	}); err != nil {
-		log.Error("subscribe capability_query failed", "error", err)
+			resp := types.CapabilityResponse{
+				QueryID:  query.QueryID,
+				Domains:  query.Domains,
+				HasMatch: len(candidates) > 0,
+				TraceID:  query.TraceID,
+			}
+			if err := commsClient.Publish(
+				"aegis.orchestrator.capability.response",
+				comms.PublishOptions{
+					MessageType:   "capability.response",
+					CorrelationID: query.QueryID,
+					Transient:     true, // at-most-once
+				},
+				resp,
+			); err != nil {
+				log.Error("publish capability.response failed",
+					"query_id", query.QueryID,
+					"error", err,
+				)
+			}
+		},
+	); err != nil {
+		log.Error("subscribe capability.query failed", "error", err)
 		os.Exit(1)
 	}
-
-	// Subscribe to status_update to print to console for interactive feedback
-	commsClient.Subscribe("status_update", func(msg *comms.Message) {
-		var update types.StatusUpdate
-		if err := json.Unmarshal(msg.Data, &update); err == nil {
-			fmt.Printf("\n[STATUS] Agent: %s | Task: %s | State: %s\n> ", update.AgentID, update.TaskID, update.State)
-		}
-	})
 
 	log.Info("aegis-agents ready")
-
-	// Interactive CLI loop
-	go func() {
-		reader := bufio.NewReader(os.Stdin)
-		fmt.Println("\n--- Interactive Mode ---")
-		fmt.Println("Commands: task <id> <skill>, query <skill>, list, exit")
-		fmt.Print("> ")
-
-		for {
-			text, _ := reader.ReadString('\n')
-			text = strings.TrimSpace(text)
-			parts := strings.Fields(text)
-
-			if len(parts) == 0 {
-				fmt.Print("> ")
-				continue
-			}
-
-			switch parts[0] {
-			case "exit":
-				syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
-				return
-			case "list":
-				agents := reg.List()
-				fmt.Printf("Registered Agents: %d\n", len(agents))
-				for _, a := range agents {
-					fmt.Printf("- %s [%s] Skills: %v\n", a.AgentID, a.State, a.SkillDomains)
-				}
-			case "task":
-				if len(parts) < 3 {
-					fmt.Println("Usage: task <task_id> <skill_domain>")
-					break
-				}
-				taskID := parts[1]
-				skill := parts[2]
-				spec := types.TaskSpec{
-					TaskID:         taskID,
-					RequiredSkills: []string{skill},
-					TraceID:        fmt.Sprintf("trace-%d", time.Now().Unix()),
-				}
-				env := types.Envelope{
-					MessageID:   fmt.Sprintf("msg-%d", time.Now().Unix()),
-					Source:      "cli",
-					Destination: "agents-component",
-					Timestamp:   time.Now().UTC(),
-					Payload:     spec,
-					TraceID:     spec.TraceID,
-				}
-				if err := commsClient.Publish("task_spec", env); err != nil {
-					fmt.Printf("Error publishing task: %v\n", err)
-				} else {
-					fmt.Println("Task published.")
-				}
-			case "query":
-				if len(parts) < 2 {
-					fmt.Println("Usage: query <skill_domain>")
-					break
-				}
-				skill := parts[1]
-				query := types.CapabilityQuery{
-					QueryID: fmt.Sprintf("q-%d", time.Now().Unix()),
-					Domains: []string{skill},
-					TraceID: fmt.Sprintf("trace-%d", time.Now().Unix()),
-				}
-				env := types.Envelope{
-					MessageID:   fmt.Sprintf("msg-%d", time.Now().Unix()),
-					Source:      "cli",
-					Destination: "agents-component",
-					Timestamp:   time.Now().UTC(),
-					Payload:     query,
-					TraceID:     query.TraceID,
-				}
-				// Subscribe to response temporarily
-				commsClient.Subscribe("capability_response", func(msg *comms.Message) {
-					var resp types.CapabilityResponse
-					json.Unmarshal(msg.Data, &resp)
-					if resp.QueryID == query.QueryID {
-						fmt.Printf("\n[QUERY RESULT] Match: %v\n> ", resp.HasMatch)
-					}
-				})
-				if err := commsClient.Publish("capability_query", env); err != nil {
-					fmt.Printf("Error publishing query: %v\n", err)
-				} else {
-					fmt.Println("Query published.")
-				}
-			default:
-				fmt.Println("Unknown command.")
-			}
-			fmt.Print("> ")
-		}
-	}()
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
@@ -266,21 +174,9 @@ func seedSkills(mgr skills.Manager, log *slog.Logger) {
 				},
 			},
 		},
-		{
-			Name:     "data",
-			Level:    "domain",
-			Children: map[string]*types.SkillNode{},
-		},
-		{
-			Name:     "comms",
-			Level:    "domain",
-			Children: map[string]*types.SkillNode{},
-		},
-		{
-			Name:     "storage",
-			Level:    "domain",
-			Children: map[string]*types.SkillNode{},
-		},
+		{Name: "data", Level: "domain", Children: map[string]*types.SkillNode{}},
+		{Name: "comms", Level: "domain", Children: map[string]*types.SkillNode{}},
+		{Name: "storage", Level: "domain", Children: map[string]*types.SkillNode{}},
 	}
 
 	for _, d := range domains {

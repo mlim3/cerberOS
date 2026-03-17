@@ -194,8 +194,12 @@ func (f *Factory) CompleteTask(agentID, sessionID, traceID string, output interf
 	if taskErr != nil {
 		result.Error = taskErr.Error()
 	}
-	if err := f.comms.Publish("task_result", result); err != nil {
-		return fmt.Errorf("factory: comms.Publish task_result: %w", err)
+	if err := f.comms.Publish(
+		"aegis.orchestrator.task.result",
+		comms.PublishOptions{MessageType: "task.result", CorrelationID: agent.AssignedTask},
+		result,
+	); err != nil {
+		return fmt.Errorf("factory: comms.Publish task.result: %w", err)
 	}
 
 	// Teardown: terminate VM → revoke credentials → update registry.
@@ -220,8 +224,12 @@ func (f *Factory) publishStatus(agentID, taskID, state, traceID string) error {
 		State:   state,
 		TraceID: traceID,
 	}
-	if err := f.comms.Publish("status_update", update); err != nil {
-		return fmt.Errorf("factory: comms.Publish status_update: %w", err)
+	if err := f.comms.Publish(
+		"aegis.orchestrator.agent.status",
+		comms.PublishOptions{MessageType: "agent.status", CorrelationID: taskID},
+		update,
+	); err != nil {
+		return fmt.Errorf("factory: comms.Publish agent.status: %w", err)
 	}
 	return nil
 }
