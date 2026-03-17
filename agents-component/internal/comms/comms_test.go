@@ -93,11 +93,21 @@ func TestStubClientMultipleSubscribers(t *testing.T) {
 		}
 	}
 
-	if err := c.Publish("multi.subject", comms.PublishOptions{}, struct{}{}); err != nil {
+	if err := c.Publish("multi.subject", comms.PublishOptions{MessageType: "test.multi"}, struct{}{}); err != nil {
 		t.Fatalf("Publish: %v", err)
 	}
 	if count != 3 {
 		t.Errorf("got %d deliveries, want 3", count)
+	}
+}
+
+func TestStubClientPublishRequiresMessageType(t *testing.T) {
+	c := comms.NewStubClient()
+	defer c.Close()
+
+	err := c.Publish("test.subject", comms.PublishOptions{}, struct{}{})
+	if err == nil {
+		t.Error("expected error for empty MessageType, got nil")
 	}
 }
 
@@ -110,7 +120,7 @@ func TestStubClientCloseRemovesSubscribers(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	_ = c.Publish("close.test", comms.PublishOptions{}, struct{}{})
+	_ = c.Publish("close.test", comms.PublishOptions{MessageType: "test.close"}, struct{}{})
 	if delivered {
 		t.Error("expected no delivery after Close")
 	}

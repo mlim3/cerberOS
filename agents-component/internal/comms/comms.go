@@ -145,6 +145,9 @@ func NewNATSClient(natsURL, componentID string) (Client, error) {
 }
 
 func (c *natsClient) Publish(subject string, opts PublishOptions, payload interface{}) error {
+	if opts.MessageType == "" {
+		return fmt.Errorf("comms: Publish to %q requires a non-empty MessageType", subject)
+	}
 	env := outboundEnvelope{
 		MessageID:       newMessageID(),
 		MessageType:     opts.MessageType,
@@ -247,7 +250,10 @@ func NewStubClient() Client {
 	}
 }
 
-func (c *stubClient) Publish(subject string, _ PublishOptions, payload interface{}) error {
+func (c *stubClient) Publish(subject string, opts PublishOptions, payload interface{}) error {
+	if opts.MessageType == "" {
+		return fmt.Errorf("comms: Publish to %q requires a non-empty MessageType", subject)
+	}
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("comms: marshal payload for %q: %w", subject, err)
