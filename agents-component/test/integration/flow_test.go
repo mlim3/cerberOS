@@ -75,7 +75,7 @@ func newHarness(t *testing.T) *harness {
 
 	// task.inbound subscription — mirrors main.go handler.
 	// The stub delivers msg.Data as the raw JSON payload (no envelope wrapping).
-	if err := commsClient.SubscribeDurable("aegis.agents.task.inbound", "agents-task-inbound", func(msg *comms.Message) {
+	if err := commsClient.SubscribeDurable(comms.SubjectTaskInbound, comms.ConsumerTaskInbound, func(msg *comms.Message) {
 		var spec types.TaskSpec
 		if err := json.Unmarshal(msg.Data, &spec); err != nil {
 			t.Errorf("task.inbound: unmarshal TaskSpec: %v", err)
@@ -93,7 +93,7 @@ func newHarness(t *testing.T) *harness {
 	}
 
 	// capability.query subscription — mirrors main.go handler.
-	if err := commsClient.Subscribe("aegis.agents.capability.query", func(msg *comms.Message) {
+	if err := commsClient.Subscribe(comms.SubjectCapabilityQuery, func(msg *comms.Message) {
 		var query types.CapabilityQuery
 		if err := json.Unmarshal(msg.Data, &query); err != nil {
 			t.Errorf("capability.query: unmarshal CapabilityQuery: %v", err)
@@ -111,8 +111,8 @@ func newHarness(t *testing.T) *harness {
 			TraceID:  query.TraceID,
 		}
 		if err := commsClient.Publish(
-			"aegis.orchestrator.capability.response",
-			comms.PublishOptions{MessageType: "capability.response", CorrelationID: query.QueryID, Transient: true},
+			comms.SubjectCapabilityResponse,
+			comms.PublishOptions{MessageType: comms.MsgTypeCapabilityResponse, CorrelationID: query.QueryID, Transient: true},
 			resp,
 		); err != nil {
 			t.Errorf("capability.query: publish response: %v", err)
@@ -135,8 +135,8 @@ func newHarness(t *testing.T) *harness {
 func publishTaskSpec(t *testing.T, c comms.Client, spec types.TaskSpec) {
 	t.Helper()
 	if err := c.Publish(
-		"aegis.agents.task.inbound",
-		comms.PublishOptions{MessageType: "task.inbound", CorrelationID: spec.TaskID},
+		comms.SubjectTaskInbound,
+		comms.PublishOptions{MessageType: comms.MsgTypeTaskInbound, CorrelationID: spec.TaskID},
 		spec,
 	); err != nil {
 		t.Fatalf("publish task.inbound: %v", err)
@@ -158,7 +158,7 @@ func TestAgentComponentFlow(t *testing.T) {
 	// ------------------------------------------------------------------
 	t.Run("new agent provisioned", func(t *testing.T) {
 		var statusUpdates []types.StatusUpdate
-		if err := h.comms.Subscribe("aegis.orchestrator.agent.status", func(msg *comms.Message) {
+		if err := h.comms.Subscribe(comms.SubjectAgentStatus, func(msg *comms.Message) {
 			var su types.StatusUpdate
 			if err := json.Unmarshal(msg.Data, &su); err != nil {
 				t.Errorf("unmarshal agent.status: %v", err)
@@ -239,7 +239,7 @@ func TestAgentComponentFlow(t *testing.T) {
 	// ------------------------------------------------------------------
 	t.Run("capability query answered", func(t *testing.T) {
 		var capResp types.CapabilityResponse
-		if err := h.comms.Subscribe("aegis.orchestrator.capability.response", func(msg *comms.Message) {
+		if err := h.comms.Subscribe(comms.SubjectCapabilityResponse, func(msg *comms.Message) {
 			if err := json.Unmarshal(msg.Data, &capResp); err != nil {
 				t.Errorf("unmarshal capability.response: %v", err)
 			}
@@ -253,8 +253,8 @@ func TestAgentComponentFlow(t *testing.T) {
 			TraceID: "trace-3",
 		}
 		if err := h.comms.Publish(
-			"aegis.agents.capability.query",
-			comms.PublishOptions{MessageType: "capability.query", CorrelationID: query.QueryID},
+			comms.SubjectCapabilityQuery,
+			comms.PublishOptions{MessageType: comms.MsgTypeCapabilityQuery, CorrelationID: query.QueryID},
 			query,
 		); err != nil {
 			t.Fatalf("publish capability.query: %v", err)
@@ -279,7 +279,7 @@ func TestAgentComponentFlow(t *testing.T) {
 		agent := h.reg.List()[0]
 
 		var taskResults []types.TaskResult
-		if err := h.comms.Subscribe("aegis.orchestrator.task.result", func(msg *comms.Message) {
+		if err := h.comms.Subscribe(comms.SubjectTaskResult, func(msg *comms.Message) {
 			var tr types.TaskResult
 			if err := json.Unmarshal(msg.Data, &tr); err != nil {
 				t.Errorf("unmarshal task.result: %v", err)

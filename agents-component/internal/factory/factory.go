@@ -195,8 +195,8 @@ func (f *Factory) CompleteTask(agentID, sessionID, traceID string, output interf
 		result.Error = taskErr.Error()
 	}
 	if err := f.comms.Publish(
-		"aegis.orchestrator.task.result",
-		comms.PublishOptions{MessageType: "task.result", CorrelationID: agent.AssignedTask},
+		comms.SubjectTaskResult,
+		comms.PublishOptions{MessageType: comms.MsgTypeTaskResult, CorrelationID: agent.AssignedTask},
 		result,
 	); err != nil {
 		return fmt.Errorf("factory: comms.Publish task.result: %w", err)
@@ -225,8 +225,8 @@ func (f *Factory) publishStatus(agentID, taskID, state, traceID string) error {
 		TraceID: traceID,
 	}
 	if err := f.comms.Publish(
-		"aegis.orchestrator.agent.status",
-		comms.PublishOptions{MessageType: "agent.status", CorrelationID: taskID},
+		comms.SubjectAgentStatus,
+		comms.PublishOptions{MessageType: comms.MsgTypeAgentStatus, CorrelationID: taskID},
 		update,
 	); err != nil {
 		return fmt.Errorf("factory: comms.Publish agent.status: %w", err)

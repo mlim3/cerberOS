@@ -63,8 +63,8 @@ func main() {
 	// Subscribe to inbound task assignments from the Orchestrator (at-least-once).
 	// Handlers MUST call msg.Ack() on success or msg.Nak() on failure.
 	if err := commsClient.SubscribeDurable(
-		"aegis.agents.task.inbound",
-		"agents-task-inbound",
+		comms.SubjectTaskInbound,
+		comms.ConsumerTaskInbound,
 		func(msg *comms.Message) {
 			var spec types.TaskSpec
 			if err := json.Unmarshal(msg.Data, &spec); err != nil {
@@ -98,7 +98,7 @@ func main() {
 
 	// Subscribe to capability queries from the Orchestrator (at-most-once).
 	if err := commsClient.Subscribe(
-		"aegis.agents.capability.query",
+		comms.SubjectCapabilityQuery,
 		func(msg *comms.Message) {
 			var query types.CapabilityQuery
 			if err := json.Unmarshal(msg.Data, &query); err != nil {
@@ -122,9 +122,9 @@ func main() {
 				TraceID:  query.TraceID,
 			}
 			if err := commsClient.Publish(
-				"aegis.orchestrator.capability.response",
+				comms.SubjectCapabilityResponse,
 				comms.PublishOptions{
-					MessageType:   "capability.response",
+					MessageType:   comms.MsgTypeCapabilityResponse,
 					CorrelationID: query.QueryID,
 					Transient:     true, // at-most-once
 				},
