@@ -163,12 +163,15 @@ func seedSkills(mgr skills.Manager, log *slog.Logger) {
 			Level: "domain",
 			Children: map[string]*types.SkillNode{
 				"web.fetch": {
-					Name:  "web.fetch",
-					Level: "command",
+					Name:           "web.fetch",
+					Level:          "command",
+					Label:          "Web Fetch",
+					Description:    "Fetch the content of a URL via HTTP. Use for web pages and APIs without authentication. Do NOT use for authenticated operations.",
+					TimeoutSeconds: 30,
 					Spec: &types.SkillSpec{
 						Parameters: map[string]types.ParameterDef{
-							"url":    {Type: "string", Required: true},
-							"method": {Type: "string", Required: false},
+							"url":    {Type: "string", Required: true, Description: "The fully-qualified URL to fetch."},
+							"method": {Type: "string", Required: false, Description: "HTTP method: GET or POST. Defaults to GET."},
 						},
 					},
 				},

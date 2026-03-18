@@ -1,15 +1,21 @@
 // Package main — tools.go implements the skill tool registry and tool contract.
 //
-// Every skill satisfies the tool contract from EDD §13.2:
-//   - Definition: the Anthropic ToolParam passed to the API.
-//   - Execute:    runs the skill and returns ToolResult.
+// Every SkillTool satisfies the full Tool Contract from EDD §13.2:
+//   - Label:                   human-readable display name for monitoring and audit logs; never shown to LLM.
+//   - Definition.Name:         snake_case identifier the LLM uses in tool calls; max 64 chars.
+//   - Definition.Description:  what the tool does and when NOT to use it; max 300 chars.
+//   - Definition.InputSchema:  JSON Schema for all parameters; every parameter must have a description.
+//   - RequiredCredentialTypes: empty = local execution; non-empty = vault execution required (M3).
+//   - Execute:                 runs the skill; returns {content, details}.
+//   - TimeoutSeconds:          0 = default (30s); hard max 300s. Enforced by dispatchTool.
 //
-// ToolResult enforces the content/details split:
+// ToolResult enforces the content/details split from §13.2:
 //   - Content (≤16KB) enters the LLM context.
 //   - Details go to monitoring (stderr) only and never enter agent context.
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,21 +31,33 @@ const (
 
 	// toolNameTaskComplete is the reserved name for the task completion signal.
 	toolNameTaskComplete = "task_complete"
+
+	// defaultToolTimeout is used when TimeoutSeconds is 0.
+	defaultToolTimeout = 30 * time.Second
 )
 
-// ToolResult is the output of a skill execution. It implements the tool contract
-// from EDD §13.2: Content enters the LLM context; Details are for monitoring only
-// and are never injected into agent context.
+// ToolResult is the output of a skill execution. It implements the content/details
+// split from EDD §13.2: Content enters the LLM context; Details are for monitoring
+// only and are never injected into agent context.
 type ToolResult struct {
 	Content string                 // what the LLM sees; max 16KB
 	IsError bool                   // signals the LLM that execution failed
 	Details map[string]interface{} // monitoring only — logged to stderr, never to LLM
 }
 
-// SkillTool pairs an Anthropic tool definition with its execute function.
+// SkillTool is the runtime representation of the full Tool Contract (EDD §13.2).
 type SkillTool struct {
+	// Contract metadata.
+	Label                   string   // human-readable display name — monitoring/audit only, never shown to the LLM
+	RequiredCredentialTypes []string // empty = local execution; non-empty = vault execution required (M3)
+	TimeoutSeconds          int      // 0 = default (30s); hard max 300s; enforced by dispatchTool
+
+	// Anthropic API definition: name (≤64 chars), description (≤300 chars), input schema.
 	Definition anthropic.ToolParam
-	Execute    func(input json.RawMessage) ToolResult
+
+	// Execute runs the skill within the given context (which carries the timeout).
+	// Returns {Content, IsError, Details} per the §13.2 tool result structure.
+	Execute func(ctx context.Context, input json.RawMessage) ToolResult
 }
 
 // toolsForDomain returns the skill tools available for the given domain.
@@ -54,7 +72,7 @@ func toolsForDomain(domain string) []SkillTool {
 	}
 }
 
-// toolDefinitions wraps each SkillTool definition into the ToolUnionParam
+// toolDefinitions wraps each SkillTool's Definition into the ToolUnionParam
 // expected by MessageNewParams.Tools.
 func toolDefinitions(tools []SkillTool) []anthropic.ToolUnionParam {
 	params := make([]anthropic.ToolUnionParam, len(tools))
@@ -65,12 +83,18 @@ func toolDefinitions(tools []SkillTool) []anthropic.ToolUnionParam {
 	return params
 }
 
-// dispatchTool finds and executes the named tool.
-// Unknown tool names return an error result so the LLM can correct itself.
-func dispatchTool(tools []SkillTool, name string, input json.RawMessage) ToolResult {
+// dispatchTool finds the named tool and executes it within a scoped timeout context.
+// Unknown tool names return an error result so the LLM can self-correct.
+func dispatchTool(ctx context.Context, tools []SkillTool, name string, input json.RawMessage) ToolResult {
 	for _, t := range tools {
 		if t.Definition.Name == name {
-			return t.Execute(input)
+			timeout := defaultToolTimeout
+			if t.TimeoutSeconds > 0 {
+				timeout = time.Duration(t.TimeoutSeconds) * time.Second
+			}
+			toolCtx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
+			return t.Execute(toolCtx, input)
 		}
 	}
 	return ToolResult{
@@ -80,10 +104,15 @@ func dispatchTool(tools []SkillTool, name string, input json.RawMessage) ToolRes
 	}
 }
 
-// webFetchTool fetches a URL via HTTP. No credentials required — for
-// authenticated operations the agent must use vault execution (M3).
+// webFetchTool fetches a URL via HTTP GET or POST.
+// No credentials required — for authenticated operations the agent must use
+// vault execution (M3). Execution is bounded by the tool's TimeoutSeconds via
+// the context passed to Execute.
 func webFetchTool() SkillTool {
 	return SkillTool{
+		Label:                   "Web Fetch",
+		RequiredCredentialTypes: nil, // no credentials — unauthenticated HTTP only
+		TimeoutSeconds:          30,
 		Definition: anthropic.ToolParam{
 			Name: "web_fetch",
 			Description: anthropic.String(
@@ -98,7 +127,7 @@ func webFetchTool() SkillTool {
 					},
 					"method": map[string]interface{}{
 						"type":        "string",
-						"description": "HTTP method. Allowed: GET, POST. Default: GET.",
+						"description": "HTTP method. Allowed: GET, POST. Defaults to GET when omitted.",
 						"enum":        []string{"GET", "POST"},
 					},
 				},
@@ -109,7 +138,7 @@ func webFetchTool() SkillTool {
 	}
 }
 
-func executeWebFetch(raw json.RawMessage) ToolResult {
+func executeWebFetch(ctx context.Context, raw json.RawMessage) ToolResult {
 	var params struct {
 		URL    string `json:"url"`
 		Method string `json:"method"`
@@ -125,8 +154,7 @@ func executeWebFetch(raw json.RawMessage) ToolResult {
 		params.Method = "GET"
 	}
 
-	httpClient := &http.Client{Timeout: 30 * time.Second}
-	req, err := http.NewRequest(params.Method, params.URL, nil)
+	req, err := http.NewRequestWithContext(ctx, params.Method, params.URL, nil)
 	if err != nil {
 		return ToolResult{
 			Content: fmt.Sprintf("failed to build request: %v", err),
@@ -137,11 +165,15 @@ func executeWebFetch(raw json.RawMessage) ToolResult {
 	req.Header.Set("User-Agent", "aegis-agent/1.0")
 
 	start := time.Now()
-	resp, err := httpClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	elapsed := time.Since(start)
 	if err != nil {
+		content := fmt.Sprintf("HTTP request failed: %v", err)
+		if ctx.Err() == context.DeadlineExceeded {
+			content = "TOOL_TIMEOUT: web_fetch did not complete within the allowed time"
+		}
 		return ToolResult{
-			Content: fmt.Sprintf("HTTP request failed: %v", err),
+			Content: content,
 			IsError: true,
 			Details: map[string]interface{}{
 				"error":      err.Error(),
@@ -180,10 +212,13 @@ func executeWebFetch(raw json.RawMessage) ToolResult {
 	}
 }
 
-// taskCompleteTool is the agent's explicit signal that it has finished the task.
-// When the agent calls this, RunLoop captures the result and exits the loop.
+// taskCompleteTool is the agent's explicit terminal signal. When the agent calls
+// this, RunLoop captures the result and exits the loop.
 func taskCompleteTool() SkillTool {
 	return SkillTool{
+		Label:                   "Task Complete",
+		RequiredCredentialTypes: nil,
+		TimeoutSeconds:          0, // instantaneous — JSON parse only
 		Definition: anthropic.ToolParam{
 			Name: toolNameTaskComplete,
 			Description: anthropic.String(
@@ -200,7 +235,7 @@ func taskCompleteTool() SkillTool {
 				Required: []string{"result"},
 			},
 		},
-		Execute: func(raw json.RawMessage) ToolResult {
+		Execute: func(_ context.Context, raw json.RawMessage) ToolResult {
 			var params struct {
 				Result string `json:"result"`
 			}

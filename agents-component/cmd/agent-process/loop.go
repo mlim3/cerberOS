@@ -121,7 +121,7 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext) (str
 				"tool_use_id", toolUse.ID,
 			)
 
-			result := dispatchTool(tools, toolUse.Name, toolUse.Input)
+			result := dispatchTool(ctx, tools, toolUse.Name, toolUse.Input)
 
 			// Phase 3: Observe — details go to monitoring (stderr) only; never
 			// enter LLM context. Content is what the LLM receives.
