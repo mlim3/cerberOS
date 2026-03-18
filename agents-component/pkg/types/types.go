@@ -6,6 +6,7 @@ import "time"
 type TaskSpec struct {
 	TaskID         string            `json:"task_id"`
 	RequiredSkills []string          `json:"required_skills"` // domain names only
+	Instructions   string            `json:"instructions"`    // natural-language task description injected into the agent at spawn
 	Metadata       map[string]string `json:"metadata"`
 	TraceID        string            `json:"trace_id"`
 	UserContextID  string            `json:"user_context_id,omitempty"` // echoed in all outbound events

@@ -42,8 +42,16 @@ func main() {
 	reg := registry.New()
 	skillMgr := skills.New()
 	credBroker := credentials.New(nil) // TODO: wire Vault-backed broker (M3)
-	lifecycleMgr := lifecycle.New()    // TODO: wire Firecracker (M3)
 	memClient := memory.New()          // TODO: wire NATS-backed Memory Interface (M3)
+
+	var lifecycleMgr lifecycle.Manager
+	if cfg.AgentProcessPath != "" {
+		log.Info("lifecycle: using process manager", "binary", cfg.AgentProcessPath)
+		lifecycleMgr = lifecycle.NewProcess(cfg.AgentProcessPath)
+	} else {
+		log.Warn("lifecycle: AEGIS_AGENT_PROCESS_PATH not set — using in-process stub (not for production)")
+		lifecycleMgr = lifecycle.New()
+	}
 
 	seedSkills(skillMgr, log)
 

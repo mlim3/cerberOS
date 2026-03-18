@@ -138,11 +138,13 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 		return fmt.Errorf("factory: credentials.PreAuthorize: %w", err)
 	}
 
-	// Step 3: Spawn Firecracker microVM.
+	// Step 3: Spawn agent process.
 	vmCfg := lifecycle.VMConfig{
 		AgentID:       agentID,
+		TaskID:        spec.TaskID,
 		SkillDomain:   entryDomain,
 		CredentialPtr: token,
+		Instructions:  spec.Instructions,
 		TraceID:       spec.TraceID,
 	}
 	if err := f.lifecycle.Spawn(vmCfg); err != nil {
