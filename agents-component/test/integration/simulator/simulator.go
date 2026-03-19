@@ -124,8 +124,6 @@ func New(natsURL string) (*Simulator, error) {
 	nc, err := nats.Connect(
 		natsURL,
 		nats.Name("aegis-partner-simulator"),
-		nats.RetryOnFailedConnect(true),
-		nats.MaxReconnects(5),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("simulator: connect to %q: %w", natsURL, err)
