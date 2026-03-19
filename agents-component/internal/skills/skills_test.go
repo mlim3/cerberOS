@@ -13,11 +13,15 @@ func webDomain() *types.SkillNode {
 		Level: "domain",
 		Children: map[string]*types.SkillNode{
 			"web.fetch": {
-				Name:  "web.fetch",
-				Level: "command",
+				Name:           "web.fetch",
+				Level:          "command",
+				Label:          "Web Fetch",
+				Description:    "Fetch the content of a URL via HTTP. Use for web pages and APIs without authentication. Do NOT use for authenticated operations.",
+				TimeoutSeconds: 30,
 				Spec: &types.SkillSpec{
 					Parameters: map[string]types.ParameterDef{
-						"url": {Type: "string", Required: true},
+						"url":    {Type: "string", Required: true, Description: "The fully-qualified URL to fetch."},
+						"method": {Type: "string", Required: false, Description: "HTTP method: GET or POST. Defaults to GET."},
 					},
 				},
 			},
@@ -77,5 +81,93 @@ func TestRegisterDomainWrongLevel(t *testing.T) {
 	node := &types.SkillNode{Name: "web", Level: "command"}
 	if err := m.RegisterDomain(node); err == nil {
 		t.Error("expected error for wrong level, got nil")
+	}
+}
+
+// --- Tool Contract enforcement tests (EDD §13.2) ---
+
+func commandWithout(field string) *types.SkillNode {
+	cmd := &types.SkillNode{
+		Name:           "web.fetch",
+		Level:          "command",
+		Label:          "Web Fetch",
+		Description:    "Fetch a URL. Use for unauthenticated HTTP. Do NOT use for authenticated operations.",
+		TimeoutSeconds: 30,
+		Spec: &types.SkillSpec{
+			Parameters: map[string]types.ParameterDef{
+				"url": {Type: "string", Required: true, Description: "URL to fetch."},
+			},
+		},
+	}
+	switch field {
+	case "label":
+		cmd.Label = ""
+	case "description":
+		cmd.Description = ""
+	case "param_description":
+		cmd.Spec.Parameters["url"] = types.ParameterDef{Type: "string", Required: true} // no Description
+	case "timeout_invalid":
+		cmd.TimeoutSeconds = 999
+	}
+	return cmd
+}
+
+func domainWith(cmd *types.SkillNode) *types.SkillNode {
+	return &types.SkillNode{
+		Name:     "web",
+		Level:    "domain",
+		Children: map[string]*types.SkillNode{cmd.Name: cmd},
+	}
+}
+
+func TestContractMissingLabel(t *testing.T) {
+	m := skills.New()
+	if err := m.RegisterDomain(domainWith(commandWithout("label"))); err == nil {
+		t.Error("expected error for missing label, got nil")
+	}
+}
+
+func TestContractMissingDescription(t *testing.T) {
+	m := skills.New()
+	if err := m.RegisterDomain(domainWith(commandWithout("description"))); err == nil {
+		t.Error("expected error for missing description, got nil")
+	}
+}
+
+func TestContractMissingParameterDescription(t *testing.T) {
+	m := skills.New()
+	if err := m.RegisterDomain(domainWith(commandWithout("param_description"))); err == nil {
+		t.Error("expected error for parameter with no description, got nil")
+	}
+}
+
+func TestContractTimeoutOutOfRange(t *testing.T) {
+	m := skills.New()
+	if err := m.RegisterDomain(domainWith(commandWithout("timeout_invalid"))); err == nil {
+		t.Error("expected error for timeout > 300, got nil")
+	}
+}
+
+func TestGetCommandsExposesContractFields(t *testing.T) {
+	m := skills.New()
+	if err := m.RegisterDomain(webDomain()); err != nil {
+		t.Fatalf("RegisterDomain: %v", err)
+	}
+	cmds, err := m.GetCommands("web")
+	if err != nil {
+		t.Fatalf("GetCommands: %v", err)
+	}
+	if len(cmds) != 1 {
+		t.Fatalf("expected 1 command, got %d", len(cmds))
+	}
+	cmd := cmds[0]
+	if cmd.Label == "" {
+		t.Error("GetCommands must expose Label")
+	}
+	if cmd.Description == "" {
+		t.Error("GetCommands must expose Description")
+	}
+	if cmd.Spec != nil {
+		t.Error("GetCommands must not expose Spec")
 	}
 }
