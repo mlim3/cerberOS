@@ -1,6 +1,9 @@
 package types
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // HeartbeatEvent is published by the agent process on the aegis.heartbeat.<agent_id>
 // subject every heartbeat interval. The Lifecycle Manager subscribes to
@@ -157,6 +160,55 @@ type CredentialResponse struct {
 	AgentID string `json:"agent_id"`
 	Token   string `json:"token"`
 	TraceID string `json:"trace_id"`
+}
+
+// VaultOperationRequest is sent to the Orchestrator (routed to the Vault) to execute
+// a credentialed operation on behalf of an agent. The agent never receives the raw
+// credential — only the operation_result flows back.
+//
+// request_id is the idempotency key. Safe to resubmit with the same request_id after
+// a crash; the Vault guarantees exactly-once execution (EDD ADR-004).
+type VaultOperationRequest struct {
+	RequestID       string          `json:"request_id"` // UUID; idempotency key for safe resubmission
+	AgentID         string          `json:"agent_id"`
+	TaskID          string          `json:"task_id"`
+	PermissionToken string          `json:"permission_token"` // opaque reference from prior authorize — never a raw secret
+	OperationType   string          `json:"operation_type"`   // e.g. "web_fetch", "storage_read"
+	OperationParams json.RawMessage `json:"operation_params"` // schema defined per operation_type by the Vault
+	TimeoutSeconds  int             `json:"timeout_seconds"`  // 1–300; hard deadline forwarded to Vault
+	CredentialType  string          `json:"credential_type"`  // e.g. "web_api_key"; Vault resolves the secret internally
+}
+
+// VaultOperationResult is received from the Orchestrator after the Vault has
+// executed a credentialed operation. Contains operation output only — never
+// the raw credential value (EDD ADR-004, NFR-08).
+type VaultOperationResult struct {
+	RequestID       string          `json:"request_id"`
+	AgentID         string          `json:"agent_id"`
+	Status          string          `json:"status"`                     // "success" | "timed_out" | "scope_violation" | "execution_error"
+	OperationResult json.RawMessage `json:"operation_result,omitempty"` // present on success; operation output only
+	ErrorCode       string          `json:"error_code,omitempty"`
+	ErrorMessage    string          `json:"error_message,omitempty"` // must not expose vault internals or paths
+	ElapsedMS       int             `json:"elapsed_ms"`
+}
+
+// CrashSnapshot is the agent state saved to the Memory Interface at the start of
+// the crash recovery sequence (EDD §6.3, Step 1). Written with DataType "snapshot"
+// and context tag "crash_snapshot". The respawned agent receives this as part of
+// its spawn context so it can resume from a known-good checkpoint.
+//
+// UnknownVaultRequestIDs lists request_ids that were in-flight at crash time with
+// no corresponding result. The recovered agent MUST resubmit them with the original
+// request_id — the Vault's idempotency guarantee ensures exactly-once execution.
+type CrashSnapshot struct {
+	AgentID                string    `json:"agent_id"`
+	TaskID                 string    `json:"task_id"`
+	FailureCount           int       `json:"failure_count"` // value at time of crash, before recovery increment
+	State                  string    `json:"state"`         // state at time of crash (typically "active")
+	SkillDomains           []string  `json:"skill_domains"`
+	PermissionSet          []string  `json:"permission_set"`
+	UnknownVaultRequestIDs []string  `json:"unknown_vault_request_ids"` // in-flight request_ids with no result at crash time
+	CrashedAt              time.Time `json:"crashed_at"`
 }
 
 // MemoryReadRequest is sent to the Orchestrator to retrieve filtered memory context.

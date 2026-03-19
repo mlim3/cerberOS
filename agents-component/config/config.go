@@ -32,6 +32,13 @@ type Config struct {
 	// before the Lifecycle Manager declares the agent crashed.
 	// Env: AEGIS_HEARTBEAT_MAX_MISSED (positive integer). Default: 3.
 	HeartbeatMaxMissed int
+
+	// MaxAgentRetries is the maximum number of times a crashed agent may be
+	// respawned before it is permanently terminated (EDD §6.3, Step 3).
+	// When failure_count >= MaxAgentRetries the agent transitions to TERMINATED
+	// instead of being respawned.
+	// Env: AEGIS_MAX_AGENT_RETRIES (positive integer). Default: 3.
+	MaxAgentRetries int
 }
 
 // Load reads configuration from environment variables and returns a validated Config.
@@ -54,6 +61,9 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if c.HeartbeatMaxMissed, err = parseInt("AEGIS_HEARTBEAT_MAX_MISSED", 3, 1); err != nil {
+		return nil, err
+	}
+	if c.MaxAgentRetries, err = parseInt("AEGIS_MAX_AGENT_RETRIES", 3, 1); err != nil {
 		return nil, err
 	}
 

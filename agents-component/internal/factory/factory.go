@@ -6,6 +6,8 @@ package factory
 
 import (
 	"fmt"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/cerberOS/agents-component/internal/comms"
@@ -30,6 +32,11 @@ type Factory struct {
 	comms         comms.Client
 	generateID    IDGenerator
 	crashDetector *lifecycle.CrashDetector
+	maxRetries    int
+
+	// inFlightMu guards inFlightRequests.
+	inFlightMu       sync.Mutex
+	inFlightRequests map[string][]string // agentID → []requestID with no result yet
 }
 
 // Config carries the dependencies required to construct a Factory.
@@ -42,6 +49,7 @@ type Config struct {
 	Comms         comms.Client
 	GenerateID    IDGenerator              // optional; defaults to timestamp-based ID
 	CrashDetector *lifecycle.CrashDetector // optional; when set, Watch/Unwatch are called around spawn/terminate
+	MaxRetries    int                      // optional; max crash respawns before permanent termination. Default: 3.
 }
 
 // New returns a Factory wired with the provided dependencies.
@@ -67,15 +75,21 @@ func New(cfg Config) (*Factory, error) {
 	if cfg.GenerateID == nil {
 		cfg.GenerateID = defaultIDGenerator
 	}
+	maxRetries := cfg.MaxRetries
+	if maxRetries <= 0 {
+		maxRetries = 3
+	}
 	return &Factory{
-		registry:      cfg.Registry,
-		skills:        cfg.Skills,
-		credentials:   cfg.Credentials,
-		lifecycle:     cfg.Lifecycle,
-		memory:        cfg.Memory,
-		comms:         cfg.Comms,
-		generateID:    cfg.GenerateID,
-		crashDetector: cfg.CrashDetector,
+		registry:         cfg.Registry,
+		skills:           cfg.Skills,
+		credentials:      cfg.Credentials,
+		lifecycle:        cfg.Lifecycle,
+		memory:           cfg.Memory,
+		comms:            cfg.Comms,
+		generateID:       cfg.GenerateID,
+		crashDetector:    cfg.CrashDetector,
+		maxRetries:       maxRetries,
+		inFlightRequests: make(map[string][]string),
 	}, nil
 }
 
@@ -274,6 +288,190 @@ func (f *Factory) CompleteTask(agentID, sessionID, traceID string, output interf
 		return fmt.Errorf("factory: UpdateState terminated: %w", err)
 	}
 	return f.publishStatus(agentID, agent.AssignedTask, registry.StateTerminated, traceID)
+}
+
+// HandleCrash implements the full crash recovery sequence for a crashed agent
+// (EDD §6.3). It is called by the CrashDetector callback when heartbeat
+// monitoring declares an agent dead.
+//
+// Sequence:
+//  1. Save last known state as a snapshot via the Memory Interface.
+//  2. Flush in-flight Vault request_ids with no result → flagged UNKNOWN in snapshot.
+//  3. Transition to RECOVERING (increments failure_count in registry).
+//  4. Decide restart vs. replace: failure_count >= maxRetries → TERMINATED.
+//  5. Respawn: fresh VM with same agent_id, new vm_id, recovered state as context.
+//  6. Credential re-authorization: fresh PreAuthorize for the same permission set.
+//  7. Registry update: new vm_id set, state → ACTIVE, failure_count already incremented.
+func (f *Factory) HandleCrash(agentID string) error {
+	// Step 1: Read current agent state from registry.
+	agent, err := f.registry.Get(agentID)
+	if err != nil {
+		return fmt.Errorf("factory: HandleCrash: registry.Get: %w", err)
+	}
+
+	// Step 2: Flush in-flight Vault request_ids with no result. Any remaining
+	// entries had no corresponding vault.execute.result at crash time → UNKNOWN.
+	unknownRequestIDs := f.flushInFlightRequests(agentID)
+
+	// Save crash snapshot to Memory Interface before any state mutation.
+	snapshot := types.CrashSnapshot{
+		AgentID:                agentID,
+		TaskID:                 agent.AssignedTask,
+		FailureCount:           agent.FailureCount,
+		State:                  agent.State,
+		SkillDomains:           agent.SkillDomains,
+		PermissionSet:          agent.PermissionSet,
+		UnknownVaultRequestIDs: unknownRequestIDs,
+		CrashedAt:              time.Now().UTC(),
+	}
+	mw := &types.MemoryWrite{
+		AgentID:   agentID,
+		SessionID: agent.AssignedTask, // task ID serves as session scope for crash snapshots
+		DataType:  "snapshot",
+		TTLHint:   86400,
+		Payload:   snapshot,
+		Tags: map[string]string{
+			"context": "crash_snapshot",
+			"task_id": agent.AssignedTask,
+		},
+	}
+	if err := f.memory.Write(mw); err != nil {
+		return fmt.Errorf("factory: HandleCrash: memory.Write snapshot: %w", err)
+	}
+
+	// Step 3: Transition to RECOVERING — increments failure_count in registry.
+	if err := f.registry.UpdateState(agentID, registry.StateRecovering, "crash detected: heartbeat timeout"); err != nil {
+		return fmt.Errorf("factory: HandleCrash: UpdateState recovering: %w", err)
+	}
+	if err := f.publishStatus(agentID, agent.AssignedTask, registry.StateRecovering, ""); err != nil {
+		return err
+	}
+
+	// Re-fetch to read the incremented failure_count.
+	agent, err = f.registry.Get(agentID)
+	if err != nil {
+		return fmt.Errorf("factory: HandleCrash: registry.Get post-recover: %w", err)
+	}
+
+	// Step 4: Decide restart vs. replace.
+	if agent.FailureCount >= f.maxRetries {
+		// Exceeded retry budget — permanently terminate.
+		// Best-effort credential revocation; the process is already dead.
+		_ = f.credentials.Revoke(agentID)
+		if err := f.registry.UpdateState(agentID, registry.StateTerminated,
+			fmt.Sprintf("max retries exceeded (%d/%d)", agent.FailureCount, f.maxRetries),
+		); err != nil {
+			return fmt.Errorf("factory: HandleCrash: UpdateState terminated: %w", err)
+		}
+		return f.publishStatus(agentID, agent.AssignedTask, registry.StateTerminated, "")
+	}
+
+	// Step 5: Clean up the stale VM entry. The process has crashed so it is
+	// already dead; Terminate just removes the stale lifecycle entry.
+	_ = f.lifecycle.Terminate(agentID)
+
+	// Step 6: Credential re-authorization — fresh permission token for the new VM.
+	token, err := f.credentials.PreAuthorize(agentID, agent.PermissionSet)
+	if err != nil {
+		return fmt.Errorf("factory: HandleCrash: credentials.PreAuthorize: %w", err)
+	}
+
+	// Step 7: Respawn — same agent_id, new vm_id, recovered state injected as context.
+	newVMID := f.generateID()
+	entryDomain := ""
+	if len(agent.SkillDomains) > 0 {
+		entryDomain = agent.SkillDomains[0]
+	}
+	vmCfg := lifecycle.VMConfig{
+		AgentID:          agentID,
+		VMID:             newVMID,
+		TaskID:           agent.AssignedTask,
+		SkillDomain:      entryDomain,
+		CredentialPtr:    token,
+		RecoveredContext: buildRecoveredContext(snapshot),
+	}
+	if err := f.lifecycle.Spawn(vmCfg); err != nil {
+		return fmt.Errorf("factory: HandleCrash: lifecycle.Spawn: %w", err)
+	}
+
+	// Step 8: Registry update — new vm_id, transition RECOVERING → ACTIVE.
+	if err := f.registry.SetVMID(agentID, newVMID); err != nil {
+		return fmt.Errorf("factory: HandleCrash: registry.SetVMID: %w", err)
+	}
+	if err := f.registry.UpdateState(agentID, registry.StateActive,
+		fmt.Sprintf("respawned after crash (attempt %d/%d)", agent.FailureCount, f.maxRetries),
+	); err != nil {
+		return fmt.Errorf("factory: HandleCrash: UpdateState active: %w", err)
+	}
+
+	// Resume heartbeat monitoring for the new VM.
+	if f.crashDetector != nil {
+		f.crashDetector.Watch(agentID)
+	}
+
+	return f.publishStatus(agentID, agent.AssignedTask, registry.StateActive, "")
+}
+
+// TrackVaultRequest records a Vault execute request_id as in-flight for an agent.
+// Call this immediately before dispatching a vault.execute.request so the request
+// is captured in crash snapshots if the agent dies before a result arrives.
+func (f *Factory) TrackVaultRequest(agentID, requestID string) {
+	f.inFlightMu.Lock()
+	f.inFlightRequests[agentID] = append(f.inFlightRequests[agentID], requestID)
+	f.inFlightMu.Unlock()
+}
+
+// CompleteVaultRequest removes a Vault execute request_id from the in-flight set
+// for an agent. Call this when a vault.execute.result is received. No-op for
+// unknown agent or request IDs.
+func (f *Factory) CompleteVaultRequest(agentID, requestID string) {
+	f.inFlightMu.Lock()
+	defer f.inFlightMu.Unlock()
+
+	ids := f.inFlightRequests[agentID]
+	for i, id := range ids {
+		if id == requestID {
+			f.inFlightRequests[agentID] = append(ids[:i], ids[i+1:]...)
+			if len(f.inFlightRequests[agentID]) == 0 {
+				delete(f.inFlightRequests, agentID)
+			}
+			return
+		}
+	}
+}
+
+// flushInFlightRequests atomically removes and returns all in-flight request_ids
+// for an agent. Used at the start of HandleCrash to collect requests that had no
+// result at crash time.
+func (f *Factory) flushInFlightRequests(agentID string) []string {
+	f.inFlightMu.Lock()
+	defer f.inFlightMu.Unlock()
+
+	ids := f.inFlightRequests[agentID]
+	delete(f.inFlightRequests, agentID)
+	if len(ids) == 0 {
+		return nil
+	}
+	out := make([]string, len(ids))
+	copy(out, ids)
+	return out
+}
+
+// buildRecoveredContext formats a CrashSnapshot as a human-readable string
+// to inject into the respawned agent's spawn context. The agent uses this to
+// identify where it left off and which Vault operations to resubmit.
+func buildRecoveredContext(s types.CrashSnapshot) string {
+	var b strings.Builder
+	b.WriteString("[RECOVERED STATE — agent restarted after crash]\n")
+	fmt.Fprintf(&b, "Task ID: %s\n", s.TaskID)
+	fmt.Fprintf(&b, "Crashed at: %s\n", s.CrashedAt.Format(time.RFC3339))
+	if len(s.UnknownVaultRequestIDs) > 0 {
+		b.WriteString("In-flight Vault operations at crash time (resubmit with original request_id for idempotent execution):\n")
+		for _, id := range s.UnknownVaultRequestIDs {
+			fmt.Fprintf(&b, "  - %s (status: UNKNOWN)\n", id)
+		}
+	}
+	return b.String()
 }
 
 // publishStatus sends a StatusUpdate to the Orchestrator via Comms.
