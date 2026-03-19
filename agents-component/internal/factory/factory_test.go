@@ -167,7 +167,7 @@ func TestTaskAcceptedExistingAgent(t *testing.T) {
 	}
 
 	// Mark idle so second task can reuse it.
-	if err := reg.UpdateState("agent-reuse-test", "idle"); err != nil {
+	if err := reg.UpdateState("agent-reuse-test", registry.StateIdle, "test: marking idle for reuse"); err != nil {
 		t.Fatalf("UpdateState idle: %v", err)
 	}
 

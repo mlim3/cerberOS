@@ -24,15 +24,24 @@ type TaskAccepted struct {
 	TraceID               string     `json:"trace_id"`
 }
 
+// StateEvent is a single entry in an agent's state transition history.
+// StateHistory is append-only — entries are never removed or modified.
+type StateEvent struct {
+	State     string    `json:"state"`
+	Timestamp time.Time `json:"timestamp"`
+	Reason    string    `json:"reason"`
+}
+
 // AgentRecord is the catalog entry stored in the Registry.
 type AgentRecord struct {
-	AgentID       string    `json:"agent_id"`
-	State         string    `json:"state"` // idle | active | terminated
-	SkillDomains  []string  `json:"skill_domains"`
-	PermissionSet []string  `json:"permission_set"`
-	AssignedTask  string    `json:"assigned_task,omitempty"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	AgentID       string       `json:"agent_id"`
+	State         string       `json:"state"` // pending | spawning | active | idle | suspended | recovering | terminated
+	SkillDomains  []string     `json:"skill_domains"`
+	PermissionSet []string     `json:"permission_set"`
+	AssignedTask  string       `json:"assigned_task,omitempty"`
+	StateHistory  []StateEvent `json:"state_history"` // append-only ordered log of all state transitions
+	CreatedAt     time.Time    `json:"created_at"`
+	UpdatedAt     time.Time    `json:"updated_at"`
 }
 
 // SkillSpec is the leaf-level parameter schema for a skill command.
