@@ -76,7 +76,12 @@ func main() {
 
 	log.Info("agent-process started", "skill_domain", spawnCtx.SkillDomain)
 
-	result, err := RunLoop(context.Background(), log, &spawnCtx)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	startHeartbeat(ctx, log, spawnCtx.TaskID, spawnCtx.TraceID)
+
+	result, err := RunLoop(ctx, log, &spawnCtx)
 	if err != nil {
 		writeError(log, spawnCtx.TaskID, spawnCtx.TraceID, err.Error())
 		os.Exit(1)

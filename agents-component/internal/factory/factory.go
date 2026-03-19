@@ -22,24 +22,26 @@ type IDGenerator func() string
 
 // Factory coordinates agent provisioning and task dispatch.
 type Factory struct {
-	registry    registry.Registry
-	skills      skills.Manager
-	credentials credentials.Broker
-	lifecycle   lifecycle.Manager
-	memory      memory.Client
-	comms       comms.Client
-	generateID  IDGenerator
+	registry      registry.Registry
+	skills        skills.Manager
+	credentials   credentials.Broker
+	lifecycle     lifecycle.Manager
+	memory        memory.Client
+	comms         comms.Client
+	generateID    IDGenerator
+	crashDetector *lifecycle.CrashDetector
 }
 
 // Config carries the dependencies required to construct a Factory.
 type Config struct {
-	Registry    registry.Registry
-	Skills      skills.Manager
-	Credentials credentials.Broker
-	Lifecycle   lifecycle.Manager
-	Memory      memory.Client
-	Comms       comms.Client
-	GenerateID  IDGenerator // optional; defaults to timestamp-based ID
+	Registry      registry.Registry
+	Skills        skills.Manager
+	Credentials   credentials.Broker
+	Lifecycle     lifecycle.Manager
+	Memory        memory.Client
+	Comms         comms.Client
+	GenerateID    IDGenerator              // optional; defaults to timestamp-based ID
+	CrashDetector *lifecycle.CrashDetector // optional; when set, Watch/Unwatch are called around spawn/terminate
 }
 
 // New returns a Factory wired with the provided dependencies.
@@ -66,13 +68,14 @@ func New(cfg Config) (*Factory, error) {
 		cfg.GenerateID = defaultIDGenerator
 	}
 	return &Factory{
-		registry:    cfg.Registry,
-		skills:      cfg.Skills,
-		credentials: cfg.Credentials,
-		lifecycle:   cfg.Lifecycle,
-		memory:      cfg.Memory,
-		comms:       cfg.Comms,
-		generateID:  cfg.GenerateID,
+		registry:      cfg.Registry,
+		skills:        cfg.Skills,
+		credentials:   cfg.Credentials,
+		lifecycle:     cfg.Lifecycle,
+		memory:        cfg.Memory,
+		comms:         cfg.Comms,
+		generateID:    cfg.GenerateID,
+		crashDetector: cfg.CrashDetector,
 	}, nil
 }
 
@@ -188,6 +191,12 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 	if err := f.registry.UpdateState(agentID, registry.StateActive, "VM spawned"); err != nil {
 		return fmt.Errorf("factory: UpdateState active: %w", err)
 	}
+
+	// Begin heartbeat crash monitoring now that the process is live.
+	if f.crashDetector != nil {
+		f.crashDetector.Watch(agentID)
+	}
+
 	return f.publishStatus(agentID, spec.TaskID, registry.StateActive, spec.TraceID)
 }
 
@@ -247,6 +256,11 @@ func (f *Factory) CompleteTask(agentID, sessionID, traceID string, output interf
 	}
 	if err := f.publishStatus(agentID, agent.AssignedTask, registry.StateIdle, traceID); err != nil {
 		return err
+	}
+
+	// Stop crash monitoring before terminating — clean teardown is not a crash.
+	if f.crashDetector != nil {
+		f.crashDetector.Unwatch(agentID)
 	}
 
 	if err := f.lifecycle.Terminate(agentID); err != nil {

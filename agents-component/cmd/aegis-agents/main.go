@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/cerberOS/agents-component/config"
@@ -32,6 +34,9 @@ func main() {
 		"nats_url", cfg.NATSURL,
 	)
 
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
 	// Wire NATS JetStream client.
 	commsClient, err := comms.NewNATSClient(cfg.NATSURL, cfg.ComponentID)
 	if err != nil {
@@ -53,15 +58,50 @@ func main() {
 		lifecycleMgr = lifecycle.New()
 	}
 
+	// Crash detector fires when an agent misses MaxMissed consecutive heartbeats.
+	// The callback logs the event and can initiate recovery (full recovery flow is M4+).
+	crashDetector := lifecycle.NewCrashDetector(
+		lifecycle.HeartbeatConfig{
+			Interval:  cfg.HeartbeatInterval,
+			MaxMissed: cfg.HeartbeatMaxMissed,
+		},
+		func(agentID string) {
+			log.Warn("agent crash detected — missed heartbeat threshold exceeded",
+				"agent_id", agentID,
+			)
+			// TODO(M4): trigger recovery sequence via factory.HandleCrash(agentID).
+		},
+	)
+	go crashDetector.Run(ctx)
+
+	// Subscribe to agent heartbeats (core NATS, at-most-once).
+	// Heartbeats are published directly by agent-process binaries on
+	// aegis.heartbeat.<agent_id> and are not captured by any JetStream stream.
+	if err := commsClient.Subscribe(
+		comms.SubjectHeartbeatAll,
+		func(msg *comms.Message) {
+			// Extract agent_id from the subject (aegis.heartbeat.<agent_id>).
+			agentID := strings.TrimPrefix(msg.Subject, comms.SubjectHeartbeatPrefix)
+			if agentID == "" {
+				return
+			}
+			crashDetector.RecordHeartbeat(agentID)
+		},
+	); err != nil {
+		log.Error("subscribe heartbeat failed", "error", err)
+		os.Exit(1)
+	}
+
 	seedSkills(skillMgr, log)
 
 	f, err := factory.New(factory.Config{
-		Registry:    reg,
-		Skills:      skillMgr,
-		Credentials: credBroker,
-		Lifecycle:   lifecycleMgr,
-		Memory:      memClient,
-		Comms:       commsClient,
+		Registry:      reg,
+		Skills:        skillMgr,
+		Credentials:   credBroker,
+		Lifecycle:     lifecycleMgr,
+		Memory:        memClient,
+		Comms:         commsClient,
+		CrashDetector: crashDetector,
 	})
 	if err != nil {
 		log.Error("factory init failed", "error", err)
@@ -151,9 +191,7 @@ func main() {
 
 	log.Info("aegis-agents ready")
 
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	<-stop
+	<-ctx.Done()
 
 	log.Info("shutdown signal received, stopping")
 	if err := commsClient.Close(); err != nil {

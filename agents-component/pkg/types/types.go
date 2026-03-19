@@ -2,6 +2,16 @@ package types
 
 import "time"
 
+// HeartbeatEvent is published by the agent process on the aegis.heartbeat.<agent_id>
+// subject every heartbeat interval. The Lifecycle Manager subscribes to
+// aegis.heartbeat.* and uses these events to detect crashed agents.
+type HeartbeatEvent struct {
+	AgentID   string    `json:"agent_id"`
+	TaskID    string    `json:"task_id"`
+	TraceID   string    `json:"trace_id"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
 // TaskSpec is received from the Orchestrator via the Comms Interface.
 type TaskSpec struct {
 	TaskID         string            `json:"task_id"`

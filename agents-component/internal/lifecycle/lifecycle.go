@@ -126,7 +126,13 @@ func (m *processManager) Spawn(config VMConfig) error {
 	cmd.Stdin = bytes.NewReader(payload)
 	cmd.Stdout = &entry.stdout
 	cmd.Stderr = os.Stderr // agent logs flow to parent stderr
-	cmd.Env = os.Environ() // inherit env so ANTHROPIC_API_KEY reaches the agent
+	// Inherit parent env (for ANTHROPIC_API_KEY etc.) then overlay agent-specific
+	// variables so the agent process can identify itself and publish heartbeats.
+	cmd.Env = append(os.Environ(),
+		"AEGIS_AGENT_ID="+config.AgentID,
+		"AEGIS_TASK_ID="+config.TaskID,
+		"AEGIS_TRACE_ID="+config.TraceID,
+	)
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("lifecycle: start agent process: %w", err)
