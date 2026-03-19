@@ -56,6 +56,10 @@ type Registry interface {
 	// must be in a state that permits a transition to ACTIVE (idle or suspended).
 	AssignTask(agentID, taskID string) error
 
+	// SetVMID updates the VMID for an agent. Used on respawn when the same
+	// agent_id is paired with a freshly-created microVM (new vm_id).
+	SetVMID(agentID, vmID string) error
+
 	// Deregister removes an agent from the catalog.
 	Deregister(agentID string) error
 
@@ -153,11 +157,35 @@ func (r *inMemoryRegistry) UpdateState(agentID, state, reason string) error {
 	now := time.Now().UTC()
 	a.State = state
 	a.UpdatedAt = now
+
+	// Maintain FailureCount automatically:
+	//   → recovering  increments the counter (each crash detection)
+	//   → idle        resets to 0 (successful task completion)
+	switch state {
+	case StateRecovering:
+		a.FailureCount++
+	case StateIdle:
+		a.FailureCount = 0
+	}
+
 	a.StateHistory = append(a.StateHistory, types.StateEvent{
 		State:     state,
 		Timestamp: now,
 		Reason:    reason,
 	})
+	return nil
+}
+
+func (r *inMemoryRegistry) SetVMID(agentID, vmID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	a, ok := r.agents[agentID]
+	if !ok {
+		return fmt.Errorf("registry: agent %q not found", agentID)
+	}
+	a.VMID = vmID
+	a.UpdatedAt = time.Now().UTC()
 	return nil
 }
 

@@ -226,6 +226,116 @@ func TestDeregister(t *testing.T) {
 	}
 }
 
+// — vm_id tests ——————————————————————————————————————————————————————————
+
+func TestRegisterPreservesVMID(t *testing.T) {
+	r := registry.New()
+	a := newAgent("a1", "web")
+	a.VMID = "vm-initial-1"
+	r.Register(a) //nolint:errcheck
+
+	got, _ := r.Get("a1")
+	if got.VMID != "vm-initial-1" {
+		t.Errorf("VMID: want %q, got %q", "vm-initial-1", got.VMID)
+	}
+}
+
+func TestSetVMID(t *testing.T) {
+	r := registry.New()
+	a := newAgent("a1", "web")
+	a.VMID = "vm-old"
+	r.Register(a) //nolint:errcheck
+
+	if err := r.SetVMID("a1", "vm-new"); err != nil {
+		t.Fatalf("SetVMID: %v", err)
+	}
+
+	got, _ := r.Get("a1")
+	if got.VMID != "vm-new" {
+		t.Errorf("VMID after SetVMID: want %q, got %q", "vm-new", got.VMID)
+	}
+}
+
+func TestSetVMIDNotFound(t *testing.T) {
+	r := registry.New()
+	if err := r.SetVMID("ghost", "vm-x"); err == nil {
+		t.Error("expected error for missing agent, got nil")
+	}
+}
+
+// — failure_count tests ——————————————————————————————————————————————————
+
+func TestFailureCountInitiallyZero(t *testing.T) {
+	r := registry.New()
+	r.Register(newAgent("a1", "web")) //nolint:errcheck
+
+	got, _ := r.Get("a1")
+	if got.FailureCount != 0 {
+		t.Errorf("initial FailureCount: want 0, got %d", got.FailureCount)
+	}
+}
+
+func TestFailureCountIncrementsOnRecovering(t *testing.T) {
+	r := registry.New()
+	r.Register(newAgent("a1", "web"))                   //nolint:errcheck
+	r.UpdateState("a1", registry.StateSpawning, "test") //nolint:errcheck
+	r.UpdateState("a1", registry.StateActive, "test")   //nolint:errcheck
+
+	if err := r.UpdateState("a1", registry.StateRecovering, "process crashed"); err != nil {
+		t.Fatalf("UpdateState →recovering: %v", err)
+	}
+
+	got, _ := r.Get("a1")
+	if got.FailureCount != 1 {
+		t.Errorf("FailureCount after first crash: want 1, got %d", got.FailureCount)
+	}
+}
+
+func TestFailureCountAccumulatesAcrossMultipleCrashes(t *testing.T) {
+	r := registry.New()
+	r.Register(newAgent("a1", "web"))                   //nolint:errcheck
+	r.UpdateState("a1", registry.StateSpawning, "test") //nolint:errcheck
+	r.UpdateState("a1", registry.StateActive, "test")   //nolint:errcheck
+
+	// Crash 1.
+	r.UpdateState("a1", registry.StateRecovering, "crash 1") //nolint:errcheck
+	r.UpdateState("a1", registry.StateActive, "recovered")   //nolint:errcheck
+
+	// Crash 2.
+	r.UpdateState("a1", registry.StateRecovering, "crash 2") //nolint:errcheck
+	r.UpdateState("a1", registry.StateActive, "recovered")   //nolint:errcheck
+
+	got, _ := r.Get("a1")
+	if got.FailureCount != 2 {
+		t.Errorf("FailureCount after 2 crashes: want 2, got %d", got.FailureCount)
+	}
+}
+
+func TestFailureCountResetsOnIdle(t *testing.T) {
+	r := registry.New()
+	r.Register(newAgent("a1", "web"))                   //nolint:errcheck
+	r.UpdateState("a1", registry.StateSpawning, "test") //nolint:errcheck
+	r.UpdateState("a1", registry.StateActive, "test")   //nolint:errcheck
+
+	// Accumulate two failures.
+	r.UpdateState("a1", registry.StateRecovering, "crash 1") //nolint:errcheck
+	r.UpdateState("a1", registry.StateActive, "recovered")   //nolint:errcheck
+	r.UpdateState("a1", registry.StateRecovering, "crash 2") //nolint:errcheck
+	r.UpdateState("a1", registry.StateActive, "recovered")   //nolint:errcheck
+
+	// Successful task completion transitions to IDLE — resets FailureCount.
+	if err := r.UpdateState("a1", registry.StateIdle, "task complete"); err != nil {
+		t.Fatalf("UpdateState →idle: %v", err)
+	}
+
+	got, _ := r.Get("a1")
+	if got.FailureCount != 0 {
+		t.Errorf("FailureCount after successful completion: want 0, got %d", got.FailureCount)
+	}
+}
+
+// — StateHistory immutability ————————————————————————————————————————————
+
 func TestStateHistoryImmutability(t *testing.T) {
 	r := registry.New()
 	r.Register(newAgent("a1", "web")) //nolint:errcheck

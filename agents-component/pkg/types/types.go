@@ -34,8 +34,11 @@ type StateEvent struct {
 
 // AgentRecord is the catalog entry stored in the Registry.
 type AgentRecord struct {
-	AgentID       string       `json:"agent_id"`
-	State         string       `json:"state"` // pending | spawning | active | idle | suspended | recovering | terminated
+	AgentID      string `json:"agent_id"`
+	VMID         string `json:"vm_id,omitempty"` // ID of the current microVM; changes on respawn; empty when suspended or terminated
+	State        string `json:"state"`           // pending | spawning | active | idle | suspended | recovering | terminated
+	FailureCount int    `json:"failure_count"`   // increments on each crash (→ recovering); resets to 0 on successful task completion (→ idle)
+
 	SkillDomains  []string     `json:"skill_domains"`
 	PermissionSet []string     `json:"permission_set"`
 	AssignedTask  string       `json:"assigned_task,omitempty"`

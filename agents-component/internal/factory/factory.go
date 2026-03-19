@@ -136,10 +136,15 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 
 	permSet := permissionSetForDomains(spec.RequiredSkills)
 
+	// Allocate a VM ID now so it can be stored in the registry entry before the
+	// VM is launched. vm_id changes on respawn (same agent_id, new vm_id).
+	vmID := f.generateID()
+
 	// Step 2: Register agent in PENDING state. Registry enforces this as the
 	// mandatory starting state — the caller does not set State on the record.
 	agent := &types.AgentRecord{
 		AgentID:       agentID,
+		VMID:          vmID,
 		SkillDomains:  spec.RequiredSkills,
 		PermissionSet: permSet,
 		AssignedTask:  spec.TaskID,
@@ -168,6 +173,7 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 	// Step 5: Spawn agent process.
 	vmCfg := lifecycle.VMConfig{
 		AgentID:       agentID,
+		VMID:          vmID,
 		TaskID:        spec.TaskID,
 		SkillDomain:   entryDomain,
 		CredentialPtr: token,

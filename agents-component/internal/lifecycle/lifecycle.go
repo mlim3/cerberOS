@@ -29,6 +29,7 @@ const (
 // VMConfig carries the parameters needed to launch an agent process.
 type VMConfig struct {
 	AgentID       string
+	VMID          string // allocated VM identity; changes on respawn (same AgentID, new VMID)
 	TaskID        string // task the agent is being spawned to execute
 	SkillDomain   string // entry-point domain injected into the agent at spawn
 	CredentialPtr string // vault permission token pointer (not the token value)
