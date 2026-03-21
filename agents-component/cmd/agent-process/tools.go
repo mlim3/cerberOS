@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/cerberOS/agents-component/pkg/types"
 )
 
 const (
@@ -285,8 +286,19 @@ func executeVaultWebFetch(ve *VaultExecutor, raw json.RawMessage) ToolResult {
 		}
 	}
 
+	// onUpdate logs progress events to monitoring (stderr via slog). Progress events
+	// must not enter LLM context — they are forwarded here for observability only.
+	onUpdate := func(p types.VaultOperationProgress) {
+		ve.log.Info("vault execute: progress",
+			"request_id", p.RequestID,
+			"progress_type", p.ProgressType,
+			"message", p.Message,
+			"elapsed_ms", p.ElapsedMS,
+		)
+	}
+
 	// vault TimeoutSeconds = 30; local deadline = 30 + 5 = 35s (matches TimeoutSeconds above).
-	return ve.Execute("web_fetch", "web_api_key", opParams, 30)
+	return ve.Execute("web_fetch", "web_api_key", opParams, 30, onUpdate)
 }
 
 // taskCompleteTool is the agent's explicit terminal signal. When the agent calls

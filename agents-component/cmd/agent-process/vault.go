@@ -44,8 +44,9 @@ type VaultExecutor struct {
 	permissionToken string
 	log             *slog.Logger
 
-	mu      sync.Mutex
-	pending map[string]chan types.VaultOperationResult // requestID → result channel
+	mu                sync.Mutex
+	pending           map[string]chan types.VaultOperationResult    // requestID → result channel
+	progressCallbacks map[string]func(types.VaultOperationProgress) // requestID → onUpdate; at-most-once
 }
 
 // agentEnvelope is the outbound wire format required by the Orchestrator (mirrors
@@ -95,13 +96,14 @@ func NewVaultExecutor(log *slog.Logger, taskID, permissionToken string) *VaultEx
 	}
 
 	ve := &VaultExecutor{
-		nc:              nc,
-		js:              js,
-		agentID:         agentID,
-		taskID:          taskID,
-		permissionToken: permissionToken,
-		log:             log,
-		pending:         make(map[string]chan types.VaultOperationResult),
+		nc:                nc,
+		js:                js,
+		agentID:           agentID,
+		taskID:            taskID,
+		permissionToken:   permissionToken,
+		log:               log,
+		pending:           make(map[string]chan types.VaultOperationResult),
+		progressCallbacks: make(map[string]func(types.VaultOperationProgress)),
 	}
 
 	// Durable consumer name is stable per agent_id: survives crash/respawn so
@@ -110,6 +112,14 @@ func NewVaultExecutor(log *slog.Logger, taskID, permissionToken string) *VaultEx
 	if err := ve.subscribeResults(durable); err != nil {
 		nc.Close()
 		log.Warn("vault executor: subscribe result failed — vault disabled", "error", err)
+		return nil
+	}
+
+	// Progress events are at-most-once (core NATS) — subscribe on the plain
+	// connection, not JetStream. Losing a progress event is acceptable.
+	if err := ve.subscribeProgress(); err != nil {
+		nc.Close()
+		log.Warn("vault executor: subscribe progress failed — vault disabled", "error", err)
 		return nil
 	}
 
@@ -132,6 +142,52 @@ func (ve *VaultExecutor) subscribeResults(durable string) error {
 		nats.DeliverNew(),
 	)
 	return err
+}
+
+// subscribeProgress registers a core NATS (at-most-once) subscription on
+// aegis.agents.vault.execute.progress. Progress events are forwarded to the
+// registered onUpdate callback for the matching request_id; they never enter
+// LLM context. Losing a progress event is acceptable and does not affect
+// correctness.
+func (ve *VaultExecutor) subscribeProgress() error {
+	_, err := ve.nc.Subscribe(comms.SubjectVaultExecuteProgress, func(msg *nats.Msg) {
+		ve.routeProgress(msg.Data)
+	})
+	return err
+}
+
+// routeProgress unwraps a progress envelope and invokes the onUpdate callback
+// registered for the matching request_id. Events for other agents or requests
+// with no registered callback are silently dropped (at-most-once semantics).
+func (ve *VaultExecutor) routeProgress(data []byte) {
+	var env struct {
+		Payload json.RawMessage `json:"payload"`
+	}
+	if err := json.Unmarshal(data, &env); err != nil {
+		ve.log.Warn("vault progress: unmarshal envelope failed", "error", err)
+		return
+	}
+
+	var p types.VaultOperationProgress
+	if err := json.Unmarshal(env.Payload, &p); err != nil {
+		ve.log.Warn("vault progress: unmarshal payload failed", "error", err)
+		return
+	}
+
+	// Multiple agent-processes share the same NATS subject — filter our own.
+	if p.AgentID != ve.agentID {
+		return
+	}
+
+	ve.mu.Lock()
+	cb, ok := ve.progressCallbacks[p.RequestID]
+	ve.mu.Unlock()
+
+	if !ok {
+		return // no waiter — acceptable at-most-once drop
+	}
+
+	cb(p) // invoked outside lock to prevent deadlock
 }
 
 // routeResult unwraps an inbound envelope and routes the result to the goroutine
@@ -160,6 +216,7 @@ func (ve *VaultExecutor) routeResult(data []byte) {
 	ch, ok := ve.pending[result.RequestID]
 	if ok {
 		delete(ve.pending, result.RequestID)
+		delete(ve.progressCallbacks, result.RequestID)
 	}
 	ve.mu.Unlock()
 
@@ -179,14 +236,22 @@ func (ve *VaultExecutor) routeResult(data []byte) {
 // Execute submits a vault operation and blocks until the result arrives or the
 // local deadline fires (EDD §13.1 Phase 2).
 //
+// onUpdate is called for each aegis.agents.vault.execute.progress event that
+// arrives for this request while it is in-flight. It is invoked on the NATS
+// subscription goroutine — implementations must be non-blocking. Pass nil to
+// ignore progress events. Progress events must not enter LLM context; onUpdate
+// is for monitoring output only. At-most-once delivery: losing an event is
+// acceptable and does not affect correctness.
+//
 // Sequence:
 //  1. Record request_id in session log (state.write) BEFORE yielding — supports
 //     crash recovery resubmission (EDD §6.3).
-//  2. Register pending channel BEFORE publishing to avoid result-before-wait race.
+//  2. Register pending channel and onUpdate callback BEFORE publishing to avoid
+//     result-before-wait race and progress-before-register races.
 //  3. Publish VaultOperationRequest (JetStream at-least-once).
 //  4. Wait: local deadline = timeout_seconds + 5s buffer.
 //  5. On deadline or context cancel: return TOOL_TIMEOUT, publish cancellation.
-func (ve *VaultExecutor) Execute(operationType, credentialType string, operationParams json.RawMessage, timeoutSeconds int) ToolResult {
+func (ve *VaultExecutor) Execute(operationType, credentialType string, operationParams json.RawMessage, timeoutSeconds int, onUpdate func(types.VaultOperationProgress)) ToolResult {
 	req := types.VaultOperationRequest{
 		RequestID:       newUUID(),
 		AgentID:         ve.agentID,
@@ -202,10 +267,15 @@ func (ve *VaultExecutor) Execute(operationType, credentialType string, operation
 	// This is the critical invariant for crash recovery (EDD §6.3, §13.1).
 	ve.recordSessionEntry(req.RequestID, req.OperationType)
 
-	// Step 2: Register pending channel BEFORE publishing.
+	// Step 2: Register pending channel and onUpdate callback BEFORE publishing.
+	// Both are registered under the same lock to ensure no progress event or
+	// result can arrive between channel registration and publishing.
 	resultCh := make(chan types.VaultOperationResult, 1)
 	ve.mu.Lock()
 	ve.pending[req.RequestID] = resultCh
+	if onUpdate != nil {
+		ve.progressCallbacks[req.RequestID] = onUpdate
+	}
 	ve.mu.Unlock()
 
 	// Step 3: Publish VaultOperationRequest (JetStream). CorrelationID = request_id
@@ -213,6 +283,7 @@ func (ve *VaultExecutor) Execute(operationType, credentialType string, operation
 	if err := ve.publishRequest(req); err != nil {
 		ve.mu.Lock()
 		delete(ve.pending, req.RequestID)
+		delete(ve.progressCallbacks, req.RequestID)
 		ve.mu.Unlock()
 		ve.log.Error("vault execute: publish request failed",
 			"request_id", req.RequestID, "error", err)
@@ -247,6 +318,7 @@ func (ve *VaultExecutor) Execute(operationType, credentialType string, operation
 		// Step 5: Local deadline exceeded.
 		ve.mu.Lock()
 		delete(ve.pending, req.RequestID)
+		delete(ve.progressCallbacks, req.RequestID)
 		ve.mu.Unlock()
 
 		ve.publishCancellation(req.RequestID, req.OperationType, "local_timeout")

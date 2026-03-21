@@ -241,6 +241,19 @@ type SessionEntry struct {
 	VaultRequestID string    `json:"vault_request_id,omitempty"` // set on tool_call entries that trigger vault execution
 }
 
+// VaultOperationProgress is received from the Orchestrator as a transient progress
+// heartbeat during long-running Vault operations (aegis.agents.vault.execute.progress).
+// Delivery is at-most-once (core NATS). Progress events must not enter LLM context;
+// they are forwarded to monitoring output only. Losing an event is acceptable and
+// must not affect operation correctness.
+type VaultOperationProgress struct {
+	RequestID    string `json:"request_id"`
+	AgentID      string `json:"agent_id"`
+	ProgressType string `json:"progress_type"` // "heartbeat" | "milestone"
+	Message      string `json:"message"`
+	ElapsedMS    int    `json:"elapsed_ms"`
+}
+
 // VaultCancelRequest is published to aegis.orchestrator.vault.execute.cancel when
 // the local deadline fires before a vault.execute.result arrives (EDD §13.1 Phase 2).
 // The Orchestrator forwards this to the Vault so it can abort the in-flight operation.
