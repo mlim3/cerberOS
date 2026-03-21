@@ -29,6 +29,7 @@ const (
 	SubjectStateWrite           = "aegis.orchestrator.state.write"
 	SubjectStateReadRequest     = "aegis.orchestrator.state.read.request"
 	SubjectClarificationRequest = "aegis.orchestrator.clarification.request"
+	SubjectVaultExecuteCancel   = "aegis.orchestrator.vault.execute.cancel"
 	SubjectAuditEvent           = "aegis.orchestrator.audit.event"
 	SubjectError                = "aegis.orchestrator.error"
 
@@ -89,6 +90,7 @@ const (
 	MsgTypeStateReadResponse     = "state.read.response"
 	MsgTypeClarificationRequest  = "clarification.request"
 	MsgTypeClarificationResponse = "clarification.response"
+	MsgTypeVaultExecuteCancel    = "vault.execute.cancel"
 	MsgTypeAuditEvent            = "audit.event"
 	MsgTypeError                 = "error"
 	MsgTypeLifecycleTerminate    = "lifecycle.terminate"

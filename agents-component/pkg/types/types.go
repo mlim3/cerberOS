@@ -226,3 +226,28 @@ type MemoryResponse struct {
 	Records []MemoryWrite `json:"records"`
 	TraceID string        `json:"trace_id"`
 }
+
+// SessionEntry is one node in the agent's append-only session log tree (EDD §13.1).
+// Each entry is written via state.write (DataType "episode") before the turn it
+// represents completes. VaultRequestID is set on "tool_call" entries that dispatch
+// a vault.execute.request — crash recovery uses this field to identify in-flight
+// operations that need resubmission (EDD §6.3).
+type SessionEntry struct {
+	EntryID        string    `json:"entry_id"`
+	ParentEntryID  string    `json:"parent_entry_id,omitempty"`
+	TurnType       string    `json:"turn_type"` // "user_message" | "assistant_response" | "tool_call" | "tool_result" | "compaction"
+	Content        string    `json:"content"`
+	Timestamp      time.Time `json:"timestamp"`
+	VaultRequestID string    `json:"vault_request_id,omitempty"` // set on tool_call entries that trigger vault execution
+}
+
+// VaultCancelRequest is published to aegis.orchestrator.vault.execute.cancel when
+// the local deadline fires before a vault.execute.result arrives (EDD §13.1 Phase 2).
+// The Orchestrator forwards this to the Vault so it can abort the in-flight operation.
+type VaultCancelRequest struct {
+	RequestID     string `json:"request_id"`
+	AgentID       string `json:"agent_id"`
+	TaskID        string `json:"task_id"`
+	OperationType string `json:"operation_type"`
+	Reason        string `json:"reason"` // "local_timeout" | "context_cancelled"
+}

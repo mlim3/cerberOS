@@ -61,12 +61,17 @@ type SkillTool struct {
 }
 
 // toolsForDomain returns the skill tools available for the given domain.
+// ve may be nil (vault execution unavailable) — credentialed tools are omitted.
 // In M3 this will query the Skill Hierarchy Manager via the Orchestrator.
-func toolsForDomain(domain string) []SkillTool {
+func toolsForDomain(domain string, ve *VaultExecutor) []SkillTool {
 	base := []SkillTool{taskCompleteTool()}
 	switch domain {
 	case "web":
-		return append([]SkillTool{webFetchTool()}, base...)
+		tools := []SkillTool{webFetchTool()}
+		if ve != nil {
+			tools = append(tools, vaultWebFetchTool(ve))
+		}
+		return append(tools, base...)
 	default:
 		return base
 	}
@@ -210,6 +215,78 @@ func executeWebFetch(ctx context.Context, raw json.RawMessage) ToolResult {
 			"truncated":   truncated,
 		},
 	}
+}
+
+// vaultWebFetchTool fetches a URL via HTTP using a stored API credential.
+// The agent never touches the credential — the Vault executes the HTTP call and
+// returns only the response body (ADR-004). The tool is omitted from the registry
+// when ve is nil (vault unavailable).
+//
+// TimeoutSeconds = 35: vault deadline = 30s, local deadline = 30 + 5s buffer.
+func vaultWebFetchTool(ve *VaultExecutor) SkillTool {
+	return SkillTool{
+		Label:                   "Vault Web Fetch",
+		RequiredCredentialTypes: []string{"web_api_key"},
+		TimeoutSeconds:          35, // must be >= vault TimeoutSeconds (30) + 5s buffer
+		Definition: anthropic.ToolParam{
+			Name: "vault_web_fetch",
+			Description: anthropic.String(
+				"Fetch a URL using a stored API credential managed by the Vault. " +
+					"Use for authenticated HTTP requests (APIs requiring an API key). " +
+					"Do NOT use for public URLs — use web_fetch instead. " +
+					"Do NOT include credential values in any parameter."),
+			InputSchema: anthropic.ToolInputSchemaParam{
+				Properties: map[string]interface{}{
+					"url": map[string]interface{}{
+						"type":        "string",
+						"description": "The fully-qualified URL to fetch (must include scheme: https:// or http://).",
+					},
+					"method": map[string]interface{}{
+						"type":        "string",
+						"description": "HTTP method. Allowed: GET, POST. Defaults to GET when omitted.",
+						"enum":        []string{"GET", "POST"},
+					},
+				},
+				Required: []string{"url"},
+			},
+		},
+		Execute: func(ctx context.Context, raw json.RawMessage) ToolResult {
+			return executeVaultWebFetch(ve, raw)
+		},
+	}
+}
+
+// executeVaultWebFetch builds a VaultOperationRequest and delegates execution to
+// the VaultExecutor. The Vault performs the HTTP call using its stored credential
+// and returns only the response body — never the credential itself (NFR-08).
+func executeVaultWebFetch(ve *VaultExecutor, raw json.RawMessage) ToolResult {
+	var params struct {
+		URL    string `json:"url"`
+		Method string `json:"method"`
+	}
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return ToolResult{
+			Content: fmt.Sprintf("invalid parameters: %v", err),
+			IsError: true,
+			Details: map[string]interface{}{"error": err.Error()},
+		}
+	}
+	if params.Method == "" {
+		params.Method = "GET"
+	}
+
+	// Re-encode normalised params as the vault operation_params payload.
+	opParams, err := json.Marshal(params)
+	if err != nil {
+		return ToolResult{
+			Content: fmt.Sprintf("failed to encode operation params: %v", err),
+			IsError: true,
+			Details: map[string]interface{}{"error": err.Error()},
+		}
+	}
+
+	// vault TimeoutSeconds = 30; local deadline = 30 + 5 = 35s (matches TimeoutSeconds above).
+	return ve.Execute("web_fetch", "web_api_key", opParams, 30)
 }
 
 // taskCompleteTool is the agent's explicit terminal signal. When the agent calls
