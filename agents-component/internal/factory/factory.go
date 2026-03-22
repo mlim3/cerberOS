@@ -181,9 +181,13 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 		return err
 	}
 
-	// Step 4: Pre-authorize credential permission set.
-	token, err := f.credentials.PreAuthorize(agentID, permSet)
+	// Step 4: Pre-authorize credential permission set via real NATS round-trip.
+	// On VAULT_UNREACHABLE the broker has already exhausted its retry budget.
+	token, err := f.credentials.PreAuthorize(agentID, spec.TaskID, spec.RequiredSkills)
 	if err != nil {
+		_ = f.registry.UpdateState(agentID, registry.StateTerminated, "credential pre-authorization failed")
+		_ = f.publishFailed(agentID, spec.TaskID, credErrorCode(err),
+			"agent credential pre-authorization failed", spec.TraceID)
 		return fmt.Errorf("factory: credentials.PreAuthorize: %w", err)
 	}
 
@@ -371,8 +375,12 @@ func (f *Factory) HandleCrash(agentID string) error {
 	_ = f.lifecycle.Terminate(agentID)
 
 	// Step 6: Credential re-authorization — fresh permission token for the new VM.
-	token, err := f.credentials.PreAuthorize(agentID, agent.PermissionSet)
+	token, err := f.credentials.PreAuthorize(agentID, agent.AssignedTask, agent.SkillDomains)
 	if err != nil {
+		// Vault unreachable during recovery — permanently terminate.
+		_ = f.registry.UpdateState(agentID, registry.StateTerminated, "credential re-authorization failed during recovery")
+		_ = f.publishFailed(agentID, agent.AssignedTask, credErrorCode(err),
+			"agent credential re-authorization failed during crash recovery", "")
 		return fmt.Errorf("factory: HandleCrash: credentials.PreAuthorize: %w", err)
 	}
 
@@ -490,6 +498,35 @@ func (f *Factory) publishStatus(agentID, taskID, state, traceID string) error {
 		return fmt.Errorf("factory: comms.Publish agent.status: %w", err)
 	}
 	return nil
+}
+
+// publishFailed sends a TaskFailed to the Orchestrator. Called when a task cannot
+// be executed due to a non-recoverable provisioning or credential failure.
+// errorMessage must be user-safe — it must not expose credential values or vault paths.
+func (f *Factory) publishFailed(agentID, taskID, errorCode, errorMessage, traceID string) error {
+	failed := types.TaskFailed{
+		TaskID:       taskID,
+		AgentID:      agentID,
+		ErrorCode:    errorCode,
+		ErrorMessage: errorMessage,
+		TraceID:      traceID,
+	}
+	if err := f.comms.Publish(
+		comms.SubjectTaskFailed,
+		comms.PublishOptions{MessageType: comms.MsgTypeTaskFailed, CorrelationID: taskID},
+		failed,
+	); err != nil {
+		return fmt.Errorf("factory: comms.Publish task.failed: %w", err)
+	}
+	return nil
+}
+
+// credErrorCode maps a credentials.PreAuthorize error to an error code for task.failed.
+func credErrorCode(err error) string {
+	if err != nil && strings.Contains(err.Error(), "VAULT_UNREACHABLE") {
+		return "VAULT_UNREACHABLE"
+	}
+	return "PROVISION_FAILED"
 }
 
 // publishAccepted sends a TaskAccepted to the Orchestrator. Must be called before
