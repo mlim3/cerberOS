@@ -282,17 +282,19 @@ func (s *Simulator) handleCredentialRequest(msg *nats.Msg) {
 	}
 
 	resp := types.CredentialResponse{
-		AgentID: req.AgentID,
-		Token:   "sim-token-" + req.AgentID,
-		TraceID: req.TraceID,
+		RequestID:       req.RequestID,
+		Status:          "granted",
+		PermissionToken: "sim-token-" + req.AgentID,
 	}
-	if err := s.publish("aegis.agents.credential.response", "credential.response", req.AgentID, resp); err != nil {
+	// CorrelationID MUST be set to req.RequestID so the natsBroker can route the
+	// response to the waiting PreAuthorize goroutine via msg.CorrelationID.
+	if err := s.publish("aegis.agents.credential.response", "credential.response", req.RequestID, resp); err != nil {
 		s.log.Error("simulator: publish credential.response", "err", err, "agent_id", req.AgentID)
 		_ = msg.Nak()
 		return
 	}
 
-	s.log.Info("simulator: credential.response sent", "agent_id", req.AgentID, "trace_id", req.TraceID)
+	s.log.Info("simulator: credential.response sent", "agent_id", req.AgentID, "request_id", req.RequestID)
 	_ = msg.Ack()
 }
 

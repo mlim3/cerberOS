@@ -146,20 +146,48 @@ type CapabilityResponse struct {
 	TraceID  string   `json:"trace_id"`
 }
 
-// CredentialRequest is sent to the Orchestrator to obtain a scoped credential.
-// The Orchestrator proxies this to the Credential Vault and returns a CredentialResponse.
+// CredentialRequest is sent to the Orchestrator to authorize a scoped permission
+// token for an agent at spawn time, or to revoke it at termination. The Orchestrator
+// proxies this to the Credential Vault which registers a scoped policy and returns
+// an opaque permission_token reference (never a raw credential value).
+//
+// RequestID is the correlation key echoed in the CredentialResponse envelope's
+// correlation_id so the Credential Broker can route the response to the waiting
+// PreAuthorize call.
 type CredentialRequest struct {
-	AgentID       string   `json:"agent_id"`
-	PermissionSet []string `json:"permission_set"`
-	TraceID       string   `json:"trace_id"`
+	RequestID    string   `json:"request_id"` // UUID; correlation key for response routing
+	AgentID      string   `json:"agent_id"`
+	TaskID       string   `json:"task_id"`
+	Operation    string   `json:"operation"`     // "authorize" | "revoke"
+	SkillDomains []string `json:"skill_domains"` // required skill domains for Vault scope resolution
+	TTLSeconds   int      `json:"ttl_seconds"`   // policy token TTL; 0 uses server default (3600)
 }
 
-// CredentialResponse is received from the Orchestrator carrying the scoped token
-// returned by the Credential Vault.
+// CredentialResponse is received from the Orchestrator carrying the result of a
+// credential.request (authorize). On "granted" the Vault returns an opaque
+// permission_token reference — never a raw credential value (NFR-08).
+//
+// RequestID echoes the originating CredentialRequest.RequestID and is used as a
+// fallback correlation key when the envelope correlation_id is unavailable.
 type CredentialResponse struct {
-	AgentID string `json:"agent_id"`
-	Token   string `json:"token"`
-	TraceID string `json:"trace_id"`
+	RequestID       string `json:"request_id"`                 // echoes CredentialRequest.RequestID
+	Status          string `json:"status"`                     // "granted" | "denied" | "error"
+	PermissionToken string `json:"permission_token,omitempty"` // opaque reference; present on "granted"
+	ExpiresAt       string `json:"expires_at,omitempty"`       // ISO 8601; present on "granted"
+	ErrorCode       string `json:"error_code,omitempty"`
+	ErrorMessage    string `json:"error_message,omitempty"` // must not expose vault internals or paths
+}
+
+// TaskFailed is published to aegis.orchestrator.task.failed when a task cannot be
+// executed due to a non-recoverable provisioning or credential failure. ErrorMessage
+// must be user-safe — it must not expose internal paths, credential details, or vault
+// implementation specifics.
+type TaskFailed struct {
+	TaskID       string `json:"task_id"`
+	AgentID      string `json:"agent_id,omitempty"`
+	ErrorCode    string `json:"error_code"`    // e.g. "VAULT_UNREACHABLE", "PROVISION_FAILED"
+	ErrorMessage string `json:"error_message"` // user-safe description
+	TraceID      string `json:"trace_id"`
 }
 
 // VaultOperationRequest is sent to the Orchestrator (routed to the Vault) to execute
