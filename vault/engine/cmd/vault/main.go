@@ -44,9 +44,13 @@ type executeRequest struct {
 	Env    map[string]string `json:"env"`
 }
 
-type executeResponse struct {
+type executeResult struct {
 	Output   string `json:"output"`
 	ExitCode int    `json:"exit_code"`
+}
+
+type executeResponse struct {
+	Response executeResult `json:"response"`
 }
 
 // run is the testable entry point. stdin may be nil when no pipe is attached.
@@ -141,8 +145,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	fmt.Fprint(stdout, result.Output)
-	return result.ExitCode
+	fmt.Fprint(stdout, result.Response.Output)
+	return result.Response.ExitCode
 }
 
 func main() {

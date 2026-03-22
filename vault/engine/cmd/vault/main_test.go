@@ -51,7 +51,7 @@ func TestInlineScript(t *testing.T) {
 		if req.Script != "echo hello" {
 			t.Errorf("unexpected script: %q", req.Script)
 		}
-		return executeResponse{Output: "hello\n", ExitCode: 0}
+		return executeResponse{Response: executeResult{Output: "hello\n", ExitCode: 0}}
 	})
 
 	stdout, _, code := runCLI(t, []string{"execute", "--host", srv.URL, "-s", "echo hello"}, "")
@@ -74,7 +74,7 @@ func TestFileScript(t *testing.T) {
 		if req.Script != script {
 			t.Errorf("unexpected script: %q", req.Script)
 		}
-		return executeResponse{Output: "from file\n", ExitCode: 0}
+		return executeResponse{Response: executeResult{Output: "from file\n", ExitCode: 0}}
 	})
 
 	stdout, _, code := runCLI(t, []string{"execute", "--host", srv.URL, "-f", f}, "")
@@ -92,7 +92,7 @@ func TestStdinScript(t *testing.T) {
 		if req.Script != script {
 			t.Errorf("unexpected script: %q", req.Script)
 		}
-		return executeResponse{Output: "from stdin\n", ExitCode: 0}
+		return executeResponse{Response: executeResult{Output: "from stdin\n", ExitCode: 0}}
 	})
 
 	stdout, _, code := runCLI(t, []string{"execute", "--host", srv.URL}, script)
@@ -100,6 +100,31 @@ func TestStdinScript(t *testing.T) {
 		t.Fatalf("expected exit 0, got %d", code)
 	}
 	if stdout != "from stdin\n" {
+		t.Errorf("unexpected output: %q", stdout)
+	}
+}
+
+func TestFileScriptEcho(t *testing.T) {
+	// Verifies that -f reads a real script file and sends its contents to the engine,
+	// and that the engine's output ("testing from test script\n") is printed to stdout.
+	script := "echo testing from test script\n"
+	f := filepath.Join(t.TempDir(), "echo_test.sh")
+	if err := os.WriteFile(f, []byte(script), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := mockEngine(t, func(req executeRequest) executeResponse {
+		if req.Script != script {
+			t.Errorf("unexpected script: %q", req.Script)
+		}
+		return executeResponse{Response: executeResult{Output: "testing from test script\n", ExitCode: 0}}
+	})
+
+	stdout, _, code := runCLI(t, []string{"execute", "--host", srv.URL, "-f", f}, "")
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d", code)
+	}
+	if stdout != "testing from test script\n" {
 		t.Errorf("unexpected output: %q", stdout)
 	}
 }
@@ -114,7 +139,7 @@ func TestFileTakesPriorityOverScript(t *testing.T) {
 		if req.Script != fileContent {
 			t.Errorf("expected file content, got: %q", req.Script)
 		}
-		return executeResponse{Output: "file wins\n", ExitCode: 0}
+		return executeResponse{Response: executeResult{Output: "file wins\n", ExitCode: 0}}
 	})
 
 	runCLI(t, []string{"execute", "--host", srv.URL, "-f", f, "-s", "echo ignored"}, "")
@@ -127,7 +152,7 @@ func TestEnvFlags(t *testing.T) {
 		if req.Env["FOO"] != "bar" || req.Env["BAZ"] != "qux" {
 			t.Errorf("unexpected env: %v", req.Env)
 		}
-		return executeResponse{Output: "", ExitCode: 0}
+		return executeResponse{Response: executeResult{Output: "", ExitCode: 0}}
 	})
 
 	runCLI(t, []string{"execute", "--host", srv.URL, "-s", "true", "-e", "FOO=bar", "-e", "BAZ=qux"}, "")
@@ -154,7 +179,7 @@ func TestExitCodePassthrough(t *testing.T) {
 		want := want
 		t.Run("exit"+strings.TrimSpace(strings.Repeat(" ", 0)), func(t *testing.T) {
 			srv := mockEngine(t, func(req executeRequest) executeResponse {
-				return executeResponse{Output: "", ExitCode: want}
+				return executeResponse{Response: executeResult{Output: "", ExitCode: want}}
 			})
 			_, _, got := runCLI(t, []string{"execute", "--host", srv.URL, "-s", "true"}, "")
 			if got != want {
