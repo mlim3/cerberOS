@@ -130,6 +130,57 @@ Listens on `:8000`. Manages a single long-lived VM instance (for `start`/`stop`)
 }
 ```
 
+## CLI (`vault`)
+
+The `vault` CLI lives in `cmd/vault/` and talks to a running engine over HTTP.
+
+### Build
+
+```sh
+# from engine/
+go build -o vault ./cmd/vault/
+
+# install to $GOPATH/bin (makes `vault` available system-wide)
+go install ./cmd/vault/
+```
+
+### Usage
+
+```
+vault execute [flags]
+
+Flags:
+  -f, --file <path>    read script from file
+  -s, --script <text>  inline script text
+  -e, --env KEY=VAL    set an environment variable (repeatable)
+  --host <url>         engine base URL (default: http://localhost:8000)
+```
+
+If neither `-f` nor `-s` is given, the script is read from stdin.
+
+### Examples
+
+```sh
+# inline script
+vault execute -s 'echo hello'
+
+# script file
+vault execute -f deploy.sh
+
+# inject env vars (forwarded to the VM as environment variables)
+vault execute -f deploy.sh -e API_KEY=abc -e REGION=us-east-1
+
+# pipe from stdin
+echo 'ls /tmp' | vault execute
+
+# point at a remote engine
+vault execute --host http://10.0.0.5:8000 -s 'uname -a'
+```
+
+The CLI's own exit code mirrors the script's exit code inside the VM. Secrets resolved via `{{PLACEHOLDER}}` syntax are scrubbed to `[REDACTED]` in the output before it reaches the terminal.
+
+---
+
 ## Building
 
 The `Dockerfile.qemu` is a three-stage build:

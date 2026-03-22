@@ -196,3 +196,71 @@ output := extractJobOutput(...)
 ```
 
 Steps that need access to injected secret values (like scrubbing) must run after step 1 returns `Result.InjectedSecrets`.
+
+---
+
+## Audit Package — Observer (with pluggable exporters)
+
+The `engine/audit` package (and the mirror implementation inside `secretstore`) uses the **Observer pattern** to decouple *what* is logged from *where* it goes.
+
+### How it works
+
+`Logger` is the subject. It holds a list of `Exporter` observers and fans each `Event` out to all of them:
+
+```go
+type Exporter interface {
+    Export(e Event) error
+}
+
+type Logger struct {
+    exporters []Exporter
+}
+
+func (l *Logger) Log(e Event) { /* fan-out to all exporters */ }
+```
+
+Built-in exporters ship with the package:
+
+| Exporter | Behaviour |
+|---|---|
+| `JSONExporter` | Writes newline-delimited JSON to any `io.Writer` (stdout, file, …) |
+| `MultiExporter` | Composes multiple exporters into one — useful for fan-out without changing callers |
+
+### Event kinds
+
+| Kind | Emitted by | What it records |
+|---|---|---|
+| `execution` | `orchestrator.Execute` | Agent identifier + "submitted script" |
+| `secret_access` | `preprocessor.Process` | Agent identifier + secret *names* (never values) |
+| `secret_access` | `secretstore.handleResolve` | Resolved key names + caller source IP |
+
+The secretstore is a separate module and mirrors the pattern locally (`auditLogger` / `auditExporter`) rather than importing `engine/audit`.
+
+### Why Observer over other patterns
+
+| Pattern | Why not |
+|---|---|
+| **Decorator** | Decorator wraps a single object to add behaviour. Here we're broadcasting to *N* independent consumers — fan-out, not wrapping. |
+| **Chain of Responsibility** | CoR passes a request down a chain until one handler claims it. We want *all* exporters to receive every event, not just the first match. |
+| **Mediator** | Mediator coordinates bidirectional many-to-many communication. Log emission is strictly one-way (Logger → Exporters). |
+
+### Adding a new exporter
+
+Implement `audit.Exporter` and pass it to `audit.New`:
+
+```go
+type WebhookExporter struct{ endpoint string }
+
+func (w *WebhookExporter) Export(e audit.Event) error {
+    b, _ := json.Marshal(e)
+    _, err := http.Post(w.endpoint, "application/json", bytes.NewReader(b))
+    return err
+}
+
+auditor := audit.New(
+    audit.NewJSONExporter(os.Stdout),
+    &WebhookExporter{endpoint: "https://ingest.example.com/audit"},
+)
+```
+
+No other code changes required — `Logger`, `Preprocessor`, and `Orchestrator` are unaware of the new destination.
