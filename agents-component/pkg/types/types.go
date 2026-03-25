@@ -92,13 +92,31 @@ type SkillNode struct {
 }
 
 // MemoryWrite is the tagged payload sent to the Memory Component.
+// RequestID is set by the Memory Interface on the wire (state.write) and used
+// as the correlation key for state.write.ack routing. It is omitted from stored
+// records. RequireAck instructs the Orchestrator to publish a state.write.ack
+// so the caller can confirm persistence before proceeding.
 type MemoryWrite struct {
-	AgentID   string            `json:"agent_id"`
-	SessionID string            `json:"session_id"`
-	DataType  string            `json:"data_type"`
-	TTLHint   int               `json:"ttl_hint_seconds"`
-	Payload   interface{}       `json:"payload"`
-	Tags      map[string]string `json:"tags"`
+	AgentID    string            `json:"agent_id"`
+	SessionID  string            `json:"session_id"`
+	DataType   string            `json:"data_type"`
+	TTLHint    int               `json:"ttl_hint_seconds"`
+	Payload    interface{}       `json:"payload"`
+	Tags       map[string]string `json:"tags"`
+	RequestID  string            `json:"request_id,omitempty"`
+	RequireAck bool              `json:"require_ack,omitempty"`
+}
+
+// StateWriteAck is the confirmation sent by the Orchestrator on
+// aegis.agents.state.write.ack in response to a state.write request.
+// Status is "accepted" on success or "rejected" when the Memory Component
+// refuses the payload (e.g. schema violation). RejectionReason is set when
+// Status == "rejected" and must be logged — never silently discarded.
+type StateWriteAck struct {
+	RequestID       string `json:"request_id,omitempty"`
+	AgentID         string `json:"agent_id"`
+	Status          string `json:"status"`                     // "accepted" | "rejected" | "ok"
+	RejectionReason string `json:"rejection_reason,omitempty"` // present when status == "rejected"
 }
 
 // Envelope is the standard NATS message wrapper for all inter-component messages.

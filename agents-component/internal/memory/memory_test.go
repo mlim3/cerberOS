@@ -56,14 +56,17 @@ func TestReadFiltersByContextTag(t *testing.T) {
 func TestWriteMissingFields(t *testing.T) {
 	c := memory.New()
 
+	validTags := map[string]string{"context": "test"}
+
 	tests := []struct {
 		name    string
 		payload *types.MemoryWrite
 	}{
 		{"nil payload", nil},
-		{"missing AgentID", &types.MemoryWrite{SessionID: "s", DataType: "t"}},
-		{"missing SessionID", &types.MemoryWrite{AgentID: "a", DataType: "t"}},
-		{"missing DataType", &types.MemoryWrite{AgentID: "a", SessionID: "s"}},
+		{"missing AgentID", &types.MemoryWrite{SessionID: "s", DataType: "t", Tags: validTags}},
+		{"missing DataType", &types.MemoryWrite{AgentID: "a", SessionID: "s", Tags: validTags}},
+		{"empty tags", &types.MemoryWrite{AgentID: "a", SessionID: "s", DataType: "t"}},
+		{"nil tags", &types.MemoryWrite{AgentID: "a", SessionID: "s", DataType: "t", Tags: nil}},
 	}
 
 	for _, tt := range tests {
