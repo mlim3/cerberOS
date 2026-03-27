@@ -11,3 +11,4 @@ vendor/
 
 # Vault
 demo
+.openbao-init.json
