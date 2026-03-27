@@ -1,93 +1,47 @@
-# vault/engine
+# vault
 
-The engine is a secure, ephemeral script execution service. It accepts arbitrary shell scripts over HTTP, injects secrets, runs them inside isolated QEMU virtual machines, and returns the output with secrets scrubbed.
+Vault is a credential broker for cerberOS agents. It accepts shell scripts with `{{PLACEHOLDER}}` markers, resolves secrets, injects them into the script, and returns the completed script for the agent to execute in its own environment.
 
-Each execution gets a fresh VM that boots, runs the script, and powers off — no shared state between requests.
+Authorization is atomic — if any requested secret is missing or denied, the entire request fails with no partial injection.
 
 ## How it works
 
 ```
-POST /execute
+POST /inject
       │
       ▼
- Preprocessor          Replaces {{PLACEHOLDER}} tokens with secrets from the SecretStore
-      │
+ Preprocessor          Extracts {{PLACEHOLDER}} tokens, resolves secrets
+      │                via SecretManager (all-or-nothing)
       ▼
- InitRD Builder        Packs the script into a per-job initramfs alongside a custom /init
-      │
-      ▼
- QEMU VM               Boots the kernel with the custom initrd; init executes the script
-      │
-      ▼
- Orchestrator          Extracts output between sentinel markers, scrubs injected secrets
-      │
-      ▼
- JSON response         { "output": "...", "exit_code": 0 }
+ Inject Response       Returns completed script with secrets substituted
 ```
 
-### 1. Preprocessor (`preprocessor/`)
+### Preprocessor (`preprocessor/`)
 
-Scans the script for `{{KEY_NAME}}` placeholders and replaces them with values fetched from a `SecretStore`. Returns the processed script and a list of the injected values (used later for scrubbing).
+Scans the script for `{{KEY_NAME}}` placeholders and replaces them with values fetched from a `SecretManager`. If any key is not found, the entire request fails — no partial injection occurs.
 
-The `SecretStore` interface is pluggable — the current implementation is a mock. Drop in HashiCorp Vault, AWS KMS, etc. without changing anything else.
+The `SecretManager` interface is pluggable — the current implementation is a mock. Drop in HashiCorp Vault, AWS Secrets Manager, etc. without changing anything else.
 
-### 2. InitRD Builder (`initrd/`)
+### Secret Manager (`secretmanager/`)
 
-Builds a per-job initramfs on top of the base `/initrd.gz` that ships with the container:
+Defines the `SecretManager` interface for pluggable secret backends:
 
-1. Decompresses the base cpio archive
-2. Strips the `TRAILER!!!` end marker
-3. Appends three new entries in newc (ASCII hex) cpio format:
-   - `/job/` — directory
-   - `/job/script.sh` — the processed script (executable)
-   - `/init` — replacement init that mounts `/proc`, `/sys`, `/dev`, runs the script, and powers off the VM via `echo o > /proc/sysrq-trigger`
-4. Re-appends `TRAILER!!!`, gzips, and writes to a temp file
-
-The init script wraps execution in sentinel markers:
-
-```
-=== cerberOS job start ===
-<script output>
-=== cerberOS job exit_code=N ===
+```go
+type SecretManager interface {
+    Resolve(keys []string) (map[string]string, error)
+}
 ```
 
-### 3. QEMU VM (`vm/`)
+The mock implementation provides dev secrets. Real implementations (HashiCorp Vault, AWS KMS, etc.) can be swapped in without changing any other package.
 
-A `VM` interface with a QEMU backend. Platform defaults are chosen automatically:
+### Audit Logger (`audit/`)
 
-| Architecture | QEMU binary           | Machine type | Console   |
-| ------------ | --------------------- | ------------ | --------- |
-| `aarch64`    | `qemu-system-aarch64` | `virt`       | `ttyAMA0` |
-| `x86_64`     | `qemu-system-x86_64`  | `microvm`    | `ttyS0`   |
-
-Accelerator priority: KVM (if `/dev/kvm` exists) → TCG software emulation.
-
-The `Run` method starts the VM, captures all output to a buffer, and waits for it to exit. The VM powers itself off at the end of the init script — no external signal needed.
-
-### 4. Orchestrator (`orchestrator/`)
-
-Ties the pipeline together. For each request:
-
-1. Calls the preprocessor
-2. Builds the initrd (written to a temp file, deleted on completion)
-3. Creates an ephemeral QEMU VM pointing at that initrd
-4. Calls `vm.Run()` and extracts the output between the sentinel markers
-5. Replaces every injected secret value with `[REDACTED]`
-6. Returns `Response{Output, ExitCode}`
-
-### 5. Audit Logger (`audit/`)
-
-Structured audit logging for agent interactions. Every `POST /execute` call produces two events in order:
-
-| Event | `kind` | What it records |
-| --- | --- | --- |
-| Script submitted | `execution` | agent identifier |
-| Secrets resolved | `secret_access` | agent identifier + secret **names** (never values) |
+Structured audit logging for agent interactions. Every `/inject` call produces an audit event recording the agent identity and requested secret names (never values).
 
 Events are written as newline-delimited JSON to stdout by default:
 
 ```json
-{"time":"2026-03-08T12:00:00Z","kind":"execution","agent":"my-agent","message":"agent submitted script for execution"}
+{"time":"2026-03-08T12:00:00Z","kind":"injection","agent":"my-agent","keys":["API_KEY","DB_PASS"],"message":"agent requested secret injection"}
 {"time":"2026-03-08T12:00:00Z","kind":"secret_access","agent":"my-agent","keys":["API_KEY","DB_PASS"],"message":"agent requested secrets"}
 ```
 
@@ -99,29 +53,15 @@ type Exporter interface {
 }
 ```
 
-Pass one or more exporters to `audit.New` in `main.go`:
+### HTTP Server (`main.go`)
 
-```go
-audit.New(
-    audit.NewJSONExporter(os.Stdout), // stdout (default)
-    &PostgresExporter{db: db},        // database
-    &WebhookExporter{url: "..."},     // HTTP ingest, Splunk, etc.
-)
-```
+Listens on `:8000`. Single endpoint:
 
-No changes to `Orchestrator`, `Preprocessor`, or any other package are needed when adding a new destination.
+| Endpoint  | Method | Description                                  |
+| --------- | ------ | -------------------------------------------- |
+| `/inject` | POST   | Inject secrets into a script and return it   |
 
-### 6. HTTP Server (`main.go`)
-
-Listens on `:8000`. Manages a single long-lived VM instance (for `start`/`stop`) separately from ephemeral execute requests.
-
-| Endpoint   | Method | Description                         |
-| ---------- | ------ | ----------------------------------- |
-| `/start`   | POST   | Boot the persistent VM (debug)      |
-| `/stop`    | POST   | Shut down the persistent VM (debug) |
-| `/execute` | POST   | Run a script in an ephemeral VM     |
-
-`/execute` request body:
+`/inject` request body:
 
 ```json
 {
@@ -130,9 +70,18 @@ Listens on `:8000`. Manages a single long-lived VM instance (for `start`/`stop`)
 }
 ```
 
+Response:
+
+```json
+{
+  "agent": "my-agent",
+  "script": "#!/bin/sh\necho actual-api-key-value"
+}
+```
+
 ## CLI (`vault`)
 
-The `vault` CLI lives in `cmd/vault/` and talks to a running engine over HTTP.
+The `vault` CLI lives in `cmd/vault/` and talks to a running vault service over HTTP.
 
 ### Build
 
@@ -140,20 +89,20 @@ The `vault` CLI lives in `cmd/vault/` and talks to a running engine over HTTP.
 # from engine/
 go build -o vault ./cmd/vault/
 
-# install to $GOPATH/bin (makes `vault` available system-wide)
+# install to $GOPATH/bin
 go install ./cmd/vault/
 ```
 
 ### Usage
 
 ```
-vault execute [flags]
+vault inject [flags]
 
 Flags:
-  -f, --file <path>    read script from file
-  -s, --script <text>  inline script text
-  -e, --env KEY=VAL    set an environment variable (repeatable)
-  --host <url>         engine base URL (default: http://localhost:8000)
+  -f, --file <path>       read script from file
+  -s, --script <text>     inline script text
+  -o, --output <path>     write injected script to file (default: stdout)
+  --host <url>            vault service URL (default: http://localhost:8000)
 ```
 
 If neither `-f` nor `-s` is given, the script is read from stdin.
@@ -162,54 +111,37 @@ If neither `-f` nor `-s` is given, the script is read from stdin.
 
 ```sh
 # inline script
-vault execute -s 'echo hello'
+vault inject -s 'echo {{API_KEY}}'
 
 # script file
-vault execute -f deploy.sh
+vault inject -f deploy.sh
 
-# inject env vars (forwarded to the VM as environment variables)
-vault execute -f deploy.sh -e API_KEY=abc -e REGION=us-east-1
+# write output to file
+vault inject -f deploy.sh -o deploy_ready.sh
 
 # pipe from stdin
-echo 'ls /tmp' | vault execute
+echo '#!/bin/sh\ncurl -H "Authorization: {{TOKEN}}" https://api.example.com' | vault inject
 
-# point at a remote engine
-vault execute --host http://10.0.0.5:8000 -s 'uname -a'
+# point at a remote vault
+vault inject --host http://10.0.0.5:8000 -s 'echo {{API_KEY}}'
 ```
 
-The CLI's own exit code mirrors the script's exit code inside the VM. Secrets resolved via `{{PLACEHOLDER}}` syntax are scrubbed to `[REDACTED]` in the output before it reaches the terminal.
+The CLI prints the completed script to stdout (or writes to a file with `-o`). Exit code 0 on success, non-zero on failure.
 
 ---
 
 ## Building
 
-The `Dockerfile.qemu` is a three-stage build:
+The `Dockerfile` is a two-stage build:
 
 1. **Build** — compiles the Go binary (static, no CGO)
-2. **Artifacts** — builds a minimal Alpine rootfs (busybox only), compiles the `linux-virt` kernel, and creates the base `initrd.gz`
-3. **Production** — assembles the final image with QEMU, kernel, base initrd, and engine binary; runs as non-root `altuser` (UID 1001)
+2. **Production** — runs as non-root `altuser` (UID 1001)
 
 ```sh
-docker build -f Dockerfile.qemu -t vault-engine .
-docker run -p 8000:8000 vault-engine
-```
-
-KVM passthrough for hardware acceleration:
-
-```sh
-docker run --device /dev/kvm -p 8000:8000 vault-engine
+docker build -t vault .
+docker run -p 8000:8000 vault
 ```
 
 ## Dependencies
 
-None. The entire engine is standard library Go (`go 1.24`).
-
-## Security properties
-
-- **VM isolation** — each script runs in its own kernel instance with no shared filesystem or network
-- **Ephemeral** — VMs boot from a read-only initramfs; nothing persists between executions
-- **Secret scrubbing** — injected secret values are replaced with `[REDACTED]` before output is returned
-- **Minimal rootfs** — only busybox in the guest; no package manager, no shell history, no network stack
-- **Non-root container** — engine process runs as UID 1001
-- **Audit trail** — every execution and secret access is logged with agent identity and secret names (never values); exporters are pluggable
-- **No external dependencies** — reduced supply chain surface
+None. Standard library Go only (`go 1.24`).
