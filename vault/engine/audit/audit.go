@@ -18,8 +18,8 @@ const (
 	// KindSecretAccess is emitted whenever an agent's script resolves one or
 	// more secret placeholders.
 	KindSecretAccess EventKind = "secret_access"
-	// KindExecution is emitted when an agent submits a script for execution.
-	KindExecution EventKind = "execution"
+	// KindInjection is emitted when an agent requests secret injection into a script.
+	KindInjection EventKind = "injection"
 )
 
 // Event is the unit of information written to every Exporter.

@@ -6,9 +6,10 @@ import (
 	"github.com/mlim3/cerberOS/vault/engine/audit"
 )
 
-// SecretStore resolves a batch of secret keys in a single call.
-// The engine's secretclient package provides the HTTP implementation;
-// swap in any backend (HashiCorp Vault, AWS KMS, etc.) without touching the pipeline.
+// SecretStore resolves a batch of secret keys in a single atomic call.
+// If any key is not found or denied, the entire call must fail —
+// no partial results. Swap in any backend (HashiCorp Vault, AWS KMS, etc.)
+// without touching the pipeline.
 type SecretStore interface {
 	Resolve(keys []string) (map[string]string, error)
 }
@@ -19,7 +20,7 @@ type Result struct {
 	InjectedSecrets []string // resolved secret values (for output scrubbing)
 }
 
-// Preprocessor handles script transformation before VM execution.
+// Preprocessor handles secret placeholder substitution in agent scripts.
 type Preprocessor struct {
 	store  SecretStore
 	logger *audit.Logger

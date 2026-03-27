@@ -1,25 +1,9 @@
 services:
-  engine:
+  vault:
     build:
-      dockerfile: "Dockerfile.qemu"
       context: "./engine"
     ports:
       - "8000:8000"
-    environment:
-      - SECRET_STORE_TOKEN=value
-      - SECRET_STORE_URL=http://secretstore:8001
-    privileged: true
-    depends_on: 
-      - secretstore
-    restart: no
-  
-  secretstore:
-    build:
-      context: "./secretstore"
-    ports:
-      - "8001:8001"
-    environment:
-      - ENGINE_TOKEN=value
     restart: no
 
   ui:
@@ -28,8 +12,7 @@ services:
     ports:
       - "80:80"
     depends_on:
-      - secretstore
-      - engine
+      - vault
     restart: no
 
   swagger:
