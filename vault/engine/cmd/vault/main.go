@@ -120,12 +120,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
 		var errResp errorResponse
-		if err := json.NewDecoder(resp.Body).Decode(&errResp); err == nil && errResp.Error != "" {
+		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
 			fmt.Fprintf(stderr, "error: %s\n", errResp.Error)
 		} else {
-			msg, _ := io.ReadAll(resp.Body)
-			fmt.Fprintf(stderr, "error: vault returned %d: %s\n", resp.StatusCode, strings.TrimSpace(string(msg)))
+			fmt.Fprintf(stderr, "error: vault returned %d: %s\n", resp.StatusCode, strings.TrimSpace(string(body)))
 		}
 		return 1
 	}
