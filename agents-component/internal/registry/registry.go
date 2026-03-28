@@ -4,12 +4,19 @@
 package registry
 
 import (
+	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
+	"github.com/cerberOS/agents-component/internal/memory"
 	"github.com/cerberOS/agents-component/pkg/types"
 )
+
+// DataTypeAgentState is the MemoryWrite.DataType used for all agent catalog writes.
+// The Memory Component uses this to route and filter records.
+const DataTypeAgentState = "agent_state"
 
 // Agent state constants — the seven states of the lifecycle state machine (EDD §6.2).
 const (
@@ -71,23 +78,93 @@ type Registry interface {
 type inMemoryRegistry struct {
 	mu     sync.RWMutex
 	agents map[string]*types.AgentRecord
+	mem    memory.Client // nil when persistence is disabled (unit-test path)
 }
 
-// New returns a ready-to-use in-memory Registry.
+// New returns a ready-to-use in-memory Registry with no persistence.
+// Use NewPersistent when you need startup recovery via the Memory Interface.
 func New() Registry {
 	return &inMemoryRegistry{
 		agents: make(map[string]*types.AgentRecord),
 	}
 }
 
+// NewPersistent returns a Registry that writes every state mutation to the Memory
+// Interface. On construction it publishes a state.read.request filtered to
+// data_type=agent_state and re-hydrates the catalog from the response — surviving
+// component restarts transparently. An empty response (first boot) is handled
+// gracefully: the returned registry starts with an empty catalog.
+func NewPersistent(mem memory.Client) (Registry, error) {
+	r := &inMemoryRegistry{
+		agents: make(map[string]*types.AgentRecord),
+		mem:    mem,
+	}
+	if err := r.recoverFromMemory(); err != nil {
+		return nil, fmt.Errorf("registry: startup recovery: %w", err)
+	}
+	return r, nil
+}
+
+// recoverFromMemory reads all agent_state records and re-hydrates the catalog.
+// For each agentID, only the record with the latest UpdatedAt is used (subsequent
+// writes to the same agent overwrite older snapshots). Terminated agents are not
+// restored — they have no work to resume. An empty result set is handled as a
+// normal first-boot condition and produces no error.
+func (r *inMemoryRegistry) recoverFromMemory() error {
+	records, err := r.mem.ReadAllByType(DataTypeAgentState)
+	if err != nil {
+		return fmt.Errorf("read %q records: %w", DataTypeAgentState, err)
+	}
+	if len(records) == 0 {
+		slog.Info("registry: no persisted agent state found — starting fresh")
+		return nil
+	}
+
+	// For each agentID, keep only the record with the latest UpdatedAt.
+	latest := make(map[string]*types.AgentRecord, len(records))
+	for _, rec := range records {
+		var agent types.AgentRecord
+		b, err := json.Marshal(rec.Payload)
+		if err != nil {
+			slog.Warn("registry: recovery: cannot marshal payload",
+				"agent_id", rec.AgentID, "error", err)
+			continue
+		}
+		if err := json.Unmarshal(b, &agent); err != nil {
+			slog.Warn("registry: recovery: cannot unmarshal AgentRecord",
+				"agent_id", rec.AgentID, "error", err)
+			continue
+		}
+		if agent.AgentID == "" {
+			continue
+		}
+		if existing, ok := latest[agent.AgentID]; !ok || agent.UpdatedAt.After(existing.UpdatedAt) {
+			cp := agent
+			latest[agent.AgentID] = &cp
+		}
+	}
+
+	var restored int
+	for _, agent := range latest {
+		if agent.State == StateTerminated {
+			continue // terminal — nothing to resume
+		}
+		r.agents[agent.AgentID] = agent
+		restored++
+	}
+
+	slog.Info("registry: startup recovery complete", "agents_restored", restored)
+	return nil
+}
+
 func (r *inMemoryRegistry) Register(agent *types.AgentRecord) error {
 	if agent == nil || agent.AgentID == "" {
 		return fmt.Errorf("registry: agent must have a non-empty AgentID")
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
 
+	r.mu.Lock()
 	if _, exists := r.agents[agent.AgentID]; exists {
+		r.mu.Unlock()
 		return fmt.Errorf("registry: agent %q already registered", agent.AgentID)
 	}
 	now := time.Now().UTC()
@@ -98,6 +175,10 @@ func (r *inMemoryRegistry) Register(agent *types.AgentRecord) error {
 		{State: StatePending, Timestamp: now, Reason: "registered"},
 	}
 	r.agents[agent.AgentID] = agent
+	snapshot := copyAgent(agent)
+	r.mu.Unlock()
+
+	r.persistAgent(snapshot)
 	return nil
 }
 
@@ -109,11 +190,7 @@ func (r *inMemoryRegistry) Get(agentID string) (*types.AgentRecord, error) {
 	if !ok {
 		return nil, fmt.Errorf("registry: agent %q not found", agentID)
 	}
-	// Return a shallow copy to prevent external mutation of the catalog entry.
-	cp := *a
-	cp.StateHistory = make([]types.StateEvent, len(a.StateHistory))
-	copy(cp.StateHistory, a.StateHistory)
-	return &cp, nil
+	return copyAgent(a), nil
 }
 
 func (r *inMemoryRegistry) FindBySkills(domains []string) ([]*types.AgentRecord, error) {
@@ -134,10 +211,7 @@ func (r *inMemoryRegistry) FindBySkills(domains []string) ([]*types.AgentRecord,
 			continue
 		}
 		if hasAllDomains(a.SkillDomains, needed) {
-			cp := *a
-			cp.StateHistory = make([]types.StateEvent, len(a.StateHistory))
-			copy(cp.StateHistory, a.StateHistory)
-			matches = append(matches, &cp)
+			matches = append(matches, copyAgent(a))
 		}
 	}
 	return matches, nil
@@ -145,13 +219,13 @@ func (r *inMemoryRegistry) FindBySkills(domains []string) ([]*types.AgentRecord,
 
 func (r *inMemoryRegistry) UpdateState(agentID, state, reason string) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	a, ok := r.agents[agentID]
 	if !ok {
+		r.mu.Unlock()
 		return fmt.Errorf("registry: agent %q not found", agentID)
 	}
 	if err := validateTransition(a.State, state); err != nil {
+		r.mu.Unlock()
 		return fmt.Errorf("registry: agent %q: %w", agentID, err)
 	}
 	now := time.Now().UTC()
@@ -173,31 +247,38 @@ func (r *inMemoryRegistry) UpdateState(agentID, state, reason string) error {
 		Timestamp: now,
 		Reason:    reason,
 	})
+	snapshot := copyAgent(a)
+	r.mu.Unlock()
+
+	r.persistAgent(snapshot)
 	return nil
 }
 
 func (r *inMemoryRegistry) SetVMID(agentID, vmID string) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	a, ok := r.agents[agentID]
 	if !ok {
+		r.mu.Unlock()
 		return fmt.Errorf("registry: agent %q not found", agentID)
 	}
 	a.VMID = vmID
 	a.UpdatedAt = time.Now().UTC()
+	snapshot := copyAgent(a)
+	r.mu.Unlock()
+
+	r.persistAgent(snapshot)
 	return nil
 }
 
 func (r *inMemoryRegistry) AssignTask(agentID, taskID string) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	a, ok := r.agents[agentID]
 	if !ok {
+		r.mu.Unlock()
 		return fmt.Errorf("registry: agent %q not found", agentID)
 	}
 	if err := validateTransition(a.State, StateActive); err != nil {
+		r.mu.Unlock()
 		return fmt.Errorf("registry: AssignTask for agent %q: %w", agentID, err)
 	}
 	now := time.Now().UTC()
@@ -209,6 +290,10 @@ func (r *inMemoryRegistry) AssignTask(agentID, taskID string) error {
 		Timestamp: now,
 		Reason:    "task assigned: " + taskID,
 	})
+	snapshot := copyAgent(a)
+	r.mu.Unlock()
+
+	r.persistAgent(snapshot)
 	return nil
 }
 
@@ -229,12 +314,42 @@ func (r *inMemoryRegistry) List() []*types.AgentRecord {
 
 	out := make([]*types.AgentRecord, 0, len(r.agents))
 	for _, a := range r.agents {
-		cp := *a
-		cp.StateHistory = make([]types.StateEvent, len(a.StateHistory))
-		copy(cp.StateHistory, a.StateHistory)
-		out = append(out, &cp)
+		out = append(out, copyAgent(a))
 	}
 	return out
+}
+
+// persistAgent writes a snapshot of the agent record to the Memory Interface.
+// Writes are fire-and-forget (RequireAck: false) to keep the mutation hot path
+// fast. A failed persist is logged as a warning but does not fail the mutation —
+// the in-memory catalog remains authoritative during the component's lifetime.
+func (r *inMemoryRegistry) persistAgent(agent *types.AgentRecord) {
+	if r.mem == nil {
+		return
+	}
+	if err := r.mem.Write(&types.MemoryWrite{
+		AgentID:  agent.AgentID,
+		DataType: DataTypeAgentState,
+		Payload:  agent,
+		Tags:     map[string]string{"context": DataTypeAgentState},
+	}); err != nil {
+		slog.Warn("registry: failed to persist agent state",
+			"agent_id", agent.AgentID,
+			"state", agent.State,
+			"error", err,
+		)
+	}
+}
+
+// — Helpers ————————————————————————————————————————————————————————————————
+
+// copyAgent returns a shallow copy of a with its StateHistory slice deep-copied
+// to prevent external mutation of the catalog entry.
+func copyAgent(a *types.AgentRecord) *types.AgentRecord {
+	cp := *a
+	cp.StateHistory = make([]types.StateEvent, len(a.StateHistory))
+	copy(cp.StateHistory, a.StateHistory)
+	return &cp
 }
 
 // validateTransition returns an error if transitioning from → to is not

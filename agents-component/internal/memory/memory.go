@@ -27,6 +27,11 @@ type Client interface {
 	// Read retrieves filtered slices by agent ID and context tag.
 	// Never returns full agent history.
 	Read(agentID, contextTag string) ([]types.MemoryWrite, error)
+
+	// ReadAllByType returns all persisted records with the given DataType across
+	// all agents. Used exclusively for component startup recovery; never call
+	// this during normal agent operation.
+	ReadAllByType(dataType string) ([]types.MemoryWrite, error)
 }
 
 // stubClient is the default in-process implementation used in unit tests.
@@ -72,6 +77,23 @@ func (c *stubClient) Read(agentID, contextTag string) ([]types.MemoryWrite, erro
 		}
 	}
 	return filtered, nil
+}
+
+func (c *stubClient) ReadAllByType(dataType string) ([]types.MemoryWrite, error) {
+	if dataType == "" {
+		return nil, fmt.Errorf("memory: dataType must not be empty")
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	var result []types.MemoryWrite
+	for _, records := range c.records {
+		for _, r := range records {
+			if r.DataType == dataType {
+				result = append(result, r)
+			}
+		}
+	}
+	return result, nil
 }
 
 // — NATS client (production) ——————————————————————————————————————————————
@@ -219,9 +241,31 @@ func (c *natsClient) Read(agentID, contextTag string) ([]types.MemoryWrite, erro
 	if agentID == "" {
 		return nil, fmt.Errorf("memory: agentID must not be empty")
 	}
-
 	traceID := newMemoryID()
+	return c.sendReadRequest(types.MemoryReadRequest{
+		AgentID:    agentID,
+		ContextTag: contextTag,
+		TraceID:    traceID,
+	}, traceID)
+}
 
+// ReadAllByType publishes a state.read.request filtered by DataType with no
+// AgentID constraint. Intended only for startup recovery.
+func (c *natsClient) ReadAllByType(dataType string) ([]types.MemoryWrite, error) {
+	if dataType == "" {
+		return nil, fmt.Errorf("memory: dataType must not be empty")
+	}
+	traceID := newMemoryID()
+	return c.sendReadRequest(types.MemoryReadRequest{
+		DataType: dataType,
+		TraceID:  traceID,
+	}, traceID)
+}
+
+// sendReadRequest registers a pending read channel, publishes the request, and
+// blocks until a state.read.response with a matching traceID arrives (retrying
+// up to memReadMaxAttempts on timeout).
+func (c *natsClient) sendReadRequest(req types.MemoryReadRequest, traceID string) ([]types.MemoryWrite, error) {
 	resultCh := make(chan readResult, 1)
 	c.pendingReadMu.Lock()
 	c.pendingReads[traceID] = resultCh
@@ -231,12 +275,6 @@ func (c *natsClient) Read(agentID, contextTag string) ([]types.MemoryWrite, erro
 		delete(c.pendingReads, traceID)
 		c.pendingReadMu.Unlock()
 	}()
-
-	req := types.MemoryReadRequest{
-		AgentID:    agentID,
-		ContextTag: contextTag,
-		TraceID:    traceID,
-	}
 
 	var lastErr error
 	for attempt := 0; attempt < memReadMaxAttempts; attempt++ {

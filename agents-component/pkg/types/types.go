@@ -259,8 +259,11 @@ type CrashSnapshot struct {
 
 // MemoryReadRequest is sent to the Orchestrator to retrieve filtered memory context.
 // The Orchestrator routes this to the Memory Component.
+// DataType filters by MemoryWrite.DataType; when set with an empty AgentID, all
+// agents' records of that type are returned (used for component-wide startup recovery).
 type MemoryReadRequest struct {
 	AgentID    string `json:"agent_id"`
+	DataType   string `json:"data_type,omitempty"`
 	ContextTag string `json:"context_tag"`
 	TraceID    string `json:"trace_id"`
 }

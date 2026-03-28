@@ -2,7 +2,9 @@ package registry_test
 
 import (
 	"testing"
+	"time"
 
+	"github.com/cerberOS/agents-component/internal/memory"
 	"github.com/cerberOS/agents-component/internal/registry"
 	"github.com/cerberOS/agents-component/pkg/types"
 )
@@ -331,6 +333,178 @@ func TestFailureCountResetsOnIdle(t *testing.T) {
 	got, _ := r.Get("a1")
 	if got.FailureCount != 0 {
 		t.Errorf("FailureCount after successful completion: want 0, got %d", got.FailureCount)
+	}
+}
+
+// — Persistence and startup recovery ————————————————————————————————————
+
+// agentStateWrite builds the MemoryWrite payload that the registry itself uses
+// when persisting an agent record, so tests can pre-populate the stub consistently.
+func agentStateWrite(agent *types.AgentRecord) *types.MemoryWrite {
+	return &types.MemoryWrite{
+		AgentID:  agent.AgentID,
+		DataType: registry.DataTypeAgentState,
+		Payload:  agent,
+		Tags:     map[string]string{"context": registry.DataTypeAgentState},
+	}
+}
+
+func TestNewPersistentFirstBoot(t *testing.T) {
+	mem := memory.New()
+	r, err := registry.NewPersistent(mem)
+	if err != nil {
+		t.Fatalf("NewPersistent: %v", err)
+	}
+	if got := r.List(); len(got) != 0 {
+		t.Errorf("expected 0 agents on first boot, got %d", len(got))
+	}
+}
+
+func TestNewPersistentRecoversAgents(t *testing.T) {
+	mem := memory.New()
+	now := time.Now().UTC()
+	agent := &types.AgentRecord{
+		AgentID:      "recovered-1",
+		State:        registry.StateIdle,
+		SkillDomains: []string{"web"},
+		CreatedAt:    now,
+		UpdatedAt:    now,
+		StateHistory: []types.StateEvent{
+			{State: registry.StatePending, Timestamp: now, Reason: "registered"},
+			{State: registry.StateIdle, Timestamp: now, Reason: "task complete"},
+		},
+	}
+	if err := mem.Write(agentStateWrite(agent)); err != nil {
+		t.Fatalf("pre-populate memory: %v", err)
+	}
+
+	r, err := registry.NewPersistent(mem)
+	if err != nil {
+		t.Fatalf("NewPersistent: %v", err)
+	}
+
+	got, err := r.Get("recovered-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.State != registry.StateIdle {
+		t.Errorf("state: want %q, got %q", registry.StateIdle, got.State)
+	}
+	if len(got.SkillDomains) != 1 || got.SkillDomains[0] != "web" {
+		t.Errorf("SkillDomains: want [web], got %v", got.SkillDomains)
+	}
+	if len(got.StateHistory) != 2 {
+		t.Errorf("StateHistory length: want 2, got %d", len(got.StateHistory))
+	}
+}
+
+func TestNewPersistentSkipsTerminatedAgents(t *testing.T) {
+	mem := memory.New()
+	now := time.Now().UTC()
+	agent := &types.AgentRecord{
+		AgentID:   "terminated-1",
+		State:     registry.StateTerminated,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	mem.Write(agentStateWrite(agent)) //nolint:errcheck
+
+	r, err := registry.NewPersistent(mem)
+	if err != nil {
+		t.Fatalf("NewPersistent: %v", err)
+	}
+	if _, err := r.Get("terminated-1"); err == nil {
+		t.Error("expected terminated agent to be excluded from recovery, but Get succeeded")
+	}
+}
+
+func TestNewPersistentUsesLatestRecord(t *testing.T) {
+	mem := memory.New()
+	old := time.Now().UTC().Add(-time.Hour)
+	recent := time.Now().UTC()
+
+	// Older record: state = idle.
+	mem.Write(agentStateWrite(&types.AgentRecord{ //nolint:errcheck
+		AgentID:   "multi-1",
+		State:     registry.StateIdle,
+		CreatedAt: old,
+		UpdatedAt: old,
+	}))
+
+	// Newer record: state = active.
+	mem.Write(agentStateWrite(&types.AgentRecord{ //nolint:errcheck
+		AgentID:   "multi-1",
+		State:     registry.StateActive,
+		CreatedAt: old,
+		UpdatedAt: recent,
+	}))
+
+	r, err := registry.NewPersistent(mem)
+	if err != nil {
+		t.Fatalf("NewPersistent: %v", err)
+	}
+	got, err := r.Get("multi-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.State != registry.StateActive {
+		t.Errorf("expected latest state %q, got %q", registry.StateActive, got.State)
+	}
+}
+
+func TestRegisterPersistsToMemory(t *testing.T) {
+	mem := memory.New()
+	r, err := registry.NewPersistent(mem)
+	if err != nil {
+		t.Fatalf("NewPersistent: %v", err)
+	}
+
+	if err := r.Register(newAgent("persist-1", "web")); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	records, err := mem.ReadAllByType(registry.DataTypeAgentState)
+	if err != nil {
+		t.Fatalf("ReadAllByType: %v", err)
+	}
+	var found bool
+	for _, rec := range records {
+		if rec.AgentID == "persist-1" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected agent_state record for persist-1, not found in memory")
+	}
+}
+
+func TestPersistenceRoundTrip(t *testing.T) {
+	mem := memory.New()
+
+	// First "boot": register an agent and walk it to active.
+	r1, err := registry.NewPersistent(mem)
+	if err != nil {
+		t.Fatalf("NewPersistent (boot 1): %v", err)
+	}
+	r1.Register(newAgent("rt-1", "web"))               //nolint:errcheck
+	r1.UpdateState("rt-1", registry.StateSpawning, "") //nolint:errcheck
+	r1.UpdateState("rt-1", registry.StateActive, "")   //nolint:errcheck
+
+	// Second "boot": create a new registry from the same memory stub.
+	r2, err := registry.NewPersistent(mem)
+	if err != nil {
+		t.Fatalf("NewPersistent (boot 2): %v", err)
+	}
+	got, err := r2.Get("rt-1")
+	if err != nil {
+		t.Fatalf("Get after recovery: %v", err)
+	}
+	if got.State != registry.StateActive {
+		t.Errorf("recovered state: want %q, got %q", registry.StateActive, got.State)
+	}
+	if len(got.SkillDomains) != 1 || got.SkillDomains[0] != "web" {
+		t.Errorf("recovered SkillDomains: want [web], got %v", got.SkillDomains)
 	}
 }
 
