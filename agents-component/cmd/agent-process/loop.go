@@ -74,7 +74,7 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 				"last_total_tokens", lastTotalTokens,
 				"threshold_pct", int(compactThreshold*100),
 			)
-			compacted, err := compact(ctx, client, log, history, compactedThrough+1, assistantTurn)
+			compacted, err := compact(ctx, client, log, history, compactedThrough+1, assistantTurn, ve)
 			if err != nil {
 				log.Warn("compaction failed, continuing without compaction", "error", err)
 			} else {

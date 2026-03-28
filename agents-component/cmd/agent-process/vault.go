@@ -445,6 +445,50 @@ type agentErrorEvent struct {
 	TraceID      string `json:"trace_id"`
 }
 
+// persistCompactionEvent writes a compaction SessionEntry to the Memory Interface
+// via state.write (data_type: episode, entry_type: compaction) per EDD §13.3 step 5.
+// Best-effort: failures are logged but do not block compaction from completing.
+func (ve *VaultExecutor) persistCompactionEvent(summary string, firstTurn, lastTurn int) {
+	entryID := newUUID()
+	entry := types.SessionEntry{
+		EntryID:   entryID,
+		TurnType:  "compaction",
+		Content:   summary,
+		Timestamp: time.Now().UTC(),
+	}
+	mw := types.MemoryWrite{
+		AgentID:   ve.agentID,
+		SessionID: ve.taskID,
+		DataType:  "episode",
+		TTLHint:   86400,
+		Payload:   entry,
+		Tags: map[string]string{
+			"turn_type":  "compaction",
+			"entry_type": "compaction",
+			"first_turn": fmt.Sprintf("%d", firstTurn),
+			"last_turn":  fmt.Sprintf("%d", lastTurn),
+		},
+	}
+	env := agentEnvelope{
+		MessageID:       newUUID(),
+		MessageType:     comms.MsgTypeStateWrite,
+		SourceComponent: "agents",
+		CorrelationID:   entryID,
+		Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
+		SchemaVersion:   "1.0",
+		Payload:         mw,
+	}
+	data, err := json.Marshal(env)
+	if err != nil {
+		ve.log.Warn("compaction persist: marshal state.write failed", "error", err)
+		return
+	}
+	if _, err := ve.js.Publish(comms.SubjectStateWrite, data); err != nil {
+		ve.log.Warn("compaction persist: publish state.write failed",
+			"first_turn", firstTurn, "last_turn", lastTurn, "error", err)
+	}
+}
+
 // PublishError publishes an error event to aegis.orchestrator.error (JetStream
 // at-least-once). Called by the ReAct loop on hard abort (e.g. CONTEXT_OVERFLOW).
 // Best-effort: failures are logged but do not block the caller from returning

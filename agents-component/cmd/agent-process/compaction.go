@@ -7,10 +7,16 @@
 //
 // Algorithm (§13.3):
 //  1. Identify compaction window: all turns older than the most recent N (10).
-//  2. Summarise: internal LLM call with structured prompt.
+//  2. Summarise: internal LLM call with structured prompt; preserve all tool call
+//     outcomes, intermediate task state, commitments, and constraints; discard
+//     conversational filler and raw content already processed.
 //  3. Quality gate: summary must be < 25% of original window size.
-//     If gate fails, fall back to extractive summary (tool names + status only).
-//  4. Replace: compaction window removed; single summary message inserted.
+//     If gate fails, fall back to extractive summary (tool names, status codes,
+//     key values only).
+//  4. Replace: compaction window removed; single summary message inserted
+//     (role=user, prefixed [COMPACTED SUMMARY — turns N through M]).
+//  5. Persist: compaction event written to episodic memory via state.write
+//     (data_type: episode, entry_type: compaction).
 package main
 
 import (
@@ -31,32 +37,27 @@ const (
 	// compactionMaxRatio is the quality gate: the summary must be smaller
 	// than this fraction of the original window's JSON size (§13.3).
 	compactionMaxRatio = 0.25
+
+	// compactionSnippetBytes is the maximum number of bytes of a tool result's
+	// content included in the extractive fallback summary.
+	compactionSnippetBytes = 100
 )
 
 // compact reduces conversation history using the summarise-and-evict strategy
 // from EDD §13.3. It retains the most recent compactionRetainTurns assistant
 // turns verbatim and summarises all prior turns into a single summary message.
+//
+// ve is used to persist the compaction event to episodic memory (step 5). It
+// may be nil — persistence is skipped when vault/NATS is unavailable.
 func compact(
 	ctx context.Context,
 	client *anthropic.Client,
 	log *slog.Logger,
 	history []anthropic.MessageParam,
 	firstTurn, lastTurn int,
+	ve *VaultExecutor,
 ) ([]anthropic.MessageParam, error) {
-	// Walk backwards to find the retention boundary: the message index at which
-	// the (compactionRetainTurns)th-most-recent assistant turn begins.
-	assistantCount := 0
-	retainFrom := len(history)
-	for i := len(history) - 1; i >= 0; i-- {
-		if history[i].Role == anthropic.MessageParamRoleAssistant {
-			assistantCount++
-			if assistantCount >= compactionRetainTurns {
-				retainFrom = i
-				break
-			}
-		}
-	}
-
+	retainFrom := findRetentionBoundary(history)
 	if retainFrom == 0 {
 		// All turns fall within the retention window — nothing to compact.
 		return history, nil
@@ -71,12 +72,37 @@ func compact(
 		summary = extractiveSummary(toCompact, firstTurn, lastTurn)
 	}
 
+	// Step 5: Persist compaction event to episodic memory (EDD §13.3).
+	if ve != nil {
+		ve.persistCompactionEvent(summary, firstTurn, lastTurn)
+	}
+
 	summaryMsg := anthropic.NewUserMessage(anthropic.NewTextBlock(summary))
 
 	compacted := make([]anthropic.MessageParam, 0, 1+len(toRetain))
 	compacted = append(compacted, summaryMsg)
 	compacted = append(compacted, toRetain...)
 	return compacted, nil
+}
+
+// findRetentionBoundary returns the history index at which the retention window
+// begins. All turns before this index are subject to compaction; turns from this
+// index onwards are kept verbatim (§13.3 step 1).
+//
+// Returns 0 when all turns fall within the retention window — i.e. there are
+// fewer than compactionRetainTurns assistant turns in history and nothing should
+// be compacted.
+func findRetentionBoundary(history []anthropic.MessageParam) int {
+	assistantCount := 0
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Role == anthropic.MessageParamRoleAssistant {
+			assistantCount++
+			if assistantCount >= compactionRetainTurns {
+				return i
+			}
+		}
+	}
+	return 0
 }
 
 // summariseHistory issues an internal LLM call to produce a structured summary
@@ -132,8 +158,9 @@ func summariseHistory(
 }
 
 // extractiveSummary is the fallback when LLM summarisation fails or exceeds
-// the quality gate. It retains only tool call names and isError status —
-// the minimum needed for the agent to understand what happened.
+// the quality gate. It retains tool call names and result status codes with a
+// brief content snippet — the minimum needed for the agent to understand what
+// happened (§13.3 step 3 fallback).
 func extractiveSummary(history []anthropic.MessageParam, firstTurn, lastTurn int) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf(
@@ -141,12 +168,38 @@ func extractiveSummary(history []anthropic.MessageParam, firstTurn, lastTurn int
 		firstTurn, lastTurn,
 	))
 	for _, msg := range history {
-		if msg.Role != anthropic.MessageParamRoleAssistant {
-			continue
-		}
-		for _, block := range msg.Content {
-			if tu := block.OfToolUse; tu != nil {
-				sb.WriteString(fmt.Sprintf("- %s\n", tu.Name))
+		switch msg.Role {
+		case anthropic.MessageParamRoleAssistant:
+			for _, block := range msg.Content {
+				if tu := block.OfToolUse; tu != nil {
+					sb.WriteString(fmt.Sprintf("- tool: %s\n", tu.Name))
+				}
+			}
+		case anthropic.MessageParamRoleUser:
+			for _, block := range msg.Content {
+				tr := block.OfToolResult
+				if tr == nil {
+					continue
+				}
+				status := "ok"
+				if tr.IsError.Valid() && tr.IsError.Value {
+					status = "error"
+				}
+				snippet := ""
+				for _, c := range tr.Content {
+					if c.OfText != nil && c.OfText.Text != "" {
+						snippet = c.OfText.Text
+						if len(snippet) > compactionSnippetBytes {
+							snippet = snippet[:compactionSnippetBytes] + "…"
+						}
+						break
+					}
+				}
+				if snippet != "" {
+					sb.WriteString(fmt.Sprintf("  result [%s]: %s\n", status, snippet))
+				} else {
+					sb.WriteString(fmt.Sprintf("  result [%s]\n", status))
+				}
 			}
 		}
 	}
