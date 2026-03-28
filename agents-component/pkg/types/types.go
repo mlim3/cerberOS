@@ -277,6 +277,17 @@ type MemoryResponse struct {
 	TraceID string        `json:"trace_id"`
 }
 
+// SkillSearchResult is a single entry returned by skills.Manager.Search (EDD §13.5).
+// Contains only domain path, command name, and description — parameters are
+// withheld per the progressive disclosure contract. Call GetSpec for the full
+// parameter schema of a specific command.
+type SkillSearchResult struct {
+	Domain      string  `json:"domain"`
+	Name        string  `json:"name"`
+	Description string  `json:"description"`
+	Score       float64 `json:"score"` // cosine similarity in [0, 1]; higher is more relevant
+}
+
 // SessionEntry is one node in the agent's append-only session log tree (EDD §13.1).
 // Each entry is written via state.write (DataType "episode") before the turn it
 // represents completes. VaultRequestID is set on "tool_call" entries that dispatch
