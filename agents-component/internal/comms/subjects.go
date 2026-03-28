@@ -29,6 +29,7 @@ const (
 	SubjectStateWrite           = "aegis.orchestrator.state.write"
 	SubjectStateReadRequest     = "aegis.orchestrator.state.read.request"
 	SubjectClarificationRequest = "aegis.orchestrator.clarification.request"
+	SubjectVaultExecuteCancel   = "aegis.orchestrator.vault.execute.cancel"
 	SubjectAuditEvent           = "aegis.orchestrator.audit.event"
 	SubjectError                = "aegis.orchestrator.error"
 
@@ -48,6 +49,25 @@ const (
 	ConsumerStateReadResponse     = "agents-state-read-response"
 	ConsumerClarificationResponse = "agents-clarification-response"
 )
+
+// Heartbeat subjects — published directly by agent-process binaries (core NATS,
+// at-most-once). Kept outside the aegis.agents.* and aegis.orchestrator.*
+// namespaces so they are not captured by JetStream streams.
+const (
+	// SubjectHeartbeatAll is the wildcard subscription used by the Lifecycle Manager.
+	SubjectHeartbeatAll = "aegis.heartbeat.*"
+
+	// SubjectHeartbeatPrefix is prepended to an agent_id to form the per-agent subject.
+	// Use HeartbeatSubject(agentID) rather than constructing the string directly.
+	SubjectHeartbeatPrefix = "aegis.heartbeat."
+
+	MsgTypeHeartbeat = "agent.heartbeat"
+)
+
+// HeartbeatSubject returns the NATS subject for a specific agent's heartbeat.
+func HeartbeatSubject(agentID string) string {
+	return SubjectHeartbeatPrefix + agentID
+}
 
 // Message type constants for the envelope MessageType field (dot-notation).
 // Every Publish call must set opts.MessageType to one of these values.
@@ -70,6 +90,7 @@ const (
 	MsgTypeStateReadResponse     = "state.read.response"
 	MsgTypeClarificationRequest  = "clarification.request"
 	MsgTypeClarificationResponse = "clarification.response"
+	MsgTypeVaultExecuteCancel    = "vault.execute.cancel"
 	MsgTypeAuditEvent            = "audit.event"
 	MsgTypeError                 = "error"
 	MsgTypeLifecycleTerminate    = "lifecycle.terminate"

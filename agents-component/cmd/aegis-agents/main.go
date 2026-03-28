@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/cerberOS/agents-component/config"
@@ -32,6 +34,9 @@ func main() {
 		"nats_url", cfg.NATSURL,
 	)
 
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
 	// Wire NATS JetStream client.
 	commsClient, err := comms.NewNATSClient(cfg.NATSURL, cfg.ComponentID)
 	if err != nil {
@@ -53,15 +58,57 @@ func main() {
 		lifecycleMgr = lifecycle.New()
 	}
 
+	// Crash detector fires when an agent misses MaxMissed consecutive heartbeats.
+	// f is set after factory.New below; the closure captures the pointer.
+	var f *factory.Factory
+	crashDetector := lifecycle.NewCrashDetector(
+		lifecycle.HeartbeatConfig{
+			Interval:  cfg.HeartbeatInterval,
+			MaxMissed: cfg.HeartbeatMaxMissed,
+		},
+		func(agentID string) {
+			log.Warn("agent crash detected — initiating recovery sequence",
+				"agent_id", agentID,
+			)
+			if err := f.HandleCrash(agentID); err != nil {
+				log.Error("crash recovery failed",
+					"agent_id", agentID,
+					"error", err,
+				)
+			}
+		},
+	)
+	go crashDetector.Run(ctx)
+
+	// Subscribe to agent heartbeats (core NATS, at-most-once).
+	// Heartbeats are published directly by agent-process binaries on
+	// aegis.heartbeat.<agent_id> and are not captured by any JetStream stream.
+	if err := commsClient.Subscribe(
+		comms.SubjectHeartbeatAll,
+		func(msg *comms.Message) {
+			// Extract agent_id from the subject (aegis.heartbeat.<agent_id>).
+			agentID := strings.TrimPrefix(msg.Subject, comms.SubjectHeartbeatPrefix)
+			if agentID == "" {
+				return
+			}
+			crashDetector.RecordHeartbeat(agentID)
+		},
+	); err != nil {
+		log.Error("subscribe heartbeat failed", "error", err)
+		os.Exit(1)
+	}
+
 	seedSkills(skillMgr, log)
 
-	f, err := factory.New(factory.Config{
-		Registry:    reg,
-		Skills:      skillMgr,
-		Credentials: credBroker,
-		Lifecycle:   lifecycleMgr,
-		Memory:      memClient,
-		Comms:       commsClient,
+	f, err = factory.New(factory.Config{
+		Registry:      reg,
+		Skills:        skillMgr,
+		Credentials:   credBroker,
+		Lifecycle:     lifecycleMgr,
+		Memory:        memClient,
+		Comms:         commsClient,
+		CrashDetector: crashDetector,
+		MaxRetries:    cfg.MaxAgentRetries,
 	})
 	if err != nil {
 		log.Error("factory init failed", "error", err)
@@ -101,6 +148,30 @@ func main() {
 		},
 	); err != nil {
 		log.Error("subscribe task.inbound failed", "error", err)
+		os.Exit(1)
+	}
+
+	// Subscribe to vault.execute.result from the Orchestrator (at-least-once).
+	// Completing a request removes it from the in-flight tracking set so it is not
+	// flagged UNKNOWN if the agent later crashes for an unrelated reason.
+	if err := commsClient.SubscribeDurable(
+		comms.SubjectVaultExecuteResult,
+		comms.ConsumerVaultExecuteResult,
+		func(msg *comms.Message) {
+			var result types.VaultOperationResult
+			if err := json.Unmarshal(msg.Data, &result); err != nil {
+				log.Error("vault.execute.result unmarshal failed",
+					"correlation_id", msg.CorrelationID,
+					"error", err,
+				)
+				_ = msg.Nak()
+				return
+			}
+			f.CompleteVaultRequest(result.AgentID, result.RequestID)
+			_ = msg.Ack()
+		},
+	); err != nil {
+		log.Error("subscribe vault.execute.result failed", "error", err)
 		os.Exit(1)
 	}
 
@@ -151,9 +222,7 @@ func main() {
 
 	log.Info("aegis-agents ready")
 
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	<-stop
+	<-ctx.Done()
 
 	log.Info("shutdown signal received, stopping")
 	if err := commsClient.Close(); err != nil {

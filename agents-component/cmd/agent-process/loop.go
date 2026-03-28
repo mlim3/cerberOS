@@ -34,7 +34,10 @@ const (
 
 // RunLoop executes the ReAct loop until the task is complete or a termination
 // condition is met. It returns the final task result as a string.
-func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext) (string, error) {
+//
+// ve may be nil — credentialed vault tools are excluded from the tool registry
+// when vault execution is unavailable.
+func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *VaultExecutor) (string, error) {
 	apiKey := os.Getenv("ANTHROPIC_API_KEY")
 	if apiKey == "" {
 		return "", fmt.Errorf("ANTHROPIC_API_KEY environment variable is not set")
@@ -42,7 +45,7 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext) (str
 	c := anthropic.NewClient(option.WithAPIKey(apiKey))
 	client := &c
 
-	tools := toolsForDomain(spawnCtx.SkillDomain)
+	tools := toolsForDomain(spawnCtx.SkillDomain, ve)
 	toolDefs := toolDefinitions(tools)
 	systemPrompt := buildSystemPrompt(spawnCtx.SkillDomain)
 

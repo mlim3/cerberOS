@@ -136,9 +136,12 @@ func TestCredentialResponse(t *testing.T) {
 	_, js := directNATS(t)
 
 	req := types.CredentialRequest{
-		AgentID:       "agent-test-1",
-		PermissionSet: []string{"web"},
-		TraceID:       "trace-test-1",
+		RequestID:    "req-test-1",
+		AgentID:      "agent-test-1",
+		TaskID:       "task-test-1",
+		Operation:    "authorize",
+		SkillDomains: []string{"web"},
+		TTLSeconds:   3600,
 	}
 
 	// Subscribe BEFORE publishing so we don't miss the response.
@@ -171,16 +174,16 @@ func TestCredentialResponse(t *testing.T) {
 		if err := json.Unmarshal(raw, &resp); err != nil {
 			t.Fatalf("unmarshal CredentialResponse: %v", err)
 		}
-		if resp.AgentID != req.AgentID {
-			t.Errorf("AgentID: want %q, got %q", req.AgentID, resp.AgentID)
+		if resp.RequestID != req.RequestID {
+			t.Errorf("RequestID: want %q, got %q", req.RequestID, resp.RequestID)
 		}
-		if resp.TraceID != req.TraceID {
-			t.Errorf("TraceID: want %q, got %q", req.TraceID, resp.TraceID)
+		if resp.Status != "granted" {
+			t.Errorf("Status: want %q, got %q", "granted", resp.Status)
 		}
-		if resp.Token == "" {
-			t.Error("Token must not be empty")
+		if resp.PermissionToken == "" {
+			t.Error("PermissionToken must not be empty")
 		}
-		t.Logf("received token: %s", resp.Token)
+		t.Logf("received permission_token: %s", resp.PermissionToken)
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for credential.response")
 	}
@@ -264,8 +267,8 @@ func TestStateWriteAck(t *testing.T) {
 	if ack.AgentID != write.AgentID {
 		t.Errorf("AgentID: want %q, got %q", write.AgentID, ack.AgentID)
 	}
-	if ack.Status != "ok" {
-		t.Errorf("Status: want %q, got %q", "ok", ack.Status)
+	if ack.Status != "accepted" {
+		t.Errorf("Status: want %q, got %q", "accepted", ack.Status)
 	}
 }
 

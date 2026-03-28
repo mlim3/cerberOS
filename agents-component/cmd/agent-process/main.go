@@ -76,7 +76,20 @@ func main() {
 
 	log.Info("agent-process started", "skill_domain", spawnCtx.SkillDomain)
 
-	result, err := RunLoop(context.Background(), log, &spawnCtx)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	startHeartbeat(ctx, log, spawnCtx.TaskID, spawnCtx.TraceID)
+
+	// VaultExecutor manages the async request/result flow for credentialed operations
+	// (ADR-004). Returns nil if NATS env vars are absent — non-credentialed tools
+	// continue to function normally.
+	ve := NewVaultExecutor(log, spawnCtx.TaskID, spawnCtx.PermissionToken)
+	if ve != nil {
+		defer ve.Close()
+	}
+
+	result, err := RunLoop(ctx, log, &spawnCtx, ve)
 	if err != nil {
 		writeError(log, spawnCtx.TaskID, spawnCtx.TraceID, err.Error())
 		os.Exit(1)

@@ -11,7 +11,7 @@ func TestPreAuthorizeAndGetCredential(t *testing.T) {
 		"db.password": "s3cr3t",
 	})
 
-	token, err := b.PreAuthorize("agent-1", []string{"db.password"})
+	token, err := b.PreAuthorize("agent-1", "task-1", []string{"db.password"})
 	if err != nil {
 		t.Fatalf("PreAuthorize: %v", err)
 	}
@@ -30,7 +30,7 @@ func TestPreAuthorizeAndGetCredential(t *testing.T) {
 
 func TestGetCredentialUnauthorizedKey(t *testing.T) {
 	b := credentials.New(map[string]string{"db.password": "s3cr3t"})
-	b.PreAuthorize("agent-1", []string{"db.password"})
+	b.PreAuthorize("agent-1", "task-1", []string{"db.password"}) //nolint:errcheck
 
 	if _, err := b.GetCredential("agent-1", "api.key"); err == nil {
 		t.Error("expected error for key not in permission set, got nil")
@@ -46,7 +46,7 @@ func TestGetCredentialBeforePreAuthorize(t *testing.T) {
 
 func TestRevoke(t *testing.T) {
 	b := credentials.New(map[string]string{"k": "v"})
-	b.PreAuthorize("agent-1", []string{"k"})
+	b.PreAuthorize("agent-1", "task-1", []string{"k"}) //nolint:errcheck
 
 	if err := b.Revoke("agent-1"); err != nil {
 		t.Fatalf("Revoke: %v", err)

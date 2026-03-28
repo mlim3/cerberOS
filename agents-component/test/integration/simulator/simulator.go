@@ -101,11 +101,7 @@ type vaultExecuteResult struct {
 	ElapsedMS       int             `json:"elapsed_ms"`
 }
 
-// stateWriteAck is the synthetic state.write.ack sent back to agents.
-type stateWriteAck struct {
-	AgentID string `json:"agent_id"`
-	Status  string `json:"status"`
-}
+// stateWriteAck has been replaced by types.StateWriteAck.
 
 // — Simulator —————————————————————————————————————————————————————————————
 
@@ -282,17 +278,19 @@ func (s *Simulator) handleCredentialRequest(msg *nats.Msg) {
 	}
 
 	resp := types.CredentialResponse{
-		AgentID: req.AgentID,
-		Token:   "sim-token-" + req.AgentID,
-		TraceID: req.TraceID,
+		RequestID:       req.RequestID,
+		Status:          "granted",
+		PermissionToken: "sim-token-" + req.AgentID,
 	}
-	if err := s.publish("aegis.agents.credential.response", "credential.response", req.AgentID, resp); err != nil {
+	// CorrelationID MUST be set to req.RequestID so the natsBroker can route the
+	// response to the waiting PreAuthorize goroutine via msg.CorrelationID.
+	if err := s.publish("aegis.agents.credential.response", "credential.response", req.RequestID, resp); err != nil {
 		s.log.Error("simulator: publish credential.response", "err", err, "agent_id", req.AgentID)
 		_ = msg.Nak()
 		return
 	}
 
-	s.log.Info("simulator: credential.response sent", "agent_id", req.AgentID, "trace_id", req.TraceID)
+	s.log.Info("simulator: credential.response sent", "agent_id", req.AgentID, "request_id", req.RequestID)
 	_ = msg.Ack()
 }
 
@@ -345,17 +343,34 @@ func (s *Simulator) handleStateWrite(msg *nats.Msg) {
 		return
 	}
 
-	ack := stateWriteAck{
-		AgentID: write.AgentID,
-		Status:  "ok",
+	// Prefer the envelope correlation_id (= request_id set by the natsClient) so
+	// the ack can be routed back to the correct waiting goroutine. Fall back to the
+	// payload RequestID, then to AgentID for simulator backward compatibility.
+	correlationID := env.CorrelationID
+	if correlationID == "" {
+		correlationID = write.RequestID
 	}
-	if err := s.publish("aegis.agents.state.write.ack", "state.write.ack", write.AgentID, ack); err != nil {
+	if correlationID == "" {
+		correlationID = write.AgentID
+	}
+
+	ack := types.StateWriteAck{
+		RequestID: write.RequestID,
+		AgentID:   write.AgentID,
+		Status:    "accepted",
+	}
+	if err := s.publish("aegis.agents.state.write.ack", "state.write.ack", correlationID, ack); err != nil {
 		s.log.Error("simulator: publish state.write.ack", "err", err, "agent_id", write.AgentID)
 		_ = msg.Nak()
 		return
 	}
 
-	s.log.Info("simulator: state.write.ack sent", "agent_id", write.AgentID, "data_type", write.DataType)
+	s.log.Info("simulator: state.write.ack sent",
+		"agent_id", write.AgentID,
+		"data_type", write.DataType,
+		"request_id", write.RequestID,
+		"require_ack", write.RequireAck,
+	)
 	_ = msg.Ack()
 }
 

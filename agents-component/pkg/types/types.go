@@ -1,6 +1,19 @@
 package types
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
+
+// HeartbeatEvent is published by the agent process on the aegis.heartbeat.<agent_id>
+// subject every heartbeat interval. The Lifecycle Manager subscribes to
+// aegis.heartbeat.* and uses these events to detect crashed agents.
+type HeartbeatEvent struct {
+	AgentID   string    `json:"agent_id"`
+	TaskID    string    `json:"task_id"`
+	TraceID   string    `json:"trace_id"`
+	Timestamp time.Time `json:"timestamp"`
+}
 
 // TaskSpec is received from the Orchestrator via the Comms Interface.
 type TaskSpec struct {
@@ -24,15 +37,27 @@ type TaskAccepted struct {
 	TraceID               string     `json:"trace_id"`
 }
 
+// StateEvent is a single entry in an agent's state transition history.
+// StateHistory is append-only — entries are never removed or modified.
+type StateEvent struct {
+	State     string    `json:"state"`
+	Timestamp time.Time `json:"timestamp"`
+	Reason    string    `json:"reason"`
+}
+
 // AgentRecord is the catalog entry stored in the Registry.
 type AgentRecord struct {
-	AgentID       string    `json:"agent_id"`
-	State         string    `json:"state"` // idle | active | terminated
-	SkillDomains  []string  `json:"skill_domains"`
-	PermissionSet []string  `json:"permission_set"`
-	AssignedTask  string    `json:"assigned_task,omitempty"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	AgentID      string `json:"agent_id"`
+	VMID         string `json:"vm_id,omitempty"` // ID of the current microVM; changes on respawn; empty when suspended or terminated
+	State        string `json:"state"`           // pending | spawning | active | idle | suspended | recovering | terminated
+	FailureCount int    `json:"failure_count"`   // increments on each crash (→ recovering); resets to 0 on successful task completion (→ idle)
+
+	SkillDomains  []string     `json:"skill_domains"`
+	PermissionSet []string     `json:"permission_set"`
+	AssignedTask  string       `json:"assigned_task,omitempty"`
+	StateHistory  []StateEvent `json:"state_history"` // append-only ordered log of all state transitions
+	CreatedAt     time.Time    `json:"created_at"`
+	UpdatedAt     time.Time    `json:"updated_at"`
 }
 
 // SkillSpec is the leaf-level parameter schema for a skill command.
@@ -67,13 +92,31 @@ type SkillNode struct {
 }
 
 // MemoryWrite is the tagged payload sent to the Memory Component.
+// RequestID is set by the Memory Interface on the wire (state.write) and used
+// as the correlation key for state.write.ack routing. It is omitted from stored
+// records. RequireAck instructs the Orchestrator to publish a state.write.ack
+// so the caller can confirm persistence before proceeding.
 type MemoryWrite struct {
-	AgentID   string            `json:"agent_id"`
-	SessionID string            `json:"session_id"`
-	DataType  string            `json:"data_type"`
-	TTLHint   int               `json:"ttl_hint_seconds"`
-	Payload   interface{}       `json:"payload"`
-	Tags      map[string]string `json:"tags"`
+	AgentID    string            `json:"agent_id"`
+	SessionID  string            `json:"session_id"`
+	DataType   string            `json:"data_type"`
+	TTLHint    int               `json:"ttl_hint_seconds"`
+	Payload    interface{}       `json:"payload"`
+	Tags       map[string]string `json:"tags"`
+	RequestID  string            `json:"request_id,omitempty"`
+	RequireAck bool              `json:"require_ack,omitempty"`
+}
+
+// StateWriteAck is the confirmation sent by the Orchestrator on
+// aegis.agents.state.write.ack in response to a state.write request.
+// Status is "accepted" on success or "rejected" when the Memory Component
+// refuses the payload (e.g. schema violation). RejectionReason is set when
+// Status == "rejected" and must be logged — never silently discarded.
+type StateWriteAck struct {
+	RequestID       string `json:"request_id,omitempty"`
+	AgentID         string `json:"agent_id"`
+	Status          string `json:"status"`                     // "accepted" | "rejected" | "ok"
+	RejectionReason string `json:"rejection_reason,omitempty"` // present when status == "rejected"
 }
 
 // Envelope is the standard NATS message wrapper for all inter-component messages.
@@ -121,26 +164,106 @@ type CapabilityResponse struct {
 	TraceID  string   `json:"trace_id"`
 }
 
-// CredentialRequest is sent to the Orchestrator to obtain a scoped credential.
-// The Orchestrator proxies this to the Credential Vault and returns a CredentialResponse.
+// CredentialRequest is sent to the Orchestrator to authorize a scoped permission
+// token for an agent at spawn time, or to revoke it at termination. The Orchestrator
+// proxies this to the Credential Vault which registers a scoped policy and returns
+// an opaque permission_token reference (never a raw credential value).
+//
+// RequestID is the correlation key echoed in the CredentialResponse envelope's
+// correlation_id so the Credential Broker can route the response to the waiting
+// PreAuthorize call.
 type CredentialRequest struct {
-	AgentID       string   `json:"agent_id"`
-	PermissionSet []string `json:"permission_set"`
-	TraceID       string   `json:"trace_id"`
+	RequestID    string   `json:"request_id"` // UUID; correlation key for response routing
+	AgentID      string   `json:"agent_id"`
+	TaskID       string   `json:"task_id"`
+	Operation    string   `json:"operation"`     // "authorize" | "revoke"
+	SkillDomains []string `json:"skill_domains"` // required skill domains for Vault scope resolution
+	TTLSeconds   int      `json:"ttl_seconds"`   // policy token TTL; 0 uses server default (3600)
 }
 
-// CredentialResponse is received from the Orchestrator carrying the scoped token
-// returned by the Credential Vault.
+// CredentialResponse is received from the Orchestrator carrying the result of a
+// credential.request (authorize). On "granted" the Vault returns an opaque
+// permission_token reference — never a raw credential value (NFR-08).
+//
+// RequestID echoes the originating CredentialRequest.RequestID and is used as a
+// fallback correlation key when the envelope correlation_id is unavailable.
 type CredentialResponse struct {
-	AgentID string `json:"agent_id"`
-	Token   string `json:"token"`
-	TraceID string `json:"trace_id"`
+	RequestID       string `json:"request_id"`                 // echoes CredentialRequest.RequestID
+	Status          string `json:"status"`                     // "granted" | "denied" | "error"
+	PermissionToken string `json:"permission_token,omitempty"` // opaque reference; present on "granted"
+	ExpiresAt       string `json:"expires_at,omitempty"`       // ISO 8601; present on "granted"
+	ErrorCode       string `json:"error_code,omitempty"`
+	ErrorMessage    string `json:"error_message,omitempty"` // must not expose vault internals or paths
+}
+
+// TaskFailed is published to aegis.orchestrator.task.failed when a task cannot be
+// executed due to a non-recoverable provisioning or credential failure. ErrorMessage
+// must be user-safe — it must not expose internal paths, credential details, or vault
+// implementation specifics.
+type TaskFailed struct {
+	TaskID       string `json:"task_id"`
+	AgentID      string `json:"agent_id,omitempty"`
+	ErrorCode    string `json:"error_code"`    // e.g. "VAULT_UNREACHABLE", "PROVISION_FAILED"
+	ErrorMessage string `json:"error_message"` // user-safe description
+	TraceID      string `json:"trace_id"`
+}
+
+// VaultOperationRequest is sent to the Orchestrator (routed to the Vault) to execute
+// a credentialed operation on behalf of an agent. The agent never receives the raw
+// credential — only the operation_result flows back.
+//
+// request_id is the idempotency key. Safe to resubmit with the same request_id after
+// a crash; the Vault guarantees exactly-once execution (EDD ADR-004).
+type VaultOperationRequest struct {
+	RequestID       string          `json:"request_id"` // UUID; idempotency key for safe resubmission
+	AgentID         string          `json:"agent_id"`
+	TaskID          string          `json:"task_id"`
+	PermissionToken string          `json:"permission_token"` // opaque reference from prior authorize — never a raw secret
+	OperationType   string          `json:"operation_type"`   // e.g. "web_fetch", "storage_read"
+	OperationParams json.RawMessage `json:"operation_params"` // schema defined per operation_type by the Vault
+	TimeoutSeconds  int             `json:"timeout_seconds"`  // 1–300; hard deadline forwarded to Vault
+	CredentialType  string          `json:"credential_type"`  // e.g. "web_api_key"; Vault resolves the secret internally
+}
+
+// VaultOperationResult is received from the Orchestrator after the Vault has
+// executed a credentialed operation. Contains operation output only — never
+// the raw credential value (EDD ADR-004, NFR-08).
+type VaultOperationResult struct {
+	RequestID       string          `json:"request_id"`
+	AgentID         string          `json:"agent_id"`
+	Status          string          `json:"status"`                     // "success" | "timed_out" | "scope_violation" | "execution_error"
+	OperationResult json.RawMessage `json:"operation_result,omitempty"` // present on success; operation output only
+	ErrorCode       string          `json:"error_code,omitempty"`
+	ErrorMessage    string          `json:"error_message,omitempty"` // must not expose vault internals or paths
+	ElapsedMS       int             `json:"elapsed_ms"`
+}
+
+// CrashSnapshot is the agent state saved to the Memory Interface at the start of
+// the crash recovery sequence (EDD §6.3, Step 1). Written with DataType "snapshot"
+// and context tag "crash_snapshot". The respawned agent receives this as part of
+// its spawn context so it can resume from a known-good checkpoint.
+//
+// UnknownVaultRequestIDs lists request_ids that were in-flight at crash time with
+// no corresponding result. The recovered agent MUST resubmit them with the original
+// request_id — the Vault's idempotency guarantee ensures exactly-once execution.
+type CrashSnapshot struct {
+	AgentID                string    `json:"agent_id"`
+	TaskID                 string    `json:"task_id"`
+	FailureCount           int       `json:"failure_count"` // value at time of crash, before recovery increment
+	State                  string    `json:"state"`         // state at time of crash (typically "active")
+	SkillDomains           []string  `json:"skill_domains"`
+	PermissionSet          []string  `json:"permission_set"`
+	UnknownVaultRequestIDs []string  `json:"unknown_vault_request_ids"` // in-flight request_ids with no result at crash time
+	CrashedAt              time.Time `json:"crashed_at"`
 }
 
 // MemoryReadRequest is sent to the Orchestrator to retrieve filtered memory context.
 // The Orchestrator routes this to the Memory Component.
+// DataType filters by MemoryWrite.DataType; when set with an empty AgentID, all
+// agents' records of that type are returned (used for component-wide startup recovery).
 type MemoryReadRequest struct {
 	AgentID    string `json:"agent_id"`
+	DataType   string `json:"data_type,omitempty"`
 	ContextTag string `json:"context_tag"`
 	TraceID    string `json:"trace_id"`
 }
@@ -151,4 +274,42 @@ type MemoryResponse struct {
 	AgentID string        `json:"agent_id"`
 	Records []MemoryWrite `json:"records"`
 	TraceID string        `json:"trace_id"`
+}
+
+// SessionEntry is one node in the agent's append-only session log tree (EDD §13.1).
+// Each entry is written via state.write (DataType "episode") before the turn it
+// represents completes. VaultRequestID is set on "tool_call" entries that dispatch
+// a vault.execute.request — crash recovery uses this field to identify in-flight
+// operations that need resubmission (EDD §6.3).
+type SessionEntry struct {
+	EntryID        string    `json:"entry_id"`
+	ParentEntryID  string    `json:"parent_entry_id,omitempty"`
+	TurnType       string    `json:"turn_type"` // "user_message" | "assistant_response" | "tool_call" | "tool_result" | "compaction"
+	Content        string    `json:"content"`
+	Timestamp      time.Time `json:"timestamp"`
+	VaultRequestID string    `json:"vault_request_id,omitempty"` // set on tool_call entries that trigger vault execution
+}
+
+// VaultOperationProgress is received from the Orchestrator as a transient progress
+// heartbeat during long-running Vault operations (aegis.agents.vault.execute.progress).
+// Delivery is at-most-once (core NATS). Progress events must not enter LLM context;
+// they are forwarded to monitoring output only. Losing an event is acceptable and
+// must not affect operation correctness.
+type VaultOperationProgress struct {
+	RequestID    string `json:"request_id"`
+	AgentID      string `json:"agent_id"`
+	ProgressType string `json:"progress_type"` // "heartbeat" | "milestone"
+	Message      string `json:"message"`
+	ElapsedMS    int    `json:"elapsed_ms"`
+}
+
+// VaultCancelRequest is published to aegis.orchestrator.vault.execute.cancel when
+// the local deadline fires before a vault.execute.result arrives (EDD §13.1 Phase 2).
+// The Orchestrator forwards this to the Vault so it can abort the in-flight operation.
+type VaultCancelRequest struct {
+	RequestID     string `json:"request_id"`
+	AgentID       string `json:"agent_id"`
+	TaskID        string `json:"task_id"`
+	OperationType string `json:"operation_type"`
+	Reason        string `json:"reason"` // "local_timeout" | "context_cancelled"
 }

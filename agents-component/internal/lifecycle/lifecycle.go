@@ -28,12 +28,14 @@ const (
 
 // VMConfig carries the parameters needed to launch an agent process.
 type VMConfig struct {
-	AgentID       string
-	TaskID        string // task the agent is being spawned to execute
-	SkillDomain   string // entry-point domain injected into the agent at spawn
-	CredentialPtr string // vault permission token pointer (not the token value)
-	Instructions  string // natural-language task description for the agent
-	TraceID       string
+	AgentID          string
+	VMID             string // allocated VM identity; changes on respawn (same AgentID, new VMID)
+	TaskID           string // task the agent is being spawned to execute
+	SkillDomain      string // entry-point domain injected into the agent at spawn
+	CredentialPtr    string // vault permission token pointer (not the token value)
+	Instructions     string // natural-language task description for the agent
+	RecoveredContext string // non-empty on respawn: serialised CrashSnapshot for checkpoint resume
+	TraceID          string
 }
 
 // HealthStatus is the result of a health probe for a running agent.
@@ -61,11 +63,12 @@ type Manager interface {
 // stdin at launch. It mirrors cmd/agent-process.SpawnContext; the struct is
 // defined here to avoid importing a main package.
 type agentSpawnContext struct {
-	TaskID          string `json:"task_id"`
-	SkillDomain     string `json:"skill_domain"`
-	PermissionToken string `json:"permission_token"` // opaque vault reference — never a raw credential
-	Instructions    string `json:"instructions"`
-	TraceID         string `json:"trace_id"`
+	TaskID           string `json:"task_id"`
+	SkillDomain      string `json:"skill_domain"`
+	PermissionToken  string `json:"permission_token"` // opaque vault reference — never a raw credential
+	Instructions     string `json:"instructions"`
+	RecoveredContext string `json:"recovered_context,omitempty"` // non-empty on respawn; contains crash snapshot for checkpoint resume
+	TraceID          string `json:"trace_id"`
 }
 
 // processEntry tracks a single running agent-process subprocess.
@@ -102,11 +105,12 @@ func (m *processManager) Spawn(config VMConfig) error {
 	}
 
 	payload, err := json.Marshal(agentSpawnContext{
-		TaskID:          config.TaskID,
-		SkillDomain:     config.SkillDomain,
-		PermissionToken: config.CredentialPtr,
-		Instructions:    config.Instructions,
-		TraceID:         config.TraceID,
+		TaskID:           config.TaskID,
+		SkillDomain:      config.SkillDomain,
+		PermissionToken:  config.CredentialPtr,
+		Instructions:     config.Instructions,
+		RecoveredContext: config.RecoveredContext,
+		TraceID:          config.TraceID,
 	})
 	if err != nil {
 		return fmt.Errorf("lifecycle: marshal spawn context: %w", err)
@@ -125,7 +129,13 @@ func (m *processManager) Spawn(config VMConfig) error {
 	cmd.Stdin = bytes.NewReader(payload)
 	cmd.Stdout = &entry.stdout
 	cmd.Stderr = os.Stderr // agent logs flow to parent stderr
-	cmd.Env = os.Environ() // inherit env so ANTHROPIC_API_KEY reaches the agent
+	// Inherit parent env (for ANTHROPIC_API_KEY etc.) then overlay agent-specific
+	// variables so the agent process can identify itself and publish heartbeats.
+	cmd.Env = append(os.Environ(),
+		"AEGIS_AGENT_ID="+config.AgentID,
+		"AEGIS_TASK_ID="+config.TaskID,
+		"AEGIS_TRACE_ID="+config.TraceID,
+	)
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("lifecycle: start agent process: %w", err)

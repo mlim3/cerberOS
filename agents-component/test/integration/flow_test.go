@@ -215,7 +215,7 @@ func TestAgentComponentFlow(t *testing.T) {
 	t.Run("existing agent reused", func(t *testing.T) {
 		agentID := h.reg.List()[0].AgentID
 
-		if err := h.reg.UpdateState(agentID, "idle"); err != nil {
+		if err := h.reg.UpdateState(agentID, "idle", "test: marking idle for reuse"); err != nil {
 			t.Fatalf("UpdateState idle: %v", err)
 		}
 
