@@ -74,6 +74,25 @@ func toolsForDomain(domain string, ve *VaultExecutor) []SkillTool {
 			tools = append(tools, vaultWebFetchTool(ve))
 		}
 		return append(tools, base...)
+	case "data":
+		tools := []SkillTool{dataTransformTool()}
+		if ve != nil {
+			tools = append(tools, vaultDataReadTool(ve), vaultDataWriteTool(ve))
+		}
+		return append(tools, base...)
+	case "comms":
+		tools := []SkillTool{commsFormatTool()}
+		if ve != nil {
+			tools = append(tools, vaultCommsSendTool(ve))
+		}
+		return append(tools, base...)
+	case "storage":
+		// All storage operations require vault credentials — no local-only tools.
+		var tools []SkillTool
+		if ve != nil {
+			tools = append(tools, vaultStorageReadTool(ve), vaultStorageWriteTool(ve), vaultStorageListTool(ve))
+		}
+		return append(tools, base...)
 	default:
 		return base
 	}
