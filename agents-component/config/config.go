@@ -16,13 +16,19 @@ type Config struct {
 
 	// ComponentID is the identity published in all outbound message envelopes.
 	ComponentID string
+
+	// AgentProcessPath is the path to the compiled cmd/agent-process binary.
+	// When set, the Lifecycle Manager spawns real agent processes.
+	// When empty, an in-process stub is used (suitable for unit testing only).
+	AgentProcessPath string
 }
 
 // Load reads configuration from environment variables and returns a validated Config.
 func Load() (*Config, error) {
 	c := &Config{
-		NATSURL:     os.Getenv("AEGIS_NATS_URL"),
-		ComponentID: os.Getenv("AEGIS_COMPONENT_ID"),
+		NATSURL:          os.Getenv("AEGIS_NATS_URL"),
+		ComponentID:      os.Getenv("AEGIS_COMPONENT_ID"),
+		AgentProcessPath: os.Getenv("AEGIS_AGENT_PROCESS_PATH"),
 	}
 
 	if c.NATSURL == "" {

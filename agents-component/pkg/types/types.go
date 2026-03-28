@@ -6,8 +6,22 @@ import "time"
 type TaskSpec struct {
 	TaskID         string            `json:"task_id"`
 	RequiredSkills []string          `json:"required_skills"` // domain names only
+	Instructions   string            `json:"instructions"`    // natural-language task description injected into the agent at spawn
 	Metadata       map[string]string `json:"metadata"`
 	TraceID        string            `json:"trace_id"`
+	UserContextID  string            `json:"user_context_id,omitempty"` // echoed in all outbound events
+}
+
+// TaskAccepted is published to aegis.orchestrator.task.accepted immediately on
+// task receipt — before any provisioning work begins (EDD §8.3).
+// Deadline: within 5 seconds of receiving task.inbound.
+type TaskAccepted struct {
+	TaskID                string     `json:"task_id"`
+	AgentID               string     `json:"agent_id"`
+	AgentType             string     `json:"agent_type"`                        // "new_provision" | "existing_assigned"
+	EstimatedCompletionAt *time.Time `json:"estimated_completion_at,omitempty"` // ISO 8601; null when unknown
+	UserContextID         string     `json:"user_context_id,omitempty"`
+	TraceID               string     `json:"trace_id"`
 }
 
 // AgentRecord is the catalog entry stored in the Registry.
@@ -34,9 +48,20 @@ type ParameterDef struct {
 }
 
 // SkillNode is a node in the three-level skill hierarchy (domain → command → spec).
+//
+// Domain nodes require only Name and Level. Command nodes must satisfy the full
+// Tool Contract (EDD §13.2): Label, Description, and all SkillSpec parameters must
+// have descriptions. The Skill Hierarchy Manager enforces this at registration time.
 type SkillNode struct {
-	Name     string                `json:"name"`
-	Level    string                `json:"level"` // domain | command | spec
+	Name  string `json:"name"`
+	Level string `json:"level"` // domain | command | spec
+
+	// Tool Contract fields — required at command level (EDD §13.2).
+	Label                   string   `json:"label,omitempty"`                     // human-readable display name; monitoring and audit logs only — never shown to the LLM
+	Description             string   `json:"description,omitempty"`               // what the tool does and when NOT to use it; max 300 chars
+	RequiredCredentialTypes []string `json:"required_credential_types,omitempty"` // empty = no vault execution needed
+	TimeoutSeconds          int      `json:"timeout_seconds,omitempty"`           // 0 = default (30s); hard max 300s
+
 	Children map[string]*SkillNode `json:"children,omitempty"`
 	Spec     *SkillSpec            `json:"spec,omitempty"` // only at leaf level
 }
