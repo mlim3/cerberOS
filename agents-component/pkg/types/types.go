@@ -203,8 +203,9 @@ type CredentialResponse struct {
 type TaskFailed struct {
 	TaskID       string `json:"task_id"`
 	AgentID      string `json:"agent_id,omitempty"`
-	ErrorCode    string `json:"error_code"`    // e.g. "VAULT_UNREACHABLE", "PROVISION_FAILED"
-	ErrorMessage string `json:"error_message"` // user-safe description
+	ErrorCode    string `json:"error_code"`      // e.g. "VAULT_UNREACHABLE", "PROVISION_FAILED", "CONTEXT_BUDGET_EXCEEDED"
+	ErrorMessage string `json:"error_message"`   // user-safe description
+	Phase        string `json:"phase,omitempty"` // provisioning phase where failure occurred, e.g. "skill_resolution"
 	TraceID      string `json:"trace_id"`
 }
 

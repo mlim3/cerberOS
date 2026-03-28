@@ -19,6 +19,26 @@ import (
 	"github.com/cerberOS/agents-component/pkg/types"
 )
 
+const (
+	// spawnContextBudget is the maximum number of tokens allowed in the initial
+	// agent context at provisioning time (EDD §13.3, PRD FR-FAC-05).
+	spawnContextBudget = 2048
+
+	// permTokenPlaceholder is a fixed-size substitute for the opaque permission
+	// token when counting spawn-context tokens before pre-authorization completes.
+	// It approximates the byte length of a typical Vault-issued token reference.
+	permTokenPlaceholder = "00000000-0000-0000-0000-000000000000"
+)
+
+// TokenCounter reports the token count of a text string.
+// It is used at provisioning time to enforce the spawn context budget (EDD §13.3).
+// Implementations may call the Anthropic SDK CountTokens API or use a local
+// approximation. Only internal/comms may open network connections; callers that
+// require API-backed counting must inject an implementation via Config.TokenCounter.
+type TokenCounter interface {
+	CountTokens(text string) (int, error)
+}
+
 // IDGenerator is a function that produces a unique agent ID.
 type IDGenerator func() string
 
@@ -33,6 +53,7 @@ type Factory struct {
 	generateID    IDGenerator
 	crashDetector *lifecycle.CrashDetector
 	maxRetries    int
+	tokenCounter  TokenCounter // optional; when nil, spawn context budget is not enforced
 
 	// inFlightMu guards inFlightRequests.
 	inFlightMu       sync.Mutex
@@ -50,6 +71,7 @@ type Config struct {
 	GenerateID    IDGenerator              // optional; defaults to timestamp-based ID
 	CrashDetector *lifecycle.CrashDetector // optional; when set, Watch/Unwatch are called around spawn/terminate
 	MaxRetries    int                      // optional; max crash respawns before permanent termination. Default: 3.
+	TokenCounter  TokenCounter             // optional; when set, enforces the 2,048-token spawn context budget (EDD §13.3)
 }
 
 // New returns a Factory wired with the provided dependencies.
@@ -89,6 +111,7 @@ func New(cfg Config) (*Factory, error) {
 		generateID:       cfg.GenerateID,
 		crashDetector:    cfg.CrashDetector,
 		maxRetries:       maxRetries,
+		tokenCounter:     cfg.TokenCounter,
 		inFlightRequests: make(map[string][]string),
 	}, nil
 }
@@ -151,6 +174,25 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 		return fmt.Errorf("factory: skills.GetDomain %q: %w", entryDomain, err)
 	}
 
+	// Step 1b: Enforce spawn context token budget (EDD §13.3, PRD FR-FAC-05).
+	// Counted components: system prompt + task payload + skill entry point domain name
+	// + permission token reference. The permission token is not yet available, so a
+	// fixed-length placeholder that approximates a real Vault token reference is used.
+	// Abort immediately if the budget is exceeded — no agent is created.
+	if f.tokenCounter != nil {
+		ctxText := buildSpawnContextText(spawnSystemPrompt(entryDomain), spec.Instructions, entryDomain, permTokenPlaceholder)
+		count, err := f.tokenCounter.CountTokens(ctxText)
+		if err != nil {
+			return fmt.Errorf("factory: token count: %w", err)
+		}
+		if count > spawnContextBudget {
+			_ = f.publishFailed(agentID, spec.TaskID, "CONTEXT_BUDGET_EXCEEDED",
+				fmt.Sprintf("spawn context token count %d exceeds the 2,048-token budget", count),
+				spec.TraceID, "skill_resolution")
+			return fmt.Errorf("factory: spawn context budget exceeded: %d tokens (max %d)", count, spawnContextBudget)
+		}
+	}
+
 	permSet := permissionSetForDomains(spec.RequiredSkills)
 
 	// Allocate a VM ID now so it can be stored in the registry entry before the
@@ -187,7 +229,7 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 	if err != nil {
 		_ = f.registry.UpdateState(agentID, registry.StateTerminated, "credential pre-authorization failed")
 		_ = f.publishFailed(agentID, spec.TaskID, credErrorCode(err),
-			"agent credential pre-authorization failed", spec.TraceID)
+			"agent credential pre-authorization failed", spec.TraceID, "")
 		return fmt.Errorf("factory: credentials.PreAuthorize: %w", err)
 	}
 
@@ -380,7 +422,7 @@ func (f *Factory) HandleCrash(agentID string) error {
 		// Vault unreachable during recovery — permanently terminate.
 		_ = f.registry.UpdateState(agentID, registry.StateTerminated, "credential re-authorization failed during recovery")
 		_ = f.publishFailed(agentID, agent.AssignedTask, credErrorCode(err),
-			"agent credential re-authorization failed during crash recovery", "")
+			"agent credential re-authorization failed during crash recovery", "", "")
 		return fmt.Errorf("factory: HandleCrash: credentials.PreAuthorize: %w", err)
 	}
 
@@ -503,12 +545,15 @@ func (f *Factory) publishStatus(agentID, taskID, state, traceID string) error {
 // publishFailed sends a TaskFailed to the Orchestrator. Called when a task cannot
 // be executed due to a non-recoverable provisioning or credential failure.
 // errorMessage must be user-safe — it must not expose credential values or vault paths.
-func (f *Factory) publishFailed(agentID, taskID, errorCode, errorMessage, traceID string) error {
+// phase is the provisioning phase where the failure occurred (e.g. "skill_resolution");
+// pass "" when the phase is not applicable.
+func (f *Factory) publishFailed(agentID, taskID, errorCode, errorMessage, traceID, phase string) error {
 	failed := types.TaskFailed{
 		TaskID:       taskID,
 		AgentID:      agentID,
 		ErrorCode:    errorCode,
 		ErrorMessage: errorMessage,
+		Phase:        phase,
 		TraceID:      traceID,
 	}
 	if err := f.comms.Publish(
@@ -562,4 +607,24 @@ func permissionSetForDomains(domains []string) []string {
 
 func defaultIDGenerator() string {
 	return fmt.Sprintf("agent-%d", time.Now().UnixNano())
+}
+
+// spawnSystemPrompt returns the domain-scoped system prompt that will be sent to
+// the agent at spawn time. Must stay in sync with buildSystemPrompt in cmd/agent-process/loop.go.
+func spawnSystemPrompt(skillDomain string) string {
+	return fmt.Sprintf(
+		`You are an Aegis OS agent scoped to the "%s" skill domain. `+
+			`Execute the assigned task using only the capabilities available within that domain. `+
+			`When the task is complete, call task_complete with the final result. `+
+			`Be concise and factual.`,
+		skillDomain,
+	)
+}
+
+// buildSpawnContextText assembles the full spawn-context string whose token count
+// is measured against the spawnContextBudget. Components match those injected into
+// the agent at spawn time: system prompt, task instructions, entry-point skill domain
+// name, and the opaque permission token reference (EDD §13.3, PRD FR-FAC-05).
+func buildSpawnContextText(systemPrompt, instructions, entryDomain, permTokenRef string) string {
+	return systemPrompt + "\n" + instructions + "\n" + entryDomain + "\n" + permTokenRef
 }

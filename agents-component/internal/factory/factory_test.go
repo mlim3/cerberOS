@@ -202,6 +202,117 @@ func TestTaskAcceptedExistingAgent(t *testing.T) {
 	}
 }
 
+// stubTokenCounter is a TokenCounter that always returns a fixed count.
+type stubTokenCounter struct{ count int }
+
+func (s *stubTokenCounter) CountTokens(_ string) (int, error) { return s.count, nil }
+
+func newFactoryWithCounter(t *testing.T, id string, counter factory.TokenCounter) *factory.Factory {
+	t.Helper()
+	sm := skills.New()
+	sm.RegisterDomain(webDomain())
+
+	f, err := factory.New(factory.Config{
+		Registry:     registry.New(),
+		Skills:       sm,
+		Credentials:  credentials.New(map[string]string{"web.credential": "tok"}),
+		Lifecycle:    lifecycle.New(),
+		Memory:       memory.New(),
+		Comms:        comms.NewStubClient(),
+		GenerateID:   func() string { return id },
+		TokenCounter: counter,
+	})
+	if err != nil {
+		t.Fatalf("factory.New: %v", err)
+	}
+	return f
+}
+
+func TestContextBudgetExceeded(t *testing.T) {
+	c := comms.NewStubClient()
+	sm := skills.New()
+	sm.RegisterDomain(webDomain())
+
+	var failed []types.TaskFailed
+	if err := c.Subscribe(comms.SubjectTaskFailed, func(msg *comms.Message) {
+		var tf types.TaskFailed
+		if err := json.Unmarshal(msg.Data, &tf); err != nil {
+			t.Errorf("unmarshal TaskFailed: %v", err)
+			return
+		}
+		failed = append(failed, tf)
+	}); err != nil {
+		t.Fatalf("subscribe task.failed: %v", err)
+	}
+
+	f, err := factory.New(factory.Config{
+		Registry:     registry.New(),
+		Skills:       sm,
+		Credentials:  credentials.New(map[string]string{"web.credential": "tok"}),
+		Lifecycle:    lifecycle.New(),
+		Memory:       memory.New(),
+		Comms:        c,
+		GenerateID:   func() string { return "agent-budget-test" },
+		TokenCounter: &stubTokenCounter{count: 2049}, // one over the 2,048 limit
+	})
+	if err != nil {
+		t.Fatalf("factory.New: %v", err)
+	}
+
+	spec := &types.TaskSpec{
+		TaskID:         "task-budget-1",
+		RequiredSkills: []string{"web"},
+		Instructions:   "some instructions",
+		TraceID:        "trace-budget-1",
+	}
+	if err := f.HandleTaskSpec(spec); err == nil {
+		t.Fatal("expected error when context budget exceeded, got nil")
+	}
+
+	if len(failed) == 0 {
+		t.Fatal("expected task.failed to be published, got none")
+	}
+	tf := failed[0]
+	if tf.ErrorCode != "CONTEXT_BUDGET_EXCEEDED" {
+		t.Errorf("ErrorCode: want %q, got %q", "CONTEXT_BUDGET_EXCEEDED", tf.ErrorCode)
+	}
+	if tf.Phase != "skill_resolution" {
+		t.Errorf("Phase: want %q, got %q", "skill_resolution", tf.Phase)
+	}
+	if tf.TaskID != spec.TaskID {
+		t.Errorf("TaskID: want %q, got %q", spec.TaskID, tf.TaskID)
+	}
+	if tf.AgentID == "" {
+		t.Error("AgentID must not be empty in task.failed for CONTEXT_BUDGET_EXCEEDED")
+	}
+}
+
+func TestContextBudgetWithinLimit(t *testing.T) {
+	// TokenCounter returning exactly 2,048 must not abort provisioning.
+	f := newFactoryWithCounter(t, "agent-budget-ok", &stubTokenCounter{count: 2048})
+	spec := &types.TaskSpec{
+		TaskID:         "task-budget-ok",
+		RequiredSkills: []string{"web"},
+		TraceID:        "trace-budget-ok",
+	}
+	if err := f.HandleTaskSpec(spec); err != nil {
+		t.Fatalf("HandleTaskSpec: unexpected error at budget boundary: %v", err)
+	}
+}
+
+func TestContextBudgetNoCounter(t *testing.T) {
+	// When no TokenCounter is configured, provisioning proceeds without a budget check.
+	f := newFactory(t, "agent-no-counter")
+	spec := &types.TaskSpec{
+		TaskID:         "task-no-counter",
+		RequiredSkills: []string{"web"},
+		TraceID:        "trace-no-counter",
+	}
+	if err := f.HandleTaskSpec(spec); err != nil {
+		t.Fatalf("HandleTaskSpec: unexpected error without token counter: %v", err)
+	}
+}
+
 func TestCompleteTask(t *testing.T) {
 	f := newFactory(t, "agent-complete-1")
 	spec := &types.TaskSpec{
