@@ -57,7 +57,33 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 	assistantTurn := 0
 	compactedThrough := 0
 
+	// compactionPending is set by Phase 4 when the token count reaches the 80%
+	// threshold. It causes compaction to run before the next Reason phase.
+	compactionPending := false
+
+	// lastTotalTokens holds the token count from the most recent Reason API
+	// response. Used in pre-Phase-1 log messages when compactionPending is set.
+	var lastTotalTokens int64
+
 	for iter := 0; iter < maxIterations; iter++ {
+		// --------------------------------------------------------------------
+		// Pre-Phase-1: compact if Phase 4 flagged it in the previous iteration.
+		// --------------------------------------------------------------------
+		if compactionPending {
+			log.Info("compaction executing (pre-reason)",
+				"last_total_tokens", lastTotalTokens,
+				"threshold_pct", int(compactThreshold*100),
+			)
+			compacted, err := compact(ctx, client, log, history, compactedThrough+1, assistantTurn)
+			if err != nil {
+				log.Warn("compaction failed, continuing without compaction", "error", err)
+			} else {
+				history = compacted
+				compactedThrough = assistantTurn
+			}
+			compactionPending = false
+		}
+
 		// --------------------------------------------------------------------
 		// Phase 1: Reason — call the LLM with the current context window.
 		// --------------------------------------------------------------------
@@ -82,12 +108,6 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 			"output_tokens", resp.Usage.OutputTokens,
 			"total_tokens", totalTokens,
 		)
-
-		// Hard abort — safety net per §13.3.
-		if float64(totalTokens) >= float64(modelContextWindow)*hardAbortThreshold {
-			return "", fmt.Errorf("CONTEXT_OVERFLOW: token count %d exceeds %.0f%% of context window",
-				totalTokens, hardAbortThreshold*100)
-		}
 
 		// end_turn with text content → task is complete.
 		if resp.StopReason == anthropic.StopReasonEndTurn {
@@ -155,25 +175,62 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 		history = append(history, anthropic.NewUserMessage(toolResults...))
 
 		// --------------------------------------------------------------------
-		// Phase 4: Update Context — trigger compaction if at 80% threshold.
+		// Phase 4: Update Context — track total token count after Observe (§13.3).
+		// totalTokens is from the Phase 1 API response; it is the best available
+		// estimate until the next Reason phase receives updated usage data.
 		// --------------------------------------------------------------------
-		if float64(totalTokens) >= float64(modelContextWindow)*compactThreshold {
-			log.Info("compaction triggered",
+		lastTotalTokens = totalTokens
+		switch contextWindowAction(totalTokens) {
+		case contextActionHardAbort:
+			log.Error("hard abort: context overflow",
+				"tokens", totalTokens,
+				"threshold_pct", int(hardAbortThreshold*100),
+			)
+			if ve != nil {
+				ve.PublishError("CONTEXT_OVERFLOW",
+					fmt.Sprintf("token count %d exceeds %.0f%% of context window",
+						totalTokens, hardAbortThreshold*100),
+					spawnCtx.TraceID,
+				)
+			}
+			return "", fmt.Errorf("CONTEXT_OVERFLOW: token count %d exceeds %.0f%% of context window",
+				totalTokens, hardAbortThreshold*100)
+		case contextActionCompactPending:
+			log.Info("compaction pending: token threshold reached",
 				"tokens", totalTokens,
 				"threshold_pct", int(compactThreshold*100),
 			)
-			compacted, err := compact(ctx, client, log, history, compactedThrough+1, assistantTurn)
-			if err != nil {
-				// Log and continue — the hard abort at 95% is the safety net.
-				log.Warn("compaction failed, continuing without compaction", "error", err)
-			} else {
-				history = compacted
-				compactedThrough = assistantTurn
-			}
+			compactionPending = true
 		}
 	}
 
 	return "", fmt.Errorf("max iterations (%d) reached without task completion", maxIterations)
+}
+
+// contextAction enumerates the token-budget decisions made by contextWindowAction.
+type contextAction int
+
+const (
+	contextActionNone           contextAction = iota // < 80% of context window — no action needed
+	contextActionCompactPending                      // ≥ 80% — set compactionPending; compact before next Reason phase
+	contextActionHardAbort                           // ≥ 95% — abort current turn; emit CONTEXT_OVERFLOW
+)
+
+// contextWindowAction returns the action required based on the token count
+// relative to the model context window thresholds (EDD §13.3). It is called
+// in Phase 4 after every Observe phase so that compaction or hard abort can be
+// applied before the next Reason (LLM) call.
+func contextWindowAction(totalTokens int64) contextAction {
+	tokens := float64(totalTokens)
+	window := float64(modelContextWindow)
+	switch {
+	case tokens >= window*hardAbortThreshold:
+		return contextActionHardAbort
+	case tokens >= window*compactThreshold:
+		return contextActionCompactPending
+	default:
+		return contextActionNone
+	}
 }
 
 // buildSystemPrompt constructs a domain-scoped system prompt. In M3 this will

@@ -435,6 +435,47 @@ func (ve *VaultExecutor) recordSessionEntry(requestID, operationType string) {
 	}
 }
 
+// agentErrorEvent is the payload for error events published to
+// aegis.orchestrator.error by the agent-process binary.
+type agentErrorEvent struct {
+	AgentID      string `json:"agent_id"`
+	TaskID       string `json:"task_id"`
+	ErrorCode    string `json:"error_code"`
+	ErrorMessage string `json:"error_message"`
+	TraceID      string `json:"trace_id"`
+}
+
+// PublishError publishes an error event to aegis.orchestrator.error (JetStream
+// at-least-once). Called by the ReAct loop on hard abort (e.g. CONTEXT_OVERFLOW).
+// Best-effort: failures are logged but do not block the caller from returning
+// the error and exiting.
+func (ve *VaultExecutor) PublishError(errorCode, errorMessage, traceID string) {
+	payload := agentErrorEvent{
+		AgentID:      ve.agentID,
+		TaskID:       ve.taskID,
+		ErrorCode:    errorCode,
+		ErrorMessage: errorMessage,
+		TraceID:      traceID,
+	}
+	env := agentEnvelope{
+		MessageID:       newUUID(),
+		MessageType:     comms.MsgTypeError,
+		SourceComponent: "agents",
+		CorrelationID:   ve.taskID,
+		Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
+		SchemaVersion:   "1.0",
+		Payload:         payload,
+	}
+	data, err := json.Marshal(env)
+	if err != nil {
+		ve.log.Warn("publish error event: marshal failed", "error", err)
+		return
+	}
+	if _, err := ve.js.Publish(comms.SubjectError, data); err != nil {
+		ve.log.Warn("publish error event: jetstream publish failed", "error", err)
+	}
+}
+
 // Close drains the NATS connection used by the vault executor.
 func (ve *VaultExecutor) Close() {
 	if ve.nc != nil {
