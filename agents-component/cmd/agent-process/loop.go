@@ -49,9 +49,17 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 	toolDefs := toolDefinitions(tools)
 	systemPrompt := buildSystemPrompt(spawnCtx.SkillDomain)
 
+	// Session log persists each turn to episodic memory (EDD §13.4).
+	// nil-safe: all methods are no-ops when sl is nil.
+	sl := NewSessionLog(ve, log)
+	ctx = WithSessionLog(ctx, sl)
+
 	history := []anthropic.MessageParam{
 		anthropic.NewUserMessage(anthropic.NewTextBlock(spawnCtx.Instructions)),
 	}
+
+	// Write root user_message entry — parent_entry_id is "" for the tree root.
+	currentParentID := sl.Write(turnTypeUserMessage, spawnCtx.Instructions, "", "")
 
 	// assistantTurn counts completed Reason phases — used to label compaction summaries.
 	assistantTurn := 0
@@ -74,12 +82,15 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 				"last_total_tokens", lastTotalTokens,
 				"threshold_pct", int(compactThreshold*100),
 			)
-			compacted, err := compact(ctx, client, log, history, compactedThrough+1, assistantTurn, ve)
+			compacted, compactionEntryID, err := compact(ctx, client, log, history, compactedThrough+1, assistantTurn, sl, currentParentID)
 			if err != nil {
 				log.Warn("compaction failed, continuing without compaction", "error", err)
 			} else {
 				history = compacted
 				compactedThrough = assistantTurn
+				if compactionEntryID != "" {
+					currentParentID = compactionEntryID
+				}
 			}
 			compactionPending = false
 		}
@@ -108,6 +119,17 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 			"output_tokens", resp.Usage.OutputTokens,
 			"total_tokens", totalTokens,
 		)
+
+		// Persist assistant_response entry — collect text content for the payload.
+		assistantText := ""
+		for _, block := range resp.Content {
+			if block.Type == "text" {
+				assistantText = block.Text
+				break
+			}
+		}
+		assistantEntryID := sl.Write(turnTypeAssistantResponse, assistantText, currentParentID, "")
+		currentParentID = assistantEntryID
 
 		// end_turn with text content → task is complete.
 		if resp.StopReason == anthropic.StopReasonEndTurn {
@@ -144,7 +166,10 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 				"tool_use_id", toolUse.ID,
 			)
 
-			result := dispatchTool(ctx, tools, toolUse.Name, toolUse.Input)
+			// Thread current parent entry ID into context so vault tools can
+			// write their tool_call entry with the correct parent (EDD §13.4).
+			toolCtx := WithParentEntryID(ctx, currentParentID)
+			result := dispatchTool(toolCtx, tools, toolUse.Name, toolUse.Input)
 
 			// Phase 3: Observe — details go to monitoring (stderr) only; never
 			// enter LLM context. Content is what the LLM receives.
@@ -154,6 +179,15 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 				"is_error", result.IsError,
 				"details", result.Details,
 			)
+
+			// Persist tool_result entry. Parent is the tool_call entry returned
+			// by vault tools; falls back to currentParentID for local tools.
+			toolResultParentID := result.SessionEntryID
+			if toolResultParentID == "" {
+				toolResultParentID = currentParentID
+			}
+			toolResultEntryID := sl.Write(turnTypeToolResult, result.Content, toolResultParentID, "")
+			currentParentID = toolResultEntryID
 
 			// task_complete is the agent's explicit terminal signal.
 			if toolUse.Name == toolNameTaskComplete && !result.IsError {

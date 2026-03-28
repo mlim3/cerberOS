@@ -47,20 +47,25 @@ const (
 // from EDD §13.3. It retains the most recent compactionRetainTurns assistant
 // turns verbatim and summarises all prior turns into a single summary message.
 //
-// ve is used to persist the compaction event to episodic memory (step 5). It
-// may be nil — persistence is skipped when vault/NATS is unavailable.
+// sl is used to persist the compaction event to episodic memory (step 5).
+// parentID is the entry_id of the preceding session entry; the compaction entry
+// is chained to it. sl may be nil — persistence is skipped when unavailable.
+//
+// Returns the compacted history, the compaction entry_id (for parent chaining),
+// and any error. On success, entry_id is always non-empty when sl is non-nil.
 func compact(
 	ctx context.Context,
 	client *anthropic.Client,
 	log *slog.Logger,
 	history []anthropic.MessageParam,
 	firstTurn, lastTurn int,
-	ve *VaultExecutor,
-) ([]anthropic.MessageParam, error) {
+	sl *SessionLog,
+	parentID string,
+) ([]anthropic.MessageParam, string, error) {
 	retainFrom := findRetentionBoundary(history)
 	if retainFrom == 0 {
 		// All turns fall within the retention window — nothing to compact.
-		return history, nil
+		return history, parentID, nil
 	}
 
 	toCompact := history[:retainFrom]
@@ -73,16 +78,14 @@ func compact(
 	}
 
 	// Step 5: Persist compaction event to episodic memory (EDD §13.3).
-	if ve != nil {
-		ve.persistCompactionEvent(summary, firstTurn, lastTurn)
-	}
+	compactionEntryID := sl.Write(turnTypeCompaction, summary, parentID, "")
 
 	summaryMsg := anthropic.NewUserMessage(anthropic.NewTextBlock(summary))
 
 	compacted := make([]anthropic.MessageParam, 0, 1+len(toRetain))
 	compacted = append(compacted, summaryMsg)
 	compacted = append(compacted, toRetain...)
-	return compacted, nil
+	return compacted, compactionEntryID, nil
 }
 
 // findRetentionBoundary returns the history index at which the retention window

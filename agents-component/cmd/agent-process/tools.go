@@ -41,9 +41,10 @@ const (
 // split from EDD §13.2: Content enters the LLM context; Details are for monitoring
 // only and are never injected into agent context.
 type ToolResult struct {
-	Content string                 // what the LLM sees; max 16KB
-	IsError bool                   // signals the LLM that execution failed
-	Details map[string]interface{} // monitoring only — logged to stderr, never to LLM
+	Content        string                 // what the LLM sees; max 16KB
+	IsError        bool                   // signals the LLM that execution failed
+	Details        map[string]interface{} // monitoring only — logged to stderr, never to LLM
+	SessionEntryID string                 // entry_id of the tool_call session entry; set by vault tools only
 }
 
 // SkillTool is the runtime representation of the full Tool Contract (EDD §13.2).
@@ -252,7 +253,7 @@ func vaultWebFetchTool(ve *VaultExecutor) SkillTool {
 			},
 		},
 		Execute: func(ctx context.Context, raw json.RawMessage) ToolResult {
-			return executeVaultWebFetch(ve, raw)
+			return executeVaultWebFetch(ctx, ve, raw)
 		},
 	}
 }
@@ -260,7 +261,7 @@ func vaultWebFetchTool(ve *VaultExecutor) SkillTool {
 // executeVaultWebFetch builds a VaultOperationRequest and delegates execution to
 // the VaultExecutor. The Vault performs the HTTP call using its stored credential
 // and returns only the response body — never the credential itself (NFR-08).
-func executeVaultWebFetch(ve *VaultExecutor, raw json.RawMessage) ToolResult {
+func executeVaultWebFetch(ctx context.Context, ve *VaultExecutor, raw json.RawMessage) ToolResult {
 	var params struct {
 		URL    string `json:"url"`
 		Method string `json:"method"`
@@ -298,7 +299,7 @@ func executeVaultWebFetch(ve *VaultExecutor, raw json.RawMessage) ToolResult {
 	}
 
 	// vault TimeoutSeconds = 30; local deadline = 30 + 5 = 35s (matches TimeoutSeconds above).
-	return ve.Execute("web_fetch", "web_api_key", opParams, 30, onUpdate)
+	return ve.Execute(ctx, "web_fetch", "web_api_key", opParams, 30, onUpdate)
 }
 
 // taskCompleteTool is the agent's explicit terminal signal. When the agent calls

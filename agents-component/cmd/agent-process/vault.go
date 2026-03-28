@@ -19,6 +19,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -251,7 +252,7 @@ func (ve *VaultExecutor) routeResult(data []byte) {
 //  3. Publish VaultOperationRequest (JetStream at-least-once).
 //  4. Wait: local deadline = timeout_seconds + 5s buffer.
 //  5. On deadline or context cancel: return TOOL_TIMEOUT, publish cancellation.
-func (ve *VaultExecutor) Execute(operationType, credentialType string, operationParams json.RawMessage, timeoutSeconds int, onUpdate func(types.VaultOperationProgress)) ToolResult {
+func (ve *VaultExecutor) Execute(ctx context.Context, operationType, credentialType string, operationParams json.RawMessage, timeoutSeconds int, onUpdate func(types.VaultOperationProgress)) ToolResult {
 	req := types.VaultOperationRequest{
 		RequestID:       newUUID(),
 		AgentID:         ve.agentID,
@@ -265,7 +266,15 @@ func (ve *VaultExecutor) Execute(operationType, credentialType string, operation
 
 	// Step 1: Record request_id in session log BEFORE the goroutine yields.
 	// This is the critical invariant for crash recovery (EDD §6.3, §13.1).
-	ve.recordSessionEntry(req.RequestID, req.OperationType)
+	// SessionLog and parent entry ID are threaded via context (EDD §13.4).
+	sl := SessionLogFromCtx(ctx)
+	parentID := ParentEntryIDFromCtx(ctx)
+	toolCallEntryID := sl.Write(
+		turnTypeToolCall,
+		fmt.Sprintf("vault.execute.request dispatched: operation=%s request_id=%s", operationType, req.RequestID),
+		parentID,
+		req.RequestID,
+	)
 
 	// Step 2: Register pending channel and onUpdate callback BEFORE publishing.
 	// Both are registered under the same lock to ensure no progress event or
@@ -288,9 +297,10 @@ func (ve *VaultExecutor) Execute(operationType, credentialType string, operation
 		ve.log.Error("vault execute: publish request failed",
 			"request_id", req.RequestID, "error", err)
 		return ToolResult{
-			Content: fmt.Sprintf("vault execute: could not dispatch request for %q: %v", operationType, err),
-			IsError: true,
-			Details: map[string]interface{}{"error": err.Error(), "request_id": req.RequestID},
+			Content:        fmt.Sprintf("vault execute: could not dispatch request for %q: %v", operationType, err),
+			IsError:        true,
+			SessionEntryID: toolCallEntryID,
+			Details:        map[string]interface{}{"error": err.Error(), "request_id": req.RequestID},
 		}
 	}
 
@@ -306,13 +316,15 @@ func (ve *VaultExecutor) Execute(operationType, credentialType string, operation
 	defer timer.Stop()
 
 	select {
-	case result := <-resultCh:
+	case vaultResult := <-resultCh:
 		ve.log.Info("vault execute: result received",
 			"request_id", req.RequestID,
-			"status", result.Status,
-			"elapsed_ms", result.ElapsedMS,
+			"status", vaultResult.Status,
+			"elapsed_ms", vaultResult.ElapsedMS,
 		)
-		return vaultResultToToolResult(result)
+		result := vaultResultToToolResult(vaultResult)
+		result.SessionEntryID = toolCallEntryID
+		return result
 
 	case <-timer.C:
 		// Step 5: Local deadline exceeded.
@@ -332,7 +344,8 @@ func (ve *VaultExecutor) Execute(operationType, credentialType string, operation
 				"TOOL_TIMEOUT: vault operation %q did not complete within %ds (timeout=%ds + 5s buffer)",
 				req.OperationType, req.TimeoutSeconds+5, req.TimeoutSeconds,
 			),
-			IsError: true,
+			IsError:        true,
+			SessionEntryID: toolCallEntryID,
 			Details: map[string]interface{}{
 				"request_id":       req.RequestID,
 				"operation_type":   req.OperationType,
@@ -392,49 +405,6 @@ func (ve *VaultExecutor) publishCancellation(requestID, operationType, reason st
 	}
 }
 
-// recordSessionEntry writes the request_id into the session log BEFORE the
-// goroutine yields (EDD §6.3 crash recovery invariant). On recovery the factory
-// inspects session log entries with VaultRequestID set and no matching result —
-// those request_ids are resubmitted with the SAME request_id (idempotent).
-func (ve *VaultExecutor) recordSessionEntry(requestID, operationType string) {
-	entry := types.SessionEntry{
-		EntryID:        newUUID(),
-		TurnType:       "tool_call",
-		Content:        fmt.Sprintf("vault.execute.request dispatched: operation=%s request_id=%s", operationType, requestID),
-		Timestamp:      time.Now().UTC(),
-		VaultRequestID: requestID,
-	}
-	mw := types.MemoryWrite{
-		AgentID:   ve.agentID,
-		SessionID: ve.taskID,
-		DataType:  "episode",
-		TTLHint:   86400,
-		Payload:   entry,
-		Tags: map[string]string{
-			"turn_type":        "tool_call",
-			"vault_request_id": requestID,
-		},
-	}
-	env := agentEnvelope{
-		MessageID:       newUUID(),
-		MessageType:     comms.MsgTypeStateWrite,
-		SourceComponent: "agents",
-		CorrelationID:   requestID,
-		Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
-		SchemaVersion:   "1.0",
-		Payload:         mw,
-	}
-	data, err := json.Marshal(env)
-	if err != nil {
-		ve.log.Warn("session log: marshal state.write failed", "error", err)
-		return
-	}
-	if _, err := ve.js.Publish(comms.SubjectStateWrite, data); err != nil {
-		ve.log.Warn("session log: publish state.write failed — request_id NOT persisted; crash recovery may miss this operation",
-			"request_id", requestID, "error", err)
-	}
-}
-
 // agentErrorEvent is the payload for error events published to
 // aegis.orchestrator.error by the agent-process binary.
 type agentErrorEvent struct {
@@ -443,50 +413,6 @@ type agentErrorEvent struct {
 	ErrorCode    string `json:"error_code"`
 	ErrorMessage string `json:"error_message"`
 	TraceID      string `json:"trace_id"`
-}
-
-// persistCompactionEvent writes a compaction SessionEntry to the Memory Interface
-// via state.write (data_type: episode, entry_type: compaction) per EDD §13.3 step 5.
-// Best-effort: failures are logged but do not block compaction from completing.
-func (ve *VaultExecutor) persistCompactionEvent(summary string, firstTurn, lastTurn int) {
-	entryID := newUUID()
-	entry := types.SessionEntry{
-		EntryID:   entryID,
-		TurnType:  "compaction",
-		Content:   summary,
-		Timestamp: time.Now().UTC(),
-	}
-	mw := types.MemoryWrite{
-		AgentID:   ve.agentID,
-		SessionID: ve.taskID,
-		DataType:  "episode",
-		TTLHint:   86400,
-		Payload:   entry,
-		Tags: map[string]string{
-			"turn_type":  "compaction",
-			"entry_type": "compaction",
-			"first_turn": fmt.Sprintf("%d", firstTurn),
-			"last_turn":  fmt.Sprintf("%d", lastTurn),
-		},
-	}
-	env := agentEnvelope{
-		MessageID:       newUUID(),
-		MessageType:     comms.MsgTypeStateWrite,
-		SourceComponent: "agents",
-		CorrelationID:   entryID,
-		Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
-		SchemaVersion:   "1.0",
-		Payload:         mw,
-	}
-	data, err := json.Marshal(env)
-	if err != nil {
-		ve.log.Warn("compaction persist: marshal state.write failed", "error", err)
-		return
-	}
-	if _, err := ve.js.Publish(comms.SubjectStateWrite, data); err != nil {
-		ve.log.Warn("compaction persist: publish state.write failed",
-			"first_turn", firstTurn, "last_turn", lastTurn, "error", err)
-	}
 }
 
 // PublishError publishes an error event to aegis.orchestrator.error (JetStream
