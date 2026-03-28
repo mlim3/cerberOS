@@ -267,8 +267,8 @@ func TestStateWriteAck(t *testing.T) {
 	if ack.AgentID != write.AgentID {
 		t.Errorf("AgentID: want %q, got %q", write.AgentID, ack.AgentID)
 	}
-	if ack.Status != "ok" {
-		t.Errorf("Status: want %q, got %q", "ok", ack.Status)
+	if ack.Status != "accepted" {
+		t.Errorf("Status: want %q, got %q", "accepted", ack.Status)
 	}
 }
 
