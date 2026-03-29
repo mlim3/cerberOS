@@ -4,112 +4,110 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-cerberOS Vault is a secure, ephemeral script execution service. AI agents submit shell scripts; the vault injects secrets at runtime inside isolated QEMU VMs and scrubs secret values from output before returning results. The core security invariant: **agents never see raw secret values**.
+cerberOS Vault is a **credential broker** for agents. Agents send shell scripts containing `{{PLACEHOLDER}}` markers; the service resolves secrets and returns the **injected script** over HTTP for the agent to run locally. Resolution is **atomic**: if any referenced secret is missing or denied, the whole request fails with no partial substitution.
+
+The HTTP service (`engine/main.go`) uses an in-memory `SecretManager` mock by default. **OpenBao** is included in Docker Compose for persistent secrets storage and can be wired to replace the mock (see `setup-openbao.sh`, `openbao.hcl`).
 
 ## Commands
 
-### Build & Run
+### Build & run (from `vault/`)
+
+`compose.yaml` attaches services to the external Docker network `memory_default`. Create it first if needed (for example by starting the [`memory`](../memory) stack, which defines that network), then:
 
 ```bash
 docker compose build
 docker compose up
 ```
 
-Services: engine (:8000), secretstore (:8001), internal-ui (:80), swagger (:8080).
+**Services:** `vault` (:8000, Go HTTP API), `ui` (:80, static UI + nginx proxy to vault), `openbao` (:8200), `swagger` (:8080, serves `openapi.yaml`).
+
+### OpenBao bootstrap (optional)
+
+From `vault/`, after memory’s Postgres is available:
+
+```bash
+./setup-openbao.sh
+```
+
+This initializes OpenBao against Postgres, unseals, and mounts a KV v2 engine. Details: `setup-openbao.sh`.
 
 ### Tests
 
-Unit tests (no Docker required):
+Unit tests (no Docker):
+
 ```bash
 cd engine && go test ./cmd/vault/
 cd engine && go test -v ./cmd/vault/
 ```
 
-Integration tests (requires running Docker stack):
+Integration tests (build tag `integration`; brings up `vault/compose.yaml` via Docker):
+
 ```bash
 cd engine && go test -tags integration -timeout 5m ./cmd/vault/
-# Run a single integration test:
-cd engine && go test -tags integration -v -timeout 5m -run TestIntegration_InlineEcho ./cmd/vault/
+# Single test:
+cd engine && go test -tags integration -v -timeout 5m -run TestIntegration_InlineInject ./cmd/vault/
 ```
 
-### UI Development
+### UI development
 
 ```bash
-cd internal-ui && npm run dev    # Dev server
-cd internal-ui && npm run lint   # ESLint
-cd internal-ui && npm run build  # Production build
+cd internal-ui && npm run dev    # or: bun run dev
+cd internal-ui && npm run lint
+cd internal-ui && npm run build
 ```
+
+Production UI is served by nginx in the `ui` image (`internal-ui/Dockerfile` + `nginx.conf`); `/inject` is proxied to the vault container.
 
 ## Architecture
 
-### Three Services
+### Request flow
 
 ```
-Agent → POST /execute → engine (:8000, Go)
-                            │ POST /secrets/resolve (X-Engine-Token header)
-                            ▼
-                        secretstore (:8001, Go)
-
-internal-ui (:80, Next.js) — browser UI proxying to engine
+Agent / CLI → POST /inject → preprocessor (placeholder scan + batch resolve)
+                                    │
+                                    ▼
+                            SecretManager (mock today; pluggable)
+                                    │
+                                    ▼
+                         JSON: injected script (or 403 on failure)
 ```
 
-### Execution Pipeline (engine/orchestrator)
+The **CLI** (`engine/cmd/vault/`) posts to `/inject` and prints or writes the returned script.
 
-The orchestrator runs 5 sequential steps — order encodes the security invariant:
+### Layout
 
-1. **Preprocessor** — finds `{{PLACEHOLDER}}` patterns, batch-resolves from secretstore, returns processed script + injected key list
-2. **InitRD Builder** — packs processed script into per-job cpio initramfs as `/job/script.sh`
-3. **QEMU VM** — boots Alpine linux-virt kernel with ephemeral initramfs; custom `/init` wraps execution
-4. **extractJobOutput()** — extracts output between sentinel markers (`=== cerberOS job start ===` / `=== cerberOS job exit_code=N ===`) to strip kernel boot noise
-5. **scrubSecrets()** — replaces all injected secret values with `[REDACTED]`
+| Path                    | Role                                             |
+| ----------------------- | ------------------------------------------------ |
+| `engine/main.go`        | HTTP server, `/inject`                           |
+| `engine/preprocessor/`  | `{{KEY}}` parsing and substitution               |
+| `engine/secretmanager/` | `SecretManager` interface + mock                 |
+| `engine/audit/`         | Audit events (key names, not values)             |
+| `engine/cmd/vault/`     | `vault inject` CLI                               |
+| `internal-ui/`          | Next.js app + nginx for static + `/inject` proxy |
 
-### Design Patterns
+### Design notes
 
-- **Strategy** — `VM` interface (`engine/vm/vm.go`) allows swapping QEMU for Firecracker etc.; `SecretManager` interface in secretstore allows swapping the mock for real backends (Vault, KMS)
-- **Pipeline** — orchestrator's 5 steps are strictly linear; each step's output feeds the next
-- **Observer** — `audit.Exporter` interface; `JSONExporter` and `MultiExporter` compose audit outputs
-- **Template Method** — preprocessor's placeholder collection → batch resolve → audit → substitute flow
+- **Strategy** — `SecretManager` / `preprocessor.SecretStore` allow swapping mock for OpenBao, cloud KMS, etc., without changing the preprocessor.
+- **Pipeline** — collect keys → single `Resolve` → audit → substitute.
 
-See `DESIGN_PATTERNS.md` for deep-dive rationale on each pattern.
+See `docs/architecture.md` for architecture, patterns, and historical QEMU notes. `engine/README.md` covers the HTTP API and CLI in detail.
 
-## Key Implementation Notes
+## Key implementation notes
 
-### Zero External Go Dependencies
+### Go dependencies
 
-Both `engine/` and `secretstore/` use Go 1.24 stdlib only. This is intentional to minimize supply chain risk. Do not add external dependencies without strong justification.
+`engine/` uses **Go 1.24** and **stdlib only** (`go.mod`). Do not add third-party Go modules without strong justification.
 
-### QEMU Architecture Gotchas (from DOCS.md)
+### Audit and safety
 
-- ARM serial console is `ttyAMA0`, not `ttyS0` — engine auto-detects per arch
-- Virtio modules are not built-in to `linux-virt` — copied and depmod'd during Docker build
-- DHCP doesn't work (no `AF_PACKET`) — VMs use static IP `10.0.2.15/24`
-- `-cpu host` only works with KVM/HVF; engine uses `max` for `tcg` fallback
-- All `COPY` commands use `--chown=1001:1001` — engine runs as UID 1001 (`altuser`)
-- Alpine sh doesn't support brace expansion — create directories explicitly
+- Audit logs record **secret key names**, not values (`engine/audit/`).
+- Failed resolution returns **403** with a JSON `error` field; no partial injection.
 
-### Secret Safety
+### Environment
 
-- `scrubSecrets()` in orchestrator runs on all output before returning
-- Secretstore's `engineOnly` middleware validates `X-Engine-Token` before reading the request body
-- Audit events record key *names* only, never values — enforced in preprocessor and secretstore audit
+The running server does not require extra env vars for the mock path. When wiring a real backend, configuration will live alongside `main.go` / `secretmanager` (see `engine/README.md`).
 
-### initramfs Construction
+## Testing approach
 
-`engine/initrd/builder.go` writes a cpio newc archive programmatically (no `cpio` binary required). The custom `/init` script prints the sentinel markers and manages the script execution lifecycle.
-
-### Environment Variables
-
-| Variable | Description |
-|----------|-------------|
-| `KERNEL_IMAGE_PATH` | Path to kernel inside container (default: `/vm/kernel`) |
-| `INITRD_PATH` | Path to base initramfs (default: `/vm/initrd.gz`) |
-| `QEMU_ACCEL` | Force accelerator: `kvm`, `hvf`, or `tcg` (auto-detected by default) |
-| `SECRET_STORE_TOKEN` | Shared token for engine → secretstore auth |
-| `SECRET_STORE_URL` | Secretstore base URL (default: `http://localhost:8001`) |
-| `ENGINE_TOKEN` | Token secretstore expects in `X-Engine-Token` header |
-
-## Testing Approach
-
-- **Unit tests** (`engine/cmd/vault/main_test.go`) use `httptest.Server` to mock the engine HTTP API — fast, no Docker
-- **Integration tests** (`engine/cmd/vault/integration_test.go`, build tag `integration`) spin up the full Docker stack and test real VM execution including secret injection and output scrubbing
-- The CLI tool in `engine/cmd/vault/` is the primary agent interface and the main target of both test suites
+- **Unit tests** (`engine/cmd/vault/main_test.go`) mock `/inject` with `httptest` — fast, no Docker.
+- **Integration tests** (`engine/cmd/vault/integration_test.go`, `integration` tag) run `docker compose` against `vault/compose.yaml` and exercise the real `vault inject` CLI against the container.
