@@ -14,22 +14,20 @@ COPY . .
 
 RUN CGO_ENABLED=0 go build \
   -ldflags="-s -w" \
-  -o secretstore
+  -o vault
 
 # Production stage
 FROM alpine:3.23.3
 
 WORKDIR /
 
-COPY --from=build /app/secretstore secretstore
+COPY --from=build /app/vault vault
 COPY --from=build /etc/passwd /etc/passwd
 
-RUN chmod +x /secretstore
+RUN chmod +x /vault
 
 USER altuser
 
-EXPOSE 8001
+EXPOSE 8000
 
-# ENGINE_TOKEN must be set at runtime — the service will refuse to start without it.
-# PORT defaults to 8001 if not set.
-CMD ["/secretstore"]
+CMD ["/vault"]

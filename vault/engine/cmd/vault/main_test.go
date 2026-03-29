@@ -10,22 +10,23 @@ import (
 	"testing"
 )
 
-// mockEngine starts a fake /execute server.
-// handler receives the decoded executeRequest and returns an executeResponse.
-func mockEngine(t *testing.T, handler func(executeRequest) executeResponse) *httptest.Server {
+// mockVault starts a fake /inject server.
+// handler receives the decoded injectRequest and returns status + response body.
+func mockVault(t *testing.T, handler func(injectRequest) (int, any)) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/execute" || r.Method != http.MethodPost {
+		if r.URL.Path != "/inject" || r.Method != http.MethodPost {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		var req executeRequest
+		var req injectRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		resp := handler(req)
+		status, resp := handler(req)
 		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
 		json.NewEncoder(w).Encode(resp)
 	}))
 	t.Cleanup(srv.Close)
@@ -47,84 +48,59 @@ func runCLI(t *testing.T, args []string, stdinData string) (stdout, stderr strin
 // --- Script source tests ---
 
 func TestInlineScript(t *testing.T) {
-	srv := mockEngine(t, func(req executeRequest) executeResponse {
-		if req.Script != "echo hello" {
+	srv := mockVault(t, func(req injectRequest) (int, any) {
+		if req.Script != "echo {{API_KEY}}" {
 			t.Errorf("unexpected script: %q", req.Script)
 		}
-		return executeResponse{Response: executeResult{Output: "hello\n", ExitCode: 0}}
+		return http.StatusOK, injectResponse{Script: "echo mock-api-key-12345"}
 	})
 
-	stdout, _, code := runCLI(t, []string{"execute", "--host", srv.URL, "-s", "echo hello"}, "")
+	stdout, _, code := runCLI(t, []string{"inject", "--host", srv.URL, "-s", "echo {{API_KEY}}"}, "")
 	if code != 0 {
 		t.Fatalf("expected exit 0, got %d", code)
 	}
-	if stdout != "hello\n" {
+	if stdout != "echo mock-api-key-12345" {
 		t.Errorf("unexpected output: %q", stdout)
 	}
 }
 
 func TestFileScript(t *testing.T) {
-	script := "#!/bin/sh\necho from file\n"
+	script := "#!/bin/sh\necho {{DB_PASS}}\n"
 	f := filepath.Join(t.TempDir(), "test.sh")
 	if err := os.WriteFile(f, []byte(script), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	srv := mockEngine(t, func(req executeRequest) executeResponse {
+	srv := mockVault(t, func(req injectRequest) (int, any) {
 		if req.Script != script {
 			t.Errorf("unexpected script: %q", req.Script)
 		}
-		return executeResponse{Response: executeResult{Output: "from file\n", ExitCode: 0}}
+		return http.StatusOK, injectResponse{Script: "#!/bin/sh\necho mock-db-password\n"}
 	})
 
-	stdout, _, code := runCLI(t, []string{"execute", "--host", srv.URL, "-f", f}, "")
+	stdout, _, code := runCLI(t, []string{"inject", "--host", srv.URL, "-f", f}, "")
 	if code != 0 {
 		t.Fatalf("expected exit 0, got %d", code)
 	}
-	if stdout != "from file\n" {
+	if !strings.Contains(stdout, "mock-db-password") {
 		t.Errorf("unexpected output: %q", stdout)
 	}
 }
 
 func TestStdinScript(t *testing.T) {
-	script := "echo from stdin\n"
-	srv := mockEngine(t, func(req executeRequest) executeResponse {
+	script := "echo {{SECRET_KEY}}\n"
+	srv := mockVault(t, func(req injectRequest) (int, any) {
 		if req.Script != script {
 			t.Errorf("unexpected script: %q", req.Script)
 		}
-		return executeResponse{Response: executeResult{Output: "from stdin\n", ExitCode: 0}}
+		return http.StatusOK, injectResponse{Script: "echo mock-secret-key\n"}
 	})
 
-	stdout, _, code := runCLI(t, []string{"execute", "--host", srv.URL}, script)
+	stdout, _, code := runCLI(t, []string{"inject", "--host", srv.URL}, script)
 	if code != 0 {
 		t.Fatalf("expected exit 0, got %d", code)
 	}
-	if stdout != "from stdin\n" {
-		t.Errorf("unexpected output: %q", stdout)
-	}
-}
-
-func TestFileScriptEcho(t *testing.T) {
-	// Verifies that -f reads a real script file and sends its contents to the engine,
-	// and that the engine's output ("testing from test script\n") is printed to stdout.
-	script := "echo testing from test script\n"
-	f := filepath.Join(t.TempDir(), "echo_test.sh")
-	if err := os.WriteFile(f, []byte(script), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	srv := mockEngine(t, func(req executeRequest) executeResponse {
-		if req.Script != script {
-			t.Errorf("unexpected script: %q", req.Script)
-		}
-		return executeResponse{Response: executeResult{Output: "testing from test script\n", ExitCode: 0}}
-	})
-
-	stdout, _, code := runCLI(t, []string{"execute", "--host", srv.URL, "-f", f}, "")
-	if code != 0 {
-		t.Fatalf("expected exit 0, got %d", code)
-	}
-	if stdout != "testing from test script\n" {
+	if !strings.Contains(stdout, "mock-secret-key") {
 		t.Errorf("unexpected output: %q", stdout)
 	}
 }
@@ -135,66 +111,57 @@ func TestFileTakesPriorityOverScript(t *testing.T) {
 	f := filepath.Join(t.TempDir(), "winner.sh")
 	os.WriteFile(f, []byte(fileContent), 0644)
 
-	srv := mockEngine(t, func(req executeRequest) executeResponse {
+	srv := mockVault(t, func(req injectRequest) (int, any) {
 		if req.Script != fileContent {
 			t.Errorf("expected file content, got: %q", req.Script)
 		}
-		return executeResponse{Response: executeResult{Output: "file wins\n", ExitCode: 0}}
+		return http.StatusOK, injectResponse{Script: fileContent}
 	})
 
-	runCLI(t, []string{"execute", "--host", srv.URL, "-f", f, "-s", "echo ignored"}, "")
+	runCLI(t, []string{"inject", "--host", srv.URL, "-f", f, "-s", "echo ignored"}, "")
 }
 
-// --- Env flag tests ---
-
-func TestEnvFlags(t *testing.T) {
-	srv := mockEngine(t, func(req executeRequest) executeResponse {
-		if req.Env["FOO"] != "bar" || req.Env["BAZ"] != "qux" {
-			t.Errorf("unexpected env: %v", req.Env)
-		}
-		return executeResponse{Response: executeResult{Output: "", ExitCode: 0}}
+func TestOutputToFile(t *testing.T) {
+	srv := mockVault(t, func(req injectRequest) (int, any) {
+		return http.StatusOK, injectResponse{Script: "#!/bin/sh\necho injected\n"}
 	})
 
-	runCLI(t, []string{"execute", "--host", srv.URL, "-s", "true", "-e", "FOO=bar", "-e", "BAZ=qux"}, "")
+	outFile := filepath.Join(t.TempDir(), "out.sh")
+	_, _, code := runCLI(t, []string{"inject", "--host", srv.URL, "-s", "echo test", "-o", outFile}, "")
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d", code)
+	}
+
+	content, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("reading output file: %v", err)
+	}
+	if !strings.Contains(string(content), "echo injected") {
+		t.Errorf("unexpected file content: %q", string(content))
+	}
 }
 
-func TestEnvFlagInvalidFormat(t *testing.T) {
-	srv := mockEngine(t, func(req executeRequest) executeResponse {
-		return executeResponse{}
+// --- Authorization failure ---
+
+func TestAuthorizationFailure(t *testing.T) {
+	srv := mockVault(t, func(req injectRequest) (int, any) {
+		return http.StatusForbidden, errorResponse{Error: "secret not found: NONEXISTENT"}
 	})
 
-	_, stderr, code := runCLI(t, []string{"execute", "--host", srv.URL, "-s", "true", "-e", "NOEQUALS"}, "")
+	_, stderr, code := runCLI(t, []string{"inject", "--host", srv.URL, "-s", "echo {{NONEXISTENT}}"}, "")
 	if code == 0 {
-		t.Fatal("expected non-zero exit")
+		t.Fatal("expected non-zero exit for denied secret")
 	}
-	if !strings.Contains(stderr, "KEY=VAL") {
-		t.Errorf("expected KEY=VAL hint in stderr, got: %q", stderr)
-	}
-}
-
-// --- Exit code passthrough ---
-
-func TestExitCodePassthrough(t *testing.T) {
-	for _, want := range []int{0, 1, 2, 42} {
-		want := want
-		t.Run("exit"+strings.TrimSpace(strings.Repeat(" ", 0)), func(t *testing.T) {
-			srv := mockEngine(t, func(req executeRequest) executeResponse {
-				return executeResponse{Response: executeResult{Output: "", ExitCode: want}}
-			})
-			_, _, got := runCLI(t, []string{"execute", "--host", srv.URL, "-s", "true"}, "")
-			if got != want {
-				t.Errorf("exit code: want %d got %d", want, got)
-			}
-		})
+	if !strings.Contains(stderr, "secret not found") {
+		t.Errorf("expected denial message in stderr, got: %q", stderr)
 	}
 }
 
 // --- Error cases ---
 
 func TestNoScriptProvided(t *testing.T) {
-	// nil stdin, no -f or -s
 	var outBuf, errBuf strings.Builder
-	code := run([]string{"execute", "--host", "http://unused"}, nil, &outBuf, &errBuf)
+	code := run([]string{"inject", "--host", "http://unused"}, nil, &outBuf, &errBuf)
 	if code == 0 {
 		t.Fatal("expected non-zero exit")
 	}
@@ -204,7 +171,7 @@ func TestNoScriptProvided(t *testing.T) {
 }
 
 func TestMissingFile(t *testing.T) {
-	_, stderr, code := runCLI(t, []string{"execute", "--host", "http://unused", "-f", "/no/such/file.sh"}, "")
+	_, stderr, code := runCLI(t, []string{"inject", "--host", "http://unused", "-f", "/no/such/file.sh"}, "")
 	if code == 0 {
 		t.Fatal("expected non-zero exit")
 	}
@@ -213,13 +180,13 @@ func TestMissingFile(t *testing.T) {
 	}
 }
 
-func TestEngineHTTPError(t *testing.T) {
+func TestVaultHTTPError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 	}))
 	t.Cleanup(srv.Close)
 
-	_, stderr, code := runCLI(t, []string{"execute", "--host", srv.URL, "-s", "true"}, "")
+	_, stderr, code := runCLI(t, []string{"inject", "--host", srv.URL, "-s", "true"}, "")
 	if code == 0 {
 		t.Fatal("expected non-zero exit")
 	}
@@ -228,12 +195,12 @@ func TestEngineHTTPError(t *testing.T) {
 	}
 }
 
-func TestEngineUnreachable(t *testing.T) {
-	_, stderr, code := runCLI(t, []string{"execute", "--host", "http://127.0.0.1:19999", "-s", "true"}, "")
+func TestVaultUnreachable(t *testing.T) {
+	_, stderr, code := runCLI(t, []string{"inject", "--host", "http://127.0.0.1:19999", "-s", "true"}, "")
 	if code == 0 {
 		t.Fatal("expected non-zero exit")
 	}
-	if !strings.Contains(stderr, "connecting to engine") {
+	if !strings.Contains(stderr, "connecting to vault") {
 		t.Errorf("unexpected stderr: %q", stderr)
 	}
 }
@@ -254,7 +221,7 @@ func TestHelpFlag(t *testing.T) {
 		if code != 0 {
 			t.Errorf("%s: expected exit 0", flag)
 		}
-		if !strings.Contains(stdout, "vault execute") {
+		if !strings.Contains(stdout, "vault inject") {
 			t.Errorf("%s: expected usage in stdout, got: %q", flag, stdout)
 		}
 	}
@@ -265,7 +232,7 @@ func TestNoArgs(t *testing.T) {
 	if code != 0 {
 		t.Errorf("expected exit 0 (shows help), got %d", code)
 	}
-	if !strings.Contains(stdout, "vault execute") {
+	if !strings.Contains(stdout, "vault inject") {
 		t.Errorf("expected usage output, got: %q", stdout)
 	}
 }

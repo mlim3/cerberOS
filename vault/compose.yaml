@@ -1,25 +1,9 @@
 services:
-  engine:
+  vault:
     build:
-      dockerfile: "Dockerfile.qemu"
       context: "./engine"
     ports:
       - "8000:8000"
-    environment:
-      - SECRET_STORE_TOKEN=value
-      - SECRET_STORE_URL=http://secretstore:8001
-    privileged: true
-    depends_on: 
-      - secretstore
-    restart: no
-  
-  secretstore:
-    build:
-      context: "./secretstore"
-    ports:
-      - "8001:8001"
-    environment:
-      - ENGINE_TOKEN=value
     restart: no
 
   ui:
@@ -28,8 +12,20 @@ services:
     ports:
       - "80:80"
     depends_on:
-      - secretstore
-      - engine
+      - vault
+    restart: no
+
+  openbao:
+    image: openbao/openbao:latest
+    command: server -config=/openbao/local/openbao.hcl
+    ports:
+      - "8200:8200"
+    environment:
+      BAO_ADDR: http://127.0.0.1:8200
+    volumes:
+      - ./openbao.hcl:/openbao/local/openbao.hcl:ro
+    cap_add:
+      - IPC_LOCK
     restart: no
 
   swagger:
@@ -41,3 +37,8 @@ services:
     volumes:
       - ./openapi.yaml:/spec/openapi.yaml:ro
     restart: no
+
+networks:
+  default:
+    name: memory_default
+    external: true

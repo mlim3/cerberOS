@@ -7,154 +7,92 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 
 	"github.com/mlim3/cerberOS/vault/engine/audit"
-	"github.com/mlim3/cerberOS/vault/engine/initrd"
-	"github.com/mlim3/cerberOS/vault/engine/orchestrator"
 	"github.com/mlim3/cerberOS/vault/engine/preprocessor"
-	"github.com/mlim3/cerberOS/vault/engine/secretclient"
-	engine "github.com/mlim3/cerberOS/vault/engine/vm"
+	"github.com/mlim3/cerberOS/vault/engine/secretmanager"
 )
 
-type controller struct {
-	mu      sync.Mutex
-	vm      engine.VM
-	orch    *orchestrator.Orchestrator
-	cancel  context.CancelFunc
-	running bool
+type injectRequest struct {
+	Agent  string   `json:"agent"`
+	Script string   `json:"script"`
+	Keys   []string `json:"keys"` // secret keys the agent is requesting
 }
 
-func (c *controller) handleStart(w http.ResponseWriter, r *http.Request) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.running {
-		http.Error(w, "vm already running", http.StatusConflict)
-		return
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	c.cancel = cancel
-	if err := c.vm.Start(ctx); err != nil {
-		cancel()
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	c.running = true
-	w.WriteHeader(http.StatusOK)
-}
-
-func (c *controller) handleStop(w http.ResponseWriter, r *http.Request) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if !c.running {
-		http.Error(w, "vm not running", http.StatusConflict)
-		return
-	}
-	c.cancel()
-	if err := c.vm.Stop(); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	c.running = false
-	w.WriteHeader(http.StatusOK)
-}
-
-func (c *controller) stopVM() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if !c.running {
-		return
-	}
-	c.cancel()
-	_ = c.vm.Stop()
-	c.running = false
-}
-
-type executeRequest struct {
+type injectResponse struct {
 	Agent  string `json:"agent"`
-	Script string `json:"script"`
+	Script string `json:"script"` // script with secrets injected
 }
 
-func (c *controller) handleExecute(w http.ResponseWriter, r *http.Request) {
+type errorResponse struct {
+	Error string `json:"error"`
+}
+
+type server struct {
+	pp      *preprocessor.Preprocessor
+	auditor *audit.Logger
+}
+
+func (s *server) handleInject(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	var req executeRequest
+	var req injectRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
 
-	resp, err := c.orch.Execute(r.Context(), orchestrator.Request{
-		Agent:  req.Agent,
-		Script: []byte(req.Script),
+	s.auditor.Log(audit.Event{
+		Kind:    audit.KindInjection,
+		Agent:   req.Agent,
+		Keys:    req.Keys,
+		Message: "agent requested secret injection",
 	})
+
+	// Preprocess: resolve and inject secrets into placeholders.
+	// Authorization is atomic — if any key is denied/missing, the entire
+	// request fails with no partial injection.
+	result, err := s.pp.Process(req.Agent, []byte(req.Script))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(errorResponse{Error: err.Error()})
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(struct {
-		Agent    string `json:"agent"`
-		Response any    `json:"response"`
-	}{Agent: req.Agent, Response: resp})
+	json.NewEncoder(w).Encode(injectResponse{
+		Agent:  req.Agent,
+		Script: string(result.Script),
+	})
 }
 
 func main() {
-	cfg := engine.DefaultQEMUConfig()
-
-	if v := os.Getenv("KERNEL_IMAGE_PATH"); v != "" {
-		cfg.KernelImagePath = v
-	}
-	if v := os.Getenv("INITRD_PATH"); v != "" {
-		cfg.InitrdPath = v
-	}
-	if v := os.Getenv("QEMU_ACCEL"); v != "" {
-		cfg.Accel = v
-	}
-
-	secretStoreURL := os.Getenv("SECRET_STORE_URL")
-	if secretStoreURL == "" {
-		secretStoreURL = "http://localhost:8001"
-	}
-	secretStoreToken := os.Getenv("SECRET_STORE_TOKEN")
-	if secretStoreToken == "" {
-		log.Fatal("SECRET_STORE_TOKEN env var is required")
-	}
-
 	auditor := audit.New(audit.NewJSONExporter(os.Stdout))
 
-	store := secretclient.New(secretStoreURL, secretStoreToken)
-	pp := preprocessor.New(store, auditor)
-	builder := initrd.New(cfg.InitrdPath)
-	orch := orchestrator.New(pp, builder, cfg, auditor)
+	manager := secretmanager.NewMock()
+	pp := preprocessor.New(manager, auditor)
 
-	ctrl := &controller{
-		vm:   engine.NewQEMU(cfg),
-		orch: orch,
-	}
+	srv := &server{pp: pp, auditor: auditor}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/start", ctrl.handleStart)
-	mux.HandleFunc("/stop", ctrl.handleStop)
-	mux.HandleFunc("/execute", ctrl.handleExecute)
+	mux.HandleFunc("/inject", srv.handleInject)
 
-	srv := &http.Server{Addr: ":8000", Handler: mux}
+	httpSrv := &http.Server{Addr: ":8000", Handler: mux}
 
 	sigCtx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
 	go func() {
 		<-sigCtx.Done()
-		ctrl.stopVM()
-		_ = srv.Shutdown(context.Background())
+		_ = httpSrv.Shutdown(context.Background())
 	}()
 
-	log.Println("listening on :8000")
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	log.Println("vault listening on :8000")
+	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("server error: %v", err)
 	}
 }

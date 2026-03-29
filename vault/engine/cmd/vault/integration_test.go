@@ -18,8 +18,8 @@ import (
 // so three levels up reaches the vault root.
 const composeFile = "../../../compose.yaml"
 
-// engineURL is the engine's base URL used by all integration tests.
-const engineURL = "http://localhost:8000"
+// vaultURL is the vault service's base URL used by all integration tests.
+const vaultURL = "http://localhost:8000"
 
 // TestMain brings compose up before any test and tears it down after.
 func TestMain(m *testing.M) {
@@ -38,9 +38,9 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
-	// Extra readiness poll — wait until /execute responds (even with 400).
-	if err := waitForEngine(engineURL, 60*time.Second); err != nil {
-		fmt.Fprintf(os.Stderr, "engine did not become ready: %v\n", err)
+	// Wait until /inject responds (even with 400).
+	if err := waitForVault(vaultURL, 60*time.Second); err != nil {
+		fmt.Fprintf(os.Stderr, "vault did not become ready: %v\n", err)
 		dockerComposeDown(compose)
 		os.Exit(1)
 	}
@@ -59,17 +59,17 @@ func dockerComposeDown(compose string) {
 	_ = down.Run()
 }
 
-func waitForEngine(url string, timeout time.Duration) error {
+func waitForVault(url string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		resp, err := http.Post(url+"/execute", "application/json", strings.NewReader("{}"))
+		resp, err := http.Post(url+"/inject", "application/json", strings.NewReader("{}"))
 		if err == nil {
 			resp.Body.Close()
 			return nil // server is up (any status code is fine)
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	return fmt.Errorf("engine at %s not reachable after %s", url, timeout)
+	return fmt.Errorf("vault at %s not reachable after %s", url, timeout)
 }
 
 // logResult prints stdout/stderr/exit_code via t.Log — only visible with -v.
@@ -86,121 +86,123 @@ func logResult(t *testing.T, stdout, stderr string, code int) {
 
 // --- integration tests ---
 
-func TestIntegration_InlineEcho(t *testing.T) {
+func TestIntegration_InlineInject(t *testing.T) {
 	stdout, stderr, code := runCLI(t,
-		[]string{"execute", "--host", engineURL, "-s", "#!/bin/sh\necho hello from vm"},
+		[]string{"inject", "--host", vaultURL, "-s", "#!/bin/sh\necho {{API_KEY}}"},
 		"",
 	)
 	logResult(t, stdout, stderr, code)
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	if !strings.Contains(stdout, "hello from vm") {
-		t.Errorf("expected 'hello from vm' in output, got: %q", stdout)
+	// The injected script should contain the resolved secret value
+	if !strings.Contains(stdout, "mock-api-key-12345") {
+		t.Errorf("expected secret value in injected script, got: %q", stdout)
+	}
+	// Original placeholder should be replaced
+	if strings.Contains(stdout, "{{API_KEY}}") {
+		t.Errorf("placeholder was not replaced: %q", stdout)
 	}
 }
 
-func TestIntegration_FileScript(t *testing.T) {
-	script := "#!/bin/sh\necho file executed\necho line two\n"
+func TestIntegration_FileInject(t *testing.T) {
+	script := "#!/bin/sh\necho {{DB_PASS}}\necho {{SECRET_KEY}}\n"
 	f := filepath.Join(t.TempDir(), "run.sh")
 	if err := os.WriteFile(f, []byte(script), 0644); err != nil {
 		t.Fatal(err)
 	}
 
 	stdout, stderr, code := runCLI(t,
-		[]string{"execute", "--host", engineURL, "-f", f},
+		[]string{"inject", "--host", vaultURL, "-f", f},
 		"",
 	)
 	logResult(t, stdout, stderr, code)
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	if !strings.Contains(stdout, "file executed") || !strings.Contains(stdout, "line two") {
-		t.Errorf("unexpected output: %q", stdout)
+	if !strings.Contains(stdout, "mock-db-password") {
+		t.Errorf("expected DB_PASS value in output, got: %q", stdout)
+	}
+	if !strings.Contains(stdout, "mock-secret-key") {
+		t.Errorf("expected SECRET_KEY value in output, got: %q", stdout)
 	}
 }
 
-func TestIntegration_StdinScript(t *testing.T) {
+func TestIntegration_StdinInject(t *testing.T) {
 	stdout, stderr, code := runCLI(t,
-		[]string{"execute", "--host", engineURL},
-		"#!/bin/sh\necho from stdin\n",
+		[]string{"inject", "--host", vaultURL},
+		"#!/bin/sh\necho {{TEST_SECRET}}\n",
 	)
 	logResult(t, stdout, stderr, code)
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	if !strings.Contains(stdout, "from stdin") {
-		t.Errorf("unexpected output: %q", stdout)
+	if !strings.Contains(stdout, "hello-from-secretstore") {
+		t.Errorf("expected TEST_SECRET value in output, got: %q", stdout)
 	}
 }
 
-func TestIntegration_ExitCodePassthrough(t *testing.T) {
+func TestIntegration_NoPlaceholders(t *testing.T) {
+	// A script with no placeholders should be returned unchanged.
+	script := "#!/bin/sh\necho no secrets here\n"
 	stdout, stderr, code := runCLI(t,
-		[]string{"execute", "--host", engineURL, "-s", "#!/bin/sh\nexit 42"},
-		"",
-	)
-	logResult(t, stdout, stderr, code)
-	if code != 42 {
-		t.Errorf("expected exit 42, got %d", code)
-	}
-}
-
-func TestIntegration_SecretPlaceholder(t *testing.T) {
-	// API_KEY is a mock secret defined in the engine's MockStore.
-	// The output should show [REDACTED], not the raw secret value.
-	stdout, stderr, code := runCLI(t,
-		[]string{"execute", "--host", engineURL, "-s", "#!/bin/sh\necho {{API_KEY}}"},
+		[]string{"inject", "--host", vaultURL, "-s", script},
 		"",
 	)
 	logResult(t, stdout, stderr, code)
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	if strings.Contains(stdout, "mock-api-key-12345") {
-		t.Errorf("raw secret leaked into output: %q", stdout)
-	}
-	if !strings.Contains(stdout, "[REDACTED]") {
-		t.Errorf("expected [REDACTED] in output, got: %q", stdout)
+	if stdout != script {
+		t.Errorf("expected script unchanged, got: %q", stdout)
 	}
 }
 
-func TestIntegration_MultilineScript(t *testing.T) {
-	script := "#!/bin/sh\nA=hello\nB=world\necho $A $B\n"
-	stdout, stderr, code := runCLI(t,
-		[]string{"execute", "--host", engineURL, "-s", script},
+func TestIntegration_UnknownSecretFails(t *testing.T) {
+	// Requesting a secret that doesn't exist should fail the entire injection.
+	_, stderr, code := runCLI(t,
+		[]string{"inject", "--host", vaultURL, "-s", "echo {{NONEXISTENT_SECRET}}"},
 		"",
 	)
-	logResult(t, stdout, stderr, code)
+	if code == 0 {
+		t.Fatal("expected non-zero exit for unknown secret")
+	}
+	if !strings.Contains(stderr, "secret not found") {
+		t.Errorf("expected denial message, got: %q", stderr)
+	}
+}
+
+func TestIntegration_AtomicFailure(t *testing.T) {
+	// If one secret exists and another doesn't, the entire request must fail.
+	// No partial injection — API_KEY should NOT appear in any output.
+	_, stderr, code := runCLI(t,
+		[]string{"inject", "--host", vaultURL, "-s", "echo {{API_KEY}} {{DOES_NOT_EXIST}}"},
+		"",
+	)
+	if code == 0 {
+		t.Fatal("expected non-zero exit for partial secret access")
+	}
+	if !strings.Contains(stderr, "secret not found") {
+		t.Errorf("expected denial message, got: %q", stderr)
+	}
+}
+
+func TestIntegration_OutputToFile(t *testing.T) {
+	outFile := filepath.Join(t.TempDir(), "injected.sh")
+	_, stderr, code := runCLI(t,
+		[]string{"inject", "--host", vaultURL, "-s", "#!/bin/sh\necho {{API_KEY}}", "-o", outFile},
+		"",
+	)
+	logResult(t, "", stderr, code)
 	if code != 0 {
-		t.Fatalf("exit %d", code)
-	}
-	if !strings.Contains(stdout, "hello world") {
-		t.Errorf("unexpected output: %q", stdout)
-	}
-}
-
-func TestIntegration_IsolationBetweenRuns(t *testing.T) {
-	// Write a file in run 1, confirm it is absent in run 2.
-	stdout1, stderr1, code1 := runCLI(t,
-		[]string{"execute", "--host", engineURL, "-s", "#!/bin/sh\necho canary > /tmp/canary.txt"},
-		"",
-	)
-	t.Log("--- run 1")
-	logResult(t, stdout1, stderr1, code1)
-	if code1 != 0 {
-		t.Fatalf("run 1 failed with exit %d", code1)
+		t.Fatalf("exit %d: %s", code, stderr)
 	}
 
-	stdout2, stderr2, code2 := runCLI(t,
-		[]string{"execute", "--host", engineURL, "-s", "#!/bin/sh\ncat /tmp/canary.txt 2>/dev/null || echo absent"},
-		"",
-	)
-	t.Log("--- run 2")
-	logResult(t, stdout2, stderr2, code2)
-	if code2 != 0 {
-		t.Fatalf("run 2 failed with exit %d", code2)
+	content, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("reading output file: %v", err)
 	}
-	if !strings.Contains(stdout2, "absent") {
-		t.Errorf("state leaked between VM runs; output: %q", stdout2)
+	if !strings.Contains(string(content), "mock-api-key-12345") {
+		t.Errorf("expected secret in output file, got: %q", string(content))
 	}
 }

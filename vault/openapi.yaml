@@ -1,154 +1,71 @@
 openapi: 3.1.0
 info:
   title: cerberOS Vault API
-  version: 1.0.0
+  version: 2.0.0
   description: |
-    Two microservices for secure, ephemeral VM-based script execution.
+    Vault is a credential broker for cerberOS agents. Agents submit scripts
+    with `{{PLACEHOLDER}}` markers; Vault resolves the secrets, injects them
+    into the script, and returns the completed script for the agent to execute
+    in its own environment.
 
-    - **Engine** (`:8000`) — Accepts script execution requests, runs them in isolated QEMU VMs
-    - **SecretStore** (`:8001`) — Resolves secret placeholders; only reachable by the engine
+    Authorization is atomic — if any requested secret is denied or missing,
+    the entire request fails with no partial injection.
 
 servers:
   - url: http://localhost:8000
-    description: Engine (local)
-  - url: http://localhost:8001
-    description: SecretStore (local, engine-only)
+    description: Vault (local)
 
 tags:
-  - name: Engine
-    description: Script execution endpoints
-  - name: Engine (debug)
-    description: Persistent VM lifecycle — for development use only
-  - name: SecretStore
-    description: Secret resolution — internal, engine-to-secretstore only
+  - name: Vault
+    description: Secret injection endpoints
 
 paths:
-  /execute:
+  /inject:
     post:
-      tags: [Engine]
-      summary: Execute a script in an ephemeral VM
+      tags: [Vault]
+      summary: Inject secrets into a script
       description: |
-        Runs the provided script inside a freshly-booted, isolated QEMU VM.
-        Any `{{PLACEHOLDER}}` tokens in the script are replaced with secrets
-        before execution. Secret values are redacted from the returned output.
+        Resolves all `{{PLACEHOLDER}}` tokens in the provided script and returns
+        the completed script with secret values substituted. If any placeholder
+        references a secret that is not found or not authorized, the entire
+        request fails — no partial injection occurs.
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/ExecuteRequest'
+              $ref: '#/components/schemas/InjectRequest'
             example:
               agent: my-agent
-              script: "echo hello && echo {{MY_SECRET}}"
+              script: "#!/bin/sh\necho {{API_KEY}}"
       responses:
         '200':
-          description: Script executed successfully
+          description: Script with secrets injected
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ExecuteResponse'
+                $ref: '#/components/schemas/InjectResponse'
               example:
                 agent: my-agent
-                response:
-                  output: "hello\n[REDACTED]\n"
-                  exit_code: 0
+                script: "#!/bin/sh\necho actual-api-key-value"
         '400':
           $ref: '#/components/responses/BadRequest'
-        '405':
-          $ref: '#/components/responses/MethodNotAllowed'
-        '500':
-          $ref: '#/components/responses/InternalError'
-
-  /start:
-    post:
-      tags: [Engine (debug)]
-      summary: Boot the persistent VM
-      description: |
-        Starts a long-lived VM instance. Intended for debugging only — normal
-        execution uses ephemeral VMs via `/execute`.
-      responses:
-        '200':
-          description: VM started
-        '409':
-          description: VM is already running
-          content:
-            text/plain:
-              example: vm already running
-        '500':
-          $ref: '#/components/responses/InternalError'
-
-  /stop:
-    post:
-      tags: [Engine (debug)]
-      summary: Shut down the persistent VM
-      description: Stops the long-lived VM started by `/start`.
-      responses:
-        '200':
-          description: VM stopped
-        '409':
-          description: VM is not running
-          content:
-            text/plain:
-              example: vm not running
-        '500':
-          $ref: '#/components/responses/InternalError'
-
-  /secrets/resolve:
-    post:
-      tags: [SecretStore]
-      summary: Resolve secret keys to their values
-      description: |
-        Returns plaintext values for the requested secret keys.
-        Requires the shared `X-Engine-Token` header — all other callers
-        receive `401 Unauthorized`.
-      security:
-        - EngineToken: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ResolveRequest'
-            example:
-              keys: ["DB_PASSWORD", "API_KEY"]
-      responses:
-        '200':
-          description: Secrets resolved
+        '403':
+          description: One or more secrets not found or access denied
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ResolveResponse'
+                $ref: '#/components/schemas/ErrorResponse'
               example:
-                secrets:
-                  DB_PASSWORD: "s3cr3t"
-                  API_KEY: "abc123"
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          description: Missing or invalid X-Engine-Token
-          content:
-            text/plain:
-              example: unauthorized
-        '404':
-          description: One or more keys not found
-          content:
-            text/plain:
-              example: key not found
+                error: "secret not found: NONEXISTENT"
         '405':
           $ref: '#/components/responses/MethodNotAllowed'
 
 components:
-  securitySchemes:
-    EngineToken:
-      type: apiKey
-      in: header
-      name: X-Engine-Token
-      description: Shared token set via the ENGINE_TOKEN / SECRET_STORE_TOKEN env vars
-
   schemas:
-    ExecuteRequest:
+    InjectRequest:
       type: object
-      required: [agent, script]
+      required: [script]
       properties:
         agent:
           type: string
@@ -157,49 +74,32 @@ components:
         script:
           type: string
           description: |
-            Shell script to execute. Supports `{{KEY}}` placeholders that are
-            replaced with resolved secret values before execution.
-          example: "#!/bin/sh\necho hello"
+            Shell script with optional `{{KEY}}` placeholders that will be
+            replaced with resolved secret values.
+          example: "#!/bin/sh\necho {{API_KEY}}"
+        keys:
+          type: array
+          items:
+            type: string
+          description: Secret keys the agent is requesting (for audit logging)
+          example: ["API_KEY"]
 
-    ExecuteResponse:
+    InjectResponse:
       type: object
       properties:
         agent:
           type: string
           description: Echo of the agent identifier from the request
-        response:
-          $ref: '#/components/schemas/ExecutionResult'
-
-    ExecutionResult:
-      type: object
-      properties:
-        output:
+        script:
           type: string
-          description: Combined stdout/stderr from the script. Secret values are replaced with `[REDACTED]`.
-        exit_code:
-          type: integer
-          description: Exit code returned by the script
+          description: The script with all placeholders replaced by secret values
 
-    ResolveRequest:
-      type: object
-      required: [keys]
-      properties:
-        keys:
-          type: array
-          items:
-            type: string
-          minItems: 1
-          description: Secret key names to resolve
-          example: ["DB_PASSWORD", "API_KEY"]
-
-    ResolveResponse:
+    ErrorResponse:
       type: object
       properties:
-        secrets:
-          type: object
-          additionalProperties:
-            type: string
-          description: Map of key → plaintext secret value
+        error:
+          type: string
+          description: Human-readable error message
 
   responses:
     BadRequest:
@@ -212,8 +112,3 @@ components:
       content:
         text/plain:
           example: method not allowed
-    InternalError:
-      description: Unexpected server error
-      content:
-        text/plain:
-          example: internal server error
