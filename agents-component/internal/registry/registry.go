@@ -229,6 +229,7 @@ func (r *inMemoryRegistry) UpdateState(agentID, state, reason string) error {
 		return fmt.Errorf("registry: agent %q: %w", agentID, err)
 	}
 	now := time.Now().UTC()
+	fromState := a.State
 	a.State = state
 	a.UpdatedAt = now
 
@@ -250,6 +251,12 @@ func (r *inMemoryRegistry) UpdateState(agentID, state, reason string) error {
 	snapshot := copyAgent(a)
 	r.mu.Unlock()
 
+	slog.Info("agent.state.transition",
+		"agent_id", agentID,
+		"from_state", fromState,
+		"to_state", state,
+		"reason", reason,
+	)
 	r.persistAgent(snapshot)
 	return nil
 }

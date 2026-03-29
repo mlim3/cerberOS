@@ -6,6 +6,7 @@ package factory
 
 import (
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -50,6 +51,7 @@ type Factory struct {
 	lifecycle     lifecycle.Manager
 	memory        memory.Client
 	comms         comms.Client
+	log           *slog.Logger
 	generateID    IDGenerator
 	crashDetector *lifecycle.CrashDetector
 	maxRetries    int
@@ -68,6 +70,7 @@ type Config struct {
 	Lifecycle     lifecycle.Manager
 	Memory        memory.Client
 	Comms         comms.Client
+	Log           *slog.Logger             // optional; if nil, slog.Default() is used
 	GenerateID    IDGenerator              // optional; defaults to timestamp-based ID
 	CrashDetector *lifecycle.CrashDetector // optional; when set, Watch/Unwatch are called around spawn/terminate
 	MaxRetries    int                      // optional; max crash respawns before permanent termination. Default: 3.
@@ -97,6 +100,10 @@ func New(cfg Config) (*Factory, error) {
 	if cfg.GenerateID == nil {
 		cfg.GenerateID = defaultIDGenerator
 	}
+	log := cfg.Log
+	if log == nil {
+		log = slog.Default()
+	}
 	maxRetries := cfg.MaxRetries
 	if maxRetries <= 0 {
 		maxRetries = 3
@@ -108,6 +115,7 @@ func New(cfg Config) (*Factory, error) {
 		lifecycle:        cfg.Lifecycle,
 		memory:           cfg.Memory,
 		comms:            cfg.Comms,
+		log:              log,
 		generateID:       cfg.GenerateID,
 		crashDetector:    cfg.CrashDetector,
 		maxRetries:       maxRetries,
@@ -227,11 +235,23 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 	// On VAULT_UNREACHABLE the broker has already exhausted its retry budget.
 	token, err := f.credentials.PreAuthorize(agentID, spec.TaskID, spec.RequiredSkills)
 	if err != nil {
+		f.log.Warn("credential.event",
+			"operation_type", "authorize",
+			"agent_id", agentID,
+			"outcome", "failed",
+			"trace_id", spec.TraceID,
+		)
 		_ = f.registry.UpdateState(agentID, registry.StateTerminated, "credential pre-authorization failed")
 		_ = f.publishFailed(agentID, spec.TaskID, credErrorCode(err),
 			"agent credential pre-authorization failed", spec.TraceID, "")
 		return fmt.Errorf("factory: credentials.PreAuthorize: %w", err)
 	}
+	f.log.Info("credential.event",
+		"operation_type", "authorize",
+		"agent_id", agentID,
+		"outcome", "granted",
+		"trace_id", spec.TraceID,
+	)
 
 	// Step 5: Spawn agent process.
 	vmCfg := lifecycle.VMConfig{
@@ -301,6 +321,15 @@ func (f *Factory) CompleteTask(agentID, sessionID, traceID string, output interf
 	if taskErr != nil {
 		result.Error = taskErr.Error()
 	}
+	f.log.Info("msg.outbound",
+		"topic", comms.SubjectTaskResult,
+		"message_type", comms.MsgTypeTaskResult,
+		"agent_id", agentID,
+		"task_id", agent.AssignedTask,
+		"correlation_id", agent.AssignedTask,
+		"trace_id", traceID,
+		"success", taskErr == nil,
+	)
 	if err := f.comms.Publish(
 		comms.SubjectTaskResult,
 		comms.PublishOptions{MessageType: comms.MsgTypeTaskResult, CorrelationID: agent.AssignedTask},
@@ -327,8 +356,20 @@ func (f *Factory) CompleteTask(agentID, sessionID, traceID string, output interf
 		return fmt.Errorf("factory: lifecycle.Terminate: %w", err)
 	}
 	if err := f.credentials.Revoke(agentID); err != nil {
+		f.log.Warn("credential.event",
+			"operation_type", "revoke",
+			"agent_id", agentID,
+			"outcome", "failed",
+			"trace_id", traceID,
+		)
 		return fmt.Errorf("factory: credentials.Revoke: %w", err)
 	}
+	f.log.Info("credential.event",
+		"operation_type", "revoke",
+		"agent_id", agentID,
+		"outcome", "ok",
+		"trace_id", traceID,
+	)
 
 	if err := f.registry.UpdateState(agentID, registry.StateTerminated, "VM terminated, credentials revoked"); err != nil {
 		return fmt.Errorf("factory: UpdateState terminated: %w", err)
@@ -403,7 +444,19 @@ func (f *Factory) HandleCrash(agentID string) error {
 	if agent.FailureCount >= f.maxRetries {
 		// Exceeded retry budget — permanently terminate.
 		// Best-effort credential revocation; the process is already dead.
-		_ = f.credentials.Revoke(agentID)
+		if err := f.credentials.Revoke(agentID); err != nil {
+			f.log.Warn("credential.event",
+				"operation_type", "revoke",
+				"agent_id", agentID,
+				"outcome", "failed",
+			)
+		} else {
+			f.log.Info("credential.event",
+				"operation_type", "revoke",
+				"agent_id", agentID,
+				"outcome", "ok",
+			)
+		}
 		if err := f.registry.UpdateState(agentID, registry.StateTerminated,
 			fmt.Sprintf("max retries exceeded (%d/%d)", agent.FailureCount, f.maxRetries),
 		); err != nil {
@@ -419,12 +472,22 @@ func (f *Factory) HandleCrash(agentID string) error {
 	// Step 6: Credential re-authorization — fresh permission token for the new VM.
 	token, err := f.credentials.PreAuthorize(agentID, agent.AssignedTask, agent.SkillDomains)
 	if err != nil {
+		f.log.Warn("credential.event",
+			"operation_type", "authorize",
+			"agent_id", agentID,
+			"outcome", "failed",
+		)
 		// Vault unreachable during recovery — permanently terminate.
 		_ = f.registry.UpdateState(agentID, registry.StateTerminated, "credential re-authorization failed during recovery")
 		_ = f.publishFailed(agentID, agent.AssignedTask, credErrorCode(err),
 			"agent credential re-authorization failed during crash recovery", "", "")
 		return fmt.Errorf("factory: HandleCrash: credentials.PreAuthorize: %w", err)
 	}
+	f.log.Info("credential.event",
+		"operation_type", "authorize",
+		"agent_id", agentID,
+		"outcome", "granted",
+	)
 
 	// Step 7: Respawn — same agent_id, new vm_id, recovered state injected as context.
 	newVMID := f.generateID()
@@ -526,6 +589,15 @@ func buildRecoveredContext(s types.CrashSnapshot) string {
 
 // publishStatus sends a StatusUpdate to the Orchestrator via Comms.
 func (f *Factory) publishStatus(agentID, taskID, state, traceID string) error {
+	f.log.Info("agent.state.transition",
+		"topic", comms.SubjectAgentStatus,
+		"message_type", comms.MsgTypeAgentStatus,
+		"agent_id", agentID,
+		"task_id", taskID,
+		"state", state,
+		"correlation_id", taskID,
+		"trace_id", traceID,
+	)
 	update := types.StatusUpdate{
 		TaskID:  taskID,
 		AgentID: agentID,
@@ -548,6 +620,15 @@ func (f *Factory) publishStatus(agentID, taskID, state, traceID string) error {
 // phase is the provisioning phase where the failure occurred (e.g. "skill_resolution");
 // pass "" when the phase is not applicable.
 func (f *Factory) publishFailed(agentID, taskID, errorCode, errorMessage, traceID, phase string) error {
+	f.log.Warn("msg.outbound",
+		"topic", comms.SubjectTaskFailed,
+		"message_type", comms.MsgTypeTaskFailed,
+		"agent_id", agentID,
+		"task_id", taskID,
+		"error_code", errorCode,
+		"correlation_id", taskID,
+		"trace_id", traceID,
+	)
 	failed := types.TaskFailed{
 		TaskID:       taskID,
 		AgentID:      agentID,
@@ -577,6 +658,14 @@ func credErrorCode(err error) string {
 // publishAccepted sends a TaskAccepted to the Orchestrator. Must be called before
 // any provisioning work so the Orchestrator knows the task has been received.
 func (f *Factory) publishAccepted(agentID, agentType string, spec *types.TaskSpec) error {
+	f.log.Info("msg.outbound",
+		"topic", comms.SubjectTaskAccepted,
+		"message_type", comms.MsgTypeTaskAccepted,
+		"agent_id", agentID,
+		"task_id", spec.TaskID,
+		"correlation_id", spec.TaskID,
+		"trace_id", spec.TraceID,
+	)
 	accepted := types.TaskAccepted{
 		TaskID:        spec.TaskID,
 		AgentID:       agentID,

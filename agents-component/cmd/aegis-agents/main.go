@@ -107,6 +107,7 @@ func main() {
 		Lifecycle:     lifecycleMgr,
 		Memory:        memClient,
 		Comms:         commsClient,
+		Log:           log,
 		CrashDetector: crashDetector,
 		MaxRetries:    cfg.MaxAgentRetries,
 	})
@@ -131,9 +132,12 @@ func main() {
 				return
 			}
 
-			log.Info("task.inbound received",
+			log.Info("msg.inbound",
+				"topic", comms.SubjectTaskInbound,
+				"message_type", msg.MessageType,
 				"task_id", spec.TaskID,
 				"correlation_id", msg.CorrelationID,
+				"trace_id", spec.TraceID,
 			)
 
 			if err := f.HandleTaskSpec(&spec); err != nil {
@@ -167,6 +171,13 @@ func main() {
 				_ = msg.Nak()
 				return
 			}
+			log.Info("msg.inbound",
+				"topic", comms.SubjectVaultExecuteResult,
+				"message_type", msg.MessageType,
+				"agent_id", result.AgentID,
+				"request_id", result.RequestID,
+				"correlation_id", msg.CorrelationID,
+			)
 			f.CompleteVaultRequest(result.AgentID, result.RequestID)
 			_ = msg.Ack()
 		},
@@ -184,6 +195,14 @@ func main() {
 				log.Error("capability.query unmarshal failed", "error", err)
 				return
 			}
+
+			log.Info("msg.inbound",
+				"topic", comms.SubjectCapabilityQuery,
+				"message_type", msg.MessageType,
+				"query_id", query.QueryID,
+				"trace_id", query.TraceID,
+				"correlation_id", msg.CorrelationID,
+			)
 
 			candidates, err := reg.FindBySkills(query.Domains)
 			if err != nil {
@@ -212,6 +231,15 @@ func main() {
 				log.Error("publish capability.response failed",
 					"query_id", query.QueryID,
 					"error", err,
+				)
+			} else {
+				log.Info("msg.outbound",
+					"topic", comms.SubjectCapabilityResponse,
+					"message_type", comms.MsgTypeCapabilityResponse,
+					"query_id", query.QueryID,
+					"trace_id", query.TraceID,
+					"correlation_id", query.QueryID,
+					"has_match", resp.HasMatch,
 				)
 			}
 		},

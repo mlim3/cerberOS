@@ -319,6 +319,7 @@ func (ve *VaultExecutor) Execute(ctx context.Context, operationType, credentialT
 	case vaultResult := <-resultCh:
 		ve.log.Info("vault execute: result received",
 			"request_id", req.RequestID,
+			"operation_type", req.OperationType,
 			"status", vaultResult.Status,
 			"elapsed_ms", vaultResult.ElapsedMS,
 		)
