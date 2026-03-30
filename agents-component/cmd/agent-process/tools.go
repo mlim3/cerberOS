@@ -93,6 +93,9 @@ func toolsForDomain(domain string, ve *VaultExecutor) []SkillTool {
 			tools = append(tools, vaultStorageReadTool(ve), vaultStorageWriteTool(ve), vaultStorageListTool(ve))
 		}
 		return append(tools, base...)
+	case "general":
+		// General reasoning — no external tools; the agent answers using its own knowledge.
+		return base
 	default:
 		return base
 	}

@@ -285,6 +285,7 @@ func seedSkills(mgr skills.Manager, log *slog.Logger) {
 		{Name: "data", Level: "domain", Children: map[string]*types.SkillNode{}},
 		{Name: "comms", Level: "domain", Children: map[string]*types.SkillNode{}},
 		{Name: "storage", Level: "domain", Children: map[string]*types.SkillNode{}},
+		{Name: "general", Level: "domain", Children: map[string]*types.SkillNode{}},
 	}
 
 	for _, d := range domains {

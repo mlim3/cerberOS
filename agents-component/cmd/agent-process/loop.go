@@ -274,6 +274,12 @@ func contextWindowAction(totalTokens int64) contextAction {
 // buildSystemPrompt constructs a domain-scoped system prompt. In M3 this will
 // include the full domain command manifest from the Skill Hierarchy Manager.
 func buildSystemPrompt(skillDomain string) string {
+	if skillDomain == "general" {
+		return `You are an Aegis OS general-purpose reasoning agent. ` +
+			`Answer questions and complete tasks using your own knowledge and reasoning. ` +
+			`When the task is complete, call task_complete with the final result. ` +
+			`Be concise and factual.`
+	}
 	return fmt.Sprintf(
 		`You are an Aegis OS agent scoped to the "%s" skill domain. `+
 			`Execute the assigned task using only the capabilities available within that domain. `+
