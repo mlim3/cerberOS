@@ -37,12 +37,16 @@ const (
 //
 // ve may be nil — credentialed vault tools are excluded from the tool registry
 // when vault execution is unavailable.
-func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *VaultExecutor) (string, error) {
+//
+// opts are forwarded to the Anthropic client constructor after the API key
+// option. Tests use this to inject option.WithBaseURL pointing at a mock server.
+func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *VaultExecutor, opts ...option.RequestOption) (string, error) {
 	apiKey := os.Getenv("ANTHROPIC_API_KEY")
 	if apiKey == "" {
 		return "", fmt.Errorf("ANTHROPIC_API_KEY environment variable is not set")
 	}
-	c := anthropic.NewClient(option.WithAPIKey(apiKey))
+	clientOpts := append([]option.RequestOption{option.WithAPIKey(apiKey)}, opts...)
+	c := anthropic.NewClient(clientOpts...)
 	client := &c
 
 	tools := toolsForDomain(spawnCtx.SkillDomain, ve)
