@@ -1,13 +1,14 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
-import type { Task, ChatMessage } from '@cerberos/io-core'
+import type { Task, ChatMessage, CredentialRequest, CredentialRequestStatus } from '@cerberos/io-core'
 import TaskSidebar from './components/TaskSidebar'
 import ChatWindow from './components/ChatWindow'
+import CredentialModal from './components/CredentialModal'
 import SettingsButton from './components/SettingsButton'
 import SettingsPanel, { defaultUISettings } from './components/SettingsPanel'
 import type { UISettings } from './components/SettingsPanel'
 import ActivityLog from './components/ActivityLog'
 import type { LogEntry } from './components/ActivityLog'
-import { streamOrchestratorReply } from './api/orchestrator'
+import { streamOrchestratorReply, submitCredential } from './api/orchestrator'
 import { createWebSurface, type SurfaceAdapter } from './surface'
 import './App.css'
 
@@ -74,6 +75,17 @@ const mockTasks: Task[] = [
     messages: [
       { id: '2a', role: 'user', content: 'Optimize the user table for better query performance', timestamp: '9:15 AM' },
       { id: '2b', role: 'agent', content: 'I\'ve created a migration script that adds indexes to the user table and normalizes the address fields. The migration is ready for your review before execution.', timestamp: '9:45 AM' },
+    ],
+  },
+  {
+    id: '13',
+    title: 'Deploy to production DB',
+    status: 'awaiting_feedback',
+    lastUpdate: 'Need database credentials to proceed',
+    expectedNextInput: 'Now',
+    messages: [
+      { id: '13a', role: 'user', content: 'Deploy the new schema to the production database', timestamp: '10:45 AM' },
+      { id: '13b', role: 'agent', content: 'I\'ve prepared the migration script and validated it against a staging snapshot. To run it on the production cluster I\'ll need the database admin password. A secure credential prompt will appear below — the password will be transmitted through an isolated channel and will not be logged or stored in this conversation.', timestamp: '10:46 AM' },
     ],
   },
   {
@@ -199,6 +211,23 @@ function App() {
   const heartbeatIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [taskHeartbeats, setTaskHeartbeats] = useState<Record<string, number>>({})
   const taskNextHeartbeatAtRef = useRef<Record<string, number>>({})
+
+  // Credential state — completely separate from the chat pipeline
+  const [credentialRequests, setCredentialRequests] = useState<
+    Record<string, { request: CredentialRequest; status: CredentialRequestStatus }>
+  >({
+    '13': {
+      request: {
+        taskId: '13',
+        requestId: 'cred-13-dbpwd',
+        label: 'Production database admin password',
+        description: 'Required to execute the migration on the production cluster.',
+      },
+      status: 'pending',
+    },
+  })
+  const [showCredentialModal, setShowCredentialModal] = useState(false)
+  const [activeCredentialTaskId, setActiveCredentialTaskId] = useState<string | null>(null)
 
   const selectedTask = tasks.find(t => t.id === selectedTaskId)
 
@@ -569,6 +598,99 @@ function App() {
     [tasks, uiSettings.showActivityLog, addLogEntry]
   )
 
+  // ── Credential handlers (completely separate from chat) ──
+
+  const selectedTaskCredential = selectedTask
+    ? credentialRequests[selectedTask.id] ?? null
+    : null
+
+  const handleOpenCredentialModal = useCallback(() => {
+    if (!selectedTask) return
+    setActiveCredentialTaskId(selectedTask.id)
+    setShowCredentialModal(true)
+  }, [selectedTask])
+
+  const handleCredentialSubmit = useCallback(
+    async (requestId: string, _credential: string) => {
+      const taskId = activeCredentialTaskId
+      if (!taskId) return
+
+      setCredentialRequests(prev => ({
+        ...prev,
+        [taskId]: { ...prev[taskId], status: 'submitting' },
+      }))
+
+      const result = await submitCredential(taskId, requestId, _credential)
+
+      if (result.ok) {
+        setCredentialRequests(prev => ({
+          ...prev,
+          [taskId]: { ...prev[taskId], status: 'submitted' },
+        }))
+
+        // Add a system-level message (no content leaked)
+        const sysMsg: ChatMessage = {
+          id: nextId(),
+          role: 'user',
+          content: 'Credential provided securely via isolated channel',
+          timestamp: timeLabel(),
+          isRedacted: true,
+        }
+        setTasks(prev =>
+          prev.map(t =>
+            t.id === taskId ? { ...t, messages: [...t.messages, sysMsg] } : t
+          )
+        )
+
+        if (uiSettings.showActivityLog) {
+          addLogEntry({
+            type: 'status_change',
+            taskId,
+            taskTitle: tasks.find(t => t.id === taskId)?.title.slice(0, 20) ?? '',
+            message: 'Credential submitted through secure channel (content not logged)',
+          })
+        }
+
+        // Simulate the orchestrator acknowledging receipt after a short delay
+        setTimeout(() => {
+          const ackMsg: ChatMessage = {
+            id: nextId(),
+            role: 'agent',
+            content: 'Credentials received securely. Running the migration now — I\'ll update you when it completes.',
+            timestamp: timeLabel(),
+          }
+          setTasks(prev =>
+            prev.map(t =>
+              t.id === taskId
+                ? {
+                    ...t,
+                    status: 'working',
+                    lastUpdate: 'Running production migration…',
+                    expectedNextInput: '~3 min',
+                    messages: [...t.messages, ackMsg],
+                  }
+                : t
+            )
+          )
+        }, 800)
+      } else {
+        setCredentialRequests(prev => ({
+          ...prev,
+          [taskId]: { ...prev[taskId], status: 'error' },
+        }))
+      }
+
+      setShowCredentialModal(false)
+      setActiveCredentialTaskId(null)
+    },
+    [activeCredentialTaskId, tasks, uiSettings.showActivityLog, addLogEntry]
+  )
+
+  const handleCredentialCancel = useCallback(() => {
+    setShowCredentialModal(false)
+    setActiveCredentialTaskId(null)
+  }, [])
+
   return (
     <div className="app">
       <TaskSidebar
@@ -616,6 +738,9 @@ function App() {
             isStreaming={streamingForTaskId === selectedTask.id}
             streamingContent={streamingForTaskId === selectedTask.id ? streamingContent : ''}
             settings={uiSettings}
+            credentialRequest={selectedTaskCredential?.request}
+            credentialStatus={selectedTaskCredential?.status}
+            onProvideCredential={handleOpenCredentialModal}
           />
         ) : (
           <div className="empty-state">
@@ -636,6 +761,14 @@ function App() {
         <ActivityLog
           entries={logEntries}
           onClose={() => setUISettings(prev => ({ ...prev, showActivityLog: false }))}
+        />
+      )}
+      {showCredentialModal && activeCredentialTaskId && credentialRequests[activeCredentialTaskId] && (
+        <CredentialModal
+          request={credentialRequests[activeCredentialTaskId].request}
+          onSubmit={handleCredentialSubmit}
+          onCancel={handleCredentialCancel}
+          isSubmitting={credentialRequests[activeCredentialTaskId].status === 'submitting'}
         />
       )}
     </div>

@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
-import type { Task } from '@cerberos/io-core'
+import type { Task, CredentialRequest, CredentialRequestStatus } from '@cerberos/io-core'
 import type { UISettings } from './SettingsPanel'
+import CredentialRequestCard from './CredentialRequestCard'
 import './ChatWindow.css'
 
 interface ChatWindowProps {
@@ -9,6 +10,9 @@ interface ChatWindowProps {
   isStreaming: boolean
   streamingContent: string
   settings: UISettings
+  credentialRequest?: CredentialRequest | null
+  credentialStatus?: CredentialRequestStatus
+  onProvideCredential?: () => void
 }
 
 const SUGGESTION_CHIPS = [
@@ -19,7 +23,16 @@ const SUGGESTION_CHIPS = [
   'Proceed with changes',
 ]
 
-function ChatWindow({ task, onSendMessage, isStreaming, streamingContent, settings }: ChatWindowProps) {
+function ChatWindow({
+  task,
+  onSendMessage,
+  isStreaming,
+  streamingContent,
+  settings,
+  credentialRequest,
+  credentialStatus,
+  onProvideCredential,
+}: ChatWindowProps) {
   const [inputValue, setInputValue] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -29,7 +42,6 @@ function ChatWindow({ task, onSendMessage, isStreaming, streamingContent, settin
   }, [task.messages, streamingContent])
 
   useEffect(() => {
-    // When switching tasks (including creating a new one), start with a blank input
     setInputValue('')
   }, [task.id])
 
@@ -83,7 +95,7 @@ function ChatWindow({ task, onSendMessage, isStreaming, streamingContent, settin
 
       <div className="messages-container">
         {task.messages.map(message => (
-          <div key={message.id} className={`message ${message.role}`}>
+          <div key={message.id} className={`message ${message.role}${message.isRedacted ? ' redacted' : ''}`}>
             <div className="message-avatar">
               {message.role === 'user' ? '👤' : <img src="/cerberOS_ASCII.png" alt="cerberOS" className="avatar-img" />}
             </div>
@@ -93,11 +105,23 @@ function ChatWindow({ task, onSendMessage, isStreaming, streamingContent, settin
                   {message.role === 'user' ? 'You' : 'cerberOS'}
                 </span>
                 <span className="message-time">{message.timestamp}</span>
+                {message.isRedacted && (
+                  <span className="redacted-badge">Secure</span>
+                )}
               </div>
               <div className="message-text">{message.content}</div>
             </div>
           </div>
         ))}
+
+        {credentialRequest && credentialStatus && onProvideCredential && (
+          <CredentialRequestCard
+            request={credentialRequest}
+            status={credentialStatus}
+            onProvide={onProvideCredential}
+          />
+        )}
+
         {isStreaming && (
           <div className="message agent streaming">
             <div className="message-avatar"><img src="/cerberOS_ASCII.png" alt="cerberOS" className="avatar-img" /></div>

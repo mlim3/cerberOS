@@ -28,6 +28,32 @@ export interface ChatMessage {
   role: 'user' | 'agent';
   content: string;
   timestamp: string;
+  /** When true, content was a credential and should be displayed masked */
+  isRedacted?: boolean;
+}
+
+// ============================================
+// Credential Types (separate from chat pipeline)
+// ============================================
+
+/** Orchestrator → IO: request a credential from the user */
+export interface CredentialRequest {
+  taskId: string;
+  /** Unique per request — used for idempotency and correlation */
+  requestId: string;
+  /** Human-readable label, e.g. "Production DB password" */
+  label: string;
+  /** Optional explanation shown to the user */
+  description?: string;
+}
+
+export type CredentialRequestStatus = 'pending' | 'submitting' | 'submitted' | 'error';
+
+/** IO → Orchestrator: submitted through a SEPARATE endpoint, never the chat channel */
+export interface CredentialSubmission {
+  taskId: string;
+  requestId: string;
+  credential: string;
 }
 
 /** A message in the conversation history sent to the API */

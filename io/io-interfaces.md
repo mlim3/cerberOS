@@ -67,6 +67,39 @@ The orchestrator must associate the message with the task and return a reply tie
 
 On stream or network failure, the orchestrator (or gateway) should communicate failure so the IO can show an error and optionally retry; the user’s message should still be logged (see Memory).
 
+### 1.3 Credentials (secure channel)
+
+When an agent task requires a secret (password, API key, token, etc.), the orchestrator sends a **credential request** to the IO component. The IO surfaces a dedicated modal — **outside** the chat DOM — so the credential never enters the chat pipeline, conversation history, or logging pipeline.
+
+**Credential request (Orchestrator → IO)**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `taskId` | `string` | Yes | Task that needs the credential. |
+| `requestId` | `string` | Yes | Unique per request. Used for idempotency and correlation with the submission. |
+| `label` | `string` | Yes | Human-readable label shown to the user, e.g. "Production DB password". |
+| `description` | `string` | No | Optional explanation, e.g. "Required to run migration on prod cluster". |
+
+**Credential submission (IO → Orchestrator)**
+
+Submitted through a **separate API endpoint** (`/api/credential`), never the chat channel.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `taskId` | `string` | Yes | Task this credential belongs to. |
+| `requestId` | `string` | Yes | Must match the original request's `requestId`. |
+| `credential` | `string` | Yes | The secret value. |
+
+**Security guarantees**
+
+- The credential **never** appears in chat message state, conversation history, or streamed replies.
+- The credential **never** enters the logging / memory pipeline. The activity log records only "Credential submitted through secure channel (content not logged)".
+- The IO surfaces the credential entry in a **dedicated modal overlay** with a separate DOM tree from the chat window.
+- The modal supports masked input (`type="password"`) with a hold-to-reveal control.
+- After successful submission, the chat displays a system event ("Credential provided securely via isolated channel") with an `isRedacted` flag — no actual content.
+
+**Delivery**: The credential request may arrive as a structured event on the same transport as status updates (WebSocket, SSE), or as a field in the streamed reply metadata. The IO component watches for this event and surfaces the modal.
+
 ---
 
 ## 2. Memory
@@ -115,6 +148,8 @@ Each log entry should include at least:
 | **Status updates** | Orchestrator → IO | Semantic heartbeat per task: status, lastUpdate, expectedNextInputMinutes (scalar, minutes from now); 1–4 s per task, push or poll. |
 | **Chat (send)** | IO → Orchestrator | User message + optional history; taskId required. |
 | **Chat (stream)** | Orchestrator → IO | Streamed assistant reply (chunks); IO accumulates and displays. |
-| **Logging** | IO/Orchestrator → Memory | Append user and orchestrator messages with taskId, role, content, timestamp. |
+| **Credential request** | Orchestrator → IO | Request a secret from the user; triggers a dedicated modal outside the chat DOM. |
+| **Credential submit** | IO → Orchestrator | Secret submitted via `/api/credential`; never touches chat or logging pipelines. |
+| **Logging** | IO/Orchestrator → Memory | Append user and orchestrator messages with taskId, role, content, timestamp. Credentials are never logged. |
 
 All identifiers (`taskId`) must be consistent across status, chat, and logging so that a task’s conversation and status can be correlated in the IO UI and in memory.
