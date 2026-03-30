@@ -6,10 +6,12 @@ package factory
 
 import (
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/cerberOS/agents-component/internal/audit"
 	"github.com/cerberOS/agents-component/internal/comms"
 	"github.com/cerberOS/agents-component/internal/credentials"
 	"github.com/cerberOS/agents-component/internal/lifecycle"
@@ -18,6 +20,26 @@ import (
 	"github.com/cerberOS/agents-component/internal/skills"
 	"github.com/cerberOS/agents-component/pkg/types"
 )
+
+const (
+	// spawnContextBudget is the maximum number of tokens allowed in the initial
+	// agent context at provisioning time (EDD §13.3, PRD FR-FAC-05).
+	spawnContextBudget = 2048
+
+	// permTokenPlaceholder is a fixed-size substitute for the opaque permission
+	// token when counting spawn-context tokens before pre-authorization completes.
+	// It approximates the byte length of a typical Vault-issued token reference.
+	permTokenPlaceholder = "00000000-0000-0000-0000-000000000000"
+)
+
+// TokenCounter reports the token count of a text string.
+// It is used at provisioning time to enforce the spawn context budget (EDD §13.3).
+// Implementations may call the Anthropic SDK CountTokens API or use a local
+// approximation. Only internal/comms may open network connections; callers that
+// require API-backed counting must inject an implementation via Config.TokenCounter.
+type TokenCounter interface {
+	CountTokens(text string) (int, error)
+}
 
 // IDGenerator is a function that produces a unique agent ID.
 type IDGenerator func() string
@@ -30,9 +52,12 @@ type Factory struct {
 	lifecycle     lifecycle.Manager
 	memory        memory.Client
 	comms         comms.Client
+	log           *slog.Logger
+	emitter       *audit.Emitter
 	generateID    IDGenerator
 	crashDetector *lifecycle.CrashDetector
 	maxRetries    int
+	tokenCounter  TokenCounter // optional; when nil, spawn context budget is not enforced
 
 	// inFlightMu guards inFlightRequests.
 	inFlightMu       sync.Mutex
@@ -47,9 +72,11 @@ type Config struct {
 	Lifecycle     lifecycle.Manager
 	Memory        memory.Client
 	Comms         comms.Client
+	Log           *slog.Logger             // optional; if nil, slog.Default() is used
 	GenerateID    IDGenerator              // optional; defaults to timestamp-based ID
 	CrashDetector *lifecycle.CrashDetector // optional; when set, Watch/Unwatch are called around spawn/terminate
 	MaxRetries    int                      // optional; max crash respawns before permanent termination. Default: 3.
+	TokenCounter  TokenCounter             // optional; when set, enforces the 2,048-token spawn context budget (EDD §13.3)
 }
 
 // New returns a Factory wired with the provided dependencies.
@@ -75,6 +102,10 @@ func New(cfg Config) (*Factory, error) {
 	if cfg.GenerateID == nil {
 		cfg.GenerateID = defaultIDGenerator
 	}
+	log := cfg.Log
+	if log == nil {
+		log = slog.Default()
+	}
 	maxRetries := cfg.MaxRetries
 	if maxRetries <= 0 {
 		maxRetries = 3
@@ -86,9 +117,12 @@ func New(cfg Config) (*Factory, error) {
 		lifecycle:        cfg.Lifecycle,
 		memory:           cfg.Memory,
 		comms:            cfg.Comms,
+		log:              log,
+		emitter:          audit.New(cfg.Comms, log),
 		generateID:       cfg.GenerateID,
 		crashDetector:    cfg.CrashDetector,
 		maxRetries:       maxRetries,
+		tokenCounter:     cfg.TokenCounter,
 		inFlightRequests: make(map[string][]string),
 	}, nil
 }
@@ -97,6 +131,21 @@ const (
 	agentTypeNew      = "new_provision"
 	agentTypeExisting = "existing_assigned"
 )
+
+// emit dispatches an audit event off the critical path. It is a no-op when
+// the emitter is nil (unit tests that do not wire a Comms client).
+func (f *Factory) emit(event types.AuditEvent) {
+	if f.emitter != nil {
+		f.emitter.Emit(event)
+	}
+}
+
+// credDenied returns true when a PreAuthorize error represents an explicit
+// vault denial rather than an infrastructure failure (VAULT_UNREACHABLE).
+// A denial means the vault responded; an unreachable failure means it did not.
+func credDenied(err error) bool {
+	return err != nil && credErrorCode(err) != "VAULT_UNREACHABLE"
+}
 
 // HandleTaskSpec processes an incoming TaskSpec. It publishes task.accepted
 // immediately — before any provisioning work — then either reuses an idle agent
@@ -145,10 +194,37 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 		return fmt.Errorf("factory: TaskSpec has no required skills")
 	}
 
+	f.emit(types.AuditEvent{
+		EventType: types.AuditEventProvisioningStart,
+		AgentID:   agentID,
+		TaskID:    spec.TaskID,
+		TraceID:   spec.TraceID,
+		Details:   map[string]string{"skill_domains": strings.Join(spec.RequiredSkills, ",")},
+	})
+
 	// Step 1: Resolve entry-point skill domain (first required domain).
 	entryDomain := spec.RequiredSkills[0]
 	if _, err := f.skills.GetDomain(entryDomain); err != nil {
 		return fmt.Errorf("factory: skills.GetDomain %q: %w", entryDomain, err)
+	}
+
+	// Step 1b: Enforce spawn context token budget (EDD §13.3, PRD FR-FAC-05).
+	// Counted components: system prompt + task payload + skill entry point domain name
+	// + permission token reference. The permission token is not yet available, so a
+	// fixed-length placeholder that approximates a real Vault token reference is used.
+	// Abort immediately if the budget is exceeded — no agent is created.
+	if f.tokenCounter != nil {
+		ctxText := buildSpawnContextText(spawnSystemPrompt(entryDomain), spec.Instructions, entryDomain, permTokenPlaceholder)
+		count, err := f.tokenCounter.CountTokens(ctxText)
+		if err != nil {
+			return fmt.Errorf("factory: token count: %w", err)
+		}
+		if count > spawnContextBudget {
+			_ = f.publishFailed(agentID, spec.TaskID, "CONTEXT_BUDGET_EXCEEDED",
+				fmt.Sprintf("spawn context token count %d exceeds the 2,048-token budget", count),
+				spec.TraceID, "skill_resolution")
+			return fmt.Errorf("factory: spawn context budget exceeded: %d tokens (max %d)", count, spawnContextBudget)
+		}
 	}
 
 	permSet := permissionSetForDomains(spec.RequiredSkills)
@@ -185,11 +261,42 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 	// On VAULT_UNREACHABLE the broker has already exhausted its retry budget.
 	token, err := f.credentials.PreAuthorize(agentID, spec.TaskID, spec.RequiredSkills)
 	if err != nil {
+		f.log.Warn("credential.event",
+			"operation_type", "authorize",
+			"agent_id", agentID,
+			"outcome", "failed",
+			"trace_id", spec.TraceID,
+		)
+		if credDenied(err) {
+			f.emit(types.AuditEvent{
+				EventType: types.AuditEventCredentialDeny,
+				AgentID:   agentID,
+				TaskID:    spec.TaskID,
+				TraceID:   spec.TraceID,
+				Details:   map[string]string{"operation_type": "authorize", "error_code": credErrorCode(err)},
+			})
+		}
 		_ = f.registry.UpdateState(agentID, registry.StateTerminated, "credential pre-authorization failed")
 		_ = f.publishFailed(agentID, spec.TaskID, credErrorCode(err),
-			"agent credential pre-authorization failed", spec.TraceID)
+			"agent credential pre-authorization failed", spec.TraceID, "")
 		return fmt.Errorf("factory: credentials.PreAuthorize: %w", err)
 	}
+	f.log.Info("credential.event",
+		"operation_type", "authorize",
+		"agent_id", agentID,
+		"outcome", "granted",
+		"trace_id", spec.TraceID,
+	)
+	f.emit(types.AuditEvent{
+		EventType: types.AuditEventCredentialGrant,
+		AgentID:   agentID,
+		TaskID:    spec.TaskID,
+		TraceID:   spec.TraceID,
+		Details: map[string]string{
+			"operation_type": "authorize",
+			"skill_domains":  strings.Join(spec.RequiredSkills, ","),
+		},
+	})
 
 	// Step 5: Spawn agent process.
 	vmCfg := lifecycle.VMConfig{
@@ -215,6 +322,13 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 		f.crashDetector.Watch(agentID)
 	}
 
+	f.emit(types.AuditEvent{
+		EventType: types.AuditEventProvisioningComplete,
+		AgentID:   agentID,
+		TaskID:    spec.TaskID,
+		TraceID:   spec.TraceID,
+		Details:   map[string]string{"skill_domains": strings.Join(spec.RequiredSkills, ",")},
+	})
 	return f.publishStatus(agentID, spec.TaskID, registry.StateActive, spec.TraceID)
 }
 
@@ -259,6 +373,21 @@ func (f *Factory) CompleteTask(agentID, sessionID, traceID string, output interf
 	if taskErr != nil {
 		result.Error = taskErr.Error()
 	}
+	f.log.Info("msg.outbound",
+		"topic", comms.SubjectTaskResult,
+		"message_type", comms.MsgTypeTaskResult,
+		"agent_id", agentID,
+		"task_id", agent.AssignedTask,
+		"correlation_id", agent.AssignedTask,
+		"trace_id", traceID,
+		"success", taskErr == nil,
+	)
+	f.emit(types.AuditEvent{
+		EventType: types.AuditEventTaskCompleted,
+		AgentID:   agentID,
+		TaskID:    agent.AssignedTask,
+		TraceID:   traceID,
+	})
 	if err := f.comms.Publish(
 		comms.SubjectTaskResult,
 		comms.PublishOptions{MessageType: comms.MsgTypeTaskResult, CorrelationID: agent.AssignedTask},
@@ -285,8 +414,27 @@ func (f *Factory) CompleteTask(agentID, sessionID, traceID string, output interf
 		return fmt.Errorf("factory: lifecycle.Terminate: %w", err)
 	}
 	if err := f.credentials.Revoke(agentID); err != nil {
+		f.log.Warn("credential.event",
+			"operation_type", "revoke",
+			"agent_id", agentID,
+			"outcome", "failed",
+			"trace_id", traceID,
+		)
 		return fmt.Errorf("factory: credentials.Revoke: %w", err)
 	}
+	f.log.Info("credential.event",
+		"operation_type", "revoke",
+		"agent_id", agentID,
+		"outcome", "ok",
+		"trace_id", traceID,
+	)
+	f.emit(types.AuditEvent{
+		EventType: types.AuditEventCredentialRevoke,
+		AgentID:   agentID,
+		TaskID:    agent.AssignedTask,
+		TraceID:   traceID,
+		Details:   map[string]string{"operation_type": "revoke"},
+	})
 
 	if err := f.registry.UpdateState(agentID, registry.StateTerminated, "VM terminated, credentials revoked"); err != nil {
 		return fmt.Errorf("factory: UpdateState terminated: %w", err)
@@ -347,6 +495,15 @@ func (f *Factory) HandleCrash(agentID string) error {
 	if err := f.registry.UpdateState(agentID, registry.StateRecovering, "crash detected: heartbeat timeout"); err != nil {
 		return fmt.Errorf("factory: HandleCrash: UpdateState recovering: %w", err)
 	}
+	f.emit(types.AuditEvent{
+		EventType: types.AuditEventRecoveryAttempt,
+		AgentID:   agentID,
+		TaskID:    agent.AssignedTask,
+		Details: map[string]string{
+			"failure_count": fmt.Sprintf("%d", agent.FailureCount+1), // +1 because registry already incremented
+			"max_retries":   fmt.Sprintf("%d", f.maxRetries),
+		},
+	})
 	if err := f.publishStatus(agentID, agent.AssignedTask, registry.StateRecovering, ""); err != nil {
 		return err
 	}
@@ -361,7 +518,25 @@ func (f *Factory) HandleCrash(agentID string) error {
 	if agent.FailureCount >= f.maxRetries {
 		// Exceeded retry budget — permanently terminate.
 		// Best-effort credential revocation; the process is already dead.
-		_ = f.credentials.Revoke(agentID)
+		if err := f.credentials.Revoke(agentID); err != nil {
+			f.log.Warn("credential.event",
+				"operation_type", "revoke",
+				"agent_id", agentID,
+				"outcome", "failed",
+			)
+		} else {
+			f.log.Info("credential.event",
+				"operation_type", "revoke",
+				"agent_id", agentID,
+				"outcome", "ok",
+			)
+			f.emit(types.AuditEvent{
+				EventType: types.AuditEventCredentialRevoke,
+				AgentID:   agentID,
+				TaskID:    agent.AssignedTask,
+				Details:   map[string]string{"operation_type": "revoke"},
+			})
+		}
 		if err := f.registry.UpdateState(agentID, registry.StateTerminated,
 			fmt.Sprintf("max retries exceeded (%d/%d)", agent.FailureCount, f.maxRetries),
 		); err != nil {
@@ -377,12 +552,39 @@ func (f *Factory) HandleCrash(agentID string) error {
 	// Step 6: Credential re-authorization — fresh permission token for the new VM.
 	token, err := f.credentials.PreAuthorize(agentID, agent.AssignedTask, agent.SkillDomains)
 	if err != nil {
+		f.log.Warn("credential.event",
+			"operation_type", "authorize",
+			"agent_id", agentID,
+			"outcome", "failed",
+		)
+		if credDenied(err) {
+			f.emit(types.AuditEvent{
+				EventType: types.AuditEventCredentialDeny,
+				AgentID:   agentID,
+				TaskID:    agent.AssignedTask,
+				Details:   map[string]string{"operation_type": "authorize", "error_code": credErrorCode(err)},
+			})
+		}
 		// Vault unreachable during recovery — permanently terminate.
 		_ = f.registry.UpdateState(agentID, registry.StateTerminated, "credential re-authorization failed during recovery")
 		_ = f.publishFailed(agentID, agent.AssignedTask, credErrorCode(err),
-			"agent credential re-authorization failed during crash recovery", "")
+			"agent credential re-authorization failed during crash recovery", "", "")
 		return fmt.Errorf("factory: HandleCrash: credentials.PreAuthorize: %w", err)
 	}
+	f.log.Info("credential.event",
+		"operation_type", "authorize",
+		"agent_id", agentID,
+		"outcome", "granted",
+	)
+	f.emit(types.AuditEvent{
+		EventType: types.AuditEventCredentialGrant,
+		AgentID:   agentID,
+		TaskID:    agent.AssignedTask,
+		Details: map[string]string{
+			"operation_type": "authorize",
+			"skill_domains":  strings.Join(agent.SkillDomains, ","),
+		},
+	})
 
 	// Step 7: Respawn — same agent_id, new vm_id, recovered state injected as context.
 	newVMID := f.generateID()
@@ -484,6 +686,22 @@ func buildRecoveredContext(s types.CrashSnapshot) string {
 
 // publishStatus sends a StatusUpdate to the Orchestrator via Comms.
 func (f *Factory) publishStatus(agentID, taskID, state, traceID string) error {
+	f.log.Info("agent.state.transition",
+		"topic", comms.SubjectAgentStatus,
+		"message_type", comms.MsgTypeAgentStatus,
+		"agent_id", agentID,
+		"task_id", taskID,
+		"state", state,
+		"correlation_id", taskID,
+		"trace_id", traceID,
+	)
+	f.emit(types.AuditEvent{
+		EventType: types.AuditEventStateTransition,
+		AgentID:   agentID,
+		TaskID:    taskID,
+		TraceID:   traceID,
+		Details:   map[string]string{"state": state},
+	})
 	update := types.StatusUpdate{
 		TaskID:  taskID,
 		AgentID: agentID,
@@ -503,12 +721,38 @@ func (f *Factory) publishStatus(agentID, taskID, state, traceID string) error {
 // publishFailed sends a TaskFailed to the Orchestrator. Called when a task cannot
 // be executed due to a non-recoverable provisioning or credential failure.
 // errorMessage must be user-safe — it must not expose credential values or vault paths.
-func (f *Factory) publishFailed(agentID, taskID, errorCode, errorMessage, traceID string) error {
+// phase is the provisioning phase where the failure occurred (e.g. "skill_resolution");
+// pass "" when the phase is not applicable.
+func (f *Factory) publishFailed(agentID, taskID, errorCode, errorMessage, traceID, phase string) error {
+	f.log.Warn("msg.outbound",
+		"topic", comms.SubjectTaskFailed,
+		"message_type", comms.MsgTypeTaskFailed,
+		"agent_id", agentID,
+		"task_id", taskID,
+		"error_code", errorCode,
+		"correlation_id", taskID,
+		"trace_id", traceID,
+	)
+	f.emit(types.AuditEvent{
+		EventType: types.AuditEventTaskFailed,
+		AgentID:   agentID,
+		TaskID:    taskID,
+		TraceID:   traceID,
+		Details:   map[string]string{"error_code": errorCode, "phase": phase},
+	})
+	f.emit(types.AuditEvent{
+		EventType: types.AuditEventProvisioningFail,
+		AgentID:   agentID,
+		TaskID:    taskID,
+		TraceID:   traceID,
+		Details:   map[string]string{"error_code": errorCode, "phase": phase},
+	})
 	failed := types.TaskFailed{
 		TaskID:       taskID,
 		AgentID:      agentID,
 		ErrorCode:    errorCode,
 		ErrorMessage: errorMessage,
+		Phase:        phase,
 		TraceID:      traceID,
 	}
 	if err := f.comms.Publish(
@@ -532,6 +776,21 @@ func credErrorCode(err error) string {
 // publishAccepted sends a TaskAccepted to the Orchestrator. Must be called before
 // any provisioning work so the Orchestrator knows the task has been received.
 func (f *Factory) publishAccepted(agentID, agentType string, spec *types.TaskSpec) error {
+	f.log.Info("msg.outbound",
+		"topic", comms.SubjectTaskAccepted,
+		"message_type", comms.MsgTypeTaskAccepted,
+		"agent_id", agentID,
+		"task_id", spec.TaskID,
+		"correlation_id", spec.TaskID,
+		"trace_id", spec.TraceID,
+	)
+	f.emit(types.AuditEvent{
+		EventType: types.AuditEventTaskAccepted,
+		AgentID:   agentID,
+		TaskID:    spec.TaskID,
+		TraceID:   spec.TraceID,
+		Details:   map[string]string{"agent_type": agentType},
+	})
 	accepted := types.TaskAccepted{
 		TaskID:        spec.TaskID,
 		AgentID:       agentID,
@@ -562,4 +821,24 @@ func permissionSetForDomains(domains []string) []string {
 
 func defaultIDGenerator() string {
 	return fmt.Sprintf("agent-%d", time.Now().UnixNano())
+}
+
+// spawnSystemPrompt returns the domain-scoped system prompt that will be sent to
+// the agent at spawn time. Must stay in sync with buildSystemPrompt in cmd/agent-process/loop.go.
+func spawnSystemPrompt(skillDomain string) string {
+	return fmt.Sprintf(
+		`You are an Aegis OS agent scoped to the "%s" skill domain. `+
+			`Execute the assigned task using only the capabilities available within that domain. `+
+			`When the task is complete, call task_complete with the final result. `+
+			`Be concise and factual.`,
+		skillDomain,
+	)
+}
+
+// buildSpawnContextText assembles the full spawn-context string whose token count
+// is measured against the spawnContextBudget. Components match those injected into
+// the agent at spawn time: system prompt, task instructions, entry-point skill domain
+// name, and the opaque permission token reference (EDD §13.3, PRD FR-FAC-05).
+func buildSpawnContextText(systemPrompt, instructions, entryDomain, permTokenRef string) string {
+	return systemPrompt + "\n" + instructions + "\n" + entryDomain + "\n" + permTokenRef
 }

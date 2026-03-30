@@ -37,27 +37,68 @@ const (
 //
 // ve may be nil — credentialed vault tools are excluded from the tool registry
 // when vault execution is unavailable.
-func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *VaultExecutor) (string, error) {
+//
+// opts are forwarded to the Anthropic client constructor after the API key
+// option. Tests use this to inject option.WithBaseURL pointing at a mock server.
+func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *VaultExecutor, opts ...option.RequestOption) (string, error) {
 	apiKey := os.Getenv("ANTHROPIC_API_KEY")
 	if apiKey == "" {
 		return "", fmt.Errorf("ANTHROPIC_API_KEY environment variable is not set")
 	}
-	c := anthropic.NewClient(option.WithAPIKey(apiKey))
+	clientOpts := append([]option.RequestOption{option.WithAPIKey(apiKey)}, opts...)
+	c := anthropic.NewClient(clientOpts...)
 	client := &c
 
 	tools := toolsForDomain(spawnCtx.SkillDomain, ve)
 	toolDefs := toolDefinitions(tools)
 	systemPrompt := buildSystemPrompt(spawnCtx.SkillDomain)
 
+	// Session log persists each turn to episodic memory (EDD §13.4).
+	// nil-safe: all methods are no-ops when sl is nil.
+	sl := NewSessionLog(ve, log)
+	ctx = WithSessionLog(ctx, sl)
+
 	history := []anthropic.MessageParam{
 		anthropic.NewUserMessage(anthropic.NewTextBlock(spawnCtx.Instructions)),
 	}
+
+	// Write root user_message entry — parent_entry_id is "" for the tree root.
+	currentParentID := sl.Write(turnTypeUserMessage, spawnCtx.Instructions, "", "")
 
 	// assistantTurn counts completed Reason phases — used to label compaction summaries.
 	assistantTurn := 0
 	compactedThrough := 0
 
+	// compactionPending is set by Phase 4 when the token count reaches the 80%
+	// threshold. It causes compaction to run before the next Reason phase.
+	compactionPending := false
+
+	// lastTotalTokens holds the token count from the most recent Reason API
+	// response. Used in pre-Phase-1 log messages when compactionPending is set.
+	var lastTotalTokens int64
+
 	for iter := 0; iter < maxIterations; iter++ {
+		// --------------------------------------------------------------------
+		// Pre-Phase-1: compact if Phase 4 flagged it in the previous iteration.
+		// --------------------------------------------------------------------
+		if compactionPending {
+			log.Info("compaction executing (pre-reason)",
+				"last_total_tokens", lastTotalTokens,
+				"threshold_pct", int(compactThreshold*100),
+			)
+			compacted, compactionEntryID, err := compact(ctx, client, log, history, compactedThrough+1, assistantTurn, sl, currentParentID)
+			if err != nil {
+				log.Warn("compaction failed, continuing without compaction", "error", err)
+			} else {
+				history = compacted
+				compactedThrough = assistantTurn
+				if compactionEntryID != "" {
+					currentParentID = compactionEntryID
+				}
+			}
+			compactionPending = false
+		}
+
 		// --------------------------------------------------------------------
 		// Phase 1: Reason — call the LLM with the current context window.
 		// --------------------------------------------------------------------
@@ -83,11 +124,16 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 			"total_tokens", totalTokens,
 		)
 
-		// Hard abort — safety net per §13.3.
-		if float64(totalTokens) >= float64(modelContextWindow)*hardAbortThreshold {
-			return "", fmt.Errorf("CONTEXT_OVERFLOW: token count %d exceeds %.0f%% of context window",
-				totalTokens, hardAbortThreshold*100)
+		// Persist assistant_response entry — collect text content for the payload.
+		assistantText := ""
+		for _, block := range resp.Content {
+			if block.Type == "text" {
+				assistantText = block.Text
+				break
+			}
 		}
+		assistantEntryID := sl.Write(turnTypeAssistantResponse, assistantText, currentParentID, "")
+		currentParentID = assistantEntryID
 
 		// end_turn with text content → task is complete.
 		if resp.StopReason == anthropic.StopReasonEndTurn {
@@ -124,7 +170,10 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 				"tool_use_id", toolUse.ID,
 			)
 
-			result := dispatchTool(ctx, tools, toolUse.Name, toolUse.Input)
+			// Thread current parent entry ID into context so vault tools can
+			// write their tool_call entry with the correct parent (EDD §13.4).
+			toolCtx := WithParentEntryID(ctx, currentParentID)
+			result := dispatchTool(toolCtx, tools, toolUse.Name, toolUse.Input)
 
 			// Phase 3: Observe — details go to monitoring (stderr) only; never
 			// enter LLM context. Content is what the LLM receives.
@@ -134,6 +183,15 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 				"is_error", result.IsError,
 				"details", result.Details,
 			)
+
+			// Persist tool_result entry. Parent is the tool_call entry returned
+			// by vault tools; falls back to currentParentID for local tools.
+			toolResultParentID := result.SessionEntryID
+			if toolResultParentID == "" {
+				toolResultParentID = currentParentID
+			}
+			toolResultEntryID := sl.Write(turnTypeToolResult, result.Content, toolResultParentID, "")
+			currentParentID = toolResultEntryID
 
 			// task_complete is the agent's explicit terminal signal.
 			if toolUse.Name == toolNameTaskComplete && !result.IsError {
@@ -155,30 +213,73 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 		history = append(history, anthropic.NewUserMessage(toolResults...))
 
 		// --------------------------------------------------------------------
-		// Phase 4: Update Context — trigger compaction if at 80% threshold.
+		// Phase 4: Update Context — track total token count after Observe (§13.3).
+		// totalTokens is from the Phase 1 API response; it is the best available
+		// estimate until the next Reason phase receives updated usage data.
 		// --------------------------------------------------------------------
-		if float64(totalTokens) >= float64(modelContextWindow)*compactThreshold {
-			log.Info("compaction triggered",
+		lastTotalTokens = totalTokens
+		switch contextWindowAction(totalTokens) {
+		case contextActionHardAbort:
+			log.Error("hard abort: context overflow",
+				"tokens", totalTokens,
+				"threshold_pct", int(hardAbortThreshold*100),
+			)
+			if ve != nil {
+				ve.PublishError("CONTEXT_OVERFLOW",
+					fmt.Sprintf("token count %d exceeds %.0f%% of context window",
+						totalTokens, hardAbortThreshold*100),
+					spawnCtx.TraceID,
+				)
+			}
+			return "", fmt.Errorf("CONTEXT_OVERFLOW: token count %d exceeds %.0f%% of context window",
+				totalTokens, hardAbortThreshold*100)
+		case contextActionCompactPending:
+			log.Info("compaction pending: token threshold reached",
 				"tokens", totalTokens,
 				"threshold_pct", int(compactThreshold*100),
 			)
-			compacted, err := compact(ctx, client, log, history, compactedThrough+1, assistantTurn)
-			if err != nil {
-				// Log and continue — the hard abort at 95% is the safety net.
-				log.Warn("compaction failed, continuing without compaction", "error", err)
-			} else {
-				history = compacted
-				compactedThrough = assistantTurn
-			}
+			compactionPending = true
 		}
 	}
 
 	return "", fmt.Errorf("max iterations (%d) reached without task completion", maxIterations)
 }
 
+// contextAction enumerates the token-budget decisions made by contextWindowAction.
+type contextAction int
+
+const (
+	contextActionNone           contextAction = iota // < 80% of context window — no action needed
+	contextActionCompactPending                      // ≥ 80% — set compactionPending; compact before next Reason phase
+	contextActionHardAbort                           // ≥ 95% — abort current turn; emit CONTEXT_OVERFLOW
+)
+
+// contextWindowAction returns the action required based on the token count
+// relative to the model context window thresholds (EDD §13.3). It is called
+// in Phase 4 after every Observe phase so that compaction or hard abort can be
+// applied before the next Reason (LLM) call.
+func contextWindowAction(totalTokens int64) contextAction {
+	tokens := float64(totalTokens)
+	window := float64(modelContextWindow)
+	switch {
+	case tokens >= window*hardAbortThreshold:
+		return contextActionHardAbort
+	case tokens >= window*compactThreshold:
+		return contextActionCompactPending
+	default:
+		return contextActionNone
+	}
+}
+
 // buildSystemPrompt constructs a domain-scoped system prompt. In M3 this will
 // include the full domain command manifest from the Skill Hierarchy Manager.
 func buildSystemPrompt(skillDomain string) string {
+	if skillDomain == "general" {
+		return `You are an Aegis OS general-purpose reasoning agent. ` +
+			`Answer questions and complete tasks using your own knowledge and reasoning. ` +
+			`When the task is complete, call task_complete with the final result. ` +
+			`Be concise and factual.`
+	}
 	return fmt.Sprintf(
 		`You are an Aegis OS agent scoped to the "%s" skill domain. `+
 			`Execute the assigned task using only the capabilities available within that domain. `+

@@ -150,6 +150,71 @@ go test ./test/integration/... -tags integration
 
 ---
 
+## Invoking an Agent Directly
+
+The `agent-process` binary can be exercised without a running NATS stack by piping a `SpawnContext` JSON to stdin. This is useful for local development and smoke testing the ReAct loop.
+
+**Required environment variable:** `ANTHROPIC_API_KEY`
+
+### Command line (direct)
+
+Use the `general` skill domain for open-ended reasoning tasks that don't require any external tool calls:
+
+```bash
+cd agents-component
+
+echo '{"task_id":"t1","skill_domain":"general","permission_token":"","instructions":"Give me the steps to make a sandwich.","trace_id":"tr1"}' \
+  | ANTHROPIC_API_KEY=<your-key> go run ./cmd/agent-process/
+```
+
+Use a domain-specific skill for tasks that require tools:
+
+```bash
+echo '{"task_id":"t2","skill_domain":"web","permission_token":"","instructions":"Fetch https://example.com and summarise the page.","trace_id":"tr2"}' \
+  | ANTHROPIC_API_KEY=<your-key> go run ./cmd/agent-process/
+```
+
+Output is two streams:
+- **stdout** — JSON-encoded `TaskOutput` (the final result)
+- **stderr** — structured JSON logs from the ReAct loop (heartbeat warnings are expected when NATS env vars are absent)
+
+### Via NATS (Orchestrator path)
+
+Start NATS with JetStream enabled, then run the Agents Component:
+
+```bash
+docker run --rm -p 4222:4222 nats:latest -js
+
+AEGIS_NATS_URL=nats://localhost:4222 \
+  go run ./cmd/aegis-agents/
+```
+
+Publish a `TaskSpec` to `aegis.agents.task.inbound` wrapped in the standard message envelope:
+
+```json
+{
+  "message_id": "msg-001",
+  "message_type": "task.inbound",
+  "source_component": "orchestrator",
+  "correlation_id": "task-sandwich-01",
+  "timestamp": "2026-03-30T12:00:00Z",
+  "schema_version": "1.0",
+  "payload": {
+    "task_id": "task-sandwich-01",
+    "required_skills": ["general"],
+    "instructions": "Give me the steps to make a sandwich.",
+    "trace_id": "trace-abc123",
+    "user_context_id": "ctx-user-42"
+  }
+}
+```
+
+The Agents Component responds on two subjects:
+- `aegis.orchestrator.task.accepted` — immediate acknowledgment (published before provisioning begins)
+- `aegis.orchestrator.task.result` — final result once the agent completes the task
+
+---
+
 ## How It Works
 
 ### Task Flow

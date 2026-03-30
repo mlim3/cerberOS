@@ -84,7 +84,7 @@ func main() {
 	// VaultExecutor manages the async request/result flow for credentialed operations
 	// (ADR-004). Returns nil if NATS env vars are absent — non-credentialed tools
 	// continue to function normally.
-	ve := NewVaultExecutor(log, spawnCtx.TaskID, spawnCtx.PermissionToken)
+	ve := NewVaultExecutor(log, spawnCtx.TaskID, spawnCtx.PermissionToken, spawnCtx.TraceID)
 	if ve != nil {
 		defer ve.Close()
 	}

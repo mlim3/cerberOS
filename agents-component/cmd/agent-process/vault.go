@@ -19,6 +19,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -41,6 +42,7 @@ type VaultExecutor struct {
 	js              nats.JetStreamContext
 	agentID         string
 	taskID          string
+	traceID         string
 	permissionToken string
 	log             *slog.Logger
 
@@ -70,7 +72,7 @@ type agentEnvelope struct {
 //	AEGIS_AGENT_ID  — this agent's identity (injected by Lifecycle Manager)
 //
 // Returns nil (non-fatal) if either env var is absent or NATS is unreachable.
-func NewVaultExecutor(log *slog.Logger, taskID, permissionToken string) *VaultExecutor {
+func NewVaultExecutor(log *slog.Logger, taskID, permissionToken, traceID string) *VaultExecutor {
 	natsURL := os.Getenv("AEGIS_NATS_URL")
 	agentID := os.Getenv("AEGIS_AGENT_ID")
 	if natsURL == "" || agentID == "" {
@@ -100,6 +102,7 @@ func NewVaultExecutor(log *slog.Logger, taskID, permissionToken string) *VaultEx
 		js:                js,
 		agentID:           agentID,
 		taskID:            taskID,
+		traceID:           traceID,
 		permissionToken:   permissionToken,
 		log:               log,
 		pending:           make(map[string]chan types.VaultOperationResult),
@@ -233,6 +236,40 @@ func (ve *VaultExecutor) routeResult(data []byte) {
 	}
 }
 
+// emitAudit publishes an audit event to aegis.orchestrator.audit.event in a
+// background goroutine. Failures are logged and never propagated — audit
+// emission must not affect the vault execute flow.
+func (ve *VaultExecutor) emitAudit(eventType string, details map[string]string) {
+	event := types.AuditEvent{
+		EventID:   newUUID(),
+		EventType: eventType,
+		AgentID:   ve.agentID,
+		TaskID:    ve.taskID,
+		TraceID:   ve.traceID,
+		Timestamp: time.Now().UTC(),
+		Details:   details,
+	}
+	go func() {
+		env := agentEnvelope{
+			MessageID:       newUUID(),
+			MessageType:     comms.MsgTypeAuditEvent,
+			SourceComponent: "agents",
+			CorrelationID:   ve.traceID,
+			Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
+			SchemaVersion:   "1.0",
+			Payload:         event,
+		}
+		data, err := json.Marshal(env)
+		if err != nil {
+			ve.log.Error("audit.event marshal failed", "event_type", eventType, "error", err)
+			return
+		}
+		if _, err := ve.js.Publish(comms.SubjectAuditEvent, data); err != nil {
+			ve.log.Error("audit.event publish failed", "event_type", eventType, "error", err)
+		}
+	}()
+}
+
 // Execute submits a vault operation and blocks until the result arrives or the
 // local deadline fires (EDD §13.1 Phase 2).
 //
@@ -251,7 +288,7 @@ func (ve *VaultExecutor) routeResult(data []byte) {
 //  3. Publish VaultOperationRequest (JetStream at-least-once).
 //  4. Wait: local deadline = timeout_seconds + 5s buffer.
 //  5. On deadline or context cancel: return TOOL_TIMEOUT, publish cancellation.
-func (ve *VaultExecutor) Execute(operationType, credentialType string, operationParams json.RawMessage, timeoutSeconds int, onUpdate func(types.VaultOperationProgress)) ToolResult {
+func (ve *VaultExecutor) Execute(ctx context.Context, operationType, credentialType string, operationParams json.RawMessage, timeoutSeconds int, onUpdate func(types.VaultOperationProgress)) ToolResult {
 	req := types.VaultOperationRequest{
 		RequestID:       newUUID(),
 		AgentID:         ve.agentID,
@@ -265,7 +302,15 @@ func (ve *VaultExecutor) Execute(operationType, credentialType string, operation
 
 	// Step 1: Record request_id in session log BEFORE the goroutine yields.
 	// This is the critical invariant for crash recovery (EDD §6.3, §13.1).
-	ve.recordSessionEntry(req.RequestID, req.OperationType)
+	// SessionLog and parent entry ID are threaded via context (EDD §13.4).
+	sl := SessionLogFromCtx(ctx)
+	parentID := ParentEntryIDFromCtx(ctx)
+	toolCallEntryID := sl.Write(
+		turnTypeToolCall,
+		fmt.Sprintf("vault.execute.request dispatched: operation=%s request_id=%s", operationType, req.RequestID),
+		parentID,
+		req.RequestID,
+	)
 
 	// Step 2: Register pending channel and onUpdate callback BEFORE publishing.
 	// Both are registered under the same lock to ensure no progress event or
@@ -288,9 +333,10 @@ func (ve *VaultExecutor) Execute(operationType, credentialType string, operation
 		ve.log.Error("vault execute: publish request failed",
 			"request_id", req.RequestID, "error", err)
 		return ToolResult{
-			Content: fmt.Sprintf("vault execute: could not dispatch request for %q: %v", operationType, err),
-			IsError: true,
-			Details: map[string]interface{}{"error": err.Error(), "request_id": req.RequestID},
+			Content:        fmt.Sprintf("vault execute: could not dispatch request for %q: %v", operationType, err),
+			IsError:        true,
+			SessionEntryID: toolCallEntryID,
+			Details:        map[string]interface{}{"error": err.Error(), "request_id": req.RequestID},
 		}
 	}
 
@@ -299,6 +345,12 @@ func (ve *VaultExecutor) Execute(operationType, credentialType string, operation
 		"operation_type", req.OperationType,
 		"timeout_seconds", req.TimeoutSeconds,
 	)
+	ve.emitAudit(types.AuditEventVaultExecuteRequest, map[string]string{
+		"request_id":      req.RequestID,
+		"operation_type":  req.OperationType,
+		"credential_type": req.CredentialType,
+		"timeout_seconds": fmt.Sprintf("%d", req.TimeoutSeconds),
+	})
 
 	// Step 4: Block with local deadline = timeout_seconds + 5s buffer (§13.1 Phase 2).
 	localDeadline := time.Duration(req.TimeoutSeconds+5) * time.Second
@@ -306,13 +358,29 @@ func (ve *VaultExecutor) Execute(operationType, credentialType string, operation
 	defer timer.Stop()
 
 	select {
-	case result := <-resultCh:
+	case vaultResult := <-resultCh:
 		ve.log.Info("vault execute: result received",
 			"request_id", req.RequestID,
-			"status", result.Status,
-			"elapsed_ms", result.ElapsedMS,
+			"operation_type", req.OperationType,
+			"status", vaultResult.Status,
+			"elapsed_ms", vaultResult.ElapsedMS,
 		)
-		return vaultResultToToolResult(result)
+		ve.emitAudit(types.AuditEventVaultExecuteResult, map[string]string{
+			"request_id":     req.RequestID,
+			"operation_type": req.OperationType,
+			"status":         vaultResult.Status,
+			"elapsed_ms":     fmt.Sprintf("%d", vaultResult.ElapsedMS),
+		})
+		if vaultResult.Status == "scope_violation" {
+			ve.emitAudit(types.AuditEventScopeViolation, map[string]string{
+				"request_id":     req.RequestID,
+				"operation_type": req.OperationType,
+				"error_code":     vaultResult.ErrorCode,
+			})
+		}
+		result := vaultResultToToolResult(vaultResult)
+		result.SessionEntryID = toolCallEntryID
+		return result
 
 	case <-timer.C:
 		// Step 5: Local deadline exceeded.
@@ -322,6 +390,11 @@ func (ve *VaultExecutor) Execute(operationType, credentialType string, operation
 		ve.mu.Unlock()
 
 		ve.publishCancellation(req.RequestID, req.OperationType, "local_timeout")
+		ve.emitAudit(types.AuditEventVaultExecuteTimeout, map[string]string{
+			"request_id":       req.RequestID,
+			"operation_type":   req.OperationType,
+			"deadline_seconds": fmt.Sprintf("%d", req.TimeoutSeconds+5),
+		})
 
 		ve.log.Warn("vault execute: TOOL_TIMEOUT — local deadline exceeded",
 			"request_id", req.RequestID,
@@ -332,7 +405,8 @@ func (ve *VaultExecutor) Execute(operationType, credentialType string, operation
 				"TOOL_TIMEOUT: vault operation %q did not complete within %ds (timeout=%ds + 5s buffer)",
 				req.OperationType, req.TimeoutSeconds+5, req.TimeoutSeconds,
 			),
-			IsError: true,
+			IsError:        true,
+			SessionEntryID: toolCallEntryID,
 			Details: map[string]interface{}{
 				"request_id":       req.RequestID,
 				"operation_type":   req.OperationType,
@@ -392,46 +466,44 @@ func (ve *VaultExecutor) publishCancellation(requestID, operationType, reason st
 	}
 }
 
-// recordSessionEntry writes the request_id into the session log BEFORE the
-// goroutine yields (EDD §6.3 crash recovery invariant). On recovery the factory
-// inspects session log entries with VaultRequestID set and no matching result —
-// those request_ids are resubmitted with the SAME request_id (idempotent).
-func (ve *VaultExecutor) recordSessionEntry(requestID, operationType string) {
-	entry := types.SessionEntry{
-		EntryID:        newUUID(),
-		TurnType:       "tool_call",
-		Content:        fmt.Sprintf("vault.execute.request dispatched: operation=%s request_id=%s", operationType, requestID),
-		Timestamp:      time.Now().UTC(),
-		VaultRequestID: requestID,
-	}
-	mw := types.MemoryWrite{
-		AgentID:   ve.agentID,
-		SessionID: ve.taskID,
-		DataType:  "episode",
-		TTLHint:   86400,
-		Payload:   entry,
-		Tags: map[string]string{
-			"turn_type":        "tool_call",
-			"vault_request_id": requestID,
-		},
+// agentErrorEvent is the payload for error events published to
+// aegis.orchestrator.error by the agent-process binary.
+type agentErrorEvent struct {
+	AgentID      string `json:"agent_id"`
+	TaskID       string `json:"task_id"`
+	ErrorCode    string `json:"error_code"`
+	ErrorMessage string `json:"error_message"`
+	TraceID      string `json:"trace_id"`
+}
+
+// PublishError publishes an error event to aegis.orchestrator.error (JetStream
+// at-least-once). Called by the ReAct loop on hard abort (e.g. CONTEXT_OVERFLOW).
+// Best-effort: failures are logged but do not block the caller from returning
+// the error and exiting.
+func (ve *VaultExecutor) PublishError(errorCode, errorMessage, traceID string) {
+	payload := agentErrorEvent{
+		AgentID:      ve.agentID,
+		TaskID:       ve.taskID,
+		ErrorCode:    errorCode,
+		ErrorMessage: errorMessage,
+		TraceID:      traceID,
 	}
 	env := agentEnvelope{
 		MessageID:       newUUID(),
-		MessageType:     comms.MsgTypeStateWrite,
+		MessageType:     comms.MsgTypeError,
 		SourceComponent: "agents",
-		CorrelationID:   requestID,
+		CorrelationID:   ve.taskID,
 		Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
 		SchemaVersion:   "1.0",
-		Payload:         mw,
+		Payload:         payload,
 	}
 	data, err := json.Marshal(env)
 	if err != nil {
-		ve.log.Warn("session log: marshal state.write failed", "error", err)
+		ve.log.Warn("publish error event: marshal failed", "error", err)
 		return
 	}
-	if _, err := ve.js.Publish(comms.SubjectStateWrite, data); err != nil {
-		ve.log.Warn("session log: publish state.write failed — request_id NOT persisted; crash recovery may miss this operation",
-			"request_id", requestID, "error", err)
+	if _, err := ve.js.Publish(comms.SubjectError, data); err != nil {
+		ve.log.Warn("publish error event: jetstream publish failed", "error", err)
 	}
 }
 
