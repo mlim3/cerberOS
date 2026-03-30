@@ -4,15 +4,8 @@ import (
 	"regexp"
 
 	"github.com/mlim3/cerberOS/vault/engine/audit"
+	"github.com/mlim3/cerberOS/vault/engine/secretmanager"
 )
-
-// SecretStore resolves a batch of secret keys in a single atomic call.
-// If any key is not found or denied, the entire call must fail —
-// no partial results. Swap in any backend (HashiCorp Vault, AWS KMS, etc.)
-// without touching the pipeline.
-type SecretStore interface {
-	Resolve(keys []string) (map[string]string, error)
-}
 
 // Result holds the output of preprocessing.
 type Result struct {
@@ -22,12 +15,12 @@ type Result struct {
 
 // Preprocessor handles secret placeholder substitution in agent scripts.
 type Preprocessor struct {
-	store  SecretStore
-	logger *audit.Logger
+	secretManager secretmanager.SecretManager
+	logger        *audit.Logger
 }
 
-func New(store SecretStore, logger *audit.Logger) *Preprocessor {
-	return &Preprocessor{store: store, logger: logger}
+func New(secretManager secretmanager.SecretManager, logger *audit.Logger) *Preprocessor {
+	return &Preprocessor{secretManager: secretManager, logger: logger}
 }
 
 var placeholderRe = regexp.MustCompile(`\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}`)
@@ -53,7 +46,7 @@ func (p *Preprocessor) Process(agent string, raw []byte) (*Result, error) {
 	}
 
 	// 2. Resolve all secrets in one round-trip
-	secrets, err := p.store.Resolve(keys)
+	secrets, err := p.secretManager.GetSecrets(keys)
 	if err != nil {
 		return nil, err
 	}
