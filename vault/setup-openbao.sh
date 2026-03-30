@@ -32,8 +32,8 @@ docker compose -f "$MEMORY_DIR/docker-compose.yml" exec db \
   psql -U user -d memory_db -c "CREATE DATABASE openbao OWNER \"user\""
 
 # Start OpenBao (joins memory's network to reach 'db')
-echo "Starting OpenBao..."
-docker compose up -d openbao
+echo "Starting Vault..."
+docker compose up -d
 
 echo "Waiting for OpenBao to be reachable..."
 for i in $(seq 1 30); do
