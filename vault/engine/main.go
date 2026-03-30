@@ -73,7 +73,7 @@ func (s *server) handleInject(w http.ResponseWriter, r *http.Request) {
 func main() {
 	auditor := audit.New(audit.NewJSONExporter(os.Stdout))
 
-	manager := secretmanager.NewMock()
+	manager := secretmanager.NewOpenBaoSecretManager(auditor)
 	pp := preprocessor.New(manager, auditor)
 
 	srv := &server{pp: pp, auditor: auditor}
