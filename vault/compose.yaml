@@ -6,14 +6,14 @@ services:
       - "8000:8000"
     restart: no
 
-  ui:
-    build:
-      context: "./internal-ui"
-    ports:
-      - "80:80"
-    depends_on:
-      - vault
-    restart: no
+  # ui:
+  #   build:
+  #     context: "./internal-ui"
+  #   ports:
+  #     - "80:80"
+  #   depends_on:
+  #     - vault
+  #   restart: no
 
   openbao:
     image: openbao/openbao:latest
