@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cerberOS/agents-component/internal/audit"
 	"github.com/cerberOS/agents-component/internal/comms"
 	"github.com/cerberOS/agents-component/internal/credentials"
 	"github.com/cerberOS/agents-component/internal/lifecycle"
@@ -52,6 +53,7 @@ type Factory struct {
 	memory        memory.Client
 	comms         comms.Client
 	log           *slog.Logger
+	emitter       *audit.Emitter
 	generateID    IDGenerator
 	crashDetector *lifecycle.CrashDetector
 	maxRetries    int
@@ -116,6 +118,7 @@ func New(cfg Config) (*Factory, error) {
 		memory:           cfg.Memory,
 		comms:            cfg.Comms,
 		log:              log,
+		emitter:          audit.New(cfg.Comms, log),
 		generateID:       cfg.GenerateID,
 		crashDetector:    cfg.CrashDetector,
 		maxRetries:       maxRetries,
@@ -128,6 +131,21 @@ const (
 	agentTypeNew      = "new_provision"
 	agentTypeExisting = "existing_assigned"
 )
+
+// emit dispatches an audit event off the critical path. It is a no-op when
+// the emitter is nil (unit tests that do not wire a Comms client).
+func (f *Factory) emit(event types.AuditEvent) {
+	if f.emitter != nil {
+		f.emitter.Emit(event)
+	}
+}
+
+// credDenied returns true when a PreAuthorize error represents an explicit
+// vault denial rather than an infrastructure failure (VAULT_UNREACHABLE).
+// A denial means the vault responded; an unreachable failure means it did not.
+func credDenied(err error) bool {
+	return err != nil && credErrorCode(err) != "VAULT_UNREACHABLE"
+}
 
 // HandleTaskSpec processes an incoming TaskSpec. It publishes task.accepted
 // immediately — before any provisioning work — then either reuses an idle agent
@@ -175,6 +193,14 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 	if len(spec.RequiredSkills) == 0 {
 		return fmt.Errorf("factory: TaskSpec has no required skills")
 	}
+
+	f.emit(types.AuditEvent{
+		EventType: types.AuditEventProvisioningStart,
+		AgentID:   agentID,
+		TaskID:    spec.TaskID,
+		TraceID:   spec.TraceID,
+		Details:   map[string]string{"skill_domains": strings.Join(spec.RequiredSkills, ",")},
+	})
 
 	// Step 1: Resolve entry-point skill domain (first required domain).
 	entryDomain := spec.RequiredSkills[0]
@@ -241,6 +267,15 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 			"outcome", "failed",
 			"trace_id", spec.TraceID,
 		)
+		if credDenied(err) {
+			f.emit(types.AuditEvent{
+				EventType: types.AuditEventCredentialDeny,
+				AgentID:   agentID,
+				TaskID:    spec.TaskID,
+				TraceID:   spec.TraceID,
+				Details:   map[string]string{"operation_type": "authorize", "error_code": credErrorCode(err)},
+			})
+		}
 		_ = f.registry.UpdateState(agentID, registry.StateTerminated, "credential pre-authorization failed")
 		_ = f.publishFailed(agentID, spec.TaskID, credErrorCode(err),
 			"agent credential pre-authorization failed", spec.TraceID, "")
@@ -252,6 +287,16 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 		"outcome", "granted",
 		"trace_id", spec.TraceID,
 	)
+	f.emit(types.AuditEvent{
+		EventType: types.AuditEventCredentialGrant,
+		AgentID:   agentID,
+		TaskID:    spec.TaskID,
+		TraceID:   spec.TraceID,
+		Details: map[string]string{
+			"operation_type": "authorize",
+			"skill_domains":  strings.Join(spec.RequiredSkills, ","),
+		},
+	})
 
 	// Step 5: Spawn agent process.
 	vmCfg := lifecycle.VMConfig{
@@ -277,6 +322,13 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 		f.crashDetector.Watch(agentID)
 	}
 
+	f.emit(types.AuditEvent{
+		EventType: types.AuditEventProvisioningComplete,
+		AgentID:   agentID,
+		TaskID:    spec.TaskID,
+		TraceID:   spec.TraceID,
+		Details:   map[string]string{"skill_domains": strings.Join(spec.RequiredSkills, ",")},
+	})
 	return f.publishStatus(agentID, spec.TaskID, registry.StateActive, spec.TraceID)
 }
 
@@ -330,6 +382,12 @@ func (f *Factory) CompleteTask(agentID, sessionID, traceID string, output interf
 		"trace_id", traceID,
 		"success", taskErr == nil,
 	)
+	f.emit(types.AuditEvent{
+		EventType: types.AuditEventTaskCompleted,
+		AgentID:   agentID,
+		TaskID:    agent.AssignedTask,
+		TraceID:   traceID,
+	})
 	if err := f.comms.Publish(
 		comms.SubjectTaskResult,
 		comms.PublishOptions{MessageType: comms.MsgTypeTaskResult, CorrelationID: agent.AssignedTask},
@@ -370,6 +428,13 @@ func (f *Factory) CompleteTask(agentID, sessionID, traceID string, output interf
 		"outcome", "ok",
 		"trace_id", traceID,
 	)
+	f.emit(types.AuditEvent{
+		EventType: types.AuditEventCredentialRevoke,
+		AgentID:   agentID,
+		TaskID:    agent.AssignedTask,
+		TraceID:   traceID,
+		Details:   map[string]string{"operation_type": "revoke"},
+	})
 
 	if err := f.registry.UpdateState(agentID, registry.StateTerminated, "VM terminated, credentials revoked"); err != nil {
 		return fmt.Errorf("factory: UpdateState terminated: %w", err)
@@ -430,6 +495,15 @@ func (f *Factory) HandleCrash(agentID string) error {
 	if err := f.registry.UpdateState(agentID, registry.StateRecovering, "crash detected: heartbeat timeout"); err != nil {
 		return fmt.Errorf("factory: HandleCrash: UpdateState recovering: %w", err)
 	}
+	f.emit(types.AuditEvent{
+		EventType: types.AuditEventRecoveryAttempt,
+		AgentID:   agentID,
+		TaskID:    agent.AssignedTask,
+		Details: map[string]string{
+			"failure_count": fmt.Sprintf("%d", agent.FailureCount+1), // +1 because registry already incremented
+			"max_retries":   fmt.Sprintf("%d", f.maxRetries),
+		},
+	})
 	if err := f.publishStatus(agentID, agent.AssignedTask, registry.StateRecovering, ""); err != nil {
 		return err
 	}
@@ -456,6 +530,12 @@ func (f *Factory) HandleCrash(agentID string) error {
 				"agent_id", agentID,
 				"outcome", "ok",
 			)
+			f.emit(types.AuditEvent{
+				EventType: types.AuditEventCredentialRevoke,
+				AgentID:   agentID,
+				TaskID:    agent.AssignedTask,
+				Details:   map[string]string{"operation_type": "revoke"},
+			})
 		}
 		if err := f.registry.UpdateState(agentID, registry.StateTerminated,
 			fmt.Sprintf("max retries exceeded (%d/%d)", agent.FailureCount, f.maxRetries),
@@ -477,6 +557,14 @@ func (f *Factory) HandleCrash(agentID string) error {
 			"agent_id", agentID,
 			"outcome", "failed",
 		)
+		if credDenied(err) {
+			f.emit(types.AuditEvent{
+				EventType: types.AuditEventCredentialDeny,
+				AgentID:   agentID,
+				TaskID:    agent.AssignedTask,
+				Details:   map[string]string{"operation_type": "authorize", "error_code": credErrorCode(err)},
+			})
+		}
 		// Vault unreachable during recovery — permanently terminate.
 		_ = f.registry.UpdateState(agentID, registry.StateTerminated, "credential re-authorization failed during recovery")
 		_ = f.publishFailed(agentID, agent.AssignedTask, credErrorCode(err),
@@ -488,6 +576,15 @@ func (f *Factory) HandleCrash(agentID string) error {
 		"agent_id", agentID,
 		"outcome", "granted",
 	)
+	f.emit(types.AuditEvent{
+		EventType: types.AuditEventCredentialGrant,
+		AgentID:   agentID,
+		TaskID:    agent.AssignedTask,
+		Details: map[string]string{
+			"operation_type": "authorize",
+			"skill_domains":  strings.Join(agent.SkillDomains, ","),
+		},
+	})
 
 	// Step 7: Respawn — same agent_id, new vm_id, recovered state injected as context.
 	newVMID := f.generateID()
@@ -598,6 +695,13 @@ func (f *Factory) publishStatus(agentID, taskID, state, traceID string) error {
 		"correlation_id", taskID,
 		"trace_id", traceID,
 	)
+	f.emit(types.AuditEvent{
+		EventType: types.AuditEventStateTransition,
+		AgentID:   agentID,
+		TaskID:    taskID,
+		TraceID:   traceID,
+		Details:   map[string]string{"state": state},
+	})
 	update := types.StatusUpdate{
 		TaskID:  taskID,
 		AgentID: agentID,
@@ -629,6 +733,20 @@ func (f *Factory) publishFailed(agentID, taskID, errorCode, errorMessage, traceI
 		"correlation_id", taskID,
 		"trace_id", traceID,
 	)
+	f.emit(types.AuditEvent{
+		EventType: types.AuditEventTaskFailed,
+		AgentID:   agentID,
+		TaskID:    taskID,
+		TraceID:   traceID,
+		Details:   map[string]string{"error_code": errorCode, "phase": phase},
+	})
+	f.emit(types.AuditEvent{
+		EventType: types.AuditEventProvisioningFail,
+		AgentID:   agentID,
+		TaskID:    taskID,
+		TraceID:   traceID,
+		Details:   map[string]string{"error_code": errorCode, "phase": phase},
+	})
 	failed := types.TaskFailed{
 		TaskID:       taskID,
 		AgentID:      agentID,
@@ -666,6 +784,13 @@ func (f *Factory) publishAccepted(agentID, agentType string, spec *types.TaskSpe
 		"correlation_id", spec.TaskID,
 		"trace_id", spec.TraceID,
 	)
+	f.emit(types.AuditEvent{
+		EventType: types.AuditEventTaskAccepted,
+		AgentID:   agentID,
+		TaskID:    spec.TaskID,
+		TraceID:   spec.TraceID,
+		Details:   map[string]string{"agent_type": agentType},
+	})
 	accepted := types.TaskAccepted{
 		TaskID:        spec.TaskID,
 		AgentID:       agentID,

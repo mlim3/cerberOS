@@ -325,3 +325,37 @@ type VaultCancelRequest struct {
 	OperationType string `json:"operation_type"`
 	Reason        string `json:"reason"` // "local_timeout" | "context_cancelled"
 }
+
+// Audit event kind constants — the 15 defined event types (EDD §8.8).
+// Every AuditEvent.EventType must be one of these values.
+const (
+	AuditEventCredentialGrant      = "credential_grant"
+	AuditEventCredentialDeny       = "credential_deny"
+	AuditEventCredentialRevoke     = "credential_revoke"
+	AuditEventScopeViolation       = "scope_violation"
+	AuditEventVaultExecuteRequest  = "vault_execute_request"
+	AuditEventVaultExecuteResult   = "vault_execute_result"
+	AuditEventVaultExecuteTimeout  = "vault_execute_timeout"
+	AuditEventStateTransition      = "state_transition"
+	AuditEventProvisioningStart    = "provisioning_start"
+	AuditEventProvisioningComplete = "provisioning_complete"
+	AuditEventProvisioningFail     = "provisioning_fail"
+	AuditEventRecoveryAttempt      = "recovery_attempt"
+	AuditEventTaskAccepted         = "task_accepted"
+	AuditEventTaskCompleted        = "task_completed"
+	AuditEventTaskFailed           = "task_failed"
+)
+
+// AuditEvent is published to aegis.orchestrator.audit.event (EDD §8.8).
+// It must never contain raw credential values, operation_result payloads, or PII.
+// Details carries event-specific metadata as a flat string map — this constraint
+// prevents accidental nesting of structured data that could carry sensitive values.
+type AuditEvent struct {
+	EventID   string            `json:"event_id"`   // UUID; idempotency key
+	EventType string            `json:"event_type"` // one of the AuditEvent* constants
+	AgentID   string            `json:"agent_id,omitempty"`
+	TaskID    string            `json:"task_id,omitempty"`
+	TraceID   string            `json:"trace_id,omitempty"`
+	Timestamp time.Time         `json:"timestamp"`
+	Details   map[string]string `json:"details,omitempty"` // event-specific metadata; never credentials or PII
+}

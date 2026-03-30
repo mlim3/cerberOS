@@ -42,6 +42,7 @@ type VaultExecutor struct {
 	js              nats.JetStreamContext
 	agentID         string
 	taskID          string
+	traceID         string
 	permissionToken string
 	log             *slog.Logger
 
@@ -71,7 +72,7 @@ type agentEnvelope struct {
 //	AEGIS_AGENT_ID  — this agent's identity (injected by Lifecycle Manager)
 //
 // Returns nil (non-fatal) if either env var is absent or NATS is unreachable.
-func NewVaultExecutor(log *slog.Logger, taskID, permissionToken string) *VaultExecutor {
+func NewVaultExecutor(log *slog.Logger, taskID, permissionToken, traceID string) *VaultExecutor {
 	natsURL := os.Getenv("AEGIS_NATS_URL")
 	agentID := os.Getenv("AEGIS_AGENT_ID")
 	if natsURL == "" || agentID == "" {
@@ -101,6 +102,7 @@ func NewVaultExecutor(log *slog.Logger, taskID, permissionToken string) *VaultEx
 		js:                js,
 		agentID:           agentID,
 		taskID:            taskID,
+		traceID:           traceID,
 		permissionToken:   permissionToken,
 		log:               log,
 		pending:           make(map[string]chan types.VaultOperationResult),
@@ -234,6 +236,40 @@ func (ve *VaultExecutor) routeResult(data []byte) {
 	}
 }
 
+// emitAudit publishes an audit event to aegis.orchestrator.audit.event in a
+// background goroutine. Failures are logged and never propagated — audit
+// emission must not affect the vault execute flow.
+func (ve *VaultExecutor) emitAudit(eventType string, details map[string]string) {
+	event := types.AuditEvent{
+		EventID:   newUUID(),
+		EventType: eventType,
+		AgentID:   ve.agentID,
+		TaskID:    ve.taskID,
+		TraceID:   ve.traceID,
+		Timestamp: time.Now().UTC(),
+		Details:   details,
+	}
+	go func() {
+		env := agentEnvelope{
+			MessageID:       newUUID(),
+			MessageType:     comms.MsgTypeAuditEvent,
+			SourceComponent: "agents",
+			CorrelationID:   ve.traceID,
+			Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
+			SchemaVersion:   "1.0",
+			Payload:         event,
+		}
+		data, err := json.Marshal(env)
+		if err != nil {
+			ve.log.Error("audit.event marshal failed", "event_type", eventType, "error", err)
+			return
+		}
+		if _, err := ve.js.Publish(comms.SubjectAuditEvent, data); err != nil {
+			ve.log.Error("audit.event publish failed", "event_type", eventType, "error", err)
+		}
+	}()
+}
+
 // Execute submits a vault operation and blocks until the result arrives or the
 // local deadline fires (EDD §13.1 Phase 2).
 //
@@ -309,6 +345,12 @@ func (ve *VaultExecutor) Execute(ctx context.Context, operationType, credentialT
 		"operation_type", req.OperationType,
 		"timeout_seconds", req.TimeoutSeconds,
 	)
+	ve.emitAudit(types.AuditEventVaultExecuteRequest, map[string]string{
+		"request_id":      req.RequestID,
+		"operation_type":  req.OperationType,
+		"credential_type": req.CredentialType,
+		"timeout_seconds": fmt.Sprintf("%d", req.TimeoutSeconds),
+	})
 
 	// Step 4: Block with local deadline = timeout_seconds + 5s buffer (§13.1 Phase 2).
 	localDeadline := time.Duration(req.TimeoutSeconds+5) * time.Second
@@ -323,6 +365,19 @@ func (ve *VaultExecutor) Execute(ctx context.Context, operationType, credentialT
 			"status", vaultResult.Status,
 			"elapsed_ms", vaultResult.ElapsedMS,
 		)
+		ve.emitAudit(types.AuditEventVaultExecuteResult, map[string]string{
+			"request_id":     req.RequestID,
+			"operation_type": req.OperationType,
+			"status":         vaultResult.Status,
+			"elapsed_ms":     fmt.Sprintf("%d", vaultResult.ElapsedMS),
+		})
+		if vaultResult.Status == "scope_violation" {
+			ve.emitAudit(types.AuditEventScopeViolation, map[string]string{
+				"request_id":     req.RequestID,
+				"operation_type": req.OperationType,
+				"error_code":     vaultResult.ErrorCode,
+			})
+		}
 		result := vaultResultToToolResult(vaultResult)
 		result.SessionEntryID = toolCallEntryID
 		return result
@@ -335,6 +390,11 @@ func (ve *VaultExecutor) Execute(ctx context.Context, operationType, credentialT
 		ve.mu.Unlock()
 
 		ve.publishCancellation(req.RequestID, req.OperationType, "local_timeout")
+		ve.emitAudit(types.AuditEventVaultExecuteTimeout, map[string]string{
+			"request_id":       req.RequestID,
+			"operation_type":   req.OperationType,
+			"deadline_seconds": fmt.Sprintf("%d", req.TimeoutSeconds+5),
+		})
 
 		ve.log.Warn("vault execute: TOOL_TIMEOUT — local deadline exceeded",
 			"request_id", req.RequestID,
