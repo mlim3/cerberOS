@@ -508,6 +508,13 @@ func (f *Factory) HandleCrash(agentID string) error {
 		},
 	}
 	if err := f.memory.Write(mw); err != nil {
+		f.log.Error("crash recovery aborted: snapshot persistence unavailable",
+			"agent_id", agentID,
+			"error", err,
+		)
+		_ = f.registry.UpdateState(agentID, registry.StateTerminated,
+			"crash recovery aborted: snapshot persistence unavailable")
+		_ = f.publishStatus(agentID, agent.AssignedTask, registry.StateTerminated, "")
 		return fmt.Errorf("factory: HandleCrash: memory.Write snapshot: %w", err)
 	}
 

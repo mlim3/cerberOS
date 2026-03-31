@@ -71,7 +71,28 @@ func main() {
 	reg := registry.New(registry.WithStateChangeHook(rec.ObserveStateChange))
 	skillMgr := skills.New(skills.WithGetSpecHook(rec.ObserveSkillInvocation))
 	credBroker := credentials.New(nil) // TODO: wire Vault-backed broker (M3)
-	memClient := memory.New()          // TODO: wire NATS-backed Memory Interface (M3)
+	memClient, err := memory.NewNATSClient(commsClient,
+		memory.WithWriteUnavailableHook(func(dataType, requestID, reason string) {
+			_ = commsClient.Publish(
+				comms.SubjectError,
+				comms.PublishOptions{
+					MessageType:   comms.MsgTypeError,
+					CorrelationID: requestID,
+					Transient:     true,
+				},
+				map[string]interface{}{
+					"error_code":    "MEMORY_UNAVAILABLE",
+					"error_message": fmt.Sprintf("state.write failed: data_type=%s: %s", dataType, reason),
+					"data_type":     dataType,
+					"request_id":    requestID,
+				},
+			)
+		}),
+	)
+	if err != nil {
+		log.Error("memory client init failed", "error", err)
+		os.Exit(1)
+	}
 
 	var lifecycleMgr lifecycle.Manager
 	if cfg.AgentProcessPath != "" {

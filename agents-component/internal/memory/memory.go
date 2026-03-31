@@ -3,9 +3,27 @@
 // never contacts the Memory Component directly — the Orchestrator owns that routing.
 // All writes are surgical and tagged; reads are always filtered by agent ID and
 // context tag. Full session dumps are explicitly forbidden.
+//
+// # Graceful Degradation
+//
+// When the Memory Component is unavailable, writes are classified by criticality:
+//
+//   - policyRequired (snapshot, audit_log, credential_event): the write MUST be
+//     acknowledged (RequireAck=true). If the ack is not received after max retries,
+//     Write returns an error and the onUnavailable hook is called. The caller is
+//     responsible for aborting the associated operation (e.g. crash recovery).
+//
+//   - policyDegradable (task_result, episode): fire-and-forget. If the NATS publish
+//     fails the payload is buffered in-process and nil is returned so the calling
+//     operation can continue. A background goroutine retries the buffer every 30 s.
+//     The onUnavailable hook is called on first buffer to trigger an error event.
+//
+//   - policyBestEffort (agent_state, everything else): the in-memory registry is
+//     authoritative; publish failures are silently tolerated.
 package memory
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -33,6 +51,8 @@ type Client interface {
 	// this during normal agent operation.
 	ReadAllByType(dataType string) ([]types.MemoryWrite, error)
 }
+
+// ── In-process stub (unit tests) ──────────────────────────────────────────────
 
 // stubClient is the default in-process implementation used in unit tests.
 type stubClient struct {
@@ -96,7 +116,48 @@ func (c *stubClient) ReadAllByType(dataType string) ([]types.MemoryWrite, error)
 	return result, nil
 }
 
-// — NATS client (production) ——————————————————————————————————————————————
+// ── Graceful-degradation policy ───────────────────────────────────────────────
+
+// writePolicy classifies the fallback behaviour when a state.write cannot be
+// delivered to or acknowledged by the Memory Component.
+type writePolicy int8
+
+const (
+	// policyRequired — the write MUST be acknowledged (RequireAck=true forced).
+	// Caller receives an error and the onUnavailable hook fires on failure.
+	// Used for crash snapshots and security-critical audit records.
+	policyRequired writePolicy = iota
+
+	// policyDegradable — fire-and-forget preferred. If the NATS publish fails
+	// the payload is queued in the in-process buffer and nil is returned so the
+	// calling operation can continue. The onUnavailable hook fires on first use
+	// of the buffer (one alert per Write call that triggers buffering).
+	policyDegradable
+
+	// policyBestEffort — the in-process source of truth is authoritative.
+	// Publish failures are silently tolerated; no hook is called.
+	policyBestEffort
+)
+
+// dataTypePolicy maps MemoryWrite.DataType values to their write policy.
+// Data types not listed here default to policyBestEffort.
+var dataTypePolicy = map[string]writePolicy{
+	"snapshot":         policyRequired,   // crash recovery depends on ack
+	"audit_log":        policyRequired,   // security audit record; must persist
+	"credential_event": policyRequired,   // credential audit record; must persist
+	"task_result":      policyDegradable, // task completed; persist when possible
+	"episode":          policyDegradable, // session log; tolerate partial loss
+	"agent_state":      policyBestEffort, // in-memory registry is authoritative
+}
+
+func policyFor(dataType string) writePolicy {
+	if p, ok := dataTypePolicy[dataType]; ok {
+		return p
+	}
+	return policyBestEffort
+}
+
+// ── NATS production client ────────────────────────────────────────────────────
 
 const (
 	memWriteMaxAttempts = 3
@@ -105,6 +166,13 @@ const (
 	memReadMaxAttempts  = 3
 	memReadTimeout      = 5 * time.Second
 	memReadBaseBackoff  = time.Second
+
+	// maxBufferEntries caps the number of degradable writes held in-process.
+	// When the cap is reached the oldest entry is evicted (FIFO).
+	maxBufferEntries = 1000
+
+	// drainInterval is how often the background goroutine retries buffered writes.
+	drainInterval = 30 * time.Second
 )
 
 type writeResult struct{ err error }
@@ -113,34 +181,54 @@ type readResult struct {
 	err     error
 }
 
-// natsClient is the production implementation. It performs real NATS round-trips:
+// NATSClientOption configures a natsClient at construction time.
+type NATSClientOption func(*natsClient)
+
+// WithWriteUnavailableHook registers a callback that fires when a state.write
+// cannot be delivered — either because a required ack was not received after max
+// retries, or because a degradable write could not be published to NATS. The hook
+// receives the DataType, the requestID assigned to the failed write, and a
+// human-readable reason string.
 //
-//   - Write: publishes to aegis.orchestrator.state.write and, when RequireAck=true,
-//     yields until a state.write.ack arrives filtered by request_id.
-//
-//   - Read: publishes to aegis.orchestrator.state.read.request and yields until
-//     a state.read.response arrives filtered by trace_id.
-//
-// Both subscriptions are established at construction so no response is ever missed
-// between publish and listen.
+// Use this to publish aegis.orchestrator.error events so the Orchestrator knows
+// the Memory Component is unreachable. The hook is invoked synchronously on the
+// Write call goroutine and must be non-blocking.
+func WithWriteUnavailableHook(fn func(dataType, requestID, reason string)) NATSClientOption {
+	return func(mc *natsClient) {
+		mc.onUnavailable = fn
+	}
+}
+
+// natsClient is the production NATS JetStream implementation. It performs real
+// NATS round-trips and applies the write-policy degradation rules above.
 type natsClient struct {
-	comms comms.Client
+	comms         comms.Client
+	onUnavailable func(dataType, requestID, reason string) // optional; called on write failure
 
 	pendingWriteMu sync.Mutex
 	pendingWrites  map[string]chan writeResult // requestID → waiting Write goroutine
 
 	pendingReadMu sync.Mutex
 	pendingReads  map[string]chan readResult // traceID → waiting Read goroutine
+
+	bufMu  sync.Mutex
+	buffer []types.MemoryWrite // in-process store for degradable writes when NATS unavailable
 }
 
 // NewNATSClient returns a Memory Client that performs real NATS round-trips via
 // the Orchestrator. It subscribes to state.write.ack and state.read.response at
 // construction time using durable consumers so responses are never lost.
-func NewNATSClient(c comms.Client) (Client, error) {
+//
+// Pass WithWriteUnavailableHook to receive a callback when state.write delivery
+// fails so the caller can publish an aegis.orchestrator.error event.
+func NewNATSClient(c comms.Client, opts ...NATSClientOption) (Client, error) {
 	mc := &natsClient{
 		comms:         c,
 		pendingWrites: make(map[string]chan writeResult),
 		pendingReads:  make(map[string]chan readResult),
+	}
+	for _, o := range opts {
+		o(mc)
 	}
 	if err := c.SubscribeDurable(
 		comms.SubjectStateWriteAck,
@@ -156,14 +244,31 @@ func NewNATSClient(c comms.Client) (Client, error) {
 	); err != nil {
 		return nil, fmt.Errorf("memory: subscribe %q: %w", comms.SubjectStateReadResponse, err)
 	}
+	go mc.drainBuffer(context.Background())
 	return mc, nil
 }
 
-// Write validates, tags, and publishes a state.write to the Orchestrator.
-// When payload.RequireAck is true it blocks until a state.write.ack is
-// received, retrying up to memWriteMaxAttempts on timeout. A "rejected"
-// ack logs the rejection_reason and returns an error immediately — it is
-// never silently discarded and is not retried (the rejection is authoritative).
+// BufferedCount returns the number of degradable writes currently held in the
+// in-process buffer. A non-zero value indicates the Memory Component was recently
+// unreachable. The background drain goroutine retries these writes every 30 s.
+func (c *natsClient) BufferedCount() int {
+	c.bufMu.Lock()
+	defer c.bufMu.Unlock()
+	return len(c.buffer)
+}
+
+// Write validates, classifies by DataType policy, and publishes a state.write.
+//
+//   - policyRequired (snapshot, audit_log, credential_event): RequireAck is
+//     forced to true. Returns an error and calls onUnavailable if the ack is
+//     not received after max retries. The caller must treat this as fatal.
+//
+//   - policyDegradable (task_result, episode): publish fire-and-forget. On NATS
+//     publish failure the write is buffered in-process, onUnavailable is called,
+//     and nil is returned so the calling operation can continue.
+//
+//   - policyBestEffort (agent_state, unknown types): publish fire-and-forget;
+//     failures are silently tolerated.
 func (c *natsClient) Write(payload *types.MemoryWrite) error {
 	if err := validateWrite(payload); err != nil {
 		return err
@@ -172,66 +277,48 @@ func (c *natsClient) Write(payload *types.MemoryWrite) error {
 	requestID := newMemoryID()
 	payload.RequestID = requestID
 
-	if !payload.RequireAck {
-		return c.comms.Publish(
-			comms.SubjectStateWrite,
-			comms.PublishOptions{
-				MessageType:   comms.MsgTypeStateWrite,
-				CorrelationID: requestID,
-			},
-			payload,
-		)
-	}
-
-	// Register the result channel BEFORE publishing so a fast ack from the
-	// Orchestrator is never lost in the gap between publish and select.
-	resultCh := make(chan writeResult, 1)
-	c.pendingWriteMu.Lock()
-	c.pendingWrites[requestID] = resultCh
-	c.pendingWriteMu.Unlock()
-	defer func() {
-		c.pendingWriteMu.Lock()
-		delete(c.pendingWrites, requestID)
-		c.pendingWriteMu.Unlock()
-	}()
-
-	var lastErr error
-	for attempt := 0; attempt < memWriteMaxAttempts; attempt++ {
-		if attempt > 0 {
-			backoff := memWriteBaseBackoff * time.Duration(1<<uint(attempt-1))
-			time.Sleep(backoff)
+	switch policyFor(payload.DataType) {
+	case policyRequired:
+		payload.RequireAck = true
+		if err := c.writeWithAck(payload, requestID); err != nil {
+			if c.onUnavailable != nil {
+				c.onUnavailable(payload.DataType, requestID, err.Error())
+			}
+			return fmt.Errorf("memory: %s write unacknowledged after %d attempts: %w",
+				payload.DataType, memWriteMaxAttempts, err)
 		}
+		return nil
 
+	case policyDegradable:
+		payload.RequireAck = false
 		if err := c.comms.Publish(
 			comms.SubjectStateWrite,
-			comms.PublishOptions{
-				MessageType:   comms.MsgTypeStateWrite,
-				CorrelationID: requestID,
-			},
+			comms.PublishOptions{MessageType: comms.MsgTypeStateWrite, CorrelationID: requestID},
 			payload,
 		); err != nil {
-			lastErr = fmt.Errorf("memory: publish state.write (attempt %d/%d): %w",
-				attempt+1, memWriteMaxAttempts, err)
-			continue
-		}
-
-		timer := time.NewTimer(memWriteTimeout)
-		select {
-		case result := <-resultCh:
-			timer.Stop()
-			if result.err != nil {
-				// Rejected by the Memory Component — authoritative; do not retry.
-				return result.err
+			c.appendBuffer(*payload)
+			if c.onUnavailable != nil {
+				c.onUnavailable(payload.DataType, requestID, err.Error())
 			}
-			return nil
-		case <-timer.C:
-			lastErr = fmt.Errorf("memory: state.write.ack timeout (attempt %d/%d, request_id=%s)",
-				attempt+1, memWriteMaxAttempts, requestID)
+			slog.Warn("memory: degradable write buffered in-process (NATS unavailable)",
+				"data_type", payload.DataType,
+				"request_id", requestID,
+				"agent_id", payload.AgentID,
+				"error", err,
+			)
+			return nil // degrade gracefully: write is held in the local buffer
 		}
-	}
+		return nil
 
-	return fmt.Errorf("memory: state.write unacknowledged after %d attempts (request_id=%s): %w",
-		memWriteMaxAttempts, requestID, lastErr)
+	default: // policyBestEffort
+		payload.RequireAck = false
+		_ = c.comms.Publish(
+			comms.SubjectStateWrite,
+			comms.PublishOptions{MessageType: comms.MsgTypeStateWrite, CorrelationID: requestID},
+			payload,
+		)
+		return nil
+	}
 }
 
 // Read publishes a state.read.request to the Orchestrator and blocks until the
@@ -260,6 +347,129 @@ func (c *natsClient) ReadAllByType(dataType string) ([]types.MemoryWrite, error)
 		DataType: dataType,
 		TraceID:  traceID,
 	}, traceID)
+}
+
+// ── Internal helpers ──────────────────────────────────────────────────────────
+
+// writeWithAck registers a pending ack channel, publishes the request, and
+// waits for acknowledgement from the Orchestrator with exponential back-off.
+// The channel must be registered BEFORE publishing to avoid the race where
+// a fast ack arrives before the select is reached.
+func (c *natsClient) writeWithAck(payload *types.MemoryWrite, requestID string) error {
+	resultCh := make(chan writeResult, 1)
+	c.pendingWriteMu.Lock()
+	c.pendingWrites[requestID] = resultCh
+	c.pendingWriteMu.Unlock()
+	defer func() {
+		c.pendingWriteMu.Lock()
+		delete(c.pendingWrites, requestID)
+		c.pendingWriteMu.Unlock()
+	}()
+
+	var lastErr error
+	for attempt := 0; attempt < memWriteMaxAttempts; attempt++ {
+		if attempt > 0 {
+			backoff := memWriteBaseBackoff * time.Duration(1<<uint(attempt-1))
+			time.Sleep(backoff)
+		}
+
+		if err := c.comms.Publish(
+			comms.SubjectStateWrite,
+			comms.PublishOptions{MessageType: comms.MsgTypeStateWrite, CorrelationID: requestID},
+			payload,
+		); err != nil {
+			lastErr = fmt.Errorf("publish state.write (attempt %d/%d): %w",
+				attempt+1, memWriteMaxAttempts, err)
+			continue
+		}
+
+		timer := time.NewTimer(memWriteTimeout)
+		select {
+		case result := <-resultCh:
+			timer.Stop()
+			if result.err != nil {
+				// Rejected by the Memory Component — authoritative; do not retry.
+				return result.err
+			}
+			return nil
+		case <-timer.C:
+			lastErr = fmt.Errorf("state.write.ack timeout (attempt %d/%d, request_id=%s)",
+				attempt+1, memWriteMaxAttempts, requestID)
+		}
+	}
+
+	return fmt.Errorf("state.write unacknowledged after %d attempts (request_id=%s): %w",
+		memWriteMaxAttempts, requestID, lastErr)
+}
+
+// appendBuffer adds a degradable write to the in-process buffer, evicting the
+// oldest entry when the cap is reached (FIFO).
+func (c *natsClient) appendBuffer(w types.MemoryWrite) {
+	c.bufMu.Lock()
+	defer c.bufMu.Unlock()
+	if len(c.buffer) >= maxBufferEntries {
+		slog.Warn("memory: degradation buffer full; oldest entry evicted",
+			"evicted_data_type", c.buffer[0].DataType,
+			"evicted_agent_id", c.buffer[0].AgentID,
+		)
+		c.buffer = c.buffer[1:]
+	}
+	c.buffer = append(c.buffer, w)
+}
+
+// drainBuffer runs in a goroutine and periodically re-publishes buffered writes.
+// Writes that still fail are kept; writes that succeed are removed.
+func (c *natsClient) drainBuffer(ctx context.Context) {
+	ticker := time.NewTicker(drainInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.flushBufferedWrites()
+		}
+	}
+}
+
+// flushBufferedWrites takes a snapshot of the buffer, attempts to publish each
+// entry, and replaces the buffer with only the entries that still failed.
+func (c *natsClient) flushBufferedWrites() {
+	c.bufMu.Lock()
+	if len(c.buffer) == 0 {
+		c.bufMu.Unlock()
+		return
+	}
+	snapshot := make([]types.MemoryWrite, len(c.buffer))
+	copy(snapshot, c.buffer)
+	c.bufMu.Unlock()
+
+	var failed []types.MemoryWrite
+	for i := range snapshot {
+		w := snapshot[i]
+		// Assign a fresh request_id for the retry publish so a stale ack from
+		// the original attempt does not confuse in-flight tracking.
+		w.RequestID = newMemoryID()
+		if err := c.comms.Publish(
+			comms.SubjectStateWrite,
+			comms.PublishOptions{MessageType: comms.MsgTypeStateWrite, CorrelationID: w.RequestID},
+			&w,
+		); err != nil {
+			failed = append(failed, snapshot[i]) // retain original requestID
+		}
+	}
+
+	c.bufMu.Lock()
+	// Prepend the still-failed entries and preserve any new entries appended
+	// to the buffer while the flush was running.
+	c.buffer = append(failed, c.buffer[len(snapshot):]...)
+	if len(failed) < len(snapshot) {
+		slog.Info("memory: degradation buffer partially drained",
+			"flushed", len(snapshot)-len(failed),
+			"remaining", len(c.buffer),
+		)
+	}
+	c.bufMu.Unlock()
 }
 
 // sendReadRequest registers a pending read channel, publishes the request, and
@@ -315,9 +525,9 @@ func (c *natsClient) sendReadRequest(req types.MemoryReadRequest, traceID string
 }
 
 // handleWriteAck is the durable subscription handler for aegis.agents.state.write.ack.
-// It routes the ack to the goroutine blocked in Write by matching on the envelope
-// correlation_id (request_id). Falls back to the payload RequestID when the
-// envelope field is absent (e.g. when delivered via the stub client in unit tests).
+// It routes the ack to the goroutine blocked in writeWithAck by matching on the
+// envelope correlation_id (request_id). Falls back to the payload RequestID when
+// the envelope field is absent (e.g. when delivered via the stub client in unit tests).
 func (c *natsClient) handleWriteAck(msg *comms.Message) {
 	var ack types.StateWriteAck
 	if err := json.Unmarshal(msg.Data, &ack); err != nil {
@@ -370,7 +580,7 @@ func (c *natsClient) handleWriteAck(msg *comms.Message) {
 
 // handleReadResponse is the durable subscription handler for
 // aegis.agents.state.read.response. It routes the response to the goroutine
-// blocked in Read by matching on the envelope correlation_id (trace_id).
+// blocked in sendReadRequest by matching on the envelope correlation_id (trace_id).
 // Falls back to the payload TraceID when the envelope field is absent.
 func (c *natsClient) handleReadResponse(msg *comms.Message) {
 	var resp types.MemoryResponse
@@ -404,7 +614,7 @@ func (c *natsClient) handleReadResponse(msg *comms.Message) {
 	_ = msg.Ack()
 }
 
-// — Helpers ————————————————————————————————————————————————————————————————
+// ── Validation helpers ────────────────────────────────────────────────────────
 
 // validateWrite enforces the pre-publication invariants on every MemoryWrite.
 // All writes must carry a non-empty AgentID, DataType, and at least one tag.
