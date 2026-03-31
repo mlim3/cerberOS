@@ -39,6 +39,10 @@ type Config struct {
 	// instead of being respawned.
 	// Env: AEGIS_MAX_AGENT_RETRIES (positive integer). Default: 3.
 	MaxAgentRetries int
+
+	// MetricsPort is the TCP port on which the /metrics HTTP endpoint is served.
+	// Env: AEGIS_METRICS_PORT (positive integer). Default: 9090.
+	MetricsPort int
 }
 
 // Load reads configuration from environment variables and returns a validated Config.
@@ -64,6 +68,9 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if c.MaxAgentRetries, err = parseInt("AEGIS_MAX_AGENT_RETRIES", 3, 1); err != nil {
+		return nil, err
+	}
+	if c.MetricsPort, err = parseInt("AEGIS_METRICS_PORT", 9090, 1); err != nil {
 		return nil, err
 	}
 

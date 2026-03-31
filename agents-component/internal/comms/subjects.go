@@ -64,6 +64,15 @@ const (
 	MsgTypeHeartbeat = "agent.heartbeat"
 )
 
+// Intra-component metrics events — published by agent-process subprocesses
+// (core NATS, at-most-once) and consumed by the aegis-agents component to
+// populate Prometheus counters and histograms. Not routed through the
+// Orchestrator; follows the same intra-component pattern as heartbeats.
+const (
+	SubjectMetricsEvent = "aegis.metrics.event"
+	MsgTypeMetricsEvent = "metrics.event"
+)
+
 // HeartbeatSubject returns the NATS subject for a specific agent's heartbeat.
 func HeartbeatSubject(agentID string) string {
 	return SubjectHeartbeatPrefix + agentID

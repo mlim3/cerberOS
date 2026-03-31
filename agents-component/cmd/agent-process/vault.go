@@ -365,6 +365,7 @@ func (ve *VaultExecutor) Execute(ctx context.Context, operationType, credentialT
 			"status", vaultResult.Status,
 			"elapsed_ms", vaultResult.ElapsedMS,
 		)
+		ve.PublishMetricsEvent(types.MetricsEventVaultExecuteComplete, req.OperationType, vaultResult.ElapsedMS)
 		ve.emitAudit(types.AuditEventVaultExecuteResult, map[string]string{
 			"request_id":     req.RequestID,
 			"operation_type": req.OperationType,
@@ -504,6 +505,28 @@ func (ve *VaultExecutor) PublishError(errorCode, errorMessage, traceID string) {
 	}
 	if _, err := ve.js.Publish(comms.SubjectError, data); err != nil {
 		ve.log.Warn("publish error event: jetstream publish failed", "error", err)
+	}
+}
+
+// PublishMetricsEvent publishes a lightweight at-most-once metrics event to
+// aegis.metrics.event so the aegis-agents process can aggregate Prometheus
+// counters for events that occur inside agent-process subprocesses (EDD §13.3).
+// Failures are silently logged — losing a metrics event is acceptable.
+func (ve *VaultExecutor) PublishMetricsEvent(eventType, operationType string, elapsedMS int) {
+	payload := types.MetricsEvent{
+		AgentID:       ve.agentID,
+		EventType:     eventType,
+		OperationType: operationType,
+		ElapsedMS:     elapsedMS,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		ve.log.Warn("metrics event: marshal failed", "event_type", eventType, "error", err)
+		return
+	}
+	// Core NATS at-most-once publish — no JetStream acknowledgement required.
+	if err := ve.nc.Publish(comms.SubjectMetricsEvent, data); err != nil {
+		ve.log.Warn("metrics event: publish failed", "event_type", eventType, "error", err)
 	}
 }
 

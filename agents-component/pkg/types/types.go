@@ -326,6 +326,26 @@ type VaultCancelRequest struct {
 	Reason        string `json:"reason"` // "local_timeout" | "context_cancelled"
 }
 
+// Metrics event types — published by agent-process subprocesses to
+// aegis.metrics.event (at-most-once core NATS) for aggregation by the
+// aegis-agents component into Prometheus counters and histograms.
+const (
+	MetricsEventVaultExecuteComplete = "vault_execute_complete"
+	MetricsEventCompactionTriggered  = "compaction_triggered"
+	MetricsEventContextOverflow      = "context_overflow"
+)
+
+// MetricsEvent is the payload published by agent-process subprocesses to
+// aegis.metrics.event. The aegis-agents process subscribes and records the
+// corresponding Prometheus observations. Delivery is at-most-once; losing
+// an event produces a small under-count but never a correctness failure.
+type MetricsEvent struct {
+	AgentID       string `json:"agent_id"`
+	EventType     string `json:"event_type"`               // one of the MetricsEvent* constants
+	OperationType string `json:"operation_type,omitempty"` // set for vault_execute_complete
+	ElapsedMS     int    `json:"elapsed_ms,omitempty"`     // set for vault_execute_complete
+}
+
 // Audit event kind constants — the 15 defined event types (EDD §8.8).
 // Every AuditEvent.EventType must be one of these values.
 const (
