@@ -50,6 +50,32 @@ const (
 	ConsumerClarificationResponse = "agents-clarification-response"
 )
 
+// Steering subjects — OQ-08 mid-task agent steering.
+//
+// Inbound: the Orchestrator publishes SteeringDirective to the per-agent subject
+// (core NATS, at-most-once). Stale directives that arrive after the relevant Act
+// phase are silently dropped — use SteeringSubject(agentID) to construct.
+//
+// Outbound: the agent process publishes SteeringAck to SubjectSteeringAck
+// (JetStream, at-least-once) so the Orchestrator can confirm application.
+const (
+	// SubjectSteeringPrefix is prepended to an agent_id to form the per-agent
+	// steering subject. Use SteeringSubject(agentID) rather than constructing directly.
+	SubjectSteeringPrefix = "aegis.agents.steering."
+
+	// SubjectSteeringAck is the outbound subject the agent publishes to confirm
+	// a directive was received and applied.
+	SubjectSteeringAck = "aegis.orchestrator.steering.ack"
+
+	MsgTypeSteeringDirective = "steering.directive"
+	MsgTypeSteeringAck       = "steering.ack"
+)
+
+// SteeringSubject returns the per-agent NATS subject for steering directives.
+func SteeringSubject(agentID string) string {
+	return SubjectSteeringPrefix + agentID
+}
+
 // Heartbeat subjects — published directly by agent-process binaries (core NATS,
 // at-most-once). Kept outside the aegis.agents.* and aegis.orchestrator.*
 // namespaces so they are not captured by JetStream streams.

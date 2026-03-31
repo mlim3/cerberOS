@@ -38,6 +38,7 @@ const (
 	turnTypeToolCall          = "tool_call"
 	turnTypeToolResult        = "tool_result"
 	turnTypeCompaction        = "compaction"
+	turnTypeSteeringDirective = "steering_directive" // OQ-08: mid-task steering
 )
 
 // sessionReadTimeout is the maximum time ReadSession waits for a

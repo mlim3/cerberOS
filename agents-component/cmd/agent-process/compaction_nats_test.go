@@ -159,7 +159,7 @@ func TestNATS_CompactionAndContinue(t *testing.T) {
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	result, err := RunLoop(ctx, log, spawnCtx, nil /* ve */, option.WithBaseURL(srv.URL))
+	result, err := RunLoop(ctx, log, spawnCtx, nil /* ve */, nil /* steerer */, option.WithBaseURL(srv.URL))
 	if err != nil {
 		t.Fatalf("RunLoop returned error: %v", err)
 	}
@@ -247,7 +247,7 @@ func TestNATS_CompactionFallbackAndContinue(t *testing.T) {
 
 	// RunLoop must complete successfully even when compact() fails and falls
 	// back to the extractive summary strategy.
-	result, err := RunLoop(ctx, log, spawnCtx, nil /* ve */, option.WithBaseURL(srv.URL))
+	result, err := RunLoop(ctx, log, spawnCtx, nil /* ve */, nil /* steerer */, option.WithBaseURL(srv.URL))
 	if err != nil {
 		t.Fatalf("RunLoop returned error after compact fallback: %v", err)
 	}

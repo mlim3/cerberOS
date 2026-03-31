@@ -89,7 +89,15 @@ func main() {
 		defer ve.Close()
 	}
 
-	result, err := RunLoop(ctx, log, &spawnCtx, ve)
+	// Steerer subscribes to the per-agent steering subject and buffers directives
+	// for the ReAct loop Act phase (OQ-08). Returns nil when env vars are absent;
+	// all loop behaviour is preserved with a nil steerer.
+	steerer := NewSteerer(log, spawnCtx.TaskID, spawnCtx.TraceID)
+	if steerer != nil {
+		defer steerer.Close()
+	}
+
+	result, err := RunLoop(ctx, log, &spawnCtx, ve, steerer)
 	if err != nil {
 		writeError(log, spawnCtx.TaskID, spawnCtx.TraceID, err.Error())
 		os.Exit(1)

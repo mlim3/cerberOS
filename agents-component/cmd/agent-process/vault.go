@@ -438,8 +438,39 @@ func (ve *VaultExecutor) Execute(ctx context.Context, operationType, credentialT
 		result.SessionEntryID = toolCallEntryID
 		return result
 
+	case <-ctx.Done():
+		// Step 5a: Context cancelled — steering directive interrupted this tool call (OQ-08).
+		ve.mu.Lock()
+		delete(ve.pending, req.RequestID)
+		delete(ve.progressCallbacks, req.RequestID)
+		ve.mu.Unlock()
+
+		ve.publishCancellation(req.RequestID, req.OperationType, "context_cancelled")
+		ve.emitAudit(types.AuditEventVaultExecuteTimeout, map[string]string{
+			"request_id":     req.RequestID,
+			"operation_type": req.OperationType,
+			"reason":         "context_cancelled",
+		})
+		ve.log.Warn("vault execute: TOOL_INTERRUPTED — context cancelled by steering directive",
+			"request_id", req.RequestID,
+			"operation_type", req.OperationType,
+		)
+		return ToolResult{
+			Content: fmt.Sprintf(
+				"[TOOL_INTERRUPTED: %s was cancelled by steering directive or task cancellation]",
+				req.OperationType,
+			),
+			IsError:        false,
+			SessionEntryID: toolCallEntryID,
+			Details: map[string]interface{}{
+				"request_id":     req.RequestID,
+				"operation_type": req.OperationType,
+				"reason":         "context_cancelled",
+			},
+		}
+
 	case <-timer.C:
-		// Step 5: Local deadline exceeded.
+		// Step 5b: Local deadline exceeded.
 		ve.mu.Lock()
 		delete(ve.pending, req.RequestID)
 		delete(ve.progressCallbacks, req.RequestID)

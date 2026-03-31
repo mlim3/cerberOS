@@ -380,6 +380,42 @@ type AuditEvent struct {
 	Details   map[string]string `json:"details,omitempty"` // event-specific metadata; never credentials or PII
 }
 
+// SteeringDirective is sent by the Orchestrator to a running agent microVM on
+// aegis.agents.steering.<agent_id> (core NATS, at-most-once) to redirect the
+// agent without requiring task termination and re-spawn (OQ-08).
+//
+// The agent process monitors this subject during the Act phase. On receipt the
+// directive is applied before the next Reason phase — or immediately if
+// InterruptTool is true, in which case the in-flight tool call is cancelled via
+// context cancellation and a [TOOL_INTERRUPTED] result is injected.
+//
+// Type values:
+//   - "redirect"        — update the agent's working instructions; optionally interrupt.
+//   - "abort_tool"      — interrupt the current tool immediately; InterruptTool must be true.
+//   - "inject_context"  — add information to the agent's context without changing its goal.
+//   - "cancel"          — terminate the task gracefully; agent exits after acknowledging.
+type SteeringDirective struct {
+	DirectiveID   string `json:"directive_id"` // UUID v4; idempotency key
+	AgentID       string `json:"agent_id"`
+	TaskID        string `json:"task_id"`
+	TraceID       string `json:"trace_id"`
+	Type          string `json:"type"`                     // "redirect" | "abort_tool" | "inject_context" | "cancel"
+	Instructions  string `json:"instructions"`             // new/additional instructions for the agent
+	InterruptTool bool   `json:"interrupt_tool,omitempty"` // if true, cancel in-flight tool via ctx cancellation
+	Priority      int    `json:"priority,omitempty"`       // 1–10; higher overrides lower pending directive
+}
+
+// SteeringAck is published by the agent process to aegis.orchestrator.steering.ack
+// (JetStream, at-least-once) to confirm receipt and application of a SteeringDirective.
+// The Orchestrator uses this to confirm the directive was acted upon.
+type SteeringAck struct {
+	DirectiveID string `json:"directive_id"` // echoes SteeringDirective.DirectiveID
+	AgentID     string `json:"agent_id"`
+	TaskID      string `json:"task_id"`
+	Status      string `json:"status"`           // "received" | "applied" | "ignored_stale"
+	Reason      string `json:"reason,omitempty"` // human-readable explanation when status != "applied"
+}
+
 // DeadLetterEvent is published to aegis.orchestrator.error (MessageType: "dead.letter")
 // when an inbound JetStream message exhausts its redelivery budget without being
 // successfully acknowledged by any handler. The Orchestrator uses this to detect

@@ -39,9 +39,12 @@ const (
 // ve may be nil — credentialed vault tools are excluded from the tool registry
 // when vault execution is unavailable.
 //
+// steerer may be nil — steering support is disabled when absent (e.g. env vars
+// not set). All existing behaviour is preserved with a nil steerer.
+//
 // opts are forwarded to the Anthropic client constructor after the API key
 // option. Tests use this to inject option.WithBaseURL pointing at a mock server.
-func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *VaultExecutor, opts ...option.RequestOption) (string, error) {
+func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *VaultExecutor, steerer *Steerer, opts ...option.RequestOption) (string, error) {
 	apiKey := os.Getenv("ANTHROPIC_API_KEY")
 	if apiKey == "" {
 		return "", fmt.Errorf("ANTHROPIC_API_KEY environment variable is not set")
@@ -158,7 +161,31 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 
 		// --------------------------------------------------------------------
 		// Phase 2: Act + Phase 3: Observe — dispatch each tool call.
+		// actCtx is cancelled when a steering interrupt_tool directive arrives
+		// (OQ-08), causing any in-flight vault execute to return TOOL_INTERRUPTED.
 		// --------------------------------------------------------------------
+		actCtx, cancelAct := context.WithCancel(ctx)
+
+		// capturedDirectiveCh receives the steering directive (if any) captured
+		// during this Act phase. Buffered size 1 — goroutine never blocks.
+		capturedDirectiveCh := make(chan *types.SteeringDirective, 1)
+		toolInterrupted := false
+
+		if steerer != nil {
+			go func() {
+				select {
+				case d := <-steerer.Chan():
+					dp := d // capture by value before sending pointer
+					capturedDirectiveCh <- &dp
+					if d.InterruptTool {
+						cancelAct()
+					}
+				case <-actCtx.Done():
+					// Act phase ended normally; exit without consuming directive.
+				}
+			}()
+		}
+
 		var toolResults []anthropic.ContentBlockParamUnion
 		finalResult := ""
 		taskDone := false
@@ -167,6 +194,10 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 			if block.Type != "tool_use" {
 				continue
 			}
+			if toolInterrupted {
+				// Skip remaining tool calls after a steering interrupt.
+				break
+			}
 			toolUse := block.AsToolUse()
 
 			log.Info("act phase: dispatching tool",
@@ -174,10 +205,15 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 				"tool_use_id", toolUse.ID,
 			)
 
-			// Thread current parent entry ID into context so vault tools can
-			// write their tool_call entry with the correct parent (EDD §13.4).
-			toolCtx := WithParentEntryID(ctx, currentParentID)
+			// Thread actCtx so vault operations are cancelled on steering interrupt.
+			// Also propagates parent entry ID for session log linking (EDD §13.4).
+			toolCtx := WithParentEntryID(actCtx, currentParentID)
 			result := dispatchTool(toolCtx, tools, toolUse.Name, toolUse.Input)
+
+			// Check whether actCtx was cancelled during this dispatch (steering interrupt).
+			if actCtx.Err() != nil {
+				toolInterrupted = true
+			}
 
 			// Phase 3: Observe — details go to monitoring (stderr) only; never
 			// enter LLM context. Content is what the LLM receives.
@@ -186,6 +222,7 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 				"tool_use_id", toolUse.ID,
 				"is_error", result.IsError,
 				"details", result.Details,
+				"tool_interrupted", toolInterrupted,
 			)
 
 			// Persist tool_result entry. Parent is the tool_call entry returned
@@ -208,13 +245,52 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 			)
 		}
 
+		// Stop the steering monitor goroutine; it will exit via actCtx.Done().
+		cancelAct()
+
 		if taskDone {
 			log.Info("task_complete called", "result_len", len(finalResult))
 			return finalResult, nil
 		}
 
 		// Add tool results as the next user turn in history.
-		history = append(history, anthropic.NewUserMessage(toolResults...))
+		if len(toolResults) > 0 {
+			history = append(history, anthropic.NewUserMessage(toolResults...))
+		}
+
+		// Drain captured directive (non-blocking — goroutine may not have fired).
+		var capturedDirective *types.SteeringDirective
+		select {
+		case capturedDirective = <-capturedDirectiveCh:
+		default:
+		}
+
+		if capturedDirective != nil {
+			// Acknowledge receipt to the Orchestrator.
+			ackStatus := "received"
+			if toolInterrupted {
+				ackStatus = "applied"
+			}
+			steerer.Ack(capturedDirective.DirectiveID, ackStatus, "")
+
+			// Inject the directive as a structured user-turn message so the LLM
+			// sees it cleanly before the next Reason phase (OQ-08).
+			steeringMsg := formatSteeringMessage(capturedDirective)
+			steeringEntryID := sl.Write(turnTypeSteeringDirective, steeringMsg, currentParentID, "")
+			currentParentID = steeringEntryID
+			history = append(history, anthropic.NewUserMessage(anthropic.NewTextBlock(steeringMsg)))
+
+			log.Info("steering directive applied",
+				"directive_id", capturedDirective.DirectiveID,
+				"type", capturedDirective.Type,
+				"tool_interrupted", toolInterrupted,
+			)
+
+			// cancel directive: terminate the task (partial results are acceptable).
+			if capturedDirective.Type == "cancel" {
+				return "", fmt.Errorf("task cancelled by steering directive: %s", capturedDirective.Instructions)
+			}
+		}
 
 		// --------------------------------------------------------------------
 		// Phase 4: Update Context — track total token count after Observe (§13.3).
