@@ -70,7 +70,17 @@ func main() {
 
 	reg := registry.New(registry.WithStateChangeHook(rec.ObserveStateChange))
 	skillMgr := skills.New(skills.WithGetSpecHook(rec.ObserveSkillInvocation))
-	credBroker := credentials.New(nil) // TODO: wire Vault-backed broker (M3)
+	credBroker, err := credentials.NewNATSBroker(commsClient,
+		credentials.WithBrokerConfig(credentials.BrokerConfig{
+			MaxAttempts: cfg.CredAuthMaxAttempts,
+			Timeout:     cfg.CredAuthTimeout,
+			BaseBackoff: cfg.CredAuthBaseBackoff,
+		}),
+	)
+	if err != nil {
+		log.Error("credential broker init failed", "error", err)
+		os.Exit(1)
+	}
 	memClient, err := memory.NewNATSClient(commsClient,
 		memory.WithWriteUnavailableHook(func(dataType, requestID, reason string) {
 			_ = commsClient.Publish(
