@@ -10,9 +10,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
+	"sync"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -33,6 +35,22 @@ const (
 	maxIterations = 50
 )
 
+// pendingToolCall is one tool_use block extracted from an assistant response,
+// ready for parallel dispatch in Phase 2.
+type pendingToolCall struct {
+	toolUseID string
+	name      string
+	input     json.RawMessage
+}
+
+// toolOutcome pairs a dispatched tool call with its completed ToolResult.
+// Outcomes are stored in the same index order as the assistant response so the
+// Anthropic API receives tool results in the required order.
+type toolOutcome struct {
+	call   pendingToolCall
+	result ToolResult
+}
+
 // RunLoop executes the ReAct loop until the task is complete or a termination
 // condition is met. It returns the final task result as a string.
 //
@@ -41,6 +59,9 @@ const (
 //
 // steerer may be nil — steering support is disabled when absent (e.g. env vars
 // not set). All existing behaviour is preserved with a nil steerer.
+//
+// Phase 2 (Act) dispatches all tool calls in a response concurrently (OQ-09).
+// Results are collected in the original index order for Anthropic API compliance.
 //
 // opts are forwarded to the Anthropic client constructor after the API key
 // option. Tests use this to inject option.WithBaseURL pointing at a mock server.
@@ -160,16 +181,21 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 		history = append(history, resp.ToParam())
 
 		// --------------------------------------------------------------------
-		// Phase 2: Act + Phase 3: Observe — dispatch each tool call.
-		// actCtx is cancelled when a steering interrupt_tool directive arrives
-		// (OQ-08), causing any in-flight vault execute to return TOOL_INTERRUPTED.
+		// Phase 2: Act — dispatch all tool calls concurrently (OQ-09).
+		//
+		// actCtx is derived from ctx; cancelling it (OQ-08 steering interrupt)
+		// propagates to all in-flight vault executes simultaneously.
+		//
+		// All tool calls from the same assistant response are dispatched in
+		// parallel. Outcomes are stored in the original index order so Phase 3
+		// can assemble the tool-result user message in the order the Anthropic
+		// API requires.
 		// --------------------------------------------------------------------
 		actCtx, cancelAct := context.WithCancel(ctx)
 
 		// capturedDirectiveCh receives the steering directive (if any) captured
 		// during this Act phase. Buffered size 1 — goroutine never blocks.
 		capturedDirectiveCh := make(chan *types.SteeringDirective, 1)
-		toolInterrupted := false
 
 		if steerer != nil {
 			go func() {
@@ -178,7 +204,7 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 					dp := d // capture by value before sending pointer
 					capturedDirectiveCh <- &dp
 					if d.InterruptTool {
-						cancelAct()
+						cancelAct() // cancel actCtx → all concurrent dispatches interrupted
 					}
 				case <-actCtx.Done():
 					// Act phase ended normally; exit without consuming directive.
@@ -186,67 +212,92 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 			}()
 		}
 
-		var toolResults []anthropic.ContentBlockParamUnion
-		finalResult := ""
-		taskDone := false
-
+		// Collect all tool_use blocks in the order the assistant emitted them.
+		// Index order is preserved in outcomes so Phase 3 assembles results correctly.
+		var pending []pendingToolCall
 		for _, block := range resp.Content {
 			if block.Type != "tool_use" {
 				continue
 			}
-			if toolInterrupted {
-				// Skip remaining tool calls after a steering interrupt.
-				break
-			}
-			toolUse := block.AsToolUse()
+			tu := block.AsToolUse()
+			pending = append(pending, pendingToolCall{
+				toolUseID: tu.ID,
+				name:      tu.Name,
+				input:     tu.Input,
+			})
+		}
 
-			log.Info("act phase: dispatching tool",
-				"tool", toolUse.Name,
-				"tool_use_id", toolUse.ID,
-			)
+		// actParentID is the session log parent shared by all concurrent tool_call
+		// entries — they all branch from the same assistant_response entry.
+		actParentID := currentParentID
 
-			// Thread actCtx so vault operations are cancelled on steering interrupt.
-			// Also propagates parent entry ID for session log linking (EDD §13.4).
-			toolCtx := WithParentEntryID(actCtx, currentParentID)
-			result := dispatchTool(toolCtx, tools, toolUse.Name, toolUse.Input)
+		// Fan-out: dispatch all tool calls concurrently.
+		// outcomes[i] receives the result for pending[i] — index order preserved.
+		outcomes := make([]toolOutcome, len(pending))
+		var wg sync.WaitGroup
+		for i, call := range pending {
+			wg.Add(1)
+			go func(idx int, c pendingToolCall) {
+				defer wg.Done()
+				log.Info("act phase: dispatching tool",
+					"tool", c.name,
+					"tool_use_id", c.toolUseID,
+					"parallel_index", idx,
+					"parallel_total", len(pending),
+				)
+				// Thread actCtx so vault operations are cancelled on steering interrupt.
+				// actParentID propagates to vault tools for session log linking (EDD §13.4).
+				toolCtx := WithParentEntryID(actCtx, actParentID)
+				outcomes[idx] = toolOutcome{call: c, result: dispatchTool(toolCtx, tools, c.name, c.input)}
+			}(i, call)
+		}
+		wg.Wait() // all concurrent dispatches complete (or are interrupted) before Phase 3
 
-			// Check whether actCtx was cancelled during this dispatch (steering interrupt).
-			if actCtx.Err() != nil {
-				toolInterrupted = true
-			}
+		// Determine whether a steering interrupt fired during dispatch.
+		toolInterrupted := actCtx.Err() != nil
+		// Stop the steering monitor goroutine; it will exit via actCtx.Done().
+		cancelAct()
 
-			// Phase 3: Observe — details go to monitoring (stderr) only; never
-			// enter LLM context. Content is what the LLM receives.
+		// --------------------------------------------------------------------
+		// Phase 3: Observe — process outcomes in index order.
+		// Content enters LLM context; Details go to monitoring only (§13.2).
+		// Session entries are written serially here (single goroutine) so the
+		// parent chain remains consistent even though dispatch was concurrent.
+		// --------------------------------------------------------------------
+		var toolResults []anthropic.ContentBlockParamUnion
+		finalResult := ""
+		taskDone := false
+
+		for _, o := range outcomes {
 			log.Info("observe phase: tool result",
-				"tool", toolUse.Name,
-				"tool_use_id", toolUse.ID,
-				"is_error", result.IsError,
-				"details", result.Details,
+				"tool", o.call.name,
+				"tool_use_id", o.call.toolUseID,
+				"is_error", o.result.IsError,
+				"details", o.result.Details,
 				"tool_interrupted", toolInterrupted,
 			)
 
-			// Persist tool_result entry. Parent is the tool_call entry returned
-			// by vault tools; falls back to currentParentID for local tools.
-			toolResultParentID := result.SessionEntryID
+			// Persist tool_result entry. Parent is the tool_call session entry
+			// written by vault tools (SessionEntryID); falls back to actParentID
+			// for local tools (which don't write a tool_call entry themselves).
+			// All concurrent tool results fan out from actParentID in the tree.
+			toolResultParentID := o.result.SessionEntryID
 			if toolResultParentID == "" {
-				toolResultParentID = currentParentID
+				toolResultParentID = actParentID
 			}
-			toolResultEntryID := sl.Write(turnTypeToolResult, result.Content, toolResultParentID, "")
-			currentParentID = toolResultEntryID
+			toolResultEntryID := sl.Write(turnTypeToolResult, o.result.Content, toolResultParentID, "")
+			currentParentID = toolResultEntryID // advance linearly through index order
 
 			// task_complete is the agent's explicit terminal signal.
-			if toolUse.Name == toolNameTaskComplete && !result.IsError {
-				finalResult = result.Content
+			if o.call.name == toolNameTaskComplete && !o.result.IsError {
+				finalResult = o.result.Content
 				taskDone = true
 			}
 
 			toolResults = append(toolResults,
-				anthropic.NewToolResultBlock(toolUse.ID, result.Content, result.IsError),
+				anthropic.NewToolResultBlock(o.call.toolUseID, o.result.Content, o.result.IsError),
 			)
 		}
-
-		// Stop the steering monitor goroutine; it will exit via actCtx.Done().
-		cancelAct()
 
 		if taskDone {
 			log.Info("task_complete called", "result_len", len(finalResult))
