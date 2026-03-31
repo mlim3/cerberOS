@@ -27,21 +27,67 @@ func New(pp *preprocessor.Preprocessor, auditor *audit.Logger, manager secretman
 }
 
 // Inject handles POST /inject.
+//
+// Example request body:
+//
+//	{
+//	  "agent": "my-agent",
+//	  "script": "#!/bin/sh\necho {{API_KEY}}",
+//	  "keys": ["API_KEY"]
+//	}
+//
+// Example response body (200):
+//
+//	{
+//	  "agent": "my-agent",
+//	  "script": "#!/bin/sh\necho actual-api-key-value"
+//	}
 func (s *Server) Inject(w http.ResponseWriter, r *http.Request) {
 	s.inj.Inject(w, r)
 }
 
 // SecretGet handles POST /secrets/get.
+//
+// Example request body:
+//
+//	{
+//	  "agent": "my-agent",
+//	  "keys": ["API_KEY", "DB_PASS"]
+//	}
+//
+// Example response body (200):
+//
+//	{
+//	  "secrets": {
+//	    "API_KEY": "mock-api-key-12345",
+//	    "DB_PASS": "mock-db-password"
+//	  }
+//	}
 func (s *Server) SecretGet(w http.ResponseWriter, r *http.Request) {
 	s.sec.SecretGet(w, r)
 }
 
-// SecretPut handles POST /secrets/put.
+// SecretPut handles POST /secrets/put. Responds with 204 and an empty body on success.
+//
+// Example request body:
+//
+//	{
+//	  "agent": "my-agent",
+//	  "key": "MY_SECRET",
+//	  "value": "super-secret"
+//	}
 func (s *Server) SecretPut(w http.ResponseWriter, r *http.Request) {
 	s.sec.SecretPut(w, r)
 }
 
-// SecretDelete handles POST /secrets/delete.
+// SecretDelete handles POST /secrets/delete. Responds with 204 and an empty body on success.
+//
+// Example request body:
+//
+//	{
+//	  "agent": "my-agent",
+//	  "key": "MY_SECRET"
+//	}
 func (s *Server) SecretDelete(w http.ResponseWriter, r *http.Request) {
 	s.sec.SecretDelete(w, r)
 }
