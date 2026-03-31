@@ -16,6 +16,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/cerberOS/agents-component/pkg/types"
 )
 
 const (
@@ -86,6 +87,9 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 				"last_total_tokens", lastTotalTokens,
 				"threshold_pct", int(compactThreshold*100),
 			)
+			if ve != nil {
+				ve.PublishMetricsEvent(types.MetricsEventCompactionTriggered, "", 0)
+			}
 			compacted, compactionEntryID, err := compact(ctx, client, log, history, compactedThrough+1, assistantTurn, sl, currentParentID)
 			if err != nil {
 				log.Warn("compaction failed, continuing without compaction", "error", err)
@@ -225,6 +229,7 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 				"threshold_pct", int(hardAbortThreshold*100),
 			)
 			if ve != nil {
+				ve.PublishMetricsEvent(types.MetricsEventContextOverflow, "", 0)
 				ve.PublishError("CONTEXT_OVERFLOW",
 					fmt.Sprintf("token count %d exceeds %.0f%% of context window",
 						totalTokens, hardAbortThreshold*100),

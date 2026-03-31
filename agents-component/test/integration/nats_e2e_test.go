@@ -51,6 +51,7 @@ type natsHarness struct {
 	lc            lifecycle.Manager
 	creds         credentials.Broker
 	mem           memory.Client
+	skillMgr      skills.Manager
 	f             *factory.Factory
 	crashDetector *lifecycle.CrashDetector
 	ctx           context.Context
@@ -234,6 +235,7 @@ func newNATSHarness(t *testing.T) *natsHarness {
 		lc:            lcMgr,
 		creds:         credBroker,
 		mem:           memClient,
+		skillMgr:      skillMgr,
 		f:             f,
 		crashDetector: crashDetector,
 		ctx:           ctx,

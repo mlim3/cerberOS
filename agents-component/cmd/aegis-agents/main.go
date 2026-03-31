@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -15,6 +17,7 @@ import (
 	"github.com/cerberOS/agents-component/internal/factory"
 	"github.com/cerberOS/agents-component/internal/lifecycle"
 	"github.com/cerberOS/agents-component/internal/memory"
+	"github.com/cerberOS/agents-component/internal/metrics"
 	"github.com/cerberOS/agents-component/internal/registry"
 	"github.com/cerberOS/agents-component/internal/skills"
 	"github.com/cerberOS/agents-component/pkg/types"
@@ -37,17 +40,71 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	// Wire NATS JetStream client.
-	commsClient, err := comms.NewNATSClient(cfg.NATSURL, cfg.ComponentID)
+	// Prometheus metrics recorder — wired into registry, skills, factory, and comms.
+	rec := metrics.NewRecorder()
+
+	// Start the /metrics HTTP server in a background goroutine.
+	metricsAddr := fmt.Sprintf(":%d", cfg.MetricsPort)
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", rec.Handler())
+	metricsSrv := &http.Server{Addr: metricsAddr, Handler: mux}
+	go func() {
+		log.Info("metrics server listening", "addr", metricsAddr)
+		if err := metricsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Error("metrics server error", "error", err)
+		}
+	}()
+	defer func() {
+		if err := metricsSrv.Shutdown(context.Background()); err != nil {
+			log.Warn("metrics server shutdown error", "error", err)
+		}
+	}()
+
+	// Wire NATS JetStream client and wrap with metrics instrumentation.
+	rawComms, err := comms.NewNATSClient(cfg.NATSURL, cfg.ComponentID,
+		comms.WithMaxDeliver(cfg.CommsMaxDeliver),
+	)
 	if err != nil {
 		log.Error("comms init failed", "error", err)
 		os.Exit(1)
 	}
+	commsClient := metrics.WrapComms(rawComms, rec)
 
-	reg := registry.New()
-	skillMgr := skills.New()
-	credBroker := credentials.New(nil) // TODO: wire Vault-backed broker (M3)
-	memClient := memory.New()          // TODO: wire NATS-backed Memory Interface (M3)
+	reg := registry.New(registry.WithStateChangeHook(rec.ObserveStateChange))
+	skillMgr := skills.New(skills.WithGetSpecHook(rec.ObserveSkillInvocation))
+	credBroker, err := credentials.NewNATSBroker(commsClient,
+		credentials.WithBrokerConfig(credentials.BrokerConfig{
+			MaxAttempts: cfg.CredAuthMaxAttempts,
+			Timeout:     cfg.CredAuthTimeout,
+			BaseBackoff: cfg.CredAuthBaseBackoff,
+		}),
+	)
+	if err != nil {
+		log.Error("credential broker init failed", "error", err)
+		os.Exit(1)
+	}
+	memClient, err := memory.NewNATSClient(commsClient,
+		memory.WithWriteUnavailableHook(func(dataType, requestID, reason string) {
+			_ = commsClient.Publish(
+				comms.SubjectError,
+				comms.PublishOptions{
+					MessageType:   comms.MsgTypeError,
+					CorrelationID: requestID,
+					Transient:     true,
+				},
+				map[string]interface{}{
+					"error_code":    "MEMORY_UNAVAILABLE",
+					"error_message": fmt.Sprintf("state.write failed: data_type=%s: %s", dataType, reason),
+					"data_type":     dataType,
+					"request_id":    requestID,
+				},
+			)
+		}),
+	)
+	if err != nil {
+		log.Error("memory client init failed", "error", err)
+		os.Exit(1)
+	}
 
 	var lifecycleMgr lifecycle.Manager
 	if cfg.AgentProcessPath != "" {
@@ -110,6 +167,9 @@ func main() {
 		Log:           log,
 		CrashDetector: crashDetector,
 		MaxRetries:    cfg.MaxAgentRetries,
+		OnSpawn:       func(_ string) { rec.ObserveLifecycleEvent("spawn") },
+		OnTerminate:   func(_ string) { rec.ObserveLifecycleEvent("terminate") },
+		OnRecover:     func(_ string) { rec.ObserveLifecycleEvent("recover") },
 	})
 	if err != nil {
 		log.Error("factory init failed", "error", err)
@@ -245,6 +305,31 @@ func main() {
 		},
 	); err != nil {
 		log.Error("subscribe capability.query failed", "error", err)
+		os.Exit(1)
+	}
+
+	// Subscribe to intra-component metrics events published by agent-process
+	// subprocesses (core NATS, at-most-once — no JetStream required).
+	// These drive counters and histograms that cannot be observed directly in the
+	// main process (vault execute latencies, context compaction, CONTEXT_OVERFLOW).
+	if err := commsClient.Subscribe(
+		comms.SubjectMetricsEvent,
+		func(msg *comms.Message) {
+			var evt types.MetricsEvent
+			if err := json.Unmarshal(msg.Data, &evt); err != nil {
+				return // drop malformed event — at-most-once, no retry
+			}
+			switch evt.EventType {
+			case types.MetricsEventVaultExecuteComplete:
+				rec.ObserveVaultExecute(evt.OperationType, evt.ElapsedMS)
+			case types.MetricsEventCompactionTriggered:
+				rec.IncCompactionTriggered()
+			case types.MetricsEventContextOverflow:
+				rec.IncContextOverflow()
+			}
+		},
+	); err != nil {
+		log.Error("subscribe metrics.event failed", "error", err)
 		os.Exit(1)
 	}
 

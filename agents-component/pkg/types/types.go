@@ -326,6 +326,26 @@ type VaultCancelRequest struct {
 	Reason        string `json:"reason"` // "local_timeout" | "context_cancelled"
 }
 
+// Metrics event types — published by agent-process subprocesses to
+// aegis.metrics.event (at-most-once core NATS) for aggregation by the
+// aegis-agents component into Prometheus counters and histograms.
+const (
+	MetricsEventVaultExecuteComplete = "vault_execute_complete"
+	MetricsEventCompactionTriggered  = "compaction_triggered"
+	MetricsEventContextOverflow      = "context_overflow"
+)
+
+// MetricsEvent is the payload published by agent-process subprocesses to
+// aegis.metrics.event. The aegis-agents process subscribes and records the
+// corresponding Prometheus observations. Delivery is at-most-once; losing
+// an event produces a small under-count but never a correctness failure.
+type MetricsEvent struct {
+	AgentID       string `json:"agent_id"`
+	EventType     string `json:"event_type"`               // one of the MetricsEvent* constants
+	OperationType string `json:"operation_type,omitempty"` // set for vault_execute_complete
+	ElapsedMS     int    `json:"elapsed_ms,omitempty"`     // set for vault_execute_complete
+}
+
 // Audit event kind constants — the 15 defined event types (EDD §8.8).
 // Every AuditEvent.EventType must be one of these values.
 const (
@@ -358,4 +378,43 @@ type AuditEvent struct {
 	TraceID   string            `json:"trace_id,omitempty"`
 	Timestamp time.Time         `json:"timestamp"`
 	Details   map[string]string `json:"details,omitempty"` // event-specific metadata; never credentials or PII
+}
+
+// DeadLetterEvent is published to aegis.orchestrator.error (MessageType: "dead.letter")
+// when an inbound JetStream message exhausts its redelivery budget without being
+// successfully acknowledged by any handler. The Orchestrator uses this to detect
+// stalled tasks and trigger intervention or manual replay.
+//
+// OriginalEnvelope contains the full wire bytes of the original inbound message —
+// the complete outbound envelope as sent by the remote component including
+// message_id, message_type, correlation_id, and payload. This allows the
+// Orchestrator to identify the stalled operation and correlate it to a task.
+type DeadLetterEvent struct {
+	// OriginalSubject is the NATS subject the message was received on.
+	OriginalSubject string `json:"original_subject"`
+
+	// ConsumerName is the durable JetStream consumer that was processing the message.
+	ConsumerName string `json:"consumer_name"`
+
+	// MessageType is extracted from the original message envelope, if present.
+	MessageType string `json:"message_type,omitempty"`
+
+	// CorrelationID is extracted from the original message envelope (task_id,
+	// request_id, or query_id). Use this to correlate the stalled message to a task.
+	CorrelationID string `json:"correlation_id,omitempty"`
+
+	// OriginalEnvelope is the full wire-format message received from NATS, including
+	// the complete outbound envelope and payload. Embedded verbatim for replay.
+	OriginalEnvelope json.RawMessage `json:"original_envelope"`
+
+	// DeliveryAttempts is the number of times JetStream attempted delivery before
+	// the message was dead-lettered.
+	DeliveryAttempts int `json:"delivery_attempts"`
+
+	// FailureReason describes why the message was dead-lettered.
+	// Always "max_redelivery_exceeded" for budget exhaustion.
+	FailureReason string `json:"failure_reason"`
+
+	// DeadLetteredAt is the UTC timestamp when the dead-letter event was emitted.
+	DeadLetteredAt time.Time `json:"dead_lettered_at"`
 }

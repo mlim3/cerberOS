@@ -39,6 +39,31 @@ type Config struct {
 	// instead of being respawned.
 	// Env: AEGIS_MAX_AGENT_RETRIES (positive integer). Default: 3.
 	MaxAgentRetries int
+
+	// MetricsPort is the TCP port on which the /metrics HTTP endpoint is served.
+	// Env: AEGIS_METRICS_PORT (positive integer). Default: 9090.
+	MetricsPort int
+
+	// CredAuthMaxAttempts is the number of credential.request publish+await cycles
+	// before PreAuthorize gives up and returns VAULT_UNREACHABLE, triggering task.failed.
+	// Env: AEGIS_CRED_AUTH_MAX_ATTEMPTS (positive integer). Default: 3.
+	CredAuthMaxAttempts int
+
+	// CredAuthTimeout is the per-attempt deadline for receiving credential.response.
+	// Env: AEGIS_CRED_AUTH_TIMEOUT (Go duration string, e.g. "5s"). Default: 5s.
+	CredAuthTimeout time.Duration
+
+	// CredAuthBaseBackoff is the initial sleep between credential authorize retries.
+	// Each subsequent retry doubles the backoff (1s → 2s → 4s, …).
+	// Env: AEGIS_CRED_AUTH_BASE_BACKOFF (Go duration string). Default: 1s.
+	CredAuthBaseBackoff time.Duration
+
+	// CommsMaxDeliver is the redelivery budget applied to every durable JetStream
+	// consumer. After this many delivery attempts the message is dead-lettered:
+	// the full original envelope is published to aegis.orchestrator.error with
+	// MessageType "dead.letter" so the Orchestrator can detect stalled tasks.
+	// Env: AEGIS_COMMS_MAX_DELIVER (positive integer). Default: 5.
+	CommsMaxDeliver int
 }
 
 // Load reads configuration from environment variables and returns a validated Config.
@@ -64,6 +89,21 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if c.MaxAgentRetries, err = parseInt("AEGIS_MAX_AGENT_RETRIES", 3, 1); err != nil {
+		return nil, err
+	}
+	if c.MetricsPort, err = parseInt("AEGIS_METRICS_PORT", 9090, 1); err != nil {
+		return nil, err
+	}
+	if c.CredAuthMaxAttempts, err = parseInt("AEGIS_CRED_AUTH_MAX_ATTEMPTS", 3, 1); err != nil {
+		return nil, err
+	}
+	if c.CredAuthTimeout, err = parseDuration("AEGIS_CRED_AUTH_TIMEOUT", 5*time.Second); err != nil {
+		return nil, err
+	}
+	if c.CredAuthBaseBackoff, err = parseDuration("AEGIS_CRED_AUTH_BASE_BACKOFF", time.Second); err != nil {
+		return nil, err
+	}
+	if c.CommsMaxDeliver, err = parseInt("AEGIS_COMMS_MAX_DELIVER", 5, 1); err != nil {
 		return nil, err
 	}
 

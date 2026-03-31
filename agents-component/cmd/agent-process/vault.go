@@ -34,6 +34,36 @@ import (
 	nats "github.com/nats-io/nats.go"
 )
 
+const (
+	// Default vault execute publish retry parameters.
+	// Override via AEGIS_VAULT_PUBLISH_MAX_ATTEMPTS and AEGIS_VAULT_PUBLISH_BASE_BACKOFF.
+	vaultPublishMaxAttempts = 3
+	vaultPublishBaseBackoff = time.Second
+)
+
+// VaultExecConfig holds the retry parameters for publishing vault execute requests.
+// When NATS is temporarily unavailable, Execute retries with exponential backoff
+// before returning TOOL_TIMEOUT to the LLM so it can decide whether to retry.
+type VaultExecConfig struct {
+	// PublishMaxAttempts is the number of JetStream publish attempts before
+	// TOOL_TIMEOUT is returned to the LLM. Zero falls back to 3.
+	PublishMaxAttempts int
+
+	// PublishBaseBackoff is the initial sleep between publish retries (doubles
+	// on each attempt: 1s → 2s → 4s, …). Zero falls back to 1s.
+	PublishBaseBackoff time.Duration
+}
+
+func (c VaultExecConfig) withDefaults() VaultExecConfig {
+	if c.PublishMaxAttempts <= 0 {
+		c.PublishMaxAttempts = vaultPublishMaxAttempts
+	}
+	if c.PublishBaseBackoff <= 0 {
+		c.PublishBaseBackoff = vaultPublishBaseBackoff
+	}
+	return c
+}
+
 // VaultExecutor manages the async vault execute request/result flow (ADR-004).
 // One instance is created per agent-process; nil means vault execution is
 // unavailable (NATS env vars absent) — non-credentialed tools still function.
@@ -44,6 +74,7 @@ type VaultExecutor struct {
 	taskID          string
 	traceID         string
 	permissionToken string
+	cfg             VaultExecConfig
 	log             *slog.Logger
 
 	mu                sync.Mutex
@@ -97,6 +128,11 @@ func NewVaultExecutor(log *slog.Logger, taskID, permissionToken, traceID string)
 		return nil
 	}
 
+	cfg := VaultExecConfig{
+		PublishMaxAttempts: parseEnvInt("AEGIS_VAULT_PUBLISH_MAX_ATTEMPTS", 0),
+		PublishBaseBackoff: parseEnvDuration("AEGIS_VAULT_PUBLISH_BASE_BACKOFF", 0),
+	}.withDefaults()
+
 	ve := &VaultExecutor{
 		nc:                nc,
 		js:                js,
@@ -104,6 +140,7 @@ func NewVaultExecutor(log *slog.Logger, taskID, permissionToken, traceID string)
 		taskID:            taskID,
 		traceID:           traceID,
 		permissionToken:   permissionToken,
+		cfg:               cfg,
 		log:               log,
 		pending:           make(map[string]chan types.VaultOperationResult),
 		progressCallbacks: make(map[string]func(types.VaultOperationProgress)),
@@ -324,19 +361,37 @@ func (ve *VaultExecutor) Execute(ctx context.Context, operationType, credentialT
 	ve.mu.Unlock()
 
 	// Step 3: Publish VaultOperationRequest (JetStream). CorrelationID = request_id
-	// as required by the Comms envelope contract.
+	// as required by the Comms envelope contract. Retried with exponential backoff
+	// (see VaultExecConfig) — NATS may be transiently unavailable.
 	if err := ve.publishRequest(req); err != nil {
 		ve.mu.Lock()
 		delete(ve.pending, req.RequestID)
 		delete(ve.progressCallbacks, req.RequestID)
 		ve.mu.Unlock()
-		ve.log.Error("vault execute: publish request failed",
-			"request_id", req.RequestID, "error", err)
+		ve.log.Error("vault execute: publish failed after retries — returning TOOL_TIMEOUT",
+			"request_id", req.RequestID,
+			"attempts", ve.cfg.PublishMaxAttempts,
+			"error", err,
+		)
+		ve.emitAudit(types.AuditEventVaultExecuteTimeout, map[string]string{
+			"request_id":     req.RequestID,
+			"operation_type": req.OperationType,
+			"reason":         "publish_failed",
+			"attempts":       fmt.Sprintf("%d", ve.cfg.PublishMaxAttempts),
+		})
 		return ToolResult{
-			Content:        fmt.Sprintf("vault execute: could not dispatch request for %q: %v", operationType, err),
+			Content: fmt.Sprintf(
+				"TOOL_TIMEOUT: vault execute request for %q could not be dispatched after %d attempts (NATS unavailable)",
+				operationType, ve.cfg.PublishMaxAttempts,
+			),
 			IsError:        true,
 			SessionEntryID: toolCallEntryID,
-			Details:        map[string]interface{}{"error": err.Error(), "request_id": req.RequestID},
+			Details: map[string]interface{}{
+				"request_id":     req.RequestID,
+				"operation_type": req.OperationType,
+				"reason":         "publish_failed",
+				"attempts":       ve.cfg.PublishMaxAttempts,
+			},
 		}
 	}
 
@@ -365,6 +420,7 @@ func (ve *VaultExecutor) Execute(ctx context.Context, operationType, credentialT
 			"status", vaultResult.Status,
 			"elapsed_ms", vaultResult.ElapsedMS,
 		)
+		ve.PublishMetricsEvent(types.MetricsEventVaultExecuteComplete, req.OperationType, vaultResult.ElapsedMS)
 		ve.emitAudit(types.AuditEventVaultExecuteResult, map[string]string{
 			"request_id":     req.RequestID,
 			"operation_type": req.OperationType,
@@ -416,25 +472,50 @@ func (ve *VaultExecutor) Execute(ctx context.Context, operationType, credentialT
 	}
 }
 
-// publishRequest wraps and publishes a VaultOperationRequest to the Orchestrator.
+// publishRequest wraps and publishes a VaultOperationRequest to the Orchestrator
+// with exponential backoff retries (VaultExecConfig.PublishMaxAttempts attempts,
+// doubling from PublishBaseBackoff). A fresh MessageID is used on each attempt so
+// the Comms deduplication window does not suppress legitimate retries; the
+// CorrelationID (= request_id) is stable across attempts for Vault idempotency.
+//
+// Returns an error only after all attempts are exhausted — callers treat this as
+// TOOL_TIMEOUT rather than a distinct error code.
 func (ve *VaultExecutor) publishRequest(req types.VaultOperationRequest) error {
-	env := agentEnvelope{
-		MessageID:       newUUID(),
-		MessageType:     comms.MsgTypeVaultExecuteRequest,
-		SourceComponent: "agents",
-		CorrelationID:   req.RequestID, // required: correlation_id MUST be request_id
-		Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
-		SchemaVersion:   "1.0",
-		Payload:         req,
+	var lastErr error
+	for attempt := 0; attempt < ve.cfg.PublishMaxAttempts; attempt++ {
+		if attempt > 0 {
+			backoff := ve.cfg.PublishBaseBackoff * time.Duration(1<<uint(attempt-1))
+			ve.log.Info("vault execute: retrying publish after backoff",
+				"request_id", req.RequestID,
+				"attempt", attempt+1,
+				"backoff", backoff,
+			)
+			time.Sleep(backoff)
+		}
+
+		env := agentEnvelope{
+			MessageID:       newUUID(), // fresh per attempt — avoids comms dedup suppression
+			MessageType:     comms.MsgTypeVaultExecuteRequest,
+			SourceComponent: "agents",
+			CorrelationID:   req.RequestID, // stable — Vault idempotency key
+			Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
+			SchemaVersion:   "1.0",
+			Payload:         req,
+		}
+		data, err := json.Marshal(env)
+		if err != nil {
+			// Marshal failure is not transient — abort immediately.
+			return fmt.Errorf("marshal vault request envelope: %w", err)
+		}
+		if _, err := ve.js.Publish(comms.SubjectVaultExecuteRequest, data); err != nil {
+			lastErr = fmt.Errorf("jetstream publish vault request (attempt %d/%d): %w",
+				attempt+1, ve.cfg.PublishMaxAttempts, err)
+			continue
+		}
+		return nil
 	}
-	data, err := json.Marshal(env)
-	if err != nil {
-		return fmt.Errorf("marshal vault request envelope: %w", err)
-	}
-	if _, err := ve.js.Publish(comms.SubjectVaultExecuteRequest, data); err != nil {
-		return fmt.Errorf("jetstream publish vault request: %w", err)
-	}
-	return nil
+	return fmt.Errorf("vault execute: NATS unavailable after %d attempts: %w",
+		ve.cfg.PublishMaxAttempts, lastErr)
 }
 
 // publishCancellation notifies the Orchestrator that the local deadline fired so
@@ -507,6 +588,28 @@ func (ve *VaultExecutor) PublishError(errorCode, errorMessage, traceID string) {
 	}
 }
 
+// PublishMetricsEvent publishes a lightweight at-most-once metrics event to
+// aegis.metrics.event so the aegis-agents process can aggregate Prometheus
+// counters for events that occur inside agent-process subprocesses (EDD §13.3).
+// Failures are silently logged — losing a metrics event is acceptable.
+func (ve *VaultExecutor) PublishMetricsEvent(eventType, operationType string, elapsedMS int) {
+	payload := types.MetricsEvent{
+		AgentID:       ve.agentID,
+		EventType:     eventType,
+		OperationType: operationType,
+		ElapsedMS:     elapsedMS,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		ve.log.Warn("metrics event: marshal failed", "event_type", eventType, "error", err)
+		return
+	}
+	// Core NATS at-most-once publish — no JetStream acknowledgement required.
+	if err := ve.nc.Publish(comms.SubjectMetricsEvent, data); err != nil {
+		ve.log.Warn("metrics event: publish failed", "event_type", eventType, "error", err)
+	}
+}
+
 // Close drains the NATS connection used by the vault executor.
 func (ve *VaultExecutor) Close() {
 	if ve.nc != nil {
@@ -563,6 +666,35 @@ func vaultResultToToolResult(r types.VaultOperationResult) ToolResult {
 			},
 		}
 	}
+}
+
+// parseEnvInt reads a positive integer from an env var.
+// Returns defaultVal (which may be 0 to signal "use package default") if the
+// variable is unset, empty, or not a positive integer.
+func parseEnvInt(key string, defaultVal int) int {
+	s := os.Getenv(key)
+	if s == "" {
+		return defaultVal
+	}
+	var n int
+	if _, err := fmt.Sscanf(s, "%d", &n); err != nil || n < 1 {
+		return defaultVal
+	}
+	return n
+}
+
+// parseEnvDuration reads a Go duration string from an env var.
+// Returns defaultVal if the variable is unset, empty, or not a valid positive duration.
+func parseEnvDuration(key string, defaultVal time.Duration) time.Duration {
+	s := os.Getenv(key)
+	if s == "" {
+		return defaultVal
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d <= 0 {
+		return defaultVal
+	}
+	return d
 }
 
 // newUUID returns a random UUID v4 string.

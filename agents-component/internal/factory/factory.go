@@ -62,6 +62,11 @@ type Factory struct {
 	// inFlightMu guards inFlightRequests.
 	inFlightMu       sync.Mutex
 	inFlightRequests map[string][]string // agentID → []requestID with no result yet
+
+	// Lifecycle hooks (optional; nil-safe).
+	onSpawn     func(agentID string)
+	onTerminate func(agentID string)
+	onRecover   func(agentID string)
 }
 
 // Config carries the dependencies required to construct a Factory.
@@ -77,6 +82,12 @@ type Config struct {
 	CrashDetector *lifecycle.CrashDetector // optional; when set, Watch/Unwatch are called around spawn/terminate
 	MaxRetries    int                      // optional; max crash respawns before permanent termination. Default: 3.
 	TokenCounter  TokenCounter             // optional; when set, enforces the 2,048-token spawn context budget (EDD §13.3)
+
+	// Lifecycle event hooks — all optional. Called synchronously on the
+	// provisioning path; implementations must be non-blocking.
+	OnSpawn     func(agentID string) // called after each successful initial agent spawn
+	OnTerminate func(agentID string) // called after each successful agent termination
+	OnRecover   func(agentID string) // called after each successful crash-recovery respawn
 }
 
 // New returns a Factory wired with the provided dependencies.
@@ -124,6 +135,9 @@ func New(cfg Config) (*Factory, error) {
 		maxRetries:       maxRetries,
 		tokenCounter:     cfg.TokenCounter,
 		inFlightRequests: make(map[string][]string),
+		onSpawn:          cfg.OnSpawn,
+		onTerminate:      cfg.OnTerminate,
+		onRecover:        cfg.OnRecover,
 	}, nil
 }
 
@@ -311,6 +325,9 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 	if err := f.lifecycle.Spawn(vmCfg); err != nil {
 		return fmt.Errorf("factory: lifecycle.Spawn: %w", err)
 	}
+	if f.onSpawn != nil {
+		f.onSpawn(agentID)
+	}
 
 	// Step 6: Transition to ACTIVE — VM is up and task is running.
 	if err := f.registry.UpdateState(agentID, registry.StateActive, "VM spawned"); err != nil {
@@ -413,6 +430,9 @@ func (f *Factory) CompleteTask(agentID, sessionID, traceID string, output interf
 	if err := f.lifecycle.Terminate(agentID); err != nil {
 		return fmt.Errorf("factory: lifecycle.Terminate: %w", err)
 	}
+	if f.onTerminate != nil {
+		f.onTerminate(agentID)
+	}
 	if err := f.credentials.Revoke(agentID); err != nil {
 		f.log.Warn("credential.event",
 			"operation_type", "revoke",
@@ -488,6 +508,13 @@ func (f *Factory) HandleCrash(agentID string) error {
 		},
 	}
 	if err := f.memory.Write(mw); err != nil {
+		f.log.Error("crash recovery aborted: snapshot persistence unavailable",
+			"agent_id", agentID,
+			"error", err,
+		)
+		_ = f.registry.UpdateState(agentID, registry.StateTerminated,
+			"crash recovery aborted: snapshot persistence unavailable")
+		_ = f.publishStatus(agentID, agent.AssignedTask, registry.StateTerminated, "")
 		return fmt.Errorf("factory: HandleCrash: memory.Write snapshot: %w", err)
 	}
 
@@ -602,6 +629,9 @@ func (f *Factory) HandleCrash(agentID string) error {
 	}
 	if err := f.lifecycle.Spawn(vmCfg); err != nil {
 		return fmt.Errorf("factory: HandleCrash: lifecycle.Spawn: %w", err)
+	}
+	if f.onRecover != nil {
+		f.onRecover(agentID)
 	}
 
 	// Step 8: Registry update — new vm_id, transition RECOVERING → ACTIVE.

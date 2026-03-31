@@ -54,6 +54,10 @@ type Manager interface {
 	Search(query string, topK int) ([]types.SkillSearchResult, error)
 }
 
+// InvocationHook is called after each successful GetSpec call. It receives the
+// domain and command names. Implementations must be non-blocking.
+type InvocationHook func(domain, command string)
+
 // Option configures a hierarchyManager.
 type Option func(*hierarchyManager)
 
@@ -64,6 +68,15 @@ type Option func(*hierarchyManager)
 func WithEmbedder(e Embedder) Option {
 	return func(m *hierarchyManager) {
 		m.embedder = e
+	}
+}
+
+// WithGetSpecHook registers a callback fired after every successful GetSpec call.
+// Pass metrics.Recorder.ObserveSkillInvocation here to drive the
+// skill_invocations_total Prometheus counter.
+func WithGetSpecHook(h InvocationHook) Option {
+	return func(m *hierarchyManager) {
+		m.onGetSpec = h
 	}
 }
 
@@ -81,6 +94,7 @@ type hierarchyManager struct {
 	domains    map[string]*types.SkillNode
 	embedder   Embedder
 	embeddings []commandEmbedding // rebuilt incrementally as domains are registered
+	onGetSpec  InvocationHook     // optional; called after each successful GetSpec
 }
 
 // New returns a ready-to-use Skill Hierarchy Manager.
@@ -205,20 +219,28 @@ func (m *hierarchyManager) GetCommands(domain string) ([]*types.SkillNode, error
 // level of disclosure and is only served when the agent is constructing a call.
 func (m *hierarchyManager) GetSpec(domain, command string) (*types.SkillSpec, error) {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
 
 	d, ok := m.domains[domain]
 	if !ok {
+		m.mu.RUnlock()
 		return nil, fmt.Errorf("skills: domain %q not found", domain)
 	}
 	cmd, ok := d.Children[command]
 	if !ok {
+		m.mu.RUnlock()
 		return nil, fmt.Errorf("skills: command %q not found in domain %q", command, domain)
 	}
 	if cmd.Spec == nil {
+		m.mu.RUnlock()
 		return nil, fmt.Errorf("skills: no spec defined for %q.%q", domain, command)
 	}
 	spec := *cmd.Spec
+	hook := m.onGetSpec
+	m.mu.RUnlock()
+
+	if hook != nil {
+		hook(domain, command)
+	}
 	return &spec, nil
 }
 

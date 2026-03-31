@@ -74,19 +74,52 @@ type Registry interface {
 	List() []*types.AgentRecord
 }
 
+// StateChangeHook is called after every agent state mutation, synchronously and
+// outside the registry lock. from is the previous state; to is the new state.
+//
+//   - from==""  on initial registration (to = "pending").
+//   - to==""    on deregistration (from = last known state).
+//
+// Implementations must be non-blocking.
+type StateChangeHook func(from, to string)
+
+// Option configures an inMemoryRegistry.
+type Option func(*inMemoryRegistry)
+
+// WithStateChangeHook registers a callback that fires after every agent state
+// mutation. Pass metrics.Recorder.ObserveStateChange here to drive the
+// agents_by_state Prometheus gauge.
+func WithStateChangeHook(h StateChangeHook) Option {
+	return func(r *inMemoryRegistry) {
+		r.onStateChange = h
+	}
+}
+
 // inMemoryRegistry is the default Registry implementation.
 type inMemoryRegistry struct {
-	mu     sync.RWMutex
-	agents map[string]*types.AgentRecord
-	mem    memory.Client // nil when persistence is disabled (unit-test path)
+	mu            sync.RWMutex
+	agents        map[string]*types.AgentRecord
+	mem           memory.Client   // nil when persistence is disabled (unit-test path)
+	onStateChange StateChangeHook // optional; called after every state mutation
+}
+
+// notifyStateChange invokes onStateChange outside the registry lock when set.
+func (r *inMemoryRegistry) notifyStateChange(from, to string) {
+	if r.onStateChange != nil {
+		r.onStateChange(from, to)
+	}
 }
 
 // New returns a ready-to-use in-memory Registry with no persistence.
 // Use NewPersistent when you need startup recovery via the Memory Interface.
-func New() Registry {
-	return &inMemoryRegistry{
+func New(opts ...Option) Registry {
+	reg := &inMemoryRegistry{
 		agents: make(map[string]*types.AgentRecord),
 	}
+	for _, o := range opts {
+		o(reg)
+	}
+	return reg
 }
 
 // NewPersistent returns a Registry that writes every state mutation to the Memory
@@ -94,10 +127,13 @@ func New() Registry {
 // data_type=agent_state and re-hydrates the catalog from the response — surviving
 // component restarts transparently. An empty response (first boot) is handled
 // gracefully: the returned registry starts with an empty catalog.
-func NewPersistent(mem memory.Client) (Registry, error) {
+func NewPersistent(mem memory.Client, opts ...Option) (Registry, error) {
 	r := &inMemoryRegistry{
 		agents: make(map[string]*types.AgentRecord),
 		mem:    mem,
+	}
+	for _, o := range opts {
+		o(r)
 	}
 	if err := r.recoverFromMemory(); err != nil {
 		return nil, fmt.Errorf("registry: startup recovery: %w", err)
@@ -178,6 +214,7 @@ func (r *inMemoryRegistry) Register(agent *types.AgentRecord) error {
 	snapshot := copyAgent(agent)
 	r.mu.Unlock()
 
+	r.notifyStateChange("", StatePending)
 	r.persistAgent(snapshot)
 	return nil
 }
@@ -257,6 +294,7 @@ func (r *inMemoryRegistry) UpdateState(agentID, state, reason string) error {
 		"to_state", state,
 		"reason", reason,
 	)
+	r.notifyStateChange(fromState, state)
 	r.persistAgent(snapshot)
 	return nil
 }
@@ -289,6 +327,7 @@ func (r *inMemoryRegistry) AssignTask(agentID, taskID string) error {
 		return fmt.Errorf("registry: AssignTask for agent %q: %w", agentID, err)
 	}
 	now := time.Now().UTC()
+	prevState := a.State
 	a.AssignedTask = taskID
 	a.State = StateActive
 	a.UpdatedAt = now
@@ -300,18 +339,23 @@ func (r *inMemoryRegistry) AssignTask(agentID, taskID string) error {
 	snapshot := copyAgent(a)
 	r.mu.Unlock()
 
+	r.notifyStateChange(prevState, StateActive)
 	r.persistAgent(snapshot)
 	return nil
 }
 
 func (r *inMemoryRegistry) Deregister(agentID string) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if _, ok := r.agents[agentID]; !ok {
+	a, ok := r.agents[agentID]
+	if !ok {
+		r.mu.Unlock()
 		return fmt.Errorf("registry: agent %q not found", agentID)
 	}
+	lastState := a.State
 	delete(r.agents, agentID)
+	r.mu.Unlock()
+
+	r.notifyStateChange(lastState, "")
 	return nil
 }
 
