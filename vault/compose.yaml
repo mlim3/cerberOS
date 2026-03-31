@@ -4,6 +4,8 @@ services:
       context: "./engine"
     ports:
       - "8000:8000"
+    environment:
+      BAO_ADDR: http://openbao:8200
     restart: no
 
   # ui:
