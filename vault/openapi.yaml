@@ -61,6 +61,97 @@ paths:
         '405':
           $ref: '#/components/responses/MethodNotAllowed'
 
+  /secrets/get:
+    post:
+      tags: [Vault]
+      summary: Read secrets by key
+      description: |
+        Returns values for all requested secret keys in one response. If any key
+        is missing or access is denied, the entire request fails — no partial results.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SecretGetRequest'
+            example:
+              agent: my-agent
+              keys: [API_KEY, DB_PASS]
+      responses:
+        '200':
+          description: Map of secret keys to values
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SecretGetResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          description: One or more secrets not found or access denied
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+
+  /secrets/put:
+    post:
+      tags: [Vault]
+      summary: Write or update a secret
+      description: Stores a secret value under the given key.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SecretPutRequest'
+            example:
+              agent: my-agent
+              key: MY_SECRET
+              value: super-secret
+      responses:
+        '204':
+          description: Secret stored successfully
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          description: Write denied or backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+
+  /secrets/delete:
+    post:
+      tags: [Vault]
+      summary: Delete a secret
+      description: Removes the secret for the given key. Uses POST for consistency with other vault actions (no body on DELETE).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SecretDeleteRequest'
+            example:
+              agent: my-agent
+              key: MY_SECRET
+      responses:
+        '204':
+          description: Secret deleted successfully
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          description: Delete denied or backend error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+
 components:
   schemas:
     InjectRequest:
@@ -93,6 +184,54 @@ components:
         script:
           type: string
           description: The script with all placeholders replaced by secret values
+
+    SecretGetRequest:
+      type: object
+      properties:
+        agent:
+          type: string
+          description: Identifier for the calling agent (used in audit logs)
+        keys:
+          type: array
+          items:
+            type: string
+          description: Secret keys to resolve
+      required: [keys]
+
+    SecretGetResponse:
+      type: object
+      properties:
+        secrets:
+          type: object
+          additionalProperties:
+            type: string
+          description: Map of secret key to value
+      required: [secrets]
+
+    SecretPutRequest:
+      type: object
+      required: [key, value]
+      properties:
+        agent:
+          type: string
+          description: Identifier for the calling agent (used in audit logs)
+        key:
+          type: string
+          description: Secret key
+        value:
+          type: string
+          description: Secret value to store
+
+    SecretDeleteRequest:
+      type: object
+      required: [key]
+      properties:
+        agent:
+          type: string
+          description: Identifier for the calling agent (used in audit logs)
+        key:
+          type: string
+          description: Secret key to remove
 
     ErrorResponse:
       type: object

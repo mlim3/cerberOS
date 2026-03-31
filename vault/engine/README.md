@@ -53,13 +53,16 @@ type Exporter interface {
 }
 ```
 
-### HTTP Server (`main.go`)
+### HTTP Server (`main.go`, `handlers/`)
 
-Listens on `:8000`. Single endpoint:
+Listens on `:8000`. `handlers/main.go` wires `handlers/inject` and `handlers/secrets`; shared JSON error type lives in `handlers/common`. Endpoints:
 
-| Endpoint  | Method | Description                                  |
-| --------- | ------ | -------------------------------------------- |
-| `/inject` | POST   | Inject secrets into a script and return it   |
+| Endpoint         | Method | Description                                  |
+| ---------------- | ------ | -------------------------------------------- |
+| `/inject`        | POST   | Inject secrets into a script and return it   |
+| `/secrets/get`   | POST   | Read secrets by key list                     |
+| `/secrets/put`   | POST   | Write or update a secret                     |
+| `/secrets/delete`| POST   | Delete a secret                              |
 
 `/inject` request body:
 

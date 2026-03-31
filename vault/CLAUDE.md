@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 cerberOS Vault is a **credential broker** for agents. Agents send shell scripts containing `{{PLACEHOLDER}}` markers; the service resolves secrets and returns the **injected script** over HTTP for the agent to run locally. Resolution is **atomic**: if any referenced secret is missing or denied, the whole request fails with no partial substitution.
 
-The HTTP service (`engine/main.go`) uses an in-memory `SecretManager` mock by default. **OpenBao** is included in Docker Compose for persistent secrets storage and can be wired to replace the mock (see `setup-openbao.sh`, `openbao.hcl`).
+The HTTP service listens in `engine/main.go` and implements routes under `engine/handlers/` (`main.go` composes `inject/`, `secrets/`, `common/`). **OpenBao** is included in Docker Compose for persistent secrets storage and can be wired to replace the mock (see `setup-openbao.sh`, `openbao.hcl`).
 
 ## Commands
 
@@ -78,7 +78,8 @@ The **CLI** (`engine/cmd/vault/`) posts to `/inject` and prints or writes the re
 
 | Path                    | Role                                             |
 | ----------------------- | ------------------------------------------------ |
-| `engine/main.go`        | HTTP server, `/inject`                           |
+| `engine/main.go`        | Listen, signal shutdown, route registration      |
+| `engine/handlers/`      | `main.go` composes `inject/`, `secrets/`, shared `common/` types |
 | `engine/preprocessor/`  | `{{KEY}}` parsing and substitution               |
 | `engine/secretmanager/` | `SecretManager` interface + mock                 |
 | `engine/audit/`         | Audit events (key names, not values)             |
