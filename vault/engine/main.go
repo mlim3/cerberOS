@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"net/http"
 	"os"
@@ -27,6 +28,10 @@ func main() {
 	mux.HandleFunc("/secrets/get", h.SecretGet)
 	mux.HandleFunc("/secrets/put", h.SecretPut)
 	mux.HandleFunc("/secrets/delete", h.SecretDelete)
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{"status": "healthy!"})
+	})
 
 	httpSrv := &http.Server{Addr: ":8000", Handler: mux}
 
