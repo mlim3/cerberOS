@@ -61,7 +61,9 @@ func main() {
 	}()
 
 	// Wire NATS JetStream client and wrap with metrics instrumentation.
-	rawComms, err := comms.NewNATSClient(cfg.NATSURL, cfg.ComponentID)
+	rawComms, err := comms.NewNATSClient(cfg.NATSURL, cfg.ComponentID,
+		comms.WithMaxDeliver(cfg.CommsMaxDeliver),
+	)
 	if err != nil {
 		log.Error("comms init failed", "error", err)
 		os.Exit(1)

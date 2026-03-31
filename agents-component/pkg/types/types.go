@@ -379,3 +379,42 @@ type AuditEvent struct {
 	Timestamp time.Time         `json:"timestamp"`
 	Details   map[string]string `json:"details,omitempty"` // event-specific metadata; never credentials or PII
 }
+
+// DeadLetterEvent is published to aegis.orchestrator.error (MessageType: "dead.letter")
+// when an inbound JetStream message exhausts its redelivery budget without being
+// successfully acknowledged by any handler. The Orchestrator uses this to detect
+// stalled tasks and trigger intervention or manual replay.
+//
+// OriginalEnvelope contains the full wire bytes of the original inbound message —
+// the complete outbound envelope as sent by the remote component including
+// message_id, message_type, correlation_id, and payload. This allows the
+// Orchestrator to identify the stalled operation and correlate it to a task.
+type DeadLetterEvent struct {
+	// OriginalSubject is the NATS subject the message was received on.
+	OriginalSubject string `json:"original_subject"`
+
+	// ConsumerName is the durable JetStream consumer that was processing the message.
+	ConsumerName string `json:"consumer_name"`
+
+	// MessageType is extracted from the original message envelope, if present.
+	MessageType string `json:"message_type,omitempty"`
+
+	// CorrelationID is extracted from the original message envelope (task_id,
+	// request_id, or query_id). Use this to correlate the stalled message to a task.
+	CorrelationID string `json:"correlation_id,omitempty"`
+
+	// OriginalEnvelope is the full wire-format message received from NATS, including
+	// the complete outbound envelope and payload. Embedded verbatim for replay.
+	OriginalEnvelope json.RawMessage `json:"original_envelope"`
+
+	// DeliveryAttempts is the number of times JetStream attempted delivery before
+	// the message was dead-lettered.
+	DeliveryAttempts int `json:"delivery_attempts"`
+
+	// FailureReason describes why the message was dead-lettered.
+	// Always "max_redelivery_exceeded" for budget exhaustion.
+	FailureReason string `json:"failure_reason"`
+
+	// DeadLetteredAt is the UTC timestamp when the dead-letter event was emitted.
+	DeadLetteredAt time.Time `json:"dead_lettered_at"`
+}

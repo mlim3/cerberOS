@@ -103,4 +103,5 @@ const (
 	MsgTypeAuditEvent            = "audit.event"
 	MsgTypeError                 = "error"
 	MsgTypeLifecycleTerminate    = "lifecycle.terminate"
+	MsgTypeDeadLetter            = "dead.letter"
 )
