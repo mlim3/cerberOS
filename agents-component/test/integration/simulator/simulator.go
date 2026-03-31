@@ -108,11 +108,13 @@ type vaultExecuteResult struct {
 // Simulator subscribes to all aegis.orchestrator.* topics and publishes
 // synthetic responses to the corresponding aegis.agents.* topics.
 type Simulator struct {
-	nc   *nats.Conn
-	js   nats.JetStreamContext
-	log  *slog.Logger
-	mu   sync.Mutex
-	subs []*nats.Subscription
+	nc         *nats.Conn
+	js         nats.JetStreamContext
+	log        *slog.Logger
+	mu         sync.Mutex
+	subs       []*nats.Subscription
+	credMu     sync.RWMutex
+	credTokens map[string]string // agentID → permission_token granted
 }
 
 // New connects to NATS at natsURL and returns a Simulator ready to be started.
@@ -132,9 +134,10 @@ func New(natsURL string) (*Simulator, error) {
 	}
 
 	return &Simulator{
-		nc:  nc,
-		js:  js,
-		log: slog.Default(),
+		nc:         nc,
+		js:         js,
+		log:        slog.Default(),
+		credTokens: make(map[string]string),
 	}, nil
 }
 
@@ -261,6 +264,19 @@ func (s *Simulator) PublishTaskInbound(spec types.TaskSpec) error {
 	return nil
 }
 
+// CredentialTokens returns a snapshot of the permission tokens issued by the
+// simulator, keyed by agent_id. Use in load tests to verify that each agent
+// received a distinct token (credential scope bleed check).
+func (s *Simulator) CredentialTokens() map[string]string {
+	s.credMu.RLock()
+	defer s.credMu.RUnlock()
+	out := make(map[string]string, len(s.credTokens))
+	for k, v := range s.credTokens {
+		out[k] = v
+	}
+	return out
+}
+
 // — Handlers ——————————————————————————————————————————————————————————————
 
 func (s *Simulator) handleCredentialRequest(msg *nats.Msg) {
@@ -277,11 +293,16 @@ func (s *Simulator) handleCredentialRequest(msg *nats.Msg) {
 		return
 	}
 
+	token := "sim-token-" + req.AgentID
 	resp := types.CredentialResponse{
 		RequestID:       req.RequestID,
 		Status:          "granted",
-		PermissionToken: "sim-token-" + req.AgentID,
+		PermissionToken: token,
 	}
+	s.credMu.Lock()
+	s.credTokens[req.AgentID] = token
+	s.credMu.Unlock()
+
 	// CorrelationID MUST be set to req.RequestID so the natsBroker can route the
 	// response to the waiting PreAuthorize goroutine via msg.CorrelationID.
 	if err := s.publish("aegis.agents.credential.response", "credential.response", req.RequestID, resp); err != nil {
