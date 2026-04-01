@@ -6,6 +6,22 @@ This document describes the format and requirements for the **IO component**'s i
 
 ## 1. Orchestrator
 
+### 1.0 Transport (default contract)
+
+Until the Orchestrator team publishes a separate ADR, **IO assumes the following** so integration can proceed in parallel:
+
+| Topic | Default | Notes |
+|-------|---------|--------|
+| **Orchestrator → IO push** | **SSE** (`GET …/api/events/{taskId}`) | One stream per selected task. Each `data:` line is JSON. |
+| **Envelope** | `{ type, payload }` | `type` is `status` or `credential_request`. Avoids ambiguity with legacy bare `StatusUpdate` objects (still accepted when parsing). |
+| **IO → Orchestrator chat** | `POST …/api/chat` | Request body: `SendMessageRequest`. Response: **SSE** with `{ chunk }` / `{ done }` lines (same pattern as today’s IO API). |
+| **Orchestrator → IO injection** | `POST …/api/orchestrator/stream-events` | Body = same envelope as SSE `data:`. IO BFF forwards to all subscribers for `payload.taskId`. For production, protect this route (network ACL, mTLS, or shared secret). |
+| **WebSocket** | Optional later | Same JSON frames as SSE `data:` payloads; IO web client can swap transport behind a thin adapter without changing payload shapes. |
+| **Browser auth** | `X-Surface-Key` on **mutating** HTTP calls | `EventSource` cannot set custom headers today; session cookies or a **query token** on the SSE URL are acceptable follow-ups. |
+| **Retries** | Client reconnect with backoff | On SSE error, UI may fall back to **local mock heartbeats** for demo tasks until the stream recovers (IO web behavior). |
+
+**Reference implementation:** `io/api` (Hono) implements the SSE hub, chat stream, and `POST /api/orchestrator/stream-events`. Shared parsing: `parseOrchestratorStreamEvent` in `@cerberos/io-core`.
+
 ### 1.1 Status updates (semantic heartbeat)
 
 The IO component needs **heartbeat-like status updates** from the orchestrator for each task so the UI can show whether a task is being worked on, is awaiting user input, or is done, and when the next user input is expected.
@@ -189,6 +205,7 @@ Each log entry should include at least:
 
 | Interface | Direction | Purpose |
 |-----------|-----------|---------|
+| **Transport (push)** | Orchestrator → IO | Default: SSE per task (`GET /api/events/{taskId}`) with enveloped JSON (`status` / `credential_request`). Inject: `POST /api/orchestrator/stream-events`. |
 | **Status updates** | Orchestrator → IO | Semantic heartbeat per task: status, lastUpdate, expectedNextInputMinutes (scalar, minutes from now); 1–4 s per task, push or poll. |
 | **Chat (send)** | IO → Orchestrator | User message + optional history; taskId required. |
 | **Chat (stream)** | Orchestrator → IO | Streamed assistant reply (chunks); IO accumulates and displays. |
