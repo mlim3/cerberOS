@@ -220,6 +220,8 @@ function App() {
       request: {
         taskId: '13',
         requestId: 'cred-13-dbpwd',
+        userId: '00000000-0000-0000-0000-000000000001',
+        keyName: 'prod_db_admin_password',
         label: 'Production database admin password',
         description: 'Required to execute the migration on the production cluster.',
       },
@@ -615,12 +617,21 @@ function App() {
       const taskId = activeCredentialTaskId
       if (!taskId) return
 
+      const credRequest = credentialRequests[taskId]?.request
+      if (!credRequest) return
+
       setCredentialRequests(prev => ({
         ...prev,
         [taskId]: { ...prev[taskId], status: 'submitting' },
       }))
 
-      const result = await submitCredential(taskId, requestId, _credential)
+      const result = await submitCredential({
+        taskId,
+        requestId,
+        userId: credRequest.userId,
+        keyName: credRequest.keyName,
+        value: _credential,
+      })
 
       if (result.ok) {
         setCredentialRequests(prev => ({
@@ -683,7 +694,7 @@ function App() {
       setShowCredentialModal(false)
       setActiveCredentialTaskId(null)
     },
-    [activeCredentialTaskId, tasks, uiSettings.showActivityLog, addLogEntry]
+    [activeCredentialTaskId, credentialRequests, tasks, uiSettings.showActivityLog, addLogEntry]
   )
 
   const handleCredentialCancel = useCallback(() => {

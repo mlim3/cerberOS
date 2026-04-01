@@ -4,6 +4,8 @@
  *
  * Credentials use a SEPARATE channel (submitCredential) that
  * never touches the chat pipeline, conversation history, or logging.
+ * Credentials flow: IO → IO-API → Memory Vault (encrypted storage).
+ * The Orchestrator never sees plaintext secrets.
  */
 
 export interface OrchestratorMessage {
@@ -11,33 +13,59 @@ export interface OrchestratorMessage {
   content: string
 }
 
+export interface CredentialSubmitParams {
+  /** Task this credential belongs to (for context/ack) */
+  taskId: string
+  /** Correlation ID from the CredentialRequest */
+  requestId: string
+  /** User ID for vault namespace */
+  userId: string
+  /** Key name in vault */
+  keyName: string
+  /** The secret value (IO-API will forward to Memory Vault) */
+  value: string
+}
+
+export interface CredentialSubmitResult {
+  ok: boolean
+  keyName?: string
+  error?: string
+}
+
 /**
  * Submit a credential through the dedicated secure channel.
- * This intentionally does NOT flow through the chat/logging pipeline.
+ * The IO API server proxies this to Memory's vault endpoint.
+ * The Orchestrator NEVER sees the plaintext value.
  */
 export async function submitCredential(
-  taskId: string,
-  requestId: string,
-  credential: string,
-): Promise<{ ok: boolean; error?: string }> {
+  params: CredentialSubmitParams,
+): Promise<CredentialSubmitResult> {
   try {
+    // POST to IO API's credential endpoint, which proxies to Memory Vault
     const res = await fetch('/api/credential', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'X-Surface-Key': 'dev',
       },
-      body: JSON.stringify({ taskId, requestId, credential }),
+      body: JSON.stringify({
+        taskId: params.taskId,
+        requestId: params.requestId,
+        userId: params.userId,
+        keyName: params.keyName,
+        value: params.value,
+      }),
     })
 
     if (!res.ok) {
       return { ok: false, error: `${res.status} ${res.statusText}` }
     }
-    return { ok: true }
+
+    return { ok: true, keyName: params.keyName }
   } catch (err) {
     // In demo mode the endpoint won't exist — simulate success
-    console.log('[credential] Demo mode: simulating credential acceptance')
-    return { ok: true }
+    console.log('[credential] Demo mode: simulating credential storage')
+    return { ok: true, keyName: params.keyName }
   }
 }
 
