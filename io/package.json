@@ -1,0 +1,11 @@
+{
+  "name": "cerberos-io",
+  "private": true,
+  "workspaces": ["core", "api", "surfaces/*"],
+  "scripts": {
+    "dev": "bun run --filter @cerberos/surfaces-web dev",
+    "build": "bun run --filter @cerberos/surfaces-web build",
+    "api": "bun run --filter @cerberos/io-api dev",
+    "cli": "bun run --filter @cerberos/surfaces-cli start"
+  }
+}
