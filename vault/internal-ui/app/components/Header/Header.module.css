@@ -1,0 +1,110 @@
+.header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 24px;
+  height: 56px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--surface-border);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.logo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  background: var(--accent-glow);
+  border: 1px solid rgba(91, 79, 207, 0.25);
+  border-radius: 8px;
+  color: var(--accent);
+}
+
+.brandName {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: -0.3px;
+  font-family: var(--font-inter), Inter, system-ui, sans-serif;
+}
+
+.brandSub {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  background: var(--surface-raised);
+  border: 1px solid var(--surface-border);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.center {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+}
+
+.urlInput {
+  width: 100%;
+  max-width: 360px;
+  background: var(--surface-raised);
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius);
+  padding: 6px 12px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-secondary);
+  outline: none;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.urlInput:focus {
+  border-color: var(--accent-dim);
+  color: var(--text-primary);
+}
+
+.services {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-shrink: 0;
+}
+
+.service {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.dotActive {
+  background: var(--success);
+  box-shadow: 0 0 4px rgba(22, 163, 74, 0.4);
+}
+
+.dotError {
+  background: var(--error);
+  box-shadow: 0 0 4px rgba(220, 38, 38, 0.4);
+}
+
+.serviceLabel {
+  font-size: 13px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}

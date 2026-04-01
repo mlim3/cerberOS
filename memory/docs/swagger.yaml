@@ -1,0 +1,632 @@
+definitions:
+  github_com_mlim3_cerberOS_memory_internal_storage.AgentLogsSchemaTaskExecution:
+    properties:
+      action_type:
+        type: string
+      agent_id:
+        type: string
+      created_at:
+        $ref: '#/definitions/pgtype.Timestamptz'
+      error_context:
+        $ref: '#/definitions/pgtype.Text'
+      id:
+        type: string
+      payload:
+        items:
+          type: integer
+        type: array
+      status:
+        type: string
+      task_id:
+        type: string
+    type: object
+  internal_api.CreateMessageRequest:
+    properties:
+      content:
+        type: string
+      idempotencyKey:
+        type: string
+      role:
+        type: string
+      tokenCount:
+        type: integer
+      userId:
+        type: string
+    type: object
+  internal_api.CreateSystemEventRequest:
+    properties:
+      message:
+        type: string
+      metadata:
+        additionalProperties: {}
+        type: object
+      serviceName:
+        type: string
+      severity:
+        type: string
+      traceId:
+        type: string
+    type: object
+  internal_api.MessageResponse:
+    properties:
+      content:
+        type: string
+      createdAt:
+        type: string
+      messageId:
+        type: string
+      role:
+        type: string
+      sessionId:
+        type: string
+      tokenCount:
+        type: integer
+      userId:
+        type: string
+    type: object
+  internal_api.QueryPersonalInfoRequest:
+    properties:
+      query:
+        type: string
+      topK:
+        type: integer
+    type: object
+  internal_api.SavePersonalInfoRequest:
+    properties:
+      content:
+        type: string
+      extractFacts:
+        type: boolean
+      sourceId:
+        type: string
+      sourceType:
+        type: string
+    type: object
+  internal_api.SystemEventResponse:
+    properties:
+      createdAt:
+        type: string
+      eventId:
+        type: string
+      message:
+        type: string
+      metadata:
+        additionalProperties: {}
+        type: object
+      serviceName:
+        type: string
+      severity:
+        type: string
+      traceId:
+        type: string
+    type: object
+  internal_api.UpdateFactRequest:
+    properties:
+      category:
+        type: string
+      confidence:
+        type: number
+      factKey:
+        type: string
+      factValue: {}
+      version:
+        type: integer
+    type: object
+  pgtype.InfinityModifier:
+    enum:
+    - 1
+    - 0
+    - -1
+    format: int32
+    type: integer
+    x-enum-varnames:
+    - Infinity
+    - Finite
+    - NegativeInfinity
+  pgtype.Text:
+    properties:
+      string:
+        type: string
+      valid:
+        type: boolean
+    type: object
+  pgtype.Timestamptz:
+    properties:
+      infinityModifier:
+        $ref: '#/definitions/pgtype.InfinityModifier'
+      time:
+        type: string
+      valid:
+        type: boolean
+    type: object
+info:
+  contact: {}
+paths:
+  /api/v1/agents/tasks/{taskId}/executions:
+    get:
+      description: Fetches and returns the chronological log of an agent's work for
+        a specific taskId
+      parameters:
+      - description: Task ID
+        in: path
+        name: taskId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: List of task executions
+          schema:
+            items:
+              $ref: '#/definitions/github_com_mlim3_cerberOS_memory_internal_storage.AgentLogsSchemaTaskExecution'
+            type: array
+        "400":
+          description: Bad Request
+        "500":
+          description: Internal Server Error
+      summary: Get task executions
+      tags:
+      - agents
+    post:
+      consumes:
+      - application/json
+      description: Creates a new task execution log for an agent
+      parameters:
+      - description: Task ID
+        in: path
+        name: taskId
+        required: true
+        type: string
+      - description: Task Execution Payload
+        in: body
+        name: request
+        required: true
+        schema:
+          type: object
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+        "400":
+          description: Bad Request
+        "500":
+          description: Internal Server Error
+      summary: Create task execution log
+      tags:
+      - agents
+  /api/v1/chat/{sessionId}/messages:
+    get:
+      description: Retrieves a list of messages for a specific chat session
+      parameters:
+      - description: Session ID
+        in: path
+        name: sessionId
+        required: true
+        type: string
+      - description: 'Limit number of messages (default: 100)'
+        in: query
+        name: limit
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              items:
+                $ref: '#/definitions/internal_api.MessageResponse'
+              type: array
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: List chat messages
+      tags:
+      - chat
+    post:
+      consumes:
+      - application/json
+      description: Creates a new message in a chat session
+      parameters:
+      - description: Session ID
+        in: path
+        name: sessionId
+        required: true
+        type: string
+      - description: Message Payload
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/internal_api.CreateMessageRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/internal_api.MessageResponse'
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Create a new chat message
+      tags:
+      - chat
+  /api/v1/personal_info/{userId}/all:
+    get:
+      description: Retrieves all stored facts and chunks for a user
+      parameters:
+      - description: User ID
+        in: path
+        name: userId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Get all personal information
+      tags:
+      - personal_info
+  /api/v1/personal_info/{userId}/facts/{factId}:
+    put:
+      consumes:
+      - application/json
+      description: Updates a fact for a user with optimistic concurrency control
+      parameters:
+      - description: User ID
+        in: path
+        name: userId
+        required: true
+        type: string
+      - description: Fact ID
+        in: path
+        name: factId
+        required: true
+        type: string
+      - description: Update Fact Payload
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/internal_api.UpdateFactRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties: true
+            type: object
+        "409":
+          description: Conflict
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Update a fact
+      tags:
+      - personal_info
+  /api/v1/personal_info/{userId}/query:
+    post:
+      consumes:
+      - application/json
+      description: Searches for relevant personal information and facts
+      parameters:
+      - description: User ID
+        in: path
+        name: userId
+        required: true
+        type: string
+      - description: Query Request Payload
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/internal_api.QueryPersonalInfoRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Query personal information
+      tags:
+      - personal_info
+  /api/v1/personal_info/{userId}/save:
+    post:
+      consumes:
+      - application/json
+      description: Extracts and saves personal information from text
+      parameters:
+      - description: User ID
+        in: path
+        name: userId
+        required: true
+        type: string
+      - description: Save Request Payload
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/internal_api.SavePersonalInfoRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Save personal information
+      tags:
+      - personal_info
+  /api/v1/system/events:
+    get:
+      description: Retrieves a list of system event logs
+      parameters:
+      - description: 'Limit number of events (default: 100)'
+        in: query
+        name: limit
+        type: integer
+      - description: Filter by service name
+        in: query
+        name: serviceName
+        type: string
+      - description: Filter by severity
+        in: query
+        name: severity
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              items:
+                $ref: '#/definitions/internal_api.SystemEventResponse'
+              type: array
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: List system events
+      tags:
+      - system_events
+    post:
+      consumes:
+      - application/json
+      description: Creates a new system event log entry
+      parameters:
+      - description: Event Payload
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/internal_api.CreateSystemEventRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Create a system event
+      tags:
+      - system_events
+  /api/v1/vault/{userId}/secrets:
+    get:
+      description: Retrieves and decrypts a secret for a user
+      parameters:
+      - description: User ID
+        in: path
+        name: userId
+        required: true
+        type: string
+      - description: Key Name
+        in: query
+        name: key_name
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "400":
+          description: Bad Request
+        "404":
+          description: Not Found
+        "500":
+          description: Internal Server Error
+      security:
+      - ApiKeyAuth: []
+      summary: Get a secret
+      tags:
+      - vault
+    post:
+      consumes:
+      - application/json
+      description: Saves a new encrypted secret for a user
+      parameters:
+      - description: User ID
+        in: path
+        name: userId
+        required: true
+        type: string
+      - description: Secret Payload (key_name, value)
+        in: body
+        name: request
+        required: true
+        schema:
+          additionalProperties:
+            type: string
+          type: object
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+        "400":
+          description: Bad Request
+        "500":
+          description: Internal Server Error
+      security:
+      - ApiKeyAuth: []
+      summary: Create a secret
+      tags:
+      - vault
+  /api/v1/vault/{userId}/secrets/{keyName}:
+    delete:
+      description: Deletes an encrypted secret for a user
+      parameters:
+      - description: User ID
+        in: path
+        name: userId
+        required: true
+        type: string
+      - description: Key Name
+        in: path
+        name: keyName
+        required: true
+        type: string
+      responses:
+        "200":
+          description: OK
+        "400":
+          description: Bad Request
+        "500":
+          description: Internal Server Error
+      security:
+      - ApiKeyAuth: []
+      summary: Delete a secret
+      tags:
+      - vault
+    put:
+      consumes:
+      - application/json
+      description: Updates an encrypted secret for a user
+      parameters:
+      - description: User ID
+        in: path
+        name: userId
+        required: true
+        type: string
+      - description: Key Name
+        in: path
+        name: keyName
+        required: true
+        type: string
+      - description: Secret Payload (value)
+        in: body
+        name: request
+        required: true
+        schema:
+          additionalProperties:
+            type: string
+          type: object
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+        "400":
+          description: Bad Request
+        "500":
+          description: Internal Server Error
+      security:
+      - ApiKeyAuth: []
+      summary: Update a secret
+      tags:
+      - vault
+swagger: "2.0"

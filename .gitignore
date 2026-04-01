@@ -1,5 +1,3 @@
-
-
 # Project
 context/
 
@@ -19,6 +17,7 @@ Desktop.ini
 
 # IDE / editors
 .idea/
+*.iml
 .vscode/
 *.sublime-project
 *.sublime-workspace
@@ -34,6 +33,8 @@ dist/
 dist-ssr/
 out/
 target/
+bin/
+vendor/
 *.o
 *.obj
 *.exe

@@ -1,0 +1,44 @@
+services:
+  vault:
+    build:
+      context: "./engine"
+    ports:
+      - "8000:8000"
+    restart: no
+
+  ui:
+    build:
+      context: "./internal-ui"
+    ports:
+      - "80:80"
+    depends_on:
+      - vault
+    restart: no
+
+  openbao:
+    image: openbao/openbao:latest
+    command: server -config=/openbao/local/openbao.hcl
+    ports:
+      - "8200:8200"
+    environment:
+      BAO_ADDR: http://127.0.0.1:8200
+    volumes:
+      - ./openbao.hcl:/openbao/local/openbao.hcl:ro
+    cap_add:
+      - IPC_LOCK
+    restart: no
+
+  swagger:
+    image: swaggerapi/swagger-ui
+    ports:
+      - "8080:8080"
+    environment:
+      - SWAGGER_JSON=/spec/openapi.yaml
+    volumes:
+      - ./openapi.yaml:/spec/openapi.yaml:ro
+    restart: no
+
+networks:
+  default:
+    name: memory_default
+    external: true
