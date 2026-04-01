@@ -157,24 +157,37 @@ func main() {
 
 	seedSkills(skillMgr, log)
 
+	if cfg.IdleSuspendTimeout > 0 {
+		log.Info("OQ-03/OQ-06 suspension enabled",
+			"idle_suspend_timeout", cfg.IdleSuspendTimeout,
+			"wake_latency_target", cfg.SuspendWakeLatencyTarget,
+		)
+	}
+
 	f, err = factory.New(factory.Config{
-		Registry:      reg,
-		Skills:        skillMgr,
-		Credentials:   credBroker,
-		Lifecycle:     lifecycleMgr,
-		Memory:        memClient,
-		Comms:         commsClient,
-		Log:           log,
-		CrashDetector: crashDetector,
-		MaxRetries:    cfg.MaxAgentRetries,
-		OnSpawn:       func(_ string) { rec.ObserveLifecycleEvent("spawn") },
-		OnTerminate:   func(_ string) { rec.ObserveLifecycleEvent("terminate") },
-		OnRecover:     func(_ string) { rec.ObserveLifecycleEvent("recover") },
+		Registry:                 reg,
+		Skills:                   skillMgr,
+		Credentials:              credBroker,
+		Lifecycle:                lifecycleMgr,
+		Memory:                   memClient,
+		Comms:                    commsClient,
+		Log:                      log,
+		CrashDetector:            crashDetector,
+		MaxRetries:               cfg.MaxAgentRetries,
+		IdleSuspendTimeout:       cfg.IdleSuspendTimeout,
+		SuspendWakeLatencyTarget: cfg.SuspendWakeLatencyTarget,
+		OnSpawn:                  func(_ string) { rec.ObserveLifecycleEvent("spawn") },
+		OnTerminate:              func(_ string) { rec.ObserveLifecycleEvent("terminate") },
+		OnRecover:                func(_ string) { rec.ObserveLifecycleEvent("recover") },
+		OnSuspend:                func(_ string) { rec.ObserveLifecycleEvent("suspend") },
+		OnWake:                   func(_ string) { rec.ObserveLifecycleEvent("wake") },
 	})
 	if err != nil {
 		log.Error("factory init failed", "error", err)
 		os.Exit(1)
 	}
+
+	f.StartIdleSweep(ctx)
 
 	// Subscribe to inbound task assignments from the Orchestrator (at-least-once).
 	// Handlers MUST call msg.Ack() on success or msg.Nak() on failure.

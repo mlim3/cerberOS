@@ -5,6 +5,7 @@
 package factory
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -63,10 +64,20 @@ type Factory struct {
 	inFlightMu       sync.Mutex
 	inFlightRequests map[string][]string // agentID → []requestID with no result yet
 
+	// idleSuspendTimeout is the duration an agent may stay IDLE before the idle
+	// sweep transitions it to SUSPENDED (OQ-03). 0 = disabled (immediate teardown).
+	idleSuspendTimeout time.Duration
+
+	// suspendWakeLatencyTarget is the documented SLA budget for SUSPENDED → ACTIVE.
+	// Informational only — logged at startup and on each wake for observability (OQ-06).
+	suspendWakeLatencyTarget time.Duration
+
 	// Lifecycle hooks (optional; nil-safe).
 	onSpawn     func(agentID string)
 	onTerminate func(agentID string)
 	onRecover   func(agentID string)
+	onSuspend   func(agentID string) // called after each successful IDLE → SUSPENDED transition
+	onWake      func(agentID string) // called after each successful SUSPENDED → ACTIVE wake
 }
 
 // Config carries the dependencies required to construct a Factory.
@@ -83,11 +94,23 @@ type Config struct {
 	MaxRetries    int                      // optional; max crash respawns before permanent termination. Default: 3.
 	TokenCounter  TokenCounter             // optional; when set, enforces the 2,048-token spawn context budget (EDD §13.3)
 
+	// IdleSuspendTimeout is the duration an agent may remain IDLE before being
+	// auto-suspended by the idle sweep (OQ-03). 0 disables auto-suspension and
+	// preserves the current behaviour: agents are TERMINATED on task completion.
+	IdleSuspendTimeout time.Duration
+
+	// SuspendWakeLatencyTarget is the SLA budget for waking a SUSPENDED agent
+	// (SUSPENDED → ACTIVE). Informational only — logged on startup and on wake
+	// for Platform team observability (OQ-06).
+	SuspendWakeLatencyTarget time.Duration
+
 	// Lifecycle event hooks — all optional. Called synchronously on the
 	// provisioning path; implementations must be non-blocking.
 	OnSpawn     func(agentID string) // called after each successful initial agent spawn
 	OnTerminate func(agentID string) // called after each successful agent termination
 	OnRecover   func(agentID string) // called after each successful crash-recovery respawn
+	OnSuspend   func(agentID string) // called after each successful IDLE → SUSPENDED transition
+	OnWake      func(agentID string) // called after each successful SUSPENDED → ACTIVE wake
 }
 
 // New returns a Factory wired with the provided dependencies.
@@ -122,22 +145,26 @@ func New(cfg Config) (*Factory, error) {
 		maxRetries = 3
 	}
 	return &Factory{
-		registry:         cfg.Registry,
-		skills:           cfg.Skills,
-		credentials:      cfg.Credentials,
-		lifecycle:        cfg.Lifecycle,
-		memory:           cfg.Memory,
-		comms:            cfg.Comms,
-		log:              log,
-		emitter:          audit.New(cfg.Comms, log),
-		generateID:       cfg.GenerateID,
-		crashDetector:    cfg.CrashDetector,
-		maxRetries:       maxRetries,
-		tokenCounter:     cfg.TokenCounter,
-		inFlightRequests: make(map[string][]string),
-		onSpawn:          cfg.OnSpawn,
-		onTerminate:      cfg.OnTerminate,
-		onRecover:        cfg.OnRecover,
+		registry:                 cfg.Registry,
+		skills:                   cfg.Skills,
+		credentials:              cfg.Credentials,
+		lifecycle:                cfg.Lifecycle,
+		memory:                   cfg.Memory,
+		comms:                    cfg.Comms,
+		log:                      log,
+		emitter:                  audit.New(cfg.Comms, log),
+		generateID:               cfg.GenerateID,
+		crashDetector:            cfg.CrashDetector,
+		maxRetries:               maxRetries,
+		tokenCounter:             cfg.TokenCounter,
+		inFlightRequests:         make(map[string][]string),
+		idleSuspendTimeout:       cfg.IdleSuspendTimeout,
+		suspendWakeLatencyTarget: cfg.SuspendWakeLatencyTarget,
+		onSpawn:                  cfg.OnSpawn,
+		onTerminate:              cfg.OnTerminate,
+		onRecover:                cfg.OnRecover,
+		onSuspend:                cfg.OnSuspend,
+		onWake:                   cfg.OnWake,
 	}, nil
 }
 
@@ -178,6 +205,7 @@ func (f *Factory) HandleTaskSpec(spec *types.TaskSpec) error {
 		return fmt.Errorf("factory: registry lookup: %w", err)
 	}
 
+	// Priority 1: IDLE agent — instant reuse; VM already running (M3) or entry warm (M2).
 	for _, agent := range candidates {
 		if agent.State == registry.StateIdle {
 			// Publish task.accepted before doing any work (§8.3 deadline: 5s from receipt).
@@ -188,8 +216,19 @@ func (f *Factory) HandleTaskSpec(spec *types.TaskSpec) error {
 		}
 	}
 
-	// No idle match — generate the agent ID now so it can be included in
-	// task.accepted before provisioning begins.
+	// Priority 2: SUSPENDED agent — requires credential re-auth + VM spawn (OQ-03/OQ-06).
+	// Only reachable when IdleSuspendTimeout > 0 (feature enabled); suspended agents
+	// only exist when the idle sweep has been running.
+	for _, agent := range candidates {
+		if agent.State == registry.StateSuspended {
+			if err := f.publishAccepted(agent.AgentID, agentTypeExisting, spec); err != nil {
+				return err
+			}
+			return f.wakeAgent(agent.AgentID, spec)
+		}
+	}
+
+	// Priority 3: No reusable agent — provision a new one.
 	agentID := f.generateID()
 	if err := f.publishAccepted(agentID, agentTypeNew, spec); err != nil {
 		return err
@@ -414,7 +453,7 @@ func (f *Factory) CompleteTask(agentID, sessionID, traceID string, output interf
 		return fmt.Errorf("factory: comms.Publish task.result: %w", err)
 	}
 
-	// Teardown: ACTIVE → IDLE → TERMINATED.
+	// Transition ACTIVE → IDLE.
 	// The state machine does not permit ACTIVE → TERMINATED directly.
 	if err := f.registry.UpdateState(agentID, registry.StateIdle, "task complete"); err != nil {
 		return fmt.Errorf("factory: UpdateState idle: %w", err)
@@ -423,11 +462,15 @@ func (f *Factory) CompleteTask(agentID, sessionID, traceID string, output interf
 		return err
 	}
 
-	// Stop crash monitoring before terminating — clean teardown is not a crash.
+	// Stop crash monitoring — task is done; the agent is no longer executing.
 	if f.crashDetector != nil {
 		f.crashDetector.Unwatch(agentID)
 	}
 
+	// Terminate the VM and revoke credentials. Both steps are always performed
+	// on task completion: the agent process has exited, and credentials must not
+	// persist beyond their owning task. A fresh PreAuthorize is required if the
+	// agent is woken from SUSPENDED for a subsequent task (OQ-03).
 	if err := f.lifecycle.Terminate(agentID); err != nil {
 		return fmt.Errorf("factory: lifecycle.Terminate: %w", err)
 	}
@@ -456,6 +499,19 @@ func (f *Factory) CompleteTask(agentID, sessionID, traceID string, output interf
 		TraceID:   traceID,
 		Details:   map[string]string{"operation_type": "revoke"},
 	})
+
+	// When IdleSuspendTimeout > 0 (OQ-03 enabled), leave the agent in IDLE so
+	// the idle sweep can suspend it. The registry entry is preserved with its
+	// skill domains, allowing reuse without full re-provisioning.
+	// When disabled (default), terminate immediately: current behaviour.
+	if f.idleSuspendTimeout > 0 {
+		f.log.Info("agent left in idle for suspension",
+			"agent_id", agentID,
+			"idle_suspend_timeout", f.idleSuspendTimeout,
+			"trace_id", traceID,
+		)
+		return nil
+	}
 
 	if err := f.registry.UpdateState(agentID, registry.StateTerminated, "VM terminated, credentials revoked"); err != nil {
 		return fmt.Errorf("factory: UpdateState terminated: %w", err)
@@ -872,4 +928,236 @@ func spawnSystemPrompt(skillDomain string) string {
 // name, and the opaque permission token reference (EDD §13.3, PRD FR-FAC-05).
 func buildSpawnContextText(systemPrompt, instructions, entryDomain, permTokenRef string) string {
 	return systemPrompt + "\n" + instructions + "\n" + entryDomain + "\n" + permTokenRef
+}
+
+// ─── OQ-03 / OQ-06 — SUSPENDED state idle timeout and wake-up ───────────────
+
+// StartIdleSweep starts the background goroutine that auto-suspends agents
+// that have been IDLE for longer than IdleSuspendTimeout (OQ-03).
+//
+// Returns immediately when IdleSuspendTimeout is 0 (feature disabled).
+// Runs until ctx is cancelled; safe to call from cmd/aegis-agents/main.go
+// after factory.New.
+func (f *Factory) StartIdleSweep(ctx context.Context) {
+	if f.idleSuspendTimeout <= 0 {
+		return // OQ-03 disabled — no sweep needed
+	}
+	f.log.Info("idle sweep started (OQ-03)",
+		"idle_suspend_timeout", f.idleSuspendTimeout,
+		"wake_latency_target", f.suspendWakeLatencyTarget,
+	)
+	// Sweep interval = 25% of the timeout so agents are never suspended more than
+	// 1.25× the configured timeout late. Minimum 10 s to avoid busy-spinning on
+	// very short (test) timeouts.
+	interval := f.idleSuspendTimeout / 4
+	if interval < 10*time.Second {
+		interval = 10 * time.Second
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				f.log.Info("idle sweep stopped")
+				return
+			case <-ticker.C:
+				f.sweepIdleAgents()
+			}
+		}
+	}()
+}
+
+// sweepIdleAgents scans the registry for agents that have exceeded the idle
+// timeout and suspends each one. Called periodically by StartIdleSweep.
+func (f *Factory) sweepIdleAgents() {
+	agents := f.registry.List()
+	deadline := time.Now().Add(-f.idleSuspendTimeout)
+	for _, agent := range agents {
+		if agent.State != registry.StateIdle {
+			continue
+		}
+		// UpdatedAt is stamped when the agent entered IDLE.
+		if agent.UpdatedAt.After(deadline) {
+			continue // not yet timed out
+		}
+		f.log.Info("idle sweep: suspending agent",
+			"agent_id", agent.AgentID,
+			"idle_since", agent.UpdatedAt,
+			"idle_duration", time.Since(agent.UpdatedAt).Round(time.Second),
+		)
+		if err := f.SuspendAgent(agent.AgentID, ""); err != nil {
+			f.log.Warn("idle sweep: SuspendAgent failed",
+				"agent_id", agent.AgentID,
+				"error", err,
+			)
+		}
+	}
+}
+
+// SuspendAgent transitions an IDLE agent to SUSPENDED, preserving its registry
+// entry for future reuse while freeing it from crash monitoring (OQ-03).
+//
+// The VM is already terminated and credentials already revoked by CompleteTask
+// before the agent entered IDLE — no additional teardown is needed here.
+// A fresh credential.authorize will be issued when the agent is woken for a
+// subsequent task (OQ-06, see wakeAgent).
+//
+// Returns an error if the agent is not IDLE or does not exist.
+func (f *Factory) SuspendAgent(agentID, traceID string) error {
+	agent, err := f.registry.Get(agentID)
+	if err != nil {
+		return fmt.Errorf("factory: SuspendAgent: registry.Get: %w", err)
+	}
+	if agent.State != registry.StateIdle {
+		return fmt.Errorf("factory: SuspendAgent: agent %q is %s (want %s)",
+			agentID, agent.State, registry.StateIdle)
+	}
+
+	if err := f.registry.UpdateState(agentID, registry.StateSuspended, "idle timeout"); err != nil {
+		return fmt.Errorf("factory: SuspendAgent: UpdateState: %w", err)
+	}
+
+	f.log.Info("agent suspended",
+		"agent_id", agentID,
+		"skill_domains", agent.SkillDomains,
+		"trace_id", traceID,
+	)
+	f.emit(types.AuditEvent{
+		EventType: types.AuditEventStateTransition,
+		AgentID:   agentID,
+		TaskID:    agent.AssignedTask,
+		TraceID:   traceID,
+		Details:   map[string]string{"state": registry.StateSuspended, "reason": "idle_timeout"},
+	})
+
+	if f.onSuspend != nil {
+		f.onSuspend(agentID)
+	}
+
+	return f.publishStatus(agentID, agent.AssignedTask, registry.StateSuspended, traceID)
+}
+
+// wakeAgent transitions a SUSPENDED agent to ACTIVE for a new task (OQ-06).
+//
+// Wake sequence:
+//  1. Issue a fresh credential.authorize (prior token expired during suspension).
+//  2. Allocate a new VMID and update the registry.
+//  3. Spawn a new agent process.
+//  4. Transition SUSPENDED → ACTIVE via registry.AssignTask.
+//
+// The measured wake latency is logged against SuspendWakeLatencyTarget so the
+// Platform team can verify the SLA is met in production.
+func (f *Factory) wakeAgent(agentID string, spec *types.TaskSpec) error {
+	wakeStart := time.Now()
+
+	agent, err := f.registry.Get(agentID)
+	if err != nil {
+		return fmt.Errorf("factory: wakeAgent: registry.Get: %w", err)
+	}
+	if agent.State != registry.StateSuspended {
+		return fmt.Errorf("factory: wakeAgent: agent %q is %s (want %s)",
+			agentID, agent.State, registry.StateSuspended)
+	}
+
+	// Step 1: Fresh credential pre-authorization — the prior token expired during
+	// suspension. Required before the new VM can be spawned (EDD §6.2, CLAUDE.md §5).
+	token, err := f.credentials.PreAuthorize(agentID, spec.TaskID, agent.SkillDomains)
+	if err != nil {
+		f.log.Warn("credential.event",
+			"operation_type", "authorize",
+			"agent_id", agentID,
+			"outcome", "failed",
+			"trace_id", spec.TraceID,
+		)
+		if credDenied(err) {
+			f.emit(types.AuditEvent{
+				EventType: types.AuditEventCredentialDeny,
+				AgentID:   agentID,
+				TaskID:    spec.TaskID,
+				TraceID:   spec.TraceID,
+				Details:   map[string]string{"operation_type": "authorize", "error_code": credErrorCode(err)},
+			})
+		}
+		_ = f.registry.UpdateState(agentID, registry.StateTerminated, "credential re-authorization failed on wake")
+		_ = f.publishFailed(agentID, spec.TaskID, credErrorCode(err),
+			"agent credential re-authorization failed on wake from suspended state", spec.TraceID, "wake")
+		return fmt.Errorf("factory: wakeAgent: credentials.PreAuthorize: %w", err)
+	}
+	f.log.Info("credential.event",
+		"operation_type", "authorize",
+		"agent_id", agentID,
+		"outcome", "granted",
+		"trace_id", spec.TraceID,
+	)
+	f.emit(types.AuditEvent{
+		EventType: types.AuditEventCredentialGrant,
+		AgentID:   agentID,
+		TaskID:    spec.TaskID,
+		TraceID:   spec.TraceID,
+		Details: map[string]string{
+			"operation_type": "authorize",
+			"skill_domains":  strings.Join(agent.SkillDomains, ","),
+		},
+	})
+
+	// Step 2: Allocate a new VMID. The old VM was terminated when the agent
+	// completed its last task and entered IDLE. A new VM identity is required.
+	newVMID := f.generateID()
+	if err := f.registry.SetVMID(agentID, newVMID); err != nil {
+		return fmt.Errorf("factory: wakeAgent: registry.SetVMID: %w", err)
+	}
+
+	// Step 3: Spawn new agent process.
+	entryDomain := ""
+	if len(agent.SkillDomains) > 0 {
+		entryDomain = agent.SkillDomains[0]
+	}
+	vmCfg := lifecycle.VMConfig{
+		AgentID:       agentID,
+		VMID:          newVMID,
+		TaskID:        spec.TaskID,
+		SkillDomain:   entryDomain,
+		CredentialPtr: token,
+		Instructions:  spec.Instructions,
+		TraceID:       spec.TraceID,
+		UserContextID: spec.UserContextID,
+	}
+	if err := f.lifecycle.Spawn(vmCfg); err != nil {
+		return fmt.Errorf("factory: wakeAgent: lifecycle.Spawn: %w", err)
+	}
+
+	// Step 4: SUSPENDED → ACTIVE. AssignTask links the task and validates the
+	// state transition — StateSuspended → StateActive is permitted (EDD §6.2).
+	if err := f.registry.AssignTask(agentID, spec.TaskID); err != nil {
+		return fmt.Errorf("factory: wakeAgent: registry.AssignTask: %w", err)
+	}
+
+	// Resume crash monitoring for the freshly-spawned VM.
+	if f.crashDetector != nil {
+		f.crashDetector.Watch(agentID)
+	}
+
+	wakeLatency := time.Since(wakeStart)
+	f.log.Info("agent woken from suspended state",
+		"agent_id", agentID,
+		"task_id", spec.TaskID,
+		"wake_latency", wakeLatency.Round(time.Millisecond),
+		"wake_latency_target", f.suspendWakeLatencyTarget,
+		"within_target", wakeLatency <= f.suspendWakeLatencyTarget,
+		"trace_id", spec.TraceID,
+	)
+	if wakeLatency > f.suspendWakeLatencyTarget && f.suspendWakeLatencyTarget > 0 {
+		f.log.Warn("wake latency exceeded target (OQ-06)",
+			"agent_id", agentID,
+			"wake_latency", wakeLatency.Round(time.Millisecond),
+			"target", f.suspendWakeLatencyTarget,
+		)
+	}
+
+	if f.onWake != nil {
+		f.onWake(agentID)
+	}
+
+	return f.publishStatus(agentID, spec.TaskID, registry.StateActive, spec.TraceID)
 }
