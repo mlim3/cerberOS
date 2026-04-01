@@ -65,7 +65,7 @@ type toolOutcome struct {
 //
 // opts are forwarded to the Anthropic client constructor after the API key
 // option. Tests use this to inject option.WithBaseURL pointing at a mock server.
-func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *VaultExecutor, steerer *Steerer, opts ...option.RequestOption) (string, error) {
+func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *VaultExecutor, steerer *Steerer, as *AgentSpawner, opts ...option.RequestOption) (string, error) {
 	apiKey := os.Getenv("ANTHROPIC_API_KEY")
 	if apiKey == "" {
 		return "", fmt.Errorf("ANTHROPIC_API_KEY environment variable is not set")
@@ -74,7 +74,7 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 	c := anthropic.NewClient(clientOpts...)
 	client := &c
 
-	tools := toolsForDomain(spawnCtx.SkillDomain, ve)
+	tools := toolsForDomain(spawnCtx.SkillDomain, ve, as)
 	toolDefs := toolDefinitions(tools)
 	systemPrompt := buildSystemPrompt(spawnCtx.SkillDomain)
 

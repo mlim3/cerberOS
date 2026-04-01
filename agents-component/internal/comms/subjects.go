@@ -11,6 +11,7 @@ const (
 	SubjectStateWriteAck         = "aegis.agents.state.write.ack"
 	SubjectStateReadResponse     = "aegis.agents.state.read.response"
 	SubjectClarificationResponse = "aegis.agents.clarification.response"
+	SubjectAgentSpawnResponse    = "aegis.agents.agent.spawn.response" // issue #67: child agent result returned to parent
 
 	// At-most-once inbound subjects — use Subscribe, not SubscribeDurable.
 	SubjectCapabilityQuery      = "aegis.agents.capability.query"
@@ -32,6 +33,7 @@ const (
 	SubjectVaultExecuteCancel   = "aegis.orchestrator.vault.execute.cancel"
 	SubjectAuditEvent           = "aegis.orchestrator.audit.event"
 	SubjectError                = "aegis.orchestrator.error"
+	SubjectAgentSpawnRequest    = "aegis.orchestrator.agent.spawn.request" // issue #67: parent agent requests a child agent
 
 	// At-most-once outbound subject — set Transient: true in PublishOptions.
 	SubjectCapabilityResponse = "aegis.orchestrator.capability.response"
@@ -48,6 +50,7 @@ const (
 	ConsumerStateWriteAck         = "agents-state-write-ack"
 	ConsumerStateReadResponse     = "agents-state-read-response"
 	ConsumerClarificationResponse = "agents-clarification-response"
+	ConsumerAgentSpawnResponse    = "agents-agent-spawn-response" // issue #67: child agent result routing
 )
 
 // Steering subjects — OQ-08 mid-task agent steering.
@@ -130,4 +133,6 @@ const (
 	MsgTypeError                 = "error"
 	MsgTypeLifecycleTerminate    = "lifecycle.terminate"
 	MsgTypeDeadLetter            = "dead.letter"
+	MsgTypeAgentSpawnRequest     = "agent.spawn.request"  // issue #67
+	MsgTypeAgentSpawnResponse    = "agent.spawn.response" // issue #67
 )

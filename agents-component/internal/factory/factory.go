@@ -321,6 +321,7 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 		CredentialPtr: token,
 		Instructions:  spec.Instructions,
 		TraceID:       spec.TraceID,
+		UserContextID: spec.UserContextID,
 	}
 	if err := f.lifecycle.Spawn(vmCfg); err != nil {
 		return fmt.Errorf("factory: lifecycle.Spawn: %w", err)

@@ -42,11 +42,13 @@ import (
 // SpawnContext is the initial context injected by the Lifecycle Manager at spawn.
 // It is delivered as JSON via stdin.
 type SpawnContext struct {
-	TaskID          string `json:"task_id"`
-	SkillDomain     string `json:"skill_domain"`
-	PermissionToken string `json:"permission_token"` // opaque credential ref — never a raw credential value
-	Instructions    string `json:"instructions"`
-	TraceID         string `json:"trace_id"`
+	TaskID           string `json:"task_id"`
+	SkillDomain      string `json:"skill_domain"`
+	PermissionToken  string `json:"permission_token"` // opaque credential ref — never a raw credential value
+	Instructions     string `json:"instructions"`
+	RecoveredContext string `json:"recovered_context,omitempty"` // non-empty on respawn
+	TraceID          string `json:"trace_id"`
+	UserContextID    string `json:"user_context_id,omitempty"` // propagated from parent TaskSpec; echoed in all outbound events (issue #67)
 }
 
 // TaskOutput is the result written to stdout when the task completes or fails.
@@ -97,7 +99,16 @@ func main() {
 		defer steerer.Close()
 	}
 
-	result, err := RunLoop(ctx, log, &spawnCtx, ve, steerer)
+	// AgentSpawner enables the agent-as-tool pattern (issue #67, EDD §13.6):
+	// the agent can request a child agent from the Orchestrator by calling the
+	// spawn_agent tool. Returns nil when NATS env vars are absent — spawn_agent
+	// is excluded from the tool registry when as == nil.
+	as := NewAgentSpawner(log, spawnCtx.TaskID, spawnCtx.TraceID, spawnCtx.UserContextID)
+	if as != nil {
+		defer as.Close()
+	}
+
+	result, err := RunLoop(ctx, log, &spawnCtx, ve, steerer, as)
 	if err != nil {
 		writeError(log, spawnCtx.TaskID, spawnCtx.TraceID, err.Error())
 		os.Exit(1)

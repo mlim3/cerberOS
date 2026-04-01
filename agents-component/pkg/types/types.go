@@ -346,7 +346,8 @@ type MetricsEvent struct {
 	ElapsedMS     int    `json:"elapsed_ms,omitempty"`     // set for vault_execute_complete
 }
 
-// Audit event kind constants — the 15 defined event types (EDD §8.8).
+// Audit event kind constants — the 15 defined event types (EDD §8.8) plus
+// agent-as-tool spawn events (issue #67, EDD §13.6).
 // Every AuditEvent.EventType must be one of these values.
 const (
 	AuditEventCredentialGrant      = "credential_grant"
@@ -364,6 +365,8 @@ const (
 	AuditEventTaskAccepted         = "task_accepted"
 	AuditEventTaskCompleted        = "task_completed"
 	AuditEventTaskFailed           = "task_failed"
+	AuditEventAgentSpawnRequest    = "agent_spawn_request"  // parent agent requested a child agent (issue #67)
+	AuditEventAgentSpawnResponse   = "agent_spawn_response" // child agent result returned to parent (issue #67)
 )
 
 // AuditEvent is published to aegis.orchestrator.audit.event (EDD §8.8).
@@ -414,6 +417,42 @@ type SteeringAck struct {
 	TaskID      string `json:"task_id"`
 	Status      string `json:"status"`           // "received" | "applied" | "ignored_stale"
 	Reason      string `json:"reason,omitempty"` // human-readable explanation when status != "applied"
+}
+
+// AgentSpawnRequest is published by an agent process to
+// aegis.orchestrator.agent.spawn.request when it needs a child agent to handle
+// a sub-task (issue #67, EDD §13.6 — agent-as-tool pattern).
+//
+// The Orchestrator creates a new TaskSpec from this request and routes it through
+// the normal aegis.agents.task.inbound flow. When the child agent completes, the
+// Orchestrator publishes an AgentSpawnResponse to aegis.agents.agent.spawn.response.
+//
+// trace_id is propagated unchanged from the parent so both agents share the same
+// distributed trace. user_context_id is echoed from the parent's context.
+// request_id is the correlation key echoed in AgentSpawnResponse.
+type AgentSpawnRequest struct {
+	RequestID      string   `json:"request_id"`                // UUID; correlation key for response routing
+	ParentAgentID  string   `json:"parent_agent_id"`           // agent_id of the requesting (parent) agent
+	ParentTaskID   string   `json:"parent_task_id"`            // task_id the parent is currently executing
+	RequiredSkills []string `json:"required_skills"`           // skill domains required by the child agent; min 1
+	Instructions   string   `json:"instructions"`              // complete, self-contained task description for the child
+	TimeoutSeconds int      `json:"timeout_seconds,omitempty"` // 0 = Orchestrator default; child task deadline
+	TraceID        string   `json:"trace_id"`                  // propagated from parent — parent and child share the same trace
+	UserContextID  string   `json:"user_context_id,omitempty"` // propagated from parent's context; echoed in all child events
+}
+
+// AgentSpawnResponse is received by the parent agent process on
+// aegis.agents.agent.spawn.response when the child agent completes or fails.
+// request_id echoes AgentSpawnRequest.RequestID for correlation routing.
+type AgentSpawnResponse struct {
+	RequestID     string `json:"request_id"`               // echoes AgentSpawnRequest.RequestID
+	ParentAgentID string `json:"parent_agent_id"`          // echoes AgentSpawnRequest.ParentAgentID
+	ChildAgentID  string `json:"child_agent_id,omitempty"` // agent_id assigned to the child; present when spawned
+	Status        string `json:"status"`                   // "success" | "failed"
+	Result        string `json:"result,omitempty"`         // child's final task result (present on "success")
+	ErrorCode     string `json:"error_code,omitempty"`
+	ErrorMessage  string `json:"error_message,omitempty"` // user-safe; must not expose internal paths or vault details
+	TraceID       string `json:"trace_id"`
 }
 
 // DeadLetterEvent is published to aegis.orchestrator.error (MessageType: "dead.letter")

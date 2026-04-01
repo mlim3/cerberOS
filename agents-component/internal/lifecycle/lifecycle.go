@@ -36,6 +36,7 @@ type VMConfig struct {
 	Instructions     string // natural-language task description for the agent
 	RecoveredContext string // non-empty on respawn: serialised CrashSnapshot for checkpoint resume
 	TraceID          string
+	UserContextID    string // propagated from TaskSpec; echoed in all outbound events (issue #67)
 }
 
 // HealthStatus is the result of a health probe for a running agent.
@@ -69,6 +70,7 @@ type agentSpawnContext struct {
 	Instructions     string `json:"instructions"`
 	RecoveredContext string `json:"recovered_context,omitempty"` // non-empty on respawn; contains crash snapshot for checkpoint resume
 	TraceID          string `json:"trace_id"`
+	UserContextID    string `json:"user_context_id,omitempty"` // propagated from TaskSpec; echoed in all child agent events (issue #67)
 }
 
 // processEntry tracks a single running agent-process subprocess.
@@ -111,6 +113,7 @@ func (m *processManager) Spawn(config VMConfig) error {
 		Instructions:     config.Instructions,
 		RecoveredContext: config.RecoveredContext,
 		TraceID:          config.TraceID,
+		UserContextID:    config.UserContextID,
 	})
 	if err != nil {
 		return fmt.Errorf("lifecycle: marshal spawn context: %w", err)

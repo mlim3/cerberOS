@@ -64,9 +64,13 @@ type SkillTool struct {
 
 // toolsForDomain returns the skill tools available for the given domain.
 // ve may be nil (vault execution unavailable) — credentialed tools are omitted.
+// as may be nil (agent spawning unavailable) — spawn_agent tool is omitted.
 // In M3 this will query the Skill Hierarchy Manager via the Orchestrator.
-func toolsForDomain(domain string, ve *VaultExecutor) []SkillTool {
+func toolsForDomain(domain string, ve *VaultExecutor, as *AgentSpawner) []SkillTool {
 	base := []SkillTool{taskCompleteTool()}
+	if as != nil {
+		base = append(base, spawnAgentTool(as))
+	}
 	switch domain {
 	case "web":
 		tools := []SkillTool{webFetchTool()}
@@ -98,6 +102,49 @@ func toolsForDomain(domain string, ve *VaultExecutor) []SkillTool {
 		return base
 	default:
 		return base
+	}
+}
+
+// spawnAgentTool implements the agent-as-tool pattern (issue #67, EDD §13.6).
+// It is included in the tool registry when an AgentSpawner is available (NATS env
+// vars set). The LLM uses this tool to delegate a sub-task to a child agent.
+func spawnAgentTool(as *AgentSpawner) SkillTool {
+	return SkillTool{
+		Label:                   "Spawn Agent",
+		RequiredCredentialTypes: nil, // no vault credential needed — Orchestrator authorises the child
+		TimeoutSeconds:          310, // local deadline = 300s task timeout + 10s routing buffer
+		Definition: anthropic.ToolParam{
+			Name: "spawn_agent",
+			Description: anthropic.String(
+				"Spawn a child agent to handle a self-contained sub-task. " +
+					"The child runs independently and returns its result when done. " +
+					"Use this when the sub-task requires a different skill domain or can run in parallel. " +
+					"Do NOT use for simple operations already available via other tools. " +
+					"Do NOT pass credential values or secrets in instructions."),
+			InputSchema: anthropic.ToolInputSchemaParam{
+				Properties: map[string]interface{}{
+					"instructions": map[string]interface{}{
+						"type":        "string",
+						"description": "Complete, self-contained task description for the child agent. Must include all context needed — the child has no access to this agent's history.",
+					},
+					"required_skills": map[string]interface{}{
+						"type": "array",
+						"items": map[string]interface{}{
+							"type": "string",
+						},
+						"description": "Skill domain names the child agent needs (e.g. [\"web\", \"data\"]). At least one domain is required.",
+					},
+					"timeout_seconds": map[string]interface{}{
+						"type":        "integer",
+						"description": "Maximum seconds to wait for the child agent to complete (default 300, max 300). Omit to use the default.",
+					},
+				},
+				Required: []string{"instructions", "required_skills"},
+			},
+		},
+		Execute: func(ctx context.Context, raw json.RawMessage) ToolResult {
+			return as.Spawn(ctx, raw)
+		},
 	}
 }
 
