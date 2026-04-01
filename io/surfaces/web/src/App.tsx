@@ -1,5 +1,11 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
-import type { Task, ChatMessage, CredentialRequest, CredentialRequestStatus } from '@cerberos/io-core'
+import type {
+  Task,
+  ChatMessage,
+  CredentialRequest,
+  CredentialRequestStatus,
+  OrchestratorStreamEvent,
+} from '@cerberos/io-core'
 import TaskSidebar from './components/TaskSidebar'
 import ChatWindow from './components/ChatWindow'
 import CredentialModal from './components/CredentialModal'
@@ -8,7 +14,13 @@ import SettingsPanel, { defaultUISettings } from './components/SettingsPanel'
 import type { UISettings } from './components/SettingsPanel'
 import ActivityLog from './components/ActivityLog'
 import type { LogEntry } from './components/ActivityLog'
-import { streamOrchestratorReply, submitCredential } from './api/orchestrator'
+import {
+  streamOrchestratorReply,
+  submitCredential,
+  subscribeOrchestratorTaskStream,
+  orchestratorSseEnabled,
+  formatExpectedNextInput,
+} from './api/orchestrator'
 import { createWebSurface, type SurfaceAdapter } from './surface'
 import './App.css'
 
@@ -52,6 +64,16 @@ function timeLabel(): string {
 /** Random 2000–4000 ms in 100 ms increments (mock heartbeat interval). */
 function randomHeartbeatMs(): number {
   return Math.floor(Math.random() * 21) * 100 + 2000
+}
+
+/** When SSE is unavailable, keep the midterm demo credential flow for task 13. */
+const FALLBACK_TASK_13_CREDENTIAL: CredentialRequest = {
+  taskId: '13',
+  requestId: 'cred-13-dbpwd',
+  userId: '00000000-0000-0000-0000-000000000001',
+  keyName: 'prod_db_admin_password',
+  label: 'Production database admin password',
+  description: 'Required to execute the migration on the production cluster.',
 }
 
 const mockTasks: Task[] = [
@@ -211,23 +233,13 @@ function App() {
   const heartbeatIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [taskHeartbeats, setTaskHeartbeats] = useState<Record<string, number>>({})
   const taskNextHeartbeatAtRef = useRef<Record<string, number>>({})
+  /** When false, semantic heartbeats come from Orchestrator SSE; when true, local mock timers (API down or env). */
+  const [useMockHeartbeat, setUseMockHeartbeat] = useState(() => !orchestratorSseEnabled())
 
-  // Credential state — completely separate from the chat pipeline
+  // Credential state — completely separate from the chat pipeline (populated via SSE / orchestrator push)
   const [credentialRequests, setCredentialRequests] = useState<
     Record<string, { request: CredentialRequest; status: CredentialRequestStatus }>
-  >({
-    '13': {
-      request: {
-        taskId: '13',
-        requestId: 'cred-13-dbpwd',
-        userId: '00000000-0000-0000-0000-000000000001',
-        keyName: 'prod_db_admin_password',
-        label: 'Production database admin password',
-        description: 'Required to execute the migration on the production cluster.',
-      },
-      status: 'pending',
-    },
-  })
+  >({})
   const [showCredentialModal, setShowCredentialModal] = useState(false)
   const [activeCredentialTaskId, setActiveCredentialTaskId] = useState<string | null>(null)
 
@@ -250,6 +262,75 @@ function App() {
     document.documentElement.setAttribute('data-font-scale', uiSettings.fontSizeScale)
     document.documentElement.setAttribute('data-high-contrast', uiSettings.highContrast ? 'true' : 'false')
   }, [uiSettings.fontSizeScale, uiSettings.highContrast])
+
+  // Orchestrator → IO push stream (SSE) for status + credential_request
+  useEffect(() => {
+    if (!orchestratorSseEnabled()) return
+
+    let cancelled = false
+
+    const onEvent = (ev: OrchestratorStreamEvent) => {
+      if (cancelled) return
+      if (ev.type === 'status') {
+        const p = ev.payload
+        setTasks(prev =>
+          prev.map(t =>
+            t.id === p.taskId
+              ? {
+                  ...t,
+                  status: p.status,
+                  lastUpdate: p.lastUpdate,
+                  expectedNextInput: formatExpectedNextInput(p.expectedNextInputMinutes),
+                }
+              : t,
+          ),
+        )
+        setTaskHeartbeats(prev => ({ ...prev, [p.taskId]: Date.now() }))
+      } else {
+        setCredentialRequests(prev => {
+          const ex = prev[ev.payload.taskId]
+          if (
+            ex?.status === 'submitted' &&
+            ex.request.requestId === ev.payload.requestId
+          ) {
+            return prev
+          }
+          return {
+            ...prev,
+            [ev.payload.taskId]: { request: ev.payload, status: 'pending' },
+          }
+        })
+      }
+    }
+
+    const unsub = subscribeOrchestratorTaskStream(selectedTaskId, {
+      onOpen: () => {
+        if (!cancelled) setUseMockHeartbeat(false)
+      },
+      onEvent,
+      onTransportError: () => {
+        if (!cancelled) setUseMockHeartbeat(true)
+      },
+    })
+
+    return () => {
+      cancelled = true
+      unsub()
+    }
+  }, [selectedTaskId])
+
+  // Offline / API-down: still show credential demo for task 13 (matches IO API demo push)
+  useEffect(() => {
+    if (!useMockHeartbeat) return
+    if (selectedTaskId !== '13') return
+    setCredentialRequests(prev => {
+      if (prev['13']) return prev
+      return {
+        ...prev,
+        '13': { request: FALLBACK_TASK_13_CREDENTIAL, status: 'pending' },
+      }
+    })
+  }, [useMockHeartbeat, selectedTaskId])
 
   // Refs to hold callbacks for SurfaceAdapter integration
   const tasksRef = useRef(tasks)
@@ -402,6 +483,14 @@ function App() {
       return
     }
 
+    if (!useMockHeartbeat) {
+      if (heartbeatIntervalRef.current) {
+        clearInterval(heartbeatIntervalRef.current)
+        heartbeatIntervalRef.current = null
+      }
+      return
+    }
+
     heartbeatIntervalRef.current = setInterval(() => {
       const workingTasks = tasks.filter(t => t.status === 'working')
       if (workingTasks.length > 0) {
@@ -420,7 +509,7 @@ function App() {
         clearInterval(heartbeatIntervalRef.current)
       }
     }
-  }, [uiSettings.showActivityLog, tasks, addLogEntry])
+  }, [uiSettings.showActivityLog, tasks, addLogEntry, useMockHeartbeat])
 
   const handleCreateTask = () => {
     const newTaskId = nextId()

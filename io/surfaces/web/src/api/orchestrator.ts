@@ -8,9 +8,75 @@
  * The Orchestrator never sees plaintext secrets.
  */
 
+import { parseOrchestratorStreamEvent, type OrchestratorStreamEvent } from '@cerberos/io-core'
+
 export interface OrchestratorMessage {
   role: 'user' | 'assistant'
   content: string
+}
+
+/** Base URL for IO API (no trailing slash). Empty = same origin (Vite proxy in dev). */
+export function getIoApiBase(): string {
+  const v = import.meta.env.VITE_IO_API_BASE as string | undefined
+  return v ? v.replace(/\/$/, '') : ''
+}
+
+export function buildApiUrl(path: string): string {
+  const base = getIoApiBase()
+  const p = path.startsWith('/') ? path : `/${path}`
+  return base ? `${base}${p}` : p
+}
+
+/** When false (`VITE_ORCHESTRATOR_SSE=0` or `false`), UI uses local mock heartbeats only. */
+export function orchestratorSseEnabled(): boolean {
+  const v = import.meta.env.VITE_ORCHESTRATOR_SSE as string | undefined
+  if (v === '0' || v === 'false') return false
+  return true
+}
+
+export function formatExpectedNextInput(minutes: number | null): string {
+  if (minutes === null) return 'Done'
+  if (minutes === 0) return 'Now'
+  return `~${minutes} min`
+}
+
+/**
+ * Subscribe to orchestrator→IO push events for one task (SSE).
+ * Returns unsubscribe. Uses enveloped events per io-interfaces.md §1.0.
+ */
+export function subscribeOrchestratorTaskStream(
+  taskId: string,
+  handlers: {
+    onEvent: (event: OrchestratorStreamEvent) => void
+    onOpen?: () => void
+    onTransportError?: () => void
+  },
+): () => void {
+  const url = buildApiUrl(`/api/events/${encodeURIComponent(taskId)}`)
+  const es = new EventSource(url)
+
+  es.onopen = () => {
+    handlers.onOpen?.()
+  }
+
+  es.onmessage = (e: MessageEvent<string>) => {
+    try {
+      const raw = JSON.parse(e.data) as unknown
+      const parsed = parseOrchestratorStreamEvent(raw)
+      if (parsed) handlers.onEvent(parsed)
+    } catch {
+      /* ignore bad frame */
+    }
+  }
+
+  es.onerror = () => {
+    handlers.onTransportError?.()
+    es.close()
+  }
+
+  return () => {
+    es.close()
+  }
 }
 
 export interface CredentialSubmitParams {
@@ -42,7 +108,7 @@ export async function submitCredential(
 ): Promise<CredentialSubmitResult> {
   try {
     // POST to IO API's credential endpoint, which proxies to Memory Vault
-    const res = await fetch('/api/credential', {
+    const res = await fetch(buildApiUrl('/api/credential'), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -74,7 +140,7 @@ export async function* streamOrchestratorReply(
   userContent: string,
   conversationHistory: OrchestratorMessage[],
 ): AsyncGenerator<string, void, unknown> {
-  const res = await fetch('/api/chat', {
+  const res = await fetch(buildApiUrl('/api/chat'), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

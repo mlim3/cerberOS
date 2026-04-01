@@ -95,6 +95,68 @@ export interface StatusUpdate {
 }
 
 // ============================================
+// Orchestrator → IO push stream (SSE / WebSocket)
+// ============================================
+
+/** One frame on the orchestrator→IO push channel (per task stream). */
+export type OrchestratorStreamEvent =
+  | { type: 'status'; payload: StatusUpdate }
+  | { type: 'credential_request'; payload: CredentialRequest };
+
+function isRecord(x: unknown): x is Record<string, unknown> {
+  return typeof x === 'object' && x !== null;
+}
+
+function isTaskStatus(x: unknown): x is TaskStatus {
+  return x === 'awaiting_feedback' || x === 'working' || x === 'completed';
+}
+
+/** Parse SSE `data:` JSON into a stream event. Supports legacy bare `StatusUpdate` objects. */
+export function parseOrchestratorStreamEvent(raw: unknown): OrchestratorStreamEvent | null {
+  if (!isRecord(raw)) return null;
+
+  if (raw.type === 'status' && isRecord(raw.payload)) {
+    const p = raw.payload;
+    if (
+      typeof p.taskId === 'string' &&
+      isTaskStatus(p.status) &&
+      typeof p.lastUpdate === 'string' &&
+      (p.expectedNextInputMinutes === null || typeof p.expectedNextInputMinutes === 'number')
+    ) {
+      return { type: 'status', payload: p as unknown as StatusUpdate };
+    }
+    return null;
+  }
+
+  if (raw.type === 'credential_request' && isRecord(raw.payload)) {
+    const p = raw.payload;
+    if (
+      typeof p.taskId === 'string' &&
+      typeof p.requestId === 'string' &&
+      typeof p.userId === 'string' &&
+      typeof p.keyName === 'string' &&
+      typeof p.label === 'string' &&
+      (p.description === undefined || typeof p.description === 'string')
+    ) {
+      return { type: 'credential_request', payload: p as unknown as CredentialRequest };
+    }
+    return null;
+  }
+
+  // Legacy: top-level StatusUpdate (no envelope)
+  if (
+    typeof raw.taskId === 'string' &&
+    isTaskStatus(raw.status) &&
+    typeof raw.lastUpdate === 'string' &&
+    (raw.expectedNextInputMinutes === null || typeof raw.expectedNextInputMinutes === 'number')
+  ) {
+    return { type: 'status', payload: raw as unknown as StatusUpdate };
+  }
+
+  return null;
+}
+
+// ============================================
 // Memory / Logging Types
 // ============================================
 
