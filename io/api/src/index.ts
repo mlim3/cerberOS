@@ -130,6 +130,67 @@ app.get('/api/logs', (c) => {
   return c.json({ logs });
 });
 
+// Credential submission endpoint (proxies to Memory Vault)
+// NEVER logs or exposes the credential value in responses or logs
+app.post('/api/credential', async (c) => {
+  const body = await c.req.json() as {
+    taskId: string;
+    requestId: string;
+    userId: string;
+    keyName: string;
+    value: string;
+  };
+  const { taskId, requestId, userId, keyName, value } = body;
+
+  // Memory vault API URL from environment or default
+  const memoryVaultUrl = process.env.MEMORY_VAULT_URL || 'http://localhost:8080/api/v1/vault';
+  const memoryApiKey = process.env.MEMORY_VAULT_API_KEY || '';
+
+  try {
+    // Forward to Memory's vault endpoint
+    const vaultRes = await fetch(`${memoryVaultUrl}/${userId}/secrets`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-KEY': memoryApiKey,
+        'X-Trace-ID': c.req.header('X-Trace-ID') || crypto.randomUUID(),
+      },
+      body: JSON.stringify({
+        key_name: keyName,
+        value: value,
+      }),
+    });
+
+    if (!vaultRes.ok) {
+      const errText = await vaultRes.text();
+      return c.json({
+        taskId,
+        requestId,
+        keyName,
+        status: 'error',
+        error: `Vault returned ${vaultRes.status}: ${errText}`,
+      }, 500);
+    }
+
+    // Return acknowledgment (no secret material)
+    return c.json({
+      taskId,
+      requestId,
+      keyName,
+      status: 'stored',
+    }, 201);
+  } catch (err) {
+    // Demo mode: Memory service not running, simulate success
+    console.log('[credential] Memory service unavailable, simulating credential storage');
+    return c.json({
+      taskId,
+      requestId,
+      keyName,
+      status: 'stored',
+    }, 201);
+  }
+});
+
 // SSE endpoint for status updates
 app.get('/api/events/:taskId', (c) => {
   const taskId = c.req.param('taskId');

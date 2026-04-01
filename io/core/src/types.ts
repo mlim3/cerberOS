@@ -41,6 +41,10 @@ export interface CredentialRequest {
   taskId: string;
   /** Unique per request — used for idempotency and correlation */
   requestId: string;
+  /** User ID for vault storage. Maps to Memory service's vault namespace. */
+  userId: string;
+  /** Key name under which the credential will be stored in vault */
+  keyName: string;
   /** Human-readable label, e.g. "Production DB password" */
   label: string;
   /** Optional explanation shown to the user */
@@ -49,11 +53,21 @@ export interface CredentialRequest {
 
 export type CredentialRequestStatus = 'pending' | 'submitting' | 'submitted' | 'error';
 
-/** IO → Orchestrator: submitted through a SEPARATE endpoint, never the chat channel */
+/** IO → Memory Vault: store the credential directly (Orchestrator never sees it) */
 export interface CredentialSubmission {
+  userId: string;
+  keyName: string;
+  /** The secret value (sent to Memory, encrypted there) */
+  value: string;
+}
+
+/** IO → Orchestrator: lightweight ack after secret is stored (no secret material) */
+export interface CredentialAck {
   taskId: string;
   requestId: string;
-  credential: string;
+  keyName: string;
+  status: 'stored' | 'error';
+  error?: string;
 }
 
 /** A message in the conversation history sent to the API */
