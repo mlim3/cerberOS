@@ -25,11 +25,13 @@ cd "$COMPOSE_DIR"
 echo "Stopping vault services..."
 docker compose down
 
-# Remove saved init credentials
-if [ -f .openbao-init.json ]; then
-  echo "Removing .openbao-init.json..."
-  rm -f .openbao-init.json
-fi
+# Remove saved init credentials and service token
+for f in .openbao-init.json .env; do
+  if [ -f "$f" ]; then
+    echo "Removing $f..."
+    rm -f "$f"
+  fi
+done
 
 # Drop the openbao database from memory's Postgres
 if [ "$KEEP_DB" = false ]; then
