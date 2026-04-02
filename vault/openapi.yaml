@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: cerberOS Vault API
-  version: 2.0.0
+  version: 2.1.0
   description: |
     Vault is a credential broker for cerberOS agents. Agents submit scripts
     with `{{PLACEHOLDER}}` markers; Vault resolves the secrets, injects them
@@ -17,9 +17,28 @@ servers:
 
 tags:
   - name: Vault
-    description: Secret injection endpoints
+    description: Secret injection and CRUD endpoints
+  - name: System
+    description: Operational endpoints
 
 paths:
+  /healthz:
+    get:
+      tags: [System]
+      summary: Liveness check
+      description: |
+        Returns a minimal JSON payload when the service is up. Used by load
+        balancers and orchestrators.
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthzResponse'
+              example:
+                status: ok
+
   /inject:
     post:
       tags: [Vault]
@@ -75,7 +94,7 @@ paths:
             schema:
               $ref: '#/components/schemas/SecretGetRequest'
             example:
-              agent: my-agent
+              agent_id: my-agent
               keys: [API_KEY, DB_PASS]
       responses:
         '200':
@@ -107,7 +126,6 @@ paths:
             schema:
               $ref: '#/components/schemas/SecretPutRequest'
             example:
-              agent: my-agent
               key: MY_SECRET
               value: super-secret
       responses:
@@ -136,7 +154,6 @@ paths:
             schema:
               $ref: '#/components/schemas/SecretDeleteRequest'
             example:
-              agent: my-agent
               key: MY_SECRET
       responses:
         '204':
@@ -188,9 +205,6 @@ components:
     SecretGetRequest:
       type: object
       properties:
-        agent:
-          type: string
-          description: Identifier for the calling agent (used in audit logs)
         keys:
           type: array
           items:
@@ -212,9 +226,6 @@ components:
       type: object
       required: [key, value]
       properties:
-        agent:
-          type: string
-          description: Identifier for the calling agent (used in audit logs)
         key:
           type: string
           description: Secret key
@@ -226,12 +237,18 @@ components:
       type: object
       required: [key]
       properties:
-        agent:
-          type: string
-          description: Identifier for the calling agent (used in audit logs)
         key:
           type: string
           description: Secret key to remove
+
+    HealthzResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          description: Human-readable health status
+          example: ok
+      required: [status]
 
     ErrorResponse:
       type: object
