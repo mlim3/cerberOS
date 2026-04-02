@@ -20,6 +20,7 @@ import (
 	"github.com/cerberOS/agents-component/internal/metrics"
 	"github.com/cerberOS/agents-component/internal/registry"
 	"github.com/cerberOS/agents-component/internal/skills"
+	"github.com/cerberOS/agents-component/internal/skillsconfig"
 	"github.com/cerberOS/agents-component/pkg/types"
 )
 
@@ -155,7 +156,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	seedSkills(skillMgr, log)
+	loadSkills(cfg.SkillsConfigPath, skillMgr, log)
 
 	if cfg.IdleSuspendTimeout > 0 {
 		log.Info("OQ-03/OQ-06 suspension enabled",
@@ -357,38 +358,37 @@ func main() {
 	log.Info("aegis-agents stopped")
 }
 
-// seedSkills registers the initial skill tree. In production this is loaded from
-// the Memory Component or a config file at startup.
-func seedSkills(mgr skills.Manager, log *slog.Logger) {
-	domains := []*types.SkillNode{
-		{
-			Name:  "web",
-			Level: "domain",
-			Children: map[string]*types.SkillNode{
-				"web.fetch": {
-					Name:           "web.fetch",
-					Level:          "command",
-					Label:          "Web Fetch",
-					Description:    "Fetch the content of a URL via HTTP. Use for web pages and APIs without authentication. Do NOT use for authenticated operations.",
-					TimeoutSeconds: 30,
-					Spec: &types.SkillSpec{
-						Parameters: map[string]types.ParameterDef{
-							"url":    {Type: "string", Required: true, Description: "The fully-qualified URL to fetch."},
-							"method": {Type: "string", Required: false, Description: "HTTP method: GET or POST. Defaults to GET."},
-						},
-					},
-				},
-			},
-		},
-		{Name: "data", Level: "domain", Children: map[string]*types.SkillNode{}},
-		{Name: "comms", Level: "domain", Children: map[string]*types.SkillNode{}},
-		{Name: "storage", Level: "domain", Children: map[string]*types.SkillNode{}},
-		{Name: "general", Level: "domain", Children: map[string]*types.SkillNode{}},
+// loadSkills loads skill definitions from configPath (YAML or JSON) and registers
+// every domain with the Skill Hierarchy Manager. When configPath is empty the
+// embedded default_skills.yaml is used automatically.
+//
+// Registration failures are logged as warnings rather than fatal errors so that
+// a single malformed command definition does not prevent all other domains from
+// being served.
+func loadSkills(configPath string, mgr skills.Manager, log *slog.Logger) {
+	cfg, err := skillsconfig.Load(configPath)
+	if err != nil {
+		log.Error("skills config load failed — no skills registered",
+			"path", configPath,
+			"error", err,
+		)
+		return
 	}
 
-	for _, d := range domains {
-		if err := mgr.RegisterDomain(d); err != nil {
-			log.Warn("skill domain registration failed", "domain", d.Name, "error", err)
+	source := "embedded default"
+	if configPath != "" {
+		source = configPath
+	}
+	log.Info("loading skills from config", "source", source, "domains", len(cfg.Domains))
+
+	for _, node := range cfg.ToSkillNodes() {
+		if err := mgr.RegisterDomain(node); err != nil {
+			log.Warn("skill domain registration failed", "domain", node.Name, "error", err)
+		} else {
+			log.Info("skill domain registered",
+				"domain", node.Name,
+				"commands", len(node.Children),
+			)
 		}
 	}
 }

@@ -20,9 +20,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"sync"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/cerberOS/agents-component/internal/skillsconfig"
 	"github.com/cerberOS/agents-component/pkg/types"
 )
 
@@ -62,47 +65,68 @@ type SkillTool struct {
 	Execute func(ctx context.Context, input json.RawMessage) ToolResult
 }
 
+// skillsCfgOnce guards one-time loading of the skills configuration.
+// The config is loaded from AEGIS_SKILLS_CONFIG_PATH, falling back to the
+// embedded default when that variable is unset or empty.
+var (
+	skillsCfgOnce sync.Once
+	skillsCfg     *skillsconfig.Config
+)
+
+// loadSkillsConfig returns the cached skills config, loading it on first call.
+// Returns nil if loading fails — callers treat nil as "no domain commands".
+func loadSkillsConfig() *skillsconfig.Config {
+	skillsCfgOnce.Do(func() {
+		path := os.Getenv("AEGIS_SKILLS_CONFIG_PATH")
+		cfg, err := skillsconfig.Load(path)
+		if err == nil {
+			skillsCfg = cfg
+		}
+	})
+	return skillsCfg
+}
+
 // toolsForDomain returns the skill tools available for the given domain.
+//
+// The tool list is assembled from the skills configuration (loaded once from
+// AEGIS_SKILLS_CONFIG_PATH or the embedded default). Each command is resolved
+// against builtinRegistry to obtain its SkillTool.
+//
 // ve may be nil (vault execution unavailable) — credentialed tools are omitted.
 // as may be nil (agent spawning unavailable) — spawn_agent tool is omitted.
-// In M3 this will query the Skill Hierarchy Manager via the Orchestrator.
+// task_complete is always included as the agent's terminal signal.
 func toolsForDomain(domain string, ve *VaultExecutor, as *AgentSpawner) []SkillTool {
 	base := []SkillTool{taskCompleteTool()}
 	if as != nil {
 		base = append(base, spawnAgentTool(as))
 	}
-	switch domain {
-	case "web":
-		tools := []SkillTool{webFetchTool()}
-		if ve != nil {
-			tools = append(tools, vaultWebFetchTool(ve))
-		}
-		return append(tools, base...)
-	case "data":
-		tools := []SkillTool{dataTransformTool()}
-		if ve != nil {
-			tools = append(tools, vaultDataReadTool(ve), vaultDataWriteTool(ve))
-		}
-		return append(tools, base...)
-	case "comms":
-		tools := []SkillTool{commsFormatTool()}
-		if ve != nil {
-			tools = append(tools, vaultCommsSendTool(ve))
-		}
-		return append(tools, base...)
-	case "storage":
-		// All storage operations require vault credentials — no local-only tools.
-		var tools []SkillTool
-		if ve != nil {
-			tools = append(tools, vaultStorageReadTool(ve), vaultStorageWriteTool(ve), vaultStorageListTool(ve))
-		}
-		return append(tools, base...)
-	case "general":
-		// General reasoning — no external tools; the agent answers using its own knowledge.
-		return base
-	default:
+
+	cfg := loadSkillsConfig()
+	if cfg == nil {
 		return base
 	}
+
+	for _, d := range cfg.Domains {
+		if d.Name != domain {
+			continue
+		}
+		var domainTools []SkillTool
+		for _, cmd := range d.Commands {
+			// Skip vault tools when vault execution is unavailable.
+			if len(cmd.RequiredCredentialTypes) > 0 && ve == nil {
+				continue
+			}
+			factory, ok := builtinRegistry[cmd.Implementation]
+			if !ok {
+				continue // Unknown implementation — skip silently.
+			}
+			domainTools = append(domainTools, factory(ve))
+		}
+		return append(domainTools, base...)
+	}
+
+	// Domain not in config — return base tools only (task_complete + spawn_agent).
+	return base
 }
 
 // spawnAgentTool implements the agent-as-tool pattern (issue #67, EDD §13.6).
