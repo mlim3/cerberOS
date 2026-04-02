@@ -403,7 +403,7 @@ func TestTC005_DeadLetterQueue(t *testing.T) {
 			m.Nak()
 			return
 		}
-		js.Publish(bus.SubjectDLQ, m.Data)
+		_ = bus.ForwardToDLQ(js, m.Subject, m.Data)
 		m.Ack()
 	}, nats.Durable("dlq-consumer"), nats.ManualAck())
 	if err != nil {

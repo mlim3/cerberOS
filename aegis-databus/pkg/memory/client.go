@@ -65,3 +65,11 @@ type MemoryClient interface {
 	GetNKey(ctx context.Context, component string) (string, error)
 	Ping(ctx context.Context) error
 }
+
+// IdempotencyChecker is optional. When implemented, DLQ replay checks WasProcessed before
+// republishing to avoid duplicate processing if upstream already retried and succeeded.
+// MemoryClient implementations may optionally implement this interface.
+type IdempotencyChecker interface {
+	WasProcessed(ctx context.Context, messageID string) (bool, error)
+	RecordProcessed(ctx context.Context, messageID string) error
+}

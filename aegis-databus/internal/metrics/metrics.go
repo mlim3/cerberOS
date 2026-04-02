@@ -5,6 +5,36 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
+// JetStreamStreamMessages mirrors JetStream stream State.Msgs (updated by poller).
+var JetStreamStreamMessages = promauto.NewGaugeVec(prometheus.GaugeOpts{
+	Name: "aegis_databus_jetstream_stream_messages",
+	Help: "JetStream stream message count (from StreamInfo)",
+}, []string{"stream"})
+
+// JetStreamStreamBytes mirrors JetStream stream State.Bytes.
+var JetStreamStreamBytes = promauto.NewGaugeVec(prometheus.GaugeOpts{
+	Name: "aegis_databus_jetstream_stream_bytes",
+	Help: "JetStream stream total bytes (from StreamInfo)",
+}, []string{"stream"})
+
+// JetStreamStreamPending is the sum of NumPending across all consumers on the stream.
+var JetStreamStreamPending = promauto.NewGaugeVec(prometheus.GaugeOpts{
+	Name: "aegis_databus_jetstream_stream_pending",
+	Help: "Sum of pending messages across consumers on the stream",
+}, []string{"stream"})
+
+// JetStreamPollErrors counts failures refreshing JetStream gauges.
+var JetStreamPollErrors = promauto.NewCounter(prometheus.CounterOpts{
+	Name: "aegis_databus_jetstream_poll_errors_total",
+	Help: "Errors while polling JetStream stream/consumer info",
+})
+
+// DLQForwardedTotal counts messages published to the DLQ via ForwardToDLQ.
+var DLQForwardedTotal = promauto.NewCounter(prometheus.CounterOpts{
+	Name: "aegis_databus_dlq_forwarded_total",
+	Help: "Total messages forwarded to the dead-letter queue",
+})
+
 var (
 	// MessagesPublished counts messages published via outbox relay.
 	MessagesPublished = promauto.NewCounter(prometheus.CounterOpts{

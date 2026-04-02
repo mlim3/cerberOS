@@ -34,7 +34,7 @@ func (d *Databus) PublishAsync(subject string, payload []byte, cb func(*nats.Pub
 
 // PublishBatch publishes multiple messages (Interface 1; Data Ingestion Pipeline).
 func (d *Databus) PublishBatch(messages []BatchMessage) BatchResult {
-	return publishBatchImpl(d.JS, messages)
+	return PublishBatch(d.JS, messages)
 }
 
 // PullFetch fetches a batch from a durable consumer (Interface 2; Data Ingestion Pipeline).

@@ -10,6 +10,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"aegis-databus/pkg/telemetry"
 )
 
 const defaultTimeout = 10 * time.Second
@@ -31,7 +33,8 @@ func NewHTTPClient(baseURL string) *HTTPClient {
 	return &HTTPClient{
 		BaseURL: strings.TrimSuffix(baseURL, "/"),
 		HTTPClient: &http.Client{
-			Timeout: defaultTimeout,
+			Timeout:   defaultTimeout,
+			Transport: telemetry.HTTPRoundTripper(http.DefaultTransport),
 		},
 		AuthToken: os.Getenv("AEGIS_MEMORY_TOKEN"),
 	}
@@ -244,6 +247,41 @@ func (h *HTTPClient) GetNKey(ctx context.Context, component string) (string, err
 		return "", ErrNotFound
 	}
 	return seed, nil
+}
+
+// WasProcessed implements IdempotencyChecker via GET /processed/{id} (200 = processed).
+func (h *HTTPClient) WasProcessed(ctx context.Context, messageID string) (bool, error) {
+	if messageID == "" {
+		return false, nil
+	}
+	resp, err := h.do(ctx, http.MethodGet, "/processed/"+url.PathEscape(messageID), nil)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return false, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("memory API: %s", resp.Status)
+	}
+	return true, nil
+}
+
+// RecordProcessed implements IdempotencyChecker via PUT /processed/{id}.
+func (h *HTTPClient) RecordProcessed(ctx context.Context, messageID string) error {
+	if messageID == "" {
+		return nil
+	}
+	resp, err := h.do(ctx, http.MethodPut, "/processed/"+url.PathEscape(messageID), nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("memory API: %s", resp.Status)
+	}
+	return nil
 }
 
 func (h *HTTPClient) Ping(ctx context.Context) error {

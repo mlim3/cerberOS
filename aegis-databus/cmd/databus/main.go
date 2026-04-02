@@ -11,13 +11,16 @@ import (
 	"syscall"
 	"time"
 
+	"aegis-databus/internal/dlq"
 	"aegis-databus/internal/health"
 	httpproxy "aegis-databus/internal/http"
+	"aegis-databus/internal/jetstreammetrics"
 	"aegis-databus/internal/relay"
+	"aegis-databus/pkg/envelope"
 	"aegis-databus/pkg/memory"
 	"aegis-databus/pkg/security"
 	"aegis-databus/pkg/streams"
-	"aegis-databus/pkg/envelope"
+	"aegis-databus/pkg/telemetry"
 
 	"github.com/nats-io/nats.go"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -61,7 +64,20 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	shutdownTel, errInit := telemetry.Init(ctx)
+	if errInit != nil {
+		log.Fatalf("telemetry: %v", errInit)
+	}
+	defer func() {
+		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTel(sctx)
+	}()
+
 	logger := log.New(os.Stdout, "databus ", log.LstdFlags)
+	if telemetry.Enabled() {
+		logger.Println("OpenTelemetry OTLP export enabled")
+	}
 
 	url := os.Getenv("AEGIS_NATS_URL")
 	if url == "" {
@@ -114,13 +130,24 @@ func main() {
 		break
 	}
 
-	// Memory client: HTTP if AEGIS_MEMORY_URL set, else Mock. FallbackClient handles DEGRADED-HOLD.
-	memURL := os.Getenv("AEGIS_MEMORY_URL")
+	// Storage client: Option 1 architecture — DataBus → Orchestrator → Memory.
+	// AEGIS_ORCHESTRATOR_URL: use Orchestrator proxy (simulate full chain with stubs).
+	// AEGIS_MEMORY_URL: legacy direct Memory (for backward compat).
+	// Else: Mock only (local demo).
 	mock := memory.NewMockMemoryClient()
-	// Seed outbox for audit demo — relay will publish these so /audit shows metadata
 	seedAuditDemo(ctx, mock)
 	var mem memory.MemoryClient = mock
-	if memURL != "" {
+	if orchURL := os.Getenv("AEGIS_ORCHESTRATOR_URL"); orchURL != "" {
+		primary := memory.NewOrchestratorStorageClient(orchURL)
+		fc := memory.NewFallbackClient(primary, mock)
+		fc.Init(ctx)
+		if fc.Degraded() {
+			logger.Println("Orchestrator proxy unavailable, DEGRADED-HOLD active (using mock)")
+		}
+		fc.StartHealthCheck(ctx, memoryPingInterval)
+		mem = fc
+		logger.Println("storage via Orchestrator proxy (DataBus → Orchestrator → Memory)")
+	} else if memURL := os.Getenv("AEGIS_MEMORY_URL"); memURL != "" {
 		primary := memory.NewHTTPClient(memURL)
 		fc := memory.NewFallbackClient(primary, mock)
 		fc.Init(ctx)
@@ -140,9 +167,23 @@ func main() {
 	}
 	go relay.Start(ctx)
 
+	// DLQ replay (optional): check-before-republish to avoid duplicates when upstream already succeeded
+	var checker memory.IdempotencyChecker
+	if c, ok := mem.(memory.IdempotencyChecker); ok {
+		checker = c
+	}
+	if os.Getenv("AEGIS_DLQ_REPLAY_ENABLED") == "1" {
+		rh := &dlq.ReplayHandler{JS: js, Checker: checker, Logger: logger, Component: "aegis-databus"}
+		go rh.Start(ctx)
+		logger.Println("DLQ replay handler started (idempotency check before republish)")
+	}
+
 	// Health heartbeat
 	hb := health.NewHeartbeat(nc, logger)
 	go hb.Start(ctx)
+
+	// JetStream gauges for Grafana (stream messages, bytes, pending)
+	go jetstreammetrics.Start(ctx, nc, jetstreammetrics.DefaultPollInterval, logger)
 
 	// HTTP endpoints: /metrics, /healthz, /audit
 	mux := http.NewServeMux()

@@ -66,22 +66,24 @@ func main() {
 		logger.Println("connected with NKey (Zero Trust)")
 	}
 
-	// Each component gets its own connection for distinct Grafana "Traffic by component" names
+	// Each component gets its own connection for distinct Grafana "Traffic by component" names.
+	// acl is the subject ACL id (EDD §9.2); must match security.CheckPublish / CheckSubscribe.
 	components := []struct {
 		name string
-		run  func(context.Context, *nats.Conn, nats.JetStreamContext, *log.Logger)
+		acl  string
+		run  func(context.Context, *nats.Conn, nats.JetStreamContext, *log.Logger, string)
 	}{
-		{"aegis-io", runIO},
-		{"aegis-orchestrator", runOrchestrator},
-		{"aegis-memory", runMemory},
-		{"aegis-vault", runVault},
-		{"aegis-agent", runAgent},
-		{"aegis-monitoring", runMonitoring},
+		{"aegis-io", "io", runIO},
+		{"aegis-orchestrator", "orchestrator", runOrchestrator},
+		{"aegis-memory", "memory", runMemory},
+		{"aegis-vault", "vault", runVault},
+		{"aegis-agent", "agent", runAgent},
+		{"aegis-monitoring", "monitoring", runMonitoring},
 	}
 
 	logger.Println("Starting 6 components: I/O, Orchestrator, Memory, Vault, Agent, Monitoring")
 	for _, c := range components {
-		connName, run := c.name, c.run
+		connName, aclName, run := c.name, c.acl, c.run
 		go func() {
 			nc, js, err := connectAs(ctx, connName, url, logger)
 			if err != nil {
@@ -89,7 +91,7 @@ func main() {
 				return
 			}
 			defer nc.Close()
-			run(ctx, nc, js, logger)
+			run(ctx, nc, js, logger, aclName)
 		}()
 	}
 	time.Sleep(500 * time.Millisecond) // allow connections to establish

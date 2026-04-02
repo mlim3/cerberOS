@@ -7,12 +7,36 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
 
 // exerciseMemoryClient runs the same operations against any MemoryClient.
 // Both MockMemoryClient and HTTPClient (via fake server) must pass.
+func TestMockMemoryClient_IdempotencyChecker(t *testing.T) {
+	ctx := context.Background()
+	m := NewMockMemoryClient()
+	var ic IdempotencyChecker = m
+	done, err := ic.WasProcessed(ctx, "id1")
+	if err != nil || done {
+		t.Errorf("WasProcessed id1: want false,nil got %v,%v", done, err)
+	}
+	if err := ic.RecordProcessed(ctx, "id1"); err != nil {
+		t.Errorf("RecordProcessed: %v", err)
+	}
+	done, err = ic.WasProcessed(ctx, "id1")
+	if err != nil || !done {
+		t.Errorf("WasProcessed id1 after record: want true,nil got %v,%v", done, err)
+	}
+	// Empty ID is no-op
+	_ = ic.RecordProcessed(ctx, "")
+	done, _ = ic.WasProcessed(ctx, "")
+	if done {
+		t.Error("WasProcessed empty id should be false")
+	}
+}
+
 func exerciseMemoryClient(ctx context.Context, t *testing.T, client MemoryClient) {
 	t.Helper()
 
@@ -94,6 +118,21 @@ func exerciseMemoryClient(ctx context.Context, t *testing.T, client MemoryClient
 
 	// NKey (mock may not have any; that's ok)
 	_, _ = client.GetNKey(ctx, "nonexistent") // ErrNotFound expected
+
+	// Idempotency (HTTP + Mock + Orchestrator implement IdempotencyChecker)
+	if ic, ok := client.(IdempotencyChecker); ok {
+		done, err := ic.WasProcessed(ctx, "exercise-idem-1")
+		if err != nil || done {
+			t.Errorf("WasProcessed: want false, got done=%v err=%v", done, err)
+		}
+		if err := ic.RecordProcessed(ctx, "exercise-idem-1"); err != nil {
+			t.Errorf("RecordProcessed: %v", err)
+		}
+		done, err = ic.WasProcessed(ctx, "exercise-idem-1")
+		if err != nil || !done {
+			t.Errorf("WasProcessed after record: want true, got done=%v err=%v", done, err)
+		}
+	}
 
 	// Cleanup
 	if err := client.DeleteStreamConfig(ctx, "TEST_STREAM"); err != nil {
@@ -341,6 +380,37 @@ func fakeMemoryServer() *httptest.Server {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"seed": seed})
 	})
+	mux.HandleFunc("/v1/memory/processed/", func(w http.ResponseWriter, r *http.Request) {
+		rest := strings.TrimPrefix(r.URL.Path, "/v1/memory/processed/")
+		rest = strings.Trim(rest, "/")
+		id, err := url.PathUnescape(rest)
+		if err != nil || id == "" {
+			http.Error(w, "bad path", http.StatusBadRequest)
+			return
+		}
+		var ic IdempotencyChecker = backend
+		switch r.Method {
+		case http.MethodGet:
+			ok, err := ic.WasProcessed(r.Context(), id)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		case http.MethodPut:
+			if err := ic.RecordProcessed(r.Context(), id); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
 
 	return httptest.NewServer(mux)
 }
@@ -353,4 +423,213 @@ func TestHTTPMemoryClient_InterfaceContract(t *testing.T) {
 	client := NewHTTPClient(baseURL)
 	ctx := context.Background()
 	exerciseMemoryClient(ctx, t, client)
+}
+
+// exerciseOrchestratorStorageClient tests the subset of MemoryClient that OrchestratorStorageClient implements.
+// Orchestrator proxy only exposes outbox, audit, ping (Option 1: DataBus → Orchestrator → Memory).
+func exerciseOrchestratorStorageClient(ctx context.Context, t *testing.T, client MemoryClient) {
+	t.Helper()
+
+	if err := client.Ping(ctx); err != nil {
+		t.Errorf("Ping: %v", err)
+		return
+	}
+
+	entry := OutboxEntry{
+		ID: "o1", Subject: "aegis.test.ev", Payload: []byte(`{"id":"1"}`),
+		Status: "pending", AttemptCount: 0, NextRetryAt: time.Now().Add(-time.Second),
+	}
+	if err := client.InsertOutboxEntry(ctx, entry); err != nil {
+		t.Errorf("InsertOutboxEntry: %v", err)
+		return
+	}
+	pending, err := client.FetchPendingOutbox(ctx, 10)
+	if err != nil || len(pending) < 1 {
+		t.Errorf("FetchPendingOutbox: err=%v len=%d", err, len(pending))
+	}
+	if err := client.MarkOutboxSent(ctx, "o1", 100); err != nil {
+		t.Errorf("MarkOutboxSent: %v", err)
+	}
+
+	audit := AuditLogEntry{
+		Subject: "aegis.tasks.routed", Component: "task-router",
+		CorrelationID: "corr-1", SizeBytes: 256,
+	}
+	if err := client.AppendAuditLog(ctx, audit); err != nil {
+		t.Errorf("AppendAuditLog: %v", err)
+	}
+	logs, err := client.ListAuditLogs(ctx, 10)
+	if err != nil || len(logs) < 1 {
+		t.Errorf("ListAuditLogs: err=%v len=%d", err, len(logs))
+	}
+
+	if ic, ok := client.(IdempotencyChecker); ok {
+		done, err := ic.WasProcessed(ctx, "orch-idempotency-1")
+		if err != nil || done {
+			t.Errorf("Orchestrator WasProcessed: want false, got done=%v err=%v", done, err)
+		}
+		if err := ic.RecordProcessed(ctx, "orch-idempotency-1"); err != nil {
+			t.Errorf("Orchestrator RecordProcessed: %v", err)
+		}
+		done, err = ic.WasProcessed(ctx, "orch-idempotency-1")
+		if err != nil || !done {
+			t.Errorf("Orchestrator WasProcessed after: want true, got done=%v err=%v", done, err)
+		}
+	}
+}
+
+// fakeOrchestratorProxyServer implements /v1/databus/* proxy API (forwards to backend MemoryClient).
+func fakeOrchestratorProxyServer() *httptest.Server {
+	backend := NewMockMemoryClient()
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/v1/databus/ping", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if backend.Ping(r.Context()) != nil {
+			http.Error(w, "ping failed", http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/v1/databus/outbox", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var entry OutboxEntry
+		if json.NewDecoder(r.Body).Decode(&entry) != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if backend.InsertOutboxEntry(r.Context(), entry) != nil {
+			http.Error(w, "error", http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+	})
+	mux.HandleFunc("/v1/databus/outbox/pending", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		limit := 10
+		if q := r.URL.Query().Get("limit"); q != "" {
+			if x, err := strconv.Atoi(q); err == nil && x > 0 {
+				limit = x
+			}
+		}
+		list, err := backend.FetchPendingOutbox(r.Context(), limit)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(list)
+	})
+	mux.HandleFunc("/v1/databus/outbox/", func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		rest := r.URL.Path[len("/v1/databus/outbox/"):]
+		if len(rest) < 5 || rest[len(rest)-5:] != "/sent" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		id := rest[:len(rest)-5]
+		id, _ = url.PathUnescape(id)
+		if r.Method != http.MethodPut {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var m map[string]uint64
+		if json.NewDecoder(r.Body).Decode(&m) != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		seq := m["sequence"]
+		if err := backend.MarkOutboxSent(ctx, id, seq); err == ErrNotFound {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		} else if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/v1/databus/audit", func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		if r.Method == http.MethodPost {
+			var entry AuditLogEntry
+			if json.NewDecoder(r.Body).Decode(&entry) != nil {
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			if backend.AppendAuditLog(ctx, entry) != nil {
+				http.Error(w, "error", http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
+			return
+		}
+		if r.Method == http.MethodGet {
+			limit := 10
+			if q := r.URL.Query().Get("limit"); q != "" {
+				if x, err := strconv.Atoi(q); err == nil && x > 0 {
+					limit = x
+				}
+			}
+			list, err := backend.ListAuditLogs(ctx, limit)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(list)
+			return
+		}
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	})
+
+	mux.HandleFunc("/v1/databus/processed/", func(w http.ResponseWriter, r *http.Request) {
+		rest := strings.TrimPrefix(r.URL.Path, "/v1/databus/processed/")
+		id, err := url.PathUnescape(strings.Trim(rest, "/"))
+		if err != nil || id == "" {
+			http.Error(w, "bad path", http.StatusBadRequest)
+			return
+		}
+		var ic IdempotencyChecker = backend
+		switch r.Method {
+		case http.MethodGet:
+			ok, err := ic.WasProcessed(r.Context(), id)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		case http.MethodPut:
+			if err := ic.RecordProcessed(r.Context(), id); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	return httptest.NewServer(mux)
+}
+
+func TestOrchestratorStorageClient_OutboxAuditPing(t *testing.T) {
+	server := fakeOrchestratorProxyServer()
+	defer server.Close()
+
+	client := NewOrchestratorStorageClient(server.URL)
+	ctx := context.Background()
+	exerciseOrchestratorStorageClient(ctx, t, client)
 }

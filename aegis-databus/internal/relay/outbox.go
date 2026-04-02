@@ -11,7 +11,11 @@ import (
 	"aegis-databus/pkg/bus"
 	"aegis-databus/pkg/envelope"
 	"aegis-databus/pkg/memory"
+	"aegis-databus/pkg/telemetry"
+
 	"github.com/nats-io/nats.go"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -66,7 +70,19 @@ func (r *OutboxRelay) Start(ctx context.Context) {
 				return
 			}
 
+			_, span := telemetry.Tracer().Start(ctx, "outbox.relay.publish",
+				trace.WithAttributes(
+					attribute.String("messaging.destination", entry.Subject),
+					attribute.String("outbox.id", entry.ID),
+				))
+			if _, _, tid := envelope.ParseMetadata(entry.Payload); tid != "" {
+				span.SetAttributes(attribute.String("ce.traceid", tid))
+			}
 			ack, err := bus.PublishValidated(r.JS, entry.Subject, entry.Payload)
+			if err != nil {
+				span.RecordError(err)
+			}
+			span.End()
 			if err != nil {
 				r.Logger.Printf("publish failed subject=%s size=%d attempt=%d err=%v",
 					entry.Subject,

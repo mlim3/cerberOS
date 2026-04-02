@@ -240,7 +240,7 @@ func runMonitoring(ctx context.Context, logger *log.Logger, js nats.JetStreamCon
 	var total uint64
 	type subDef struct{ subj, dura string }
 	for _, s := range []subDef{
-		{bus.SubjectTasks, "mon-tasks"}, {bus.SubjectAgents, "mon-agents"}, {bus.SubjectRuntime, "mon-runtime"},
+		{bus.SubjectTasks, "mon-tasks"}, {bus.SubjectAgentsLeafWildcard, "mon-agents"}, {bus.SubjectRuntime, "mon-runtime"},
 		{bus.SubjectVault, "mon-vault"}, {bus.SubjectMemory, "mon-mem"}, {bus.SubjectMonitoring, "mon-mon"},
 	} {
 		sub, err := bus.SubscribeWithACL(js, stubComponentName, s.subj, func(msg *nats.Msg) {

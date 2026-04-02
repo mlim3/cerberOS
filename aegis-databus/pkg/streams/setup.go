@@ -8,12 +8,16 @@ import (
 )
 
 const (
-	maxAgeSevenDays   = 7 * 24 * time.Hour
-	maxBytesTenGB     = 10 * 1024 * 1024 * 1024
-	dedupWindow120Sec = 120 * time.Second
+	maxAgeSevenDays    = 7 * 24 * time.Hour
+	maxAgeTransient    = 1 * time.Hour // EDD §8.1: capability / vault progress (ephemeral interest)
+	maxBytesTenGB      = 10 * 1024 * 1024 * 1024
+	maxBytesTransient  = 256 * 1024 * 1024
+	dedupWindow120Sec  = 120 * time.Second
 )
 
-// EnsureStreams creates or updates the six Aegis JetStream streams (3 replicas for cluster).
+// EnsureStreams creates or updates Aegis JetStream streams (3 replicas for cluster).
+// Durable domains use file storage and 7-day retention; transient domains use memory storage
+// and short retention (EDD §8.1 — at-most-once style, no long-lived replay).
 func EnsureStreams(nc *nats.Conn) error {
 	return EnsureStreamsWithReplicas(nc, 3)
 }
@@ -96,6 +100,26 @@ func EnsureStreamsWithReplicas(nc *nats.Conn, replicas int) error {
 			MaxBytes:   1 * 1024 * 1024 * 1024, // 1 GB
 			Replicas:   replicas,
 			Discard:    nats.DiscardOld,
+			Duplicates: dedupWindow120Sec,
+		},
+		{
+			Name:      bus.StreamCapabilityTransient,
+			Subjects:  []string{bus.SubjectCapability},
+			Storage:   nats.MemoryStorage,
+			MaxAge:    maxAgeTransient,
+			MaxBytes:  maxBytesTransient,
+			Replicas:  replicas,
+			Discard:   nats.DiscardOld,
+			Duplicates: dedupWindow120Sec,
+		},
+		{
+			Name:      bus.StreamVaultProgressTransient,
+			Subjects:  []string{bus.SubjectVaultProgress},
+			Storage:   nats.MemoryStorage,
+			MaxAge:    maxAgeTransient,
+			MaxBytes:  maxBytesTransient,
+			Replicas:  replicas,
+			Discard:   nats.DiscardOld,
 			Duplicates: dedupWindow120Sec,
 		},
 	}

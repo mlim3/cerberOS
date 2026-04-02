@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"aegis-databus/pkg/security"
+	"aegis-databus/pkg/validation"
 
 	"github.com/nats-io/nats.go"
 )
@@ -56,10 +56,19 @@ func SubscribeRequestReply(ctx context.Context, nc *nats.Conn, subject string, h
 }
 
 // SubscribeRequestReplyWithACL subscribes with ACL check (component must be allowed to subscribe).
-// Use for request-reply responders to enforce SR-DB-003 subject-level ACL.
+// Uses validation.Strict. For tests, use SubscribeRequestReplyWithACLValidator with validation.NoOp.
 func SubscribeRequestReplyWithACL(ctx context.Context, nc *nats.Conn, component, subject string, handler RequestReplyHandler) error {
+	return subscribeRequestReplyWithACLImpl(ctx, nc, component, subject, handler, validation.Strict)
+}
+
+// SubscribeRequestReplyWithACLValidator is SubscribeRequestReplyWithACL with explicit validator.
+func SubscribeRequestReplyWithACLValidator(ctx context.Context, nc *nats.Conn, component, subject string, handler RequestReplyHandler, val validation.Validator) error {
+	return subscribeRequestReplyWithACLImpl(ctx, nc, component, subject, handler, val)
+}
+
+func subscribeRequestReplyWithACLImpl(ctx context.Context, nc *nats.Conn, component, subject string, handler RequestReplyHandler, val validation.Validator) error {
 	if component != "" {
-		if err := security.CheckSubscribe(component, subject); err != nil {
+		if err := val.ValidateSubscribe(component, subject); err != nil {
 			return err
 		}
 	}

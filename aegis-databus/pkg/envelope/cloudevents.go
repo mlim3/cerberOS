@@ -25,6 +25,19 @@ type CloudEvent struct {
 	Data            interface{} `json:"data"`
 }
 
+// ExtractID returns the CloudEvents id from JSON payload, or empty string if not found.
+// Used for deduplication (Nats-Msg-Id) and idempotency checks when replaying from DLQ.
+func ExtractID(data []byte) string {
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		return ""
+	}
+	if id, ok := m["id"].(string); ok {
+		return id
+	}
+	return ""
+}
+
 // ParseMetadata extracts source, correlationid, and traceid from CloudEvents JSON.
 // Used for audit logging — never log payload content.
 // traceid supports Design Principle 4 (observable operations / tracing).

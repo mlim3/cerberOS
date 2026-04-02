@@ -13,22 +13,36 @@ import (
 	"github.com/nats-io/nkeys"
 )
 
-// TLSConfigFromEnv returns TLS config when AEGIS_NATS_TLS_CA is set (NFR-DB-006).
+// TLSConfigFromEnv returns TLS config when AEGIS_NATS_TLS_CA and/or client cert env is set (NFR-DB-006, EDD mTLS).
+// Set AEGIS_NATS_TLS_CA to verify the server. Set AEGIS_NATS_TLS_CERT and AEGIS_NATS_TLS_KEY for mutual TLS (client certificate).
 func TLSConfigFromEnv() (*tls.Config, error) {
 	caPath := os.Getenv("AEGIS_NATS_TLS_CA")
-	if caPath == "" {
+	certPath := os.Getenv("AEGIS_NATS_TLS_CERT")
+	keyPath := os.Getenv("AEGIS_NATS_TLS_KEY")
+	if caPath == "" && certPath == "" && keyPath == "" {
 		return nil, nil
 	}
-	caPem, err := os.ReadFile(caPath)
-	if err != nil {
-		return nil, fmt.Errorf("read TLS CA: %w", err)
+	cfg := &tls.Config{MinVersion: tls.VersionTLS13}
+	if caPath != "" {
+		caPem, err := os.ReadFile(caPath)
+		if err != nil {
+			return nil, fmt.Errorf("read TLS CA: %w", err)
+		}
+		pool := x509.NewCertPool()
+		pool.AppendCertsFromPEM(caPem)
+		cfg.RootCAs = pool
 	}
-	pool := x509.NewCertPool()
-	pool.AppendCertsFromPEM(caPem)
-	return &tls.Config{
-		MinVersion: tls.VersionTLS13,
-		RootCAs:    pool,
-	}, nil
+	if certPath != "" || keyPath != "" {
+		if certPath == "" || keyPath == "" {
+			return nil, fmt.Errorf("mTLS: set both AEGIS_NATS_TLS_CERT and AEGIS_NATS_TLS_KEY")
+		}
+		cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+		if err != nil {
+			return nil, fmt.Errorf("load client cert/key: %w", err)
+		}
+		cfg.Certificates = []tls.Certificate{cert}
+	}
+	return cfg, nil
 }
 
 // NewSecureConnection connects to NATS with NKey auth and TLS 1.3.

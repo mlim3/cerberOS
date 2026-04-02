@@ -158,3 +158,21 @@ func (fc *FallbackClient) GetNKey(ctx context.Context, component string) (string
 func (fc *FallbackClient) Ping(ctx context.Context) error {
 	return fc.Client().Ping(ctx)
 }
+
+// WasProcessed implements IdempotencyChecker by delegating to the active client when it supports it.
+func (fc *FallbackClient) WasProcessed(ctx context.Context, messageID string) (bool, error) {
+	c := fc.Client()
+	if ic, ok := c.(IdempotencyChecker); ok {
+		return ic.WasProcessed(ctx, messageID)
+	}
+	return false, nil
+}
+
+// RecordProcessed implements IdempotencyChecker by delegating to the active client when it supports it.
+func (fc *FallbackClient) RecordProcessed(ctx context.Context, messageID string) error {
+	c := fc.Client()
+	if ic, ok := c.(IdempotencyChecker); ok {
+		return ic.RecordProcessed(ctx, messageID)
+	}
+	return nil
+}

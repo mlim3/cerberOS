@@ -87,6 +87,60 @@
       "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "" } },
       "title": "Messages out (by component)",
       "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "short" }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 18 },
+      "id": 7,
+      "targets": [
+        { "expr": "aegis_databus_jetstream_stream_messages", "legendFormat": "{{stream}}", "refId": "A" }
+      ],
+      "title": "JetStream stream messages (DataBus)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "short" }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 18 },
+      "id": 8,
+      "targets": [
+        { "expr": "aegis_databus_jetstream_stream_pending", "legendFormat": "{{stream}}", "refId": "A" }
+      ],
+      "title": "JetStream pending (sum per stream)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } }
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 26 },
+      "id": 9,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [
+        { "expr": "aegis_databus_degraded", "refId": "A" }
+      ],
+      "title": "DataBus degraded (1=DEGRADED-HOLD)",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "short" }
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 26 },
+      "id": 10,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [
+        { "expr": "rate(aegis_databus_dlq_forwarded_total[5m])", "refId": "A" }
+      ],
+      "title": "DLQ forward rate (/s)",
+      "type": "stat"
     }
   ],
   "schemaVersion": 38,

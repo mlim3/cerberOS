@@ -9,6 +9,9 @@ const (
 	StreamMemory     = "AEGIS_MEMORY"
 	StreamMonitoring = "AEGIS_MONITORING"
 	StreamDLQ        = "AEGIS_DLQ"
+	// Transient JetStream domains (memory-backed, short retention) — EDD §8.1 at-most-once style delivery.
+	StreamCapabilityTransient   = "AEGIS_CAPABILITY_TRANSIENT"
+	StreamVaultProgressTransient = "AEGIS_VAULTPROGRESS_TRANSIENT"
 )
 
 const (
@@ -25,6 +28,11 @@ const (
 	SubjectAgentsCreated    = "aegis.agents.created"
 	SubjectAgentsFailed     = "aegis.agents.failed"
 	SubjectAgentsTerminated = "aegis.agents.terminated"
+	// EDD §9.2 / M3: agent-only subscribe; Permission Manager / Vault may publish.
+	SubjectAgentsVaultExecuteResult = "aegis.agents.vault.execute.result"
+	SubjectAgentsCredentialResponse = "aegis.agents.credential.response"
+	// SubjectAgentsLeafWildcard matches single-token agent events (created, failed, …) but not nested paths like SubjectAgentsVaultExecuteResult.
+	SubjectAgentsLeafWildcard = "aegis.agents.*"
 	SubjectRuntimeCompleted = "aegis.runtime.completed"
 	SubjectMemorySaved      = "aegis.memory.saved"
 	SubjectUIAction         = "aegis.ui.action"
@@ -35,4 +43,16 @@ const (
 	SubjectPersonalization     = "aegis.personalization.get"
 	SubjectMonitoringHealth    = "aegis.monitoring.health.>"   // FR-DB-006: high priority
 	SubjectMonitoringResource  = "aegis.monitoring.resource.>" // FR-DB-006: standard priority
+	// At-most-once transient domains (no overlap with aegis.vault.> durable stream — use distinct prefix).
+	SubjectCapability   = "aegis.capability.>"
+	SubjectVaultProgress = "aegis.vaultprogress.>"
 )
+
+// AegisStreamNames lists all JetStream streams created by EnsureStreams (for metrics polling).
+func AegisStreamNames() []string {
+	return []string{
+		StreamTasks, StreamUI, StreamAgents, StreamRuntime,
+		StreamVault, StreamMemory, StreamMonitoring, StreamDLQ,
+		StreamCapabilityTransient, StreamVaultProgressTransient,
+	}
+}

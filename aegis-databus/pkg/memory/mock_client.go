@@ -8,21 +8,23 @@ import (
 )
 
 type MockMemoryClient struct {
-	mu            sync.RWMutex
-	streamConfigs map[string]StreamConfig
-	consumerState map[string]ConsumerState
-	outbox        map[string]OutboxEntry
-	auditLogs     []AuditLogEntry
-	nkeys         map[string]string
+	mu               sync.RWMutex
+	streamConfigs    map[string]StreamConfig
+	consumerState    map[string]ConsumerState
+	outbox           map[string]OutboxEntry
+	auditLogs        []AuditLogEntry
+	nkeys            map[string]string
+	processedMessage map[string]struct{} // for IdempotencyChecker
 }
 
 func NewMockMemoryClient() *MockMemoryClient {
 	return &MockMemoryClient{
-		streamConfigs: make(map[string]StreamConfig),
-		consumerState: make(map[string]ConsumerState),
-		outbox:        make(map[string]OutboxEntry),
-		auditLogs:     make([]AuditLogEntry, 0),
-		nkeys:         make(map[string]string),
+		streamConfigs:    make(map[string]StreamConfig),
+		consumerState:    make(map[string]ConsumerState),
+		outbox:           make(map[string]OutboxEntry),
+		auditLogs:        make([]AuditLogEntry, 0),
+		nkeys:            make(map[string]string),
+		processedMessage: make(map[string]struct{}),
 	}
 }
 
@@ -191,5 +193,29 @@ func (m *MockMemoryClient) GetNKey(ctx context.Context, component string) (strin
 
 func (m *MockMemoryClient) Ping(ctx context.Context) error {
 	_ = ctx
+	return nil
+}
+
+// WasProcessed implements IdempotencyChecker. Returns true if messageID was recorded.
+func (m *MockMemoryClient) WasProcessed(ctx context.Context, messageID string) (bool, error) {
+	_ = ctx
+	if messageID == "" {
+		return false, nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	_, ok := m.processedMessage[messageID]
+	return ok, nil
+}
+
+// RecordProcessed implements IdempotencyChecker. Call after successful consumer processing.
+func (m *MockMemoryClient) RecordProcessed(ctx context.Context, messageID string) error {
+	_ = ctx
+	if messageID == "" {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.processedMessage[messageID] = struct{}{}
 	return nil
 }

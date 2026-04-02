@@ -3,11 +3,15 @@
 BINARY := aegis-databus
 STUBS := aegis-stubs
 DEMO := aegis-demo
+MEMORY_STUB := memory-stub
+ORCHESTRATOR_STUB := orchestrator-stub
 
 build:
 	go build -o bin/$(BINARY) ./cmd/databus
 	go build -o bin/$(STUBS) ./cmd/stubs
 	go build -o bin/$(DEMO) ./cmd/demo
+	go build -o bin/$(MEMORY_STUB) ./cmd/memory-stub
+	go build -o bin/$(ORCHESTRATOR_STUB) ./cmd/orchestrator-stub
 
 # Unit tests (no Docker, fast)
 test-unit:
@@ -37,6 +41,14 @@ demo: build
 
 demo-full: build
 	@./scripts/demo.sh
+
+# Option B: DataBus → Orchestrator → Memory (full chain with stubs)
+# Run in 3 terminals: make demo-orchestrator-memory (stubs), make run (databus), make demo (components)
+demo-orchestrator-memory: build
+	@echo "Starting memory-stub (:8090) and orchestrator-stub (:8091)..."
+	@./bin/$(MEMORY_STUB) & ./bin/$(ORCHESTRATOR_STUB) &
+	@echo "Then run: AEGIS_ORCHESTRATOR_URL=http://localhost:8091 ./bin/$(BINARY)"
+	@echo "And: ./bin/$(DEMO)"
 
 up:
 	docker compose up -d

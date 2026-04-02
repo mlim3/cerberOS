@@ -1,42 +1,114 @@
 package bus
 
 import (
+	"context"
+
 	"aegis-databus/internal/metrics"
 	"aegis-databus/pkg/envelope"
-	"aegis-databus/pkg/security"
+	"aegis-databus/pkg/telemetry"
+	"aegis-databus/pkg/validation"
+
 	"github.com/nats-io/nats.go"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
-// PublishValidated publishes to JetStream only if payload passes CloudEvents validation.
-// Returns error if validation fails or publish fails.
-func PublishValidated(js nats.JetStreamContext, subject string, payload []byte) (*nats.PubAck, error) {
-	if err := envelope.Validate(payload); err != nil {
+// HeaderOriginalSubject is set when forwarding a message to DLQ so replay knows the target subject.
+const HeaderOriginalSubject = "X-Aegis-Original-Subject"
+
+func validatorOrDefault(v []validation.Validator) validation.Validator {
+	if len(v) > 0 {
+		return v[0]
+	}
+	return validation.Strict
+}
+
+// PublishValidated publishes to JetStream only if payload passes validation.
+// When the payload is valid CloudEvents JSON with an "id" field, sets Nats-Msg-Id for JetStream deduplication (120s window).
+// Optional v: use validation.NoOp for tests. Default: validation.Strict.
+func PublishValidated(js nats.JetStreamContext, subject string, payload []byte, v ...validation.Validator) (*nats.PubAck, error) {
+	msgID := envelope.ExtractID(payload)
+	return publishJetStream(js, subject, payload, msgID, v...)
+}
+
+func publishJetStream(js nats.JetStreamContext, subject string, payload []byte, msgID string, v ...validation.Validator) (*nats.PubAck, error) {
+	ctx, span := telemetry.Tracer().Start(context.Background(), "PublishValidated",
+		trace.WithAttributes(
+			attribute.String("messaging.system", "nats"),
+			attribute.String("messaging.destination", subject),
+		))
+	defer span.End()
+	_ = ctx
+
+	val := validatorOrDefault(v)
+	if err := val.ValidatePayload(payload); err != nil {
 		metrics.ValidationErrors.Inc()
+		span.RecordError(err)
 		return nil, err
 	}
-	ack, err := js.Publish(subject, payload)
+	if id := envelope.ExtractID(payload); id != "" {
+		span.SetAttributes(attribute.String("ce.id", id))
+	}
+	if _, _, tid := envelope.ParseMetadata(payload); tid != "" {
+		span.SetAttributes(attribute.String("ce.traceid", tid))
+	}
+	msg := &nats.Msg{Subject: subject, Data: payload}
+	if msg.Header == nil {
+		msg.Header = make(nats.Header)
+	}
+	if msgID != "" {
+		msg.Header.Set("Nats-Msg-Id", msgID)
+	}
+	ack, err := js.PublishMsg(msg)
 	if err != nil {
 		metrics.PublishErrors.Inc()
+		span.RecordError(err)
 		return nil, err
 	}
 	metrics.MessagesPublished.Inc()
 	return ack, nil
 }
 
-// PublishWithACL checks subject ACL for component, validates CloudEvents, then publishes.
-// Use this when components publish to enforce subject-level permissions.
-func PublishWithACL(js nats.JetStreamContext, component, subject string, payload []byte) (*nats.PubAck, error) {
-	if err := security.CheckPublish(component, subject); err != nil {
+// PublishWithACL validates (ACL + CloudEvents) then publishes.
+// Optional v: use validation.NoOp for tests. Default: validation.Strict.
+func PublishWithACL(js nats.JetStreamContext, component, subject string, payload []byte, v ...validation.Validator) (*nats.PubAck, error) {
+	val := validatorOrDefault(v)
+	if err := val.ValidatePublish(component, subject, payload); err != nil {
 		return nil, err
 	}
-	return PublishValidated(js, subject, payload)
+	return PublishValidated(js, subject, payload, v...)
+}
+
+// PublishWithMsgID publishes with an explicit Nats-Msg-Id (e.g. DLQ replay). Overrides ExtractID from payload when msgID is non-empty.
+func PublishWithMsgID(js nats.JetStreamContext, subject string, payload []byte, msgID string, v ...validation.Validator) (*nats.PubAck, error) {
+	if msgID == "" {
+		msgID = envelope.ExtractID(payload)
+	}
+	return publishJetStream(js, subject, payload, msgID, v...)
+}
+
+// ForwardToDLQ publishes a failed message to the DLQ with X-Aegis-Original-Subject header.
+// Consumers should use this when forwarding after MaxDeliver so replay can restore the target subject.
+func ForwardToDLQ(js nats.JetStreamContext, originalSubject string, payload []byte) error {
+	msg := &nats.Msg{Subject: SubjectDLQ, Data: payload}
+	if msg.Header == nil {
+		msg.Header = make(nats.Header)
+	}
+	msg.Header.Set(HeaderOriginalSubject, originalSubject)
+	if id := envelope.ExtractID(payload); id != "" {
+		msg.Header.Set("Nats-Msg-Id", id)
+	}
+	_, err := js.PublishMsg(msg)
+	if err == nil {
+		metrics.DLQForwardedTotal.Inc()
+	}
+	return err
 }
 
 // PublishAsync publishes asynchronously and invokes callback with ack or error (Interface 1).
-// For high-throughput publishers; does not block on network round-trip.
-func PublishAsync(js nats.JetStreamContext, subject string, payload []byte, cb func(*nats.PubAck, error)) {
+func PublishAsync(js nats.JetStreamContext, subject string, payload []byte, cb func(*nats.PubAck, error), v ...validation.Validator) {
 	go func() {
-		ack, err := PublishValidated(js, subject, payload)
+		ack, err := PublishValidated(js, subject, payload, v...)
 		if cb != nil {
 			cb(ack, err)
 		}
@@ -44,9 +116,9 @@ func PublishAsync(js nats.JetStreamContext, subject string, payload []byte, cb f
 }
 
 // PublishAsyncWithACL is PublishAsync with subject ACL check.
-func PublishAsyncWithACL(js nats.JetStreamContext, component, subject string, payload []byte, cb func(*nats.PubAck, error)) {
+func PublishAsyncWithACL(js nats.JetStreamContext, component, subject string, payload []byte, cb func(*nats.PubAck, error), v ...validation.Validator) {
 	go func() {
-		ack, err := PublishWithACL(js, component, subject, payload)
+		ack, err := PublishWithACL(js, component, subject, payload, v...)
 		if cb != nil {
 			cb(ack, err)
 		}
@@ -65,17 +137,16 @@ type BatchResult struct {
 	Err  error // First error encountered, if any (partial_error)
 }
 
-// PublishBatch publishes multiple messages; returns acks and first error if any fail (Interface 1).
-// Used by Data Ingestion Pipeline. Each payload is validated as CloudEvents.
-func PublishBatch(js nats.JetStreamContext, messages []BatchMessage) BatchResult {
-	return publishBatchImpl(js, messages)
+// PublishBatch publishes multiple messages; each payload is validated.
+func PublishBatch(js nats.JetStreamContext, messages []BatchMessage, v ...validation.Validator) BatchResult {
+	return publishBatchImpl(js, messages, validatorOrDefault(v))
 }
 
-func publishBatchImpl(js nats.JetStreamContext, messages []BatchMessage) BatchResult {
+func publishBatchImpl(js nats.JetStreamContext, messages []BatchMessage, val validation.Validator) BatchResult {
 	var acks []*nats.PubAck
 	var firstErr error
 	for _, m := range messages {
-		ack, err := PublishValidated(js, m.Subject, m.Payload)
+		ack, err := PublishValidated(js, m.Subject, m.Payload, val)
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err
