@@ -9,7 +9,9 @@ import (
 	"testing"
 
 	"github.com/mlim3/cerberOS/vault/engine/audit"
-	"github.com/mlim3/cerberOS/vault/engine/handlers"
+	"github.com/mlim3/cerberOS/vault/engine/handlers/common"
+	"github.com/mlim3/cerberOS/vault/engine/handlers/inject"
+	"github.com/mlim3/cerberOS/vault/engine/handlers/secrets"
 	"github.com/mlim3/cerberOS/vault/engine/preprocessor"
 	"github.com/mlim3/cerberOS/vault/engine/secretmanager"
 )
@@ -19,12 +21,11 @@ func newTestHTTPServer(t *testing.T) *httptest.Server {
 	auditor := audit.New(audit.NewJSONExporter(io.Discard))
 	manager := secretmanager.NewMockSecretManager(auditor)
 	pp := preprocessor.New(manager, auditor)
-	h := handlers.New(pp, auditor, manager)
 	mux := http.NewServeMux()
-	mux.HandleFunc("/inject", h.Inject)
-	mux.HandleFunc("/secrets/get", h.SecretGet)
-	mux.HandleFunc("/secrets/put", h.SecretPut)
-	mux.HandleFunc("/secrets/delete", h.SecretDelete)
+	injHandler := &inject.Handler{PP: pp, Auditor: auditor}
+	injHandler.Register(mux)
+	secHandler := &secrets.Handler{Manager: manager, Auditor: auditor}
+	secHandler.Register(mux)
 	return httptest.NewServer(mux)
 }
 
@@ -41,7 +42,7 @@ func TestSecretGet_OK(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status %d", resp.StatusCode)
 	}
-	var out handlers.SecretGetResponse
+	var out secrets.SecretGetResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +64,7 @@ func TestSecretGet_MissingKey_403(t *testing.T) {
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("status %d", resp.StatusCode)
 	}
-	var er handlers.ErrorResponse
+	var er common.ErrorResponse
 	if err := json.NewDecoder(resp.Body).Decode(&er); err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +95,7 @@ func TestSecretPut_ThenGet(t *testing.T) {
 	if getResp.StatusCode != http.StatusOK {
 		t.Fatalf("get status %d", getResp.StatusCode)
 	}
-	var out handlers.SecretGetResponse
+	var out secrets.SecretGetResponse
 	if err := json.NewDecoder(getResp.Body).Decode(&out); err != nil {
 		t.Fatal(err)
 	}

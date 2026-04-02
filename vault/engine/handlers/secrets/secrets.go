@@ -15,6 +15,13 @@ type Handler struct {
 	Auditor *audit.Logger
 }
 
+// Register mounts this handler on mux.
+func (h *Handler) Register(mux *http.ServeMux) {
+	mux.HandleFunc("/secrets/get", h.SecretGet)
+	mux.HandleFunc("/secrets/put", h.SecretPut)
+	mux.HandleFunc("/secrets/delete", h.SecretDelete)
+}
+
 // SecretGet handles POST /secrets/get.
 func (h *Handler) SecretGet(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -29,9 +36,9 @@ func (h *Handler) SecretGet(w http.ResponseWriter, r *http.Request) {
 
 	h.Auditor.Log(audit.Event{
 		Kind:    audit.KindSecretAccess,
-		Agent:   req.Agent,
 		Keys:    req.Keys,
-		Message: "agent requested direct secret read",
+		Agent:   req.AgentID,
+		Message: "direct secret read requested",
 	})
 
 	secrets, err := h.Manager.GetSecrets(req.Keys)
@@ -60,9 +67,8 @@ func (h *Handler) SecretPut(w http.ResponseWriter, r *http.Request) {
 
 	h.Auditor.Log(audit.Event{
 		Kind:    audit.KindSecretAccess,
-		Agent:   req.Agent,
 		Keys:    []string{req.Key},
-		Message: "agent wrote secret",
+		Message: "secret written",
 	})
 
 	if err := h.Manager.PutSecret(r.Context(), req.Key, req.Value); err != nil {
@@ -89,7 +95,6 @@ func (h *Handler) SecretDelete(w http.ResponseWriter, r *http.Request) {
 
 	h.Auditor.Log(audit.Event{
 		Kind:    audit.KindSecretAccess,
-		Agent:   req.Agent,
 		Keys:    []string{req.Key},
 		Message: "agent deleted secret",
 	})

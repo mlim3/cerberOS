@@ -1,4 +1,4 @@
-package secretmanager
+package mock
 
 import (
 	"context"
@@ -7,13 +7,8 @@ import (
 	"github.com/mlim3/cerberOS/vault/engine/audit"
 )
 
-type MockSecretManager struct {
-	secrets map[string]string
-	logger  *audit.Logger
-}
-
 // NewMockSecretManager returns an in-memory SecretManager with seeded dev keys.
-func NewMockSecretManager(logger *audit.Logger) *MockSecretManager {
+func New(logger *audit.Logger) *MockSecretManager {
 	return &MockSecretManager{
 		secrets: map[string]string{
 			"API_KEY":     "mock-api-key-12345",
@@ -52,5 +47,3 @@ func (m *MockSecretManager) DeleteSecret(ctx context.Context, key string) error 
 	delete(m.secrets, key)
 	return nil
 }
-
-var _ SecretManager = (*MockSecretManager)(nil)

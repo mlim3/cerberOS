@@ -10,7 +10,8 @@ import (
 	"testing"
 
 	"github.com/mlim3/cerberOS/vault/engine/audit"
-	"github.com/mlim3/cerberOS/vault/engine/handlers"
+	"github.com/mlim3/cerberOS/vault/engine/handlers/inject"
+	"github.com/mlim3/cerberOS/vault/engine/handlers/secrets"
 	"github.com/mlim3/cerberOS/vault/engine/preprocessor"
 	"github.com/mlim3/cerberOS/vault/engine/secretmanager"
 )
@@ -24,13 +25,12 @@ func NewTestServer(t *testing.T) (*httptest.Server, *secretmanager.MockSecretMan
 	auditor := audit.New(audit.NewJSONExporter(io.Discard), cap)
 	manager := secretmanager.NewMockSecretManager(auditor)
 	pp := preprocessor.New(manager, auditor)
-	h := handlers.New(pp, auditor, manager)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/inject", h.Inject)
-	mux.HandleFunc("/secrets/get", h.SecretGet)
-	mux.HandleFunc("/secrets/put", h.SecretPut)
-	mux.HandleFunc("/secrets/delete", h.SecretDelete)
+	injHandler := &inject.Handler{PP: pp, Auditor: auditor}
+	injHandler.Register(mux)
+	secHandler := &secrets.Handler{Manager: manager, Auditor: auditor}
+	secHandler.Register(mux)
 
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)

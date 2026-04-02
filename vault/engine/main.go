@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"log"
 	"net/http"
 	"os"
@@ -10,7 +9,9 @@ import (
 	"syscall"
 
 	"github.com/mlim3/cerberOS/vault/engine/audit"
-	"github.com/mlim3/cerberOS/vault/engine/handlers"
+	"github.com/mlim3/cerberOS/vault/engine/handlers/healthz"
+	"github.com/mlim3/cerberOS/vault/engine/handlers/inject"
+	"github.com/mlim3/cerberOS/vault/engine/handlers/secrets"
 	"github.com/mlim3/cerberOS/vault/engine/preprocessor"
 	"github.com/mlim3/cerberOS/vault/engine/secretmanager"
 )
@@ -21,17 +22,16 @@ func main() {
 	manager := secretmanager.NewOpenBaoSecretManager(auditor)
 	pp := preprocessor.New(manager, auditor)
 
-	h := handlers.New(pp, auditor, manager)
-
 	mux := http.NewServeMux()
-	mux.HandleFunc("/inject", h.Inject)
-	mux.HandleFunc("/secrets/get", h.SecretGet)
-	mux.HandleFunc("/secrets/put", h.SecretPut)
-	mux.HandleFunc("/secrets/delete", h.SecretDelete)
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]string{"status": "healthy!"})
-	})
+
+	injHandler := &inject.Handler{PP: pp, Auditor: auditor}
+	injHandler.Register(mux)
+
+	secHandler := &secrets.Handler{Manager: manager, Auditor: auditor}
+	secHandler.Register(mux)
+
+	hzHandler := &healthz.Handler{Auditor: auditor}
+	hzHandler.Register(mux)
 
 	httpSrv := &http.Server{Addr: ":8000", Handler: mux}
 

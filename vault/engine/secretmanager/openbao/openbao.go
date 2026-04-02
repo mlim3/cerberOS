@@ -1,4 +1,4 @@
-package secretmanager
+package openbao
 
 import (
 	"context"
@@ -10,17 +10,11 @@ import (
 	"github.com/openbao/openbao/api/v2"
 )
 
-// KvMount is the KV v2 mount path (see vault/setup-openbao.sh: sys/mounts/kv).
-const KvMount = "kv"
-
-type OpenBaoSecretManager struct {
-	client *api.Client
-	logger *audit.Logger
-}
-
+// New returns an OpenBao-backed SecretManager, or nil if the client cannot be created.
+//
 // BAO_ADDR (e.g. http://openbao:8200 from Docker, or http://127.0.0.1:8200 on the host),
-// BAO_TOKEN, TLS vars, etc. Returns nil if the client cannot be created.
-func NewOpenBaoSecretManager(logger *audit.Logger) SecretManager {
+// BAO_TOKEN, TLS vars, etc.
+func New(logger *audit.Logger) *OpenBaoSecretManager {
 	cfg := api.DefaultConfig()
 	if err := cfg.ReadEnvironment(); err != nil {
 		logger.Log(audit.Event{
@@ -30,7 +24,6 @@ func NewOpenBaoSecretManager(logger *audit.Logger) SecretManager {
 		})
 		return nil
 	}
-	// DefaultConfig uses https; local OpenBao (openbao.hcl) has TLS off — prefer http when BAO_ADDR is unset.
 	if os.Getenv("BAO_ADDR") == "" {
 		cfg.Address = "http://127.0.0.1:8200"
 	}
@@ -46,7 +39,7 @@ func NewOpenBaoSecretManager(logger *audit.Logger) SecretManager {
 	return &OpenBaoSecretManager{client: client, logger: logger}
 }
 
-// Resolve reads KV v2 secrets at kv/data/<key>. Each secret's payload should include
+// GetSecrets reads KV v2 secrets at kv/data/<key>. Each secret's payload should include
 // a "value" field, or a field named like the key, or a single key-value pair.
 func (m *OpenBaoSecretManager) GetSecrets(keys []string) (map[string]string, error) {
 	if m == nil || m.client == nil {
@@ -117,5 +110,3 @@ func stringifyAny(v any) string {
 		return fmt.Sprint(t)
 	}
 }
-
-var _ SecretManager = (*OpenBaoSecretManager)(nil)

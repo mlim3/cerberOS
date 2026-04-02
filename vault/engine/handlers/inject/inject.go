@@ -15,6 +15,11 @@ type Handler struct {
 	Auditor *audit.Logger
 }
 
+// Register mounts this handler on mux.
+func (h *Handler) Register(mux *http.ServeMux) {
+	mux.HandleFunc("/inject", h.Inject)
+}
+
 // Inject handles POST /inject.
 func (h *Handler) Inject(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
