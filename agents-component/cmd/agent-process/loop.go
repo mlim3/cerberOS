@@ -207,7 +207,18 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 						cancelAct() // cancel actCtx → all concurrent dispatches interrupted
 					}
 				case <-actCtx.Done():
-					// Act phase ended normally; exit without consuming directive.
+					// actCtx was cancelled (tools finished or parent ctx done).
+					// Race guard: if a directive arrived in steerer.Chan() at the
+					// same moment actCtx fired, Go's select may have chosen Done
+					// over Chan non-deterministically. Do a non-blocking drain so
+					// the directive is never silently dropped.
+					select {
+					case d := <-steerer.Chan():
+						dp := d
+						capturedDirectiveCh <- &dp
+					default:
+						// No directive pending — normal exit.
+					}
 				}
 			}()
 		}
