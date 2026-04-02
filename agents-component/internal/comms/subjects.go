@@ -11,6 +11,7 @@ const (
 	SubjectStateWriteAck         = "aegis.agents.state.write.ack"
 	SubjectStateReadResponse     = "aegis.agents.state.read.response"
 	SubjectClarificationResponse = "aegis.agents.clarification.response"
+	SubjectAgentSpawnResponse    = "aegis.agents.agent.spawn.response" // issue #67: child agent result returned to parent
 
 	// At-most-once inbound subjects — use Subscribe, not SubscribeDurable.
 	SubjectCapabilityQuery      = "aegis.agents.capability.query"
@@ -32,6 +33,7 @@ const (
 	SubjectVaultExecuteCancel   = "aegis.orchestrator.vault.execute.cancel"
 	SubjectAuditEvent           = "aegis.orchestrator.audit.event"
 	SubjectError                = "aegis.orchestrator.error"
+	SubjectAgentSpawnRequest    = "aegis.orchestrator.agent.spawn.request" // issue #67: parent agent requests a child agent
 
 	// At-most-once outbound subject — set Transient: true in PublishOptions.
 	SubjectCapabilityResponse = "aegis.orchestrator.capability.response"
@@ -48,7 +50,34 @@ const (
 	ConsumerStateWriteAck         = "agents-state-write-ack"
 	ConsumerStateReadResponse     = "agents-state-read-response"
 	ConsumerClarificationResponse = "agents-clarification-response"
+	ConsumerAgentSpawnResponse    = "agents-agent-spawn-response" // issue #67: child agent result routing
 )
+
+// Steering subjects — OQ-08 mid-task agent steering.
+//
+// Inbound: the Orchestrator publishes SteeringDirective to the per-agent subject
+// (core NATS, at-most-once). Stale directives that arrive after the relevant Act
+// phase are silently dropped — use SteeringSubject(agentID) to construct.
+//
+// Outbound: the agent process publishes SteeringAck to SubjectSteeringAck
+// (JetStream, at-least-once) so the Orchestrator can confirm application.
+const (
+	// SubjectSteeringPrefix is prepended to an agent_id to form the per-agent
+	// steering subject. Use SteeringSubject(agentID) rather than constructing directly.
+	SubjectSteeringPrefix = "aegis.agents.steering."
+
+	// SubjectSteeringAck is the outbound subject the agent publishes to confirm
+	// a directive was received and applied.
+	SubjectSteeringAck = "aegis.orchestrator.steering.ack"
+
+	MsgTypeSteeringDirective = "steering.directive"
+	MsgTypeSteeringAck       = "steering.ack"
+)
+
+// SteeringSubject returns the per-agent NATS subject for steering directives.
+func SteeringSubject(agentID string) string {
+	return SubjectSteeringPrefix + agentID
+}
 
 // Heartbeat subjects — published directly by agent-process binaries (core NATS,
 // at-most-once). Kept outside the aegis.agents.* and aegis.orchestrator.*
@@ -104,4 +133,6 @@ const (
 	MsgTypeError                 = "error"
 	MsgTypeLifecycleTerminate    = "lifecycle.terminate"
 	MsgTypeDeadLetter            = "dead.letter"
+	MsgTypeAgentSpawnRequest     = "agent.spawn.request"  // issue #67
+	MsgTypeAgentSpawnResponse    = "agent.spawn.response" // issue #67
 )

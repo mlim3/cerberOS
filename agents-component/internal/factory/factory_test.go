@@ -3,6 +3,7 @@ package factory_test
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/cerberOS/agents-component/internal/comms"
 	"github.com/cerberOS/agents-component/internal/credentials"
@@ -325,5 +326,244 @@ func TestCompleteTask(t *testing.T) {
 	}
 	if err := f.CompleteTask("agent-complete-1", "session-1", "trace-2", "result output", nil); err != nil {
 		t.Fatalf("CompleteTask: %v", err)
+	}
+}
+
+// ── OQ-03 / OQ-06 tests ──────────────────────────────────────────────────────
+
+func newSuspendFactory(t *testing.T, id string) (*factory.Factory, registry.Registry) {
+	t.Helper()
+	sm := skills.New()
+	sm.RegisterDomain(webDomain())
+	reg := registry.New()
+
+	f, err := factory.New(factory.Config{
+		Registry:           reg,
+		Skills:             sm,
+		Credentials:        credentials.New(map[string]string{"web.credential": "tok"}),
+		Lifecycle:          lifecycle.New(),
+		Memory:             memory.New(),
+		Comms:              comms.NewStubClient(),
+		GenerateID:         func() string { return id },
+		IdleSuspendTimeout: 30 * time.Minute, // OQ-03 enabled
+	})
+	if err != nil {
+		t.Fatalf("factory.New: %v", err)
+	}
+	return f, reg
+}
+
+// TestCompleteTaskLeavesAgentIdleWhenSuspensionEnabled verifies that, when
+// IdleSuspendTimeout > 0, CompleteTask transitions the agent to IDLE instead of
+// immediately terminating it to TERMINATED.
+func TestCompleteTaskLeavesAgentIdleWhenSuspensionEnabled(t *testing.T) {
+	f, reg := newSuspendFactory(t, "agent-idle-suspend")
+
+	if err := f.HandleTaskSpec(&types.TaskSpec{
+		TaskID:         "task-idle-1",
+		RequiredSkills: []string{"web"},
+		TraceID:        "trace-idle-1",
+	}); err != nil {
+		t.Fatalf("HandleTaskSpec: %v", err)
+	}
+
+	if err := f.CompleteTask("agent-idle-suspend", "session-idle-1", "trace-idle-1", "output", nil); err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+
+	agent, err := reg.Get("agent-idle-suspend")
+	if err != nil {
+		t.Fatalf("registry.Get: %v", err)
+	}
+	if agent.State != registry.StateIdle {
+		t.Errorf("state: want %q, got %q", registry.StateIdle, agent.State)
+	}
+}
+
+// TestSuspendAgentTransitionsSuspended verifies that SuspendAgent moves an IDLE
+// agent to SUSPENDED and that the registry reflects the new state.
+func TestSuspendAgentTransitionsSuspended(t *testing.T) {
+	f, reg := newSuspendFactory(t, "agent-suspend-1")
+
+	if err := f.HandleTaskSpec(&types.TaskSpec{
+		TaskID:         "task-susp-1",
+		RequiredSkills: []string{"web"},
+		TraceID:        "trace-susp-1",
+	}); err != nil {
+		t.Fatalf("HandleTaskSpec: %v", err)
+	}
+
+	// Move agent to IDLE via CompleteTask.
+	if err := f.CompleteTask("agent-suspend-1", "session-susp-1", "trace-susp-1", "result", nil); err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+
+	// SuspendAgent requires IDLE state.
+	if err := f.SuspendAgent("agent-suspend-1", "trace-susp-1"); err != nil {
+		t.Fatalf("SuspendAgent: %v", err)
+	}
+
+	agent, err := reg.Get("agent-suspend-1")
+	if err != nil {
+		t.Fatalf("registry.Get: %v", err)
+	}
+	if agent.State != registry.StateSuspended {
+		t.Errorf("state: want %q, got %q", registry.StateSuspended, agent.State)
+	}
+}
+
+// TestSuspendAgentRejectsNonIdleAgent verifies that SuspendAgent returns an
+// error when called on an agent that is not in the IDLE state.
+func TestSuspendAgentRejectsNonIdleAgent(t *testing.T) {
+	f, _ := newSuspendFactory(t, "agent-suspend-bad")
+
+	if err := f.HandleTaskSpec(&types.TaskSpec{
+		TaskID:         "task-susp-bad",
+		RequiredSkills: []string{"web"},
+		TraceID:        "trace-susp-bad",
+	}); err != nil {
+		t.Fatalf("HandleTaskSpec: %v", err)
+	}
+
+	// Agent is ACTIVE — SuspendAgent should fail.
+	if err := f.SuspendAgent("agent-suspend-bad", "trace-susp-bad"); err == nil {
+		t.Error("expected error suspending an ACTIVE agent, got nil")
+	}
+}
+
+// TestHandleTaskSpecWakesSuspendedAgent verifies the Priority 2 path: when a
+// SUSPENDED agent with matching skills exists, HandleTaskSpec wakes it (issues
+// fresh credentials + spawns new VM) instead of provisioning a new agent.
+func TestHandleTaskSpecWakesSuspendedAgent(t *testing.T) {
+	sm := skills.New()
+	sm.RegisterDomain(webDomain())
+	reg := registry.New()
+	c := comms.NewStubClient()
+
+	var acceptedIDs []string
+	_ = c.Subscribe(comms.SubjectTaskAccepted, func(msg *comms.Message) {
+		var ta types.TaskAccepted
+		if err := json.Unmarshal(msg.Data, &ta); err != nil {
+			return
+		}
+		acceptedIDs = append(acceptedIDs, ta.AgentID)
+	})
+
+	idSeq := []string{"agent-wake-1", "vmid-wake-2"}
+	idx := 0
+	genID := func() string {
+		id := idSeq[idx%len(idSeq)]
+		idx++
+		return id
+	}
+
+	f, err := factory.New(factory.Config{
+		Registry:           reg,
+		Skills:             sm,
+		Credentials:        credentials.New(map[string]string{"web.credential": "tok"}),
+		Lifecycle:          lifecycle.New(),
+		Memory:             memory.New(),
+		Comms:              c,
+		GenerateID:         genID,
+		IdleSuspendTimeout: 30 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("factory.New: %v", err)
+	}
+
+	// Provision → complete → suspend.
+	if err := f.HandleTaskSpec(&types.TaskSpec{
+		TaskID:         "task-wake-1",
+		RequiredSkills: []string{"web"},
+		TraceID:        "trace-wake-1",
+	}); err != nil {
+		t.Fatalf("HandleTaskSpec (provision): %v", err)
+	}
+	if err := f.CompleteTask("agent-wake-1", "session-wake-1", "trace-wake-1", "done", nil); err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+	if err := f.SuspendAgent("agent-wake-1", "trace-wake-1"); err != nil {
+		t.Fatalf("SuspendAgent: %v", err)
+	}
+
+	// A second task should reuse the SUSPENDED agent.
+	if err := f.HandleTaskSpec(&types.TaskSpec{
+		TaskID:         "task-wake-2",
+		RequiredSkills: []string{"web"},
+		TraceID:        "trace-wake-2",
+	}); err != nil {
+		t.Fatalf("HandleTaskSpec (wake): %v", err)
+	}
+
+	agent, err := reg.Get("agent-wake-1")
+	if err != nil {
+		t.Fatalf("registry.Get: %v", err)
+	}
+	if agent.State != registry.StateActive {
+		t.Errorf("state after wake: want %q, got %q", registry.StateActive, agent.State)
+	}
+	if agent.AssignedTask != "task-wake-2" {
+		t.Errorf("AssignedTask: want %q, got %q", "task-wake-2", agent.AssignedTask)
+	}
+}
+
+// TestOnSuspendAndOnWakeHooks verifies that the OnSuspend and OnWake hooks are
+// called when an agent is suspended and subsequently woken.
+func TestOnSuspendAndOnWakeHooks(t *testing.T) {
+	sm := skills.New()
+	sm.RegisterDomain(webDomain())
+	reg := registry.New()
+
+	idSeq := []string{"agent-hooks-1", "vmid-hooks-2"}
+	idx := 0
+	genID := func() string {
+		id := idSeq[idx%len(idSeq)]
+		idx++
+		return id
+	}
+
+	var suspendCalled, wakeCalled bool
+	f, err := factory.New(factory.Config{
+		Registry:           reg,
+		Skills:             sm,
+		Credentials:        credentials.New(map[string]string{"web.credential": "tok"}),
+		Lifecycle:          lifecycle.New(),
+		Memory:             memory.New(),
+		Comms:              comms.NewStubClient(),
+		GenerateID:         genID,
+		IdleSuspendTimeout: 30 * time.Minute,
+		OnSuspend:          func(_ string) { suspendCalled = true },
+		OnWake:             func(_ string) { wakeCalled = true },
+	})
+	if err != nil {
+		t.Fatalf("factory.New: %v", err)
+	}
+
+	if err := f.HandleTaskSpec(&types.TaskSpec{
+		TaskID:         "task-hooks-1",
+		RequiredSkills: []string{"web"},
+		TraceID:        "trace-hooks-1",
+	}); err != nil {
+		t.Fatalf("HandleTaskSpec: %v", err)
+	}
+	if err := f.CompleteTask("agent-hooks-1", "session-hooks-1", "trace-hooks-1", "ok", nil); err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+	if err := f.SuspendAgent("agent-hooks-1", "trace-hooks-1"); err != nil {
+		t.Fatalf("SuspendAgent: %v", err)
+	}
+	if !suspendCalled {
+		t.Error("OnSuspend hook was not called")
+	}
+
+	if err := f.HandleTaskSpec(&types.TaskSpec{
+		TaskID:         "task-hooks-2",
+		RequiredSkills: []string{"web"},
+		TraceID:        "trace-hooks-2",
+	}); err != nil {
+		t.Fatalf("HandleTaskSpec (wake): %v", err)
+	}
+	if !wakeCalled {
+		t.Error("OnWake hook was not called")
 	}
 }

@@ -1,0 +1,48 @@
+services:
+
+  # NATS JetStream — sole external transport for the Agents Component.
+  # --jetstream enables the JetStream engine; streams are created at runtime
+  # by the comms layer. --store_dir persists stream state across restarts.
+  nats:
+    image: nats:2.10-alpine
+    command: ["--jetstream", "--store_dir=/data"]
+    ports:
+      - "4222:4222"   # client connections
+      - "8222:8222"   # HTTP monitoring endpoint (nats.internal/varz etc.)
+    volumes:
+      - nats-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  aegis-agents:
+    build: .
+    depends_on:
+      nats:
+        condition: service_healthy
+    environment:
+      # Required
+      AEGIS_NATS_URL: nats://nats:4222
+      AEGIS_AGENT_PROCESS_PATH: /app/agent-process
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+
+      # Optional — defaults shown; uncomment to override
+      # AEGIS_COMPONENT_ID: aegis-agents
+      # AEGIS_HEARTBEAT_INTERVAL: 5s
+      # AEGIS_HEARTBEAT_MAX_MISSED: 3
+      # AEGIS_MAX_AGENT_RETRIES: 3
+      # AEGIS_METRICS_PORT: 9090
+      # AEGIS_CRED_AUTH_MAX_ATTEMPTS: 3
+      # AEGIS_CRED_AUTH_TIMEOUT: 5s
+      # AEGIS_CRED_AUTH_BASE_BACKOFF: 1s
+      # AEGIS_COMMS_MAX_DELIVER: 5
+      # AEGIS_IDLE_SUSPEND_TIMEOUT: 5m    # 0 = disabled (default)
+      # AEGIS_SUSPEND_WAKE_LATENCY_TARGET: 2s
+    ports:
+      - "9090:9090"   # Prometheus /metrics
+    restart: unless-stopped
+
+volumes:
+  nats-data:

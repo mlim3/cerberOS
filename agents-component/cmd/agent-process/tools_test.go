@@ -10,7 +10,7 @@ import (
 // ---- toolsForDomain tests ----
 
 func TestToolsForDomain_Web(t *testing.T) {
-	tools := toolsForDomain("web", nil)
+	tools := toolsForDomain("web", nil, nil)
 	names := toolNames(tools)
 	mustContain(t, names, "web_fetch")
 	mustContain(t, names, "task_complete")
@@ -18,7 +18,7 @@ func TestToolsForDomain_Web(t *testing.T) {
 }
 
 func TestToolsForDomain_Data(t *testing.T) {
-	tools := toolsForDomain("data", nil)
+	tools := toolsForDomain("data", nil, nil)
 	names := toolNames(tools)
 	mustContain(t, names, "data_transform")
 	mustContain(t, names, "task_complete")
@@ -27,7 +27,7 @@ func TestToolsForDomain_Data(t *testing.T) {
 }
 
 func TestToolsForDomain_Comms(t *testing.T) {
-	tools := toolsForDomain("comms", nil)
+	tools := toolsForDomain("comms", nil, nil)
 	names := toolNames(tools)
 	mustContain(t, names, "comms_format")
 	mustContain(t, names, "task_complete")
@@ -36,7 +36,7 @@ func TestToolsForDomain_Comms(t *testing.T) {
 
 func TestToolsForDomain_Storage(t *testing.T) {
 	// storage has no local tools; with nil ve only task_complete is present.
-	tools := toolsForDomain("storage", nil)
+	tools := toolsForDomain("storage", nil, nil)
 	names := toolNames(tools)
 	mustContain(t, names, "task_complete")
 	mustNotContain(t, names, "vault_storage_read")
@@ -45,7 +45,7 @@ func TestToolsForDomain_Storage(t *testing.T) {
 }
 
 func TestToolsForDomain_Unknown(t *testing.T) {
-	tools := toolsForDomain("unknown-domain", nil)
+	tools := toolsForDomain("unknown-domain", nil, nil)
 	names := toolNames(tools)
 	mustContain(t, names, "task_complete")
 	if len(tools) != 1 {

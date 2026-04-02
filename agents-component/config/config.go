@@ -64,6 +64,34 @@ type Config struct {
 	// MessageType "dead.letter" so the Orchestrator can detect stalled tasks.
 	// Env: AEGIS_COMMS_MAX_DELIVER (positive integer). Default: 5.
 	CommsMaxDeliver int
+
+	// IdleSuspendTimeout is how long an agent may remain in the IDLE state before
+	// the idle sweep transitions it to SUSPENDED, freeing VM resources while
+	// preserving the agent's registry entry for future reuse (OQ-03).
+	//
+	// When a task arrives for a SUSPENDED agent the factory issues a fresh
+	// credential.authorize and spawns a new microVM (see SuspendWakeLatencyTarget).
+	//
+	// Set to 0 (default) to disable auto-suspension: all agents are TERMINATED
+	// immediately after task completion (current behaviour).
+	//
+	// Env: AEGIS_IDLE_SUSPEND_TIMEOUT (Go duration, e.g. "5m"). Default: 0 (disabled).
+	IdleSuspendTimeout time.Duration
+
+	// SuspendWakeLatencyTarget is the expected latency budget for waking a SUSPENDED
+	// agent — from task.inbound receipt to the agent process being ACTIVE (OQ-06).
+	// This budget covers credential.authorize round-trip + VM spawn + process startup.
+	//
+	// This value is informational: it is logged at startup so the Platform team can
+	// verify that the measured wake latency stays within the agreed SLA. It does NOT
+	// gate or throttle any runtime behaviour; the Orchestrator is responsible for
+	// routing latency-sensitive tasks away from SUSPENDED agents when needed.
+	//
+	// Baseline (M2 process manager, no Firecracker): ~2 s.
+	// Target with Firecracker snapshot restore (M3): < 500 ms.
+	//
+	// Env: AEGIS_SUSPEND_WAKE_LATENCY_TARGET (Go duration, e.g. "2s"). Default: 2s.
+	SuspendWakeLatencyTarget time.Duration
 }
 
 // Load reads configuration from environment variables and returns a validated Config.
@@ -104,6 +132,16 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if c.CommsMaxDeliver, err = parseInt("AEGIS_COMMS_MAX_DELIVER", 5, 1); err != nil {
+		return nil, err
+	}
+	// IdleSuspendTimeout: 0 means disabled (no auto-suspension); valid positive
+	// durations enable OQ-03. parseDuration returns 0 for unset/empty.
+	if raw := os.Getenv("AEGIS_IDLE_SUSPEND_TIMEOUT"); raw != "" {
+		if c.IdleSuspendTimeout, err = parseDuration("AEGIS_IDLE_SUSPEND_TIMEOUT", 0); err != nil {
+			return nil, err
+		}
+	}
+	if c.SuspendWakeLatencyTarget, err = parseDuration("AEGIS_SUSPEND_WAKE_LATENCY_TARGET", 2*time.Second); err != nil {
 		return nil, err
 	}
 
