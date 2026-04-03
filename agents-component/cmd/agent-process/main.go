@@ -37,6 +37,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
+
+	"github.com/cerberOS/agents-component/internal/skills"
 )
 
 // SpawnContext is the initial context injected by the Lifecycle Manager at spawn.
@@ -108,7 +111,21 @@ func main() {
 		defer as.Close()
 	}
 
-	result, err := RunLoop(ctx, log, &spawnCtx, ve, steerer, as)
+	// Build the per-agent spec budget when AEGIS_SKILL_SPEC_BUDGET is set.
+	// 0 or unset = no budget enforcement (nil disables all budget logic in RunLoop).
+	var specBudget *skills.SpecBudget
+	if budgetStr := os.Getenv("AEGIS_SKILL_SPEC_BUDGET"); budgetStr != "" {
+		if ceiling, err := strconv.Atoi(budgetStr); err == nil && ceiling > 0 {
+			if b, err := skills.NewSpecBudget(ceiling); err == nil {
+				specBudget = b
+				log.Info("spec budget enabled", "ceiling_tokens", ceiling)
+			} else {
+				log.Warn("spec budget init failed, disabling budget enforcement", "error", err)
+			}
+		}
+	}
+
+	result, err := RunLoop(ctx, log, &spawnCtx, ve, steerer, as, specBudget)
 	if err != nil {
 		writeError(log, spawnCtx.TaskID, spawnCtx.TraceID, err.Error())
 		os.Exit(1)
