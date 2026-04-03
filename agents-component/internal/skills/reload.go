@@ -72,36 +72,117 @@ func (m *hierarchyManager) Reload(domains []*types.SkillNode) (ReloadResult, err
 		}
 	}
 
-	// Phase 2 — Build the replacement domains map and pre-compute embeddings.
-	// Both happen outside the write lock so a slow embedding call does not
-	// block concurrent readers.
+	// Phase 2 — Build the replacement domains map (no IO — fast).
 	newDomains := make(map[string]*types.SkillNode, len(domains))
 	for _, n := range domains {
 		newDomains[n.Name] = n
 	}
 
-	var newEmbeddings []commandEmbedding
-	for _, node := range domains {
-		newEmbeddings = append(newEmbeddings, m.buildEmbeddings(node)...)
-	}
-
-	// Phase 3 — Snapshot current domains under a read lock to compute the diff.
-	// The diff is informational (returned to the caller for logging); it does
-	// not affect correctness of the swap.
+	// Phase 3 — Snapshot current state under a read lock.
+	// Capturing both domains (for the diff) and embeddings (for the
+	// incremental re-embedding step below — unchanged commands reuse their
+	// existing vectors without calling the embedder).
 	m.mu.RLock()
 	oldDomains := m.domains
+	oldEmbeddings := m.embeddings
 	m.mu.RUnlock()
 
 	result := diffDomains(oldDomains, newDomains)
 
-	// Phase 4 — Atomic swap. Readers that hold the read lock see either the
-	// full old state or the full new state — never a partial mix.
+	// Phase 4 — Compute embeddings incrementally outside the write lock so
+	// slow embedder calls (e.g. remote Voyage AI) do not stall readers.
+	// Only commands whose (domain, name, description) tuple has changed since
+	// the last load call the embedder; all others reuse their existing vector.
+	newEmbeddings := m.buildIncrementalEmbeddings(domains, oldEmbeddings)
+
+	// Phase 5 — Atomic swap. Readers see either the full old state or the
+	// full new state — never a partial mix.
 	m.mu.Lock()
 	m.domains = newDomains
 	m.embeddings = newEmbeddings
 	m.mu.Unlock()
 
 	return result, nil
+}
+
+// embeddingCacheKey returns a unique key for a (domain, command, description)
+// triple. Used by buildIncrementalEmbeddings to detect unchanged commands.
+// The NUL byte separator is safe because no field may contain NUL.
+func embeddingCacheKey(domain, name, description string) string {
+	return domain + "\x00" + name + "\x00" + description
+}
+
+// buildIncrementalEmbeddings constructs the new embedding slice for domains,
+// reusing existing vectors for commands whose (domain, name, description)
+// triple is unchanged. Only genuinely new or modified commands call the
+// embedder — in a single batch when BatchEmbedder is available.
+// Called outside the write lock; safe for concurrent reads.
+func (m *hierarchyManager) buildIncrementalEmbeddings(
+	domains []*types.SkillNode, oldEmbs []commandEmbedding,
+) []commandEmbedding {
+	// Index existing vectors by cache key.
+	cache := make(map[string][]float64, len(oldEmbs))
+	for _, e := range oldEmbs {
+		cache[embeddingCacheKey(e.domain, e.name, e.description)] = e.vector
+	}
+
+	type pending struct {
+		domain string
+		name   string
+		desc   string
+		text   string
+	}
+	var result []commandEmbedding
+	var toEmbed []pending
+
+	for _, node := range domains {
+		for _, cmd := range node.Children {
+			if cmd.Level != "command" {
+				continue
+			}
+			key := embeddingCacheKey(node.Name, cmd.Name, cmd.Description)
+			if vec, ok := cache[key]; ok {
+				// Unchanged — reuse without calling the embedder.
+				result = append(result, commandEmbedding{
+					domain:      node.Name,
+					name:        cmd.Name,
+					description: cmd.Description,
+					vector:      vec,
+				})
+			} else {
+				toEmbed = append(toEmbed, pending{
+					domain: node.Name,
+					name:   cmd.Name,
+					desc:   cmd.Description,
+					text:   cmd.Name + " " + cmd.Description,
+				})
+			}
+		}
+	}
+
+	if len(toEmbed) == 0 {
+		return result
+	}
+
+	// Batch-embed all new/changed commands in a single call when possible.
+	texts := make([]string, len(toEmbed))
+	for i, p := range toEmbed {
+		texts[i] = p.text
+	}
+	vecs := m.embedTexts(texts)
+	for i, p := range toEmbed {
+		if i < len(vecs) && vecs[i] != nil {
+			result = append(result, commandEmbedding{
+				domain:      p.domain,
+				name:        p.name,
+				description: p.desc,
+				vector:      vecs[i],
+			})
+		}
+		// Non-fatal: commands with nil vectors are excluded from search
+		// results but structural queries (GetSpec etc.) still work.
+	}
+	return result
 }
 
 // diffDomains computes the added/removed/modified sets between two domain maps.

@@ -79,7 +79,19 @@ func main() {
 	commsClient := metrics.WrapComms(rawComms, rec)
 
 	reg := registry.New(registry.WithStateChangeHook(rec.ObserveStateChange))
-	skillMgr := skills.New(skills.WithGetSpecHook(rec.ObserveSkillInvocation))
+
+	// Wire the embedding model. If VOYAGE_API_KEY is present, use the Voyage AI
+	// production embedder (voyage-3-lite or a custom model from config). Otherwise
+	// fall back to the default feature-hashing embedder — sufficient for
+	// development and integration tests but not for production similarity quality.
+	skillOpts := []skills.Option{skills.WithGetSpecHook(rec.ObserveSkillInvocation)}
+	if voyageAPIKey := os.Getenv("VOYAGE_API_KEY"); voyageAPIKey != "" {
+		log.Info("embedding: using Voyage AI model", "model", cfg.EmbeddingModel)
+		skillOpts = append(skillOpts, skills.WithEmbedder(newVoyageEmbedder(voyageAPIKey, cfg.EmbeddingModel)))
+	} else {
+		log.Warn("embedding: VOYAGE_API_KEY not set — using hash embedder (not for production)")
+	}
+	skillMgr := skills.New(skillOpts...)
 	credBroker, err := credentials.NewNATSBroker(commsClient,
 		credentials.WithBrokerConfig(credentials.BrokerConfig{
 			MaxAttempts: cfg.CredAuthMaxAttempts,

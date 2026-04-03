@@ -143,6 +143,43 @@ func l2Normalize(vec []float64) {
 	}
 }
 
+// BatchEmbedder is an optional extension of Embedder that enables efficient
+// multi-text embedding in a single API call (e.g. a remote voyage-3-lite
+// request). Implementations must be safe for concurrent use.
+//
+// Callers detect support via type assertion:
+//
+//	if be, ok := embedder.(skills.BatchEmbedder); ok { ... }
+type BatchEmbedder interface {
+	Embedder
+	EmbedBatch(texts []string) ([][]float64, error)
+}
+
+// embedTexts embeds all texts in a single call when the configured embedder
+// implements BatchEmbedder, and falls back to sequential Embed calls otherwise.
+// The returned slice is always the same length as texts; entries where
+// embedding failed are nil (non-fatal — those commands are excluded from search
+// results but structural queries still work).
+func (m *hierarchyManager) embedTexts(texts []string) [][]float64 {
+	if len(texts) == 0 {
+		return nil
+	}
+	if be, ok := m.embedder.(BatchEmbedder); ok {
+		vecs, err := be.EmbedBatch(texts)
+		if err == nil && len(vecs) == len(texts) {
+			return vecs
+		}
+		// Fall through to one-at-a-time on error or unexpected length.
+	}
+	result := make([][]float64, len(texts))
+	for i, t := range texts {
+		if vec, err := m.embedder.Embed(t); err == nil {
+			result[i] = vec
+		}
+	}
+	return result
+}
+
 // cosineSimilarity computes the dot product of two L2-normalised vectors.
 // Returns 0 when the vectors have different lengths.
 func cosineSimilarity(a, b []float64) float64 {

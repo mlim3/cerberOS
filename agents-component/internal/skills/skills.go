@@ -149,27 +149,43 @@ func (m *hierarchyManager) RegisterDomain(node *types.SkillNode) error {
 
 // buildEmbeddings computes commandEmbedding entries for all command-level
 // children of the domain. Called without holding the mutex.
+// Uses embedTexts for batch embedding when the configured embedder supports it.
 func (m *hierarchyManager) buildEmbeddings(domain *types.SkillNode) []commandEmbedding {
+	type cmdMeta struct {
+		name string
+		desc string
+	}
+	var cmds []cmdMeta
+	for _, c := range domain.Children {
+		if c.Level == "command" {
+			cmds = append(cmds, cmdMeta{name: c.Name, desc: c.Description})
+		}
+	}
+	if len(cmds) == 0 {
+		return nil
+	}
+
+	// Embed all command texts in a single batch call when possible.
+	texts := make([]string, len(cmds))
+	for i, c := range cmds {
+		// Embed the command name and description together so both technical
+		// identifiers and natural-language intent are captured.
+		texts[i] = c.name + " " + c.desc
+	}
+	vecs := m.embedTexts(texts)
+
 	var entries []commandEmbedding
-	for _, cmd := range domain.Children {
-		if cmd.Level != "command" {
-			continue
+	for i, c := range cmds {
+		if i < len(vecs) && vecs[i] != nil {
+			entries = append(entries, commandEmbedding{
+				domain:      domain.Name,
+				name:        c.name,
+				description: c.desc,
+				vector:      vecs[i],
+			})
 		}
-		// Embed the command name and description together so both
-		// technical identifiers and natural-language intent are captured.
-		text := cmd.Name + " " + cmd.Description
-		vec, err := m.embedder.Embed(text)
-		if err != nil {
-			// Non-fatal: skip this command in the index; it will be excluded
-			// from search results but structural queries (GetSpec etc.) still work.
-			continue
-		}
-		entries = append(entries, commandEmbedding{
-			domain:      domain.Name,
-			name:        cmd.Name,
-			description: cmd.Description,
-			vector:      vec,
-		})
+		// Non-fatal: commands with nil vectors are excluded from search results
+		// but structural queries (GetSpec etc.) still work.
 	}
 	return entries
 }

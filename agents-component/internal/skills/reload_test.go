@@ -2,6 +2,7 @@ package skills_test
 
 import (
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/cerberOS/agents-component/internal/skills"
@@ -389,6 +390,180 @@ func TestReload_SearchReflectsNewDescriptions(t *testing.T) {
 	}
 	if results[0].Name != "web.fetch" {
 		t.Errorf("top result: want web.fetch, got %q", results[0].Name)
+	}
+}
+
+// ---- Incremental embedding tests ----
+
+// countingBatchEmbedder records how many individual texts have been embedded
+// so tests can verify that unchanged commands are not re-embedded on Reload.
+// It satisfies both skills.Embedder and skills.BatchEmbedder.
+type countingBatchEmbedder struct {
+	count int64 // atomic; incremented once per text embedded
+	inner *stubEmbedder
+}
+
+func (c *countingBatchEmbedder) Embed(text string) ([]float64, error) {
+	atomic.AddInt64(&c.count, 1)
+	return c.inner.Embed(text)
+}
+
+func (c *countingBatchEmbedder) EmbedBatch(texts []string) ([][]float64, error) {
+	atomic.AddInt64(&c.count, int64(len(texts)))
+	vecs := make([][]float64, len(texts))
+	for i, t := range texts {
+		v, _ := c.inner.Embed(t)
+		vecs[i] = v
+	}
+	return vecs, nil
+}
+
+func (c *countingBatchEmbedder) embedCount() int64 {
+	return atomic.LoadInt64(&c.count)
+}
+
+// TestReload_IncrementalEmbedding verifies that reloading a tree where only
+// one command changes calls the embedder exactly once — for the changed
+// command only. Unchanged commands must reuse their existing vectors.
+func TestReload_IncrementalEmbedding(t *testing.T) {
+	ce := &countingBatchEmbedder{
+		inner: &stubEmbedder{dim: 4, vectors: map[string][]float64{}},
+	}
+	mgr := skills.New(skills.WithEmbedder(ce))
+
+	// Register a domain with two commands.
+	twoCmd := &types.SkillNode{
+		Name:  "web",
+		Level: "domain",
+		Children: map[string]*types.SkillNode{
+			"web.fetch": webDomain().Children["web.fetch"],
+			"web.parse": {
+				Name:           "web.parse",
+				Level:          "command",
+				Label:          "Web Parse",
+				Description:    "Parse HTML content and extract data. Use after web.fetch. Do NOT call without fetched HTML.",
+				TimeoutSeconds: 15,
+				Spec: &types.SkillSpec{
+					Parameters: map[string]types.ParameterDef{
+						"html": {Type: "string", Required: true, Description: "HTML to parse."},
+					},
+				},
+			},
+		},
+	}
+	if err := mgr.RegisterDomain(twoCmd); err != nil {
+		t.Fatalf("RegisterDomain: %v", err)
+	}
+
+	afterRegister := ce.embedCount()
+	if afterRegister != 2 {
+		t.Fatalf("expected 2 embed calls after RegisterDomain, got %d", afterRegister)
+	}
+
+	// Reload with the same two commands plus one new command.
+	// The embedder should be called exactly once — for the new command only.
+	withNewCmd := &types.SkillNode{
+		Name:  "web",
+		Level: "domain",
+		Children: map[string]*types.SkillNode{
+			"web.fetch": twoCmd.Children["web.fetch"], // unchanged
+			"web.parse": twoCmd.Children["web.parse"], // unchanged
+			"web.search": {
+				Name:           "web.search",
+				Level:          "command",
+				Label:          "Web Search",
+				Description:    "Perform a web search and return result snippets. Use for discovery queries. Do NOT use to fetch full page content.",
+				TimeoutSeconds: 20,
+				Spec: &types.SkillSpec{
+					Parameters: map[string]types.ParameterDef{
+						"query": {Type: "string", Required: true, Description: "Search query string."},
+					},
+				},
+			},
+		},
+	}
+
+	r := reloader(t, mgr)
+	if _, err := r.Reload([]*types.SkillNode{withNewCmd}); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+
+	afterReload := ce.embedCount() - afterRegister
+	if afterReload != 1 {
+		t.Errorf("expected 1 embed call during Reload (new command only), got %d", afterReload)
+	}
+
+	// All three commands must be discoverable after the reload.
+	cmds, err := mgr.GetCommands("web")
+	if err != nil {
+		t.Fatalf("GetCommands: %v", err)
+	}
+	if len(cmds) != 3 {
+		t.Errorf("expected 3 commands after Reload, got %d", len(cmds))
+	}
+}
+
+// TestReload_IncrementalEmbedding_DescriptionChange verifies that modifying a
+// command description causes exactly that command to be re-embedded.
+func TestReload_IncrementalEmbedding_DescriptionChange(t *testing.T) {
+	ce := &countingBatchEmbedder{
+		inner: &stubEmbedder{dim: 4, vectors: map[string][]float64{}},
+	}
+	mgr := skills.New(skills.WithEmbedder(ce))
+
+	if err := mgr.RegisterDomain(webDomain()); err != nil {
+		t.Fatalf("RegisterDomain: %v", err)
+	}
+	afterRegister := ce.embedCount() // should be 1 (one command in webDomain)
+
+	// Reload with an updated description for the same command.
+	updatedWeb := &types.SkillNode{
+		Name:  "web",
+		Level: "domain",
+		Children: map[string]*types.SkillNode{
+			"web.fetch": {
+				Name:           "web.fetch",
+				Level:          "command",
+				Label:          "Web Fetch",
+				Description:    "Fetch a URL via HTTP. UPDATED. Do NOT use for authenticated operations.",
+				TimeoutSeconds: 30,
+				Spec:           webDomain().Children["web.fetch"].Spec,
+			},
+		},
+	}
+
+	r := reloader(t, mgr)
+	if _, err := r.Reload([]*types.SkillNode{updatedWeb}); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+
+	afterReload := ce.embedCount() - afterRegister
+	if afterReload != 1 {
+		t.Errorf("expected 1 embed call for description change, got %d", afterReload)
+	}
+}
+
+// TestReload_IncrementalEmbedding_Idempotent verifies that reloading with an
+// identical tree calls the embedder zero times.
+func TestReload_IncrementalEmbedding_Idempotent(t *testing.T) {
+	ce := &countingBatchEmbedder{
+		inner: &stubEmbedder{dim: 4, vectors: map[string][]float64{}},
+	}
+	mgr := skills.New(skills.WithEmbedder(ce))
+
+	if err := mgr.RegisterDomain(webDomain()); err != nil {
+		t.Fatalf("RegisterDomain: %v", err)
+	}
+	afterRegister := ce.embedCount()
+
+	r := reloader(t, mgr)
+	if _, err := r.Reload([]*types.SkillNode{webDomain()}); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+
+	afterReload := ce.embedCount() - afterRegister
+	if afterReload != 0 {
+		t.Errorf("idempotent reload: expected 0 embed calls, got %d", afterReload)
 	}
 }
 
