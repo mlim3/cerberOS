@@ -126,12 +126,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Lifecycle manager selection (highest-priority wins):
+	//   1. Firecracker microVMs — when AEGIS_FIRECRACKER_SOCKET_DIR is set (production).
+	//   2. OS process manager  — when AEGIS_AGENT_PROCESS_PATH is set (local dev / CI).
+	//   3. In-process stub     — fallback for unit tests; never use in production.
 	var lifecycleMgr lifecycle.Manager
-	if cfg.AgentProcessPath != "" {
+	if fcSocketDir := os.Getenv("AEGIS_FIRECRACKER_SOCKET_DIR"); fcSocketDir != "" {
+		log.Info("lifecycle: using Firecracker microVM manager", "socket_dir", fcSocketDir)
+		lifecycleMgr = lifecycle.NewFirecracker(fcSocketDir)
+	} else if cfg.AgentProcessPath != "" {
 		log.Info("lifecycle: using process manager", "binary", cfg.AgentProcessPath)
 		lifecycleMgr = lifecycle.NewProcess(cfg.AgentProcessPath)
 	} else {
-		log.Warn("lifecycle: AEGIS_AGENT_PROCESS_PATH not set — using in-process stub (not for production)")
+		log.Warn("lifecycle: AEGIS_AGENT_PROCESS_PATH and AEGIS_FIRECRACKER_SOCKET_DIR not set — using in-process stub (not for production)")
 		lifecycleMgr = lifecycle.New()
 	}
 
@@ -200,6 +207,22 @@ func main() {
 		)
 	}
 
+	// Load the permission policy when AEGIS_PERMISSION_POLICY_PATH is set.
+	// When unset, the factory falls back to the legacy domain.credential stub
+	// which is acceptable for local dev but must not run in production.
+	var permPolicy *factory.PermissionPolicy
+	if policyPath := os.Getenv("AEGIS_PERMISSION_POLICY_PATH"); policyPath != "" {
+		pp, err := factory.LoadPermissionPolicy(policyPath)
+		if err != nil {
+			log.Error("permission policy load failed", "path", policyPath, "error", err)
+			os.Exit(1)
+		}
+		permPolicy = pp
+		log.Info("permission policy loaded", "path", policyPath)
+	} else {
+		log.Warn("AEGIS_PERMISSION_POLICY_PATH not set — using legacy domain.credential stub (not for production)")
+	}
+
 	f, err = factory.New(factory.Config{
 		Registry:                 reg,
 		Skills:                   skillMgr,
@@ -210,6 +233,7 @@ func main() {
 		Log:                      log,
 		CrashDetector:            crashDetector,
 		MaxRetries:               cfg.MaxAgentRetries,
+		Policy:                   permPolicy,
 		IdleSuspendTimeout:       cfg.IdleSuspendTimeout,
 		SuspendWakeLatencyTarget: cfg.SuspendWakeLatencyTarget,
 		OnSpawn:                  func(_ string) { rec.ObserveLifecycleEvent("spawn") },

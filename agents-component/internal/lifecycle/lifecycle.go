@@ -34,6 +34,7 @@ type VMConfig struct {
 	SkillDomain      string // entry-point domain injected into the agent at spawn
 	CredentialPtr    string // vault permission token pointer (not the token value)
 	Instructions     string // natural-language task description for the agent
+	CommandManifest  string // pre-built "- name: description" list for the entry domain; injected into system prompt
 	RecoveredContext string // non-empty on respawn: serialised CrashSnapshot for checkpoint resume
 	TraceID          string
 	UserContextID    string // propagated from TaskSpec; echoed in all outbound events (issue #67)
@@ -68,6 +69,7 @@ type agentSpawnContext struct {
 	SkillDomain      string `json:"skill_domain"`
 	PermissionToken  string `json:"permission_token"` // opaque vault reference — never a raw credential
 	Instructions     string `json:"instructions"`
+	CommandManifest  string `json:"command_manifest,omitempty"`  // "- name: description" list; injected into system prompt
 	RecoveredContext string `json:"recovered_context,omitempty"` // non-empty on respawn; contains crash snapshot for checkpoint resume
 	TraceID          string `json:"trace_id"`
 	UserContextID    string `json:"user_context_id,omitempty"` // propagated from TaskSpec; echoed in all child agent events (issue #67)
@@ -111,6 +113,7 @@ func (m *processManager) Spawn(config VMConfig) error {
 		SkillDomain:      config.SkillDomain,
 		PermissionToken:  config.CredentialPtr,
 		Instructions:     config.Instructions,
+		CommandManifest:  config.CommandManifest,
 		RecoveredContext: config.RecoveredContext,
 		TraceID:          config.TraceID,
 		UserContextID:    config.UserContextID,

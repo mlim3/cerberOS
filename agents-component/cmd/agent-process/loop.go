@@ -87,7 +87,7 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 	// spawn_agent) are never evicted.
 	tools = applySpecBudget(budget, spawnCtx.SkillDomain, tools, log)
 	toolDefs := toolDefinitions(tools)
-	systemPrompt := buildSystemPrompt(spawnCtx.SkillDomain)
+	systemPrompt := buildSystemPrompt(spawnCtx.SkillDomain, spawnCtx.CommandManifest)
 
 	// Session log persists each turn to episodic memory (EDD §13.4).
 	// nil-safe: all methods are no-ops when sl is nil.
@@ -208,8 +208,16 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 		// during this Act phase. Buffered size 1 — goroutine never blocks.
 		capturedDirectiveCh := make(chan *types.SteeringDirective, 1)
 
+		// steeringDone is used to synchronise with the steering goroutine before
+		// draining capturedDirectiveCh. Without it there is a race: cancelAct()
+		// fires, the main goroutine reaches the drain, but the steering goroutine
+		// has not yet written to capturedDirectiveCh — so the drain takes the
+		// default branch and silently drops the directive.
+		var steeringDone sync.WaitGroup
 		if steerer != nil {
+			steeringDone.Add(1)
 			go func() {
+				defer steeringDone.Done()
 				select {
 				case d := <-steerer.Chan():
 					dp := d // capture by value before sending pointer
@@ -291,6 +299,10 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 		toolInterrupted := actCtx.Err() != nil
 		// Stop the steering monitor goroutine; it will exit via actCtx.Done().
 		cancelAct()
+		// Wait for the steering goroutine to finish writing to capturedDirectiveCh
+		// before the drain below. Without this, the drain races with the goroutine
+		// and may take the default branch while the goroutine is mid-write.
+		steeringDone.Wait()
 
 		// --------------------------------------------------------------------
 		// Phase 3: Observe — process outcomes in index order.
@@ -449,20 +461,29 @@ func contextWindowAction(totalTokens int64) contextAction {
 	}
 }
 
-// buildSystemPrompt constructs a domain-scoped system prompt. In M3 this will
-// include the full domain command manifest from the Skill Hierarchy Manager.
-func buildSystemPrompt(skillDomain string) string {
+// buildSystemPrompt constructs a domain-scoped system prompt that includes the
+// command manifest built by the factory at spawn time (EDD §13.1).
+//
+// manifest is the pre-formatted "- name: description\n..." list passed via
+// SpawnContext. When non-empty it is appended to the base prompt so the agent
+// knows what commands are available from turn 1 without a discovery round-trip.
+// For the "general" domain there is no skill manifest to inject.
+func buildSystemPrompt(skillDomain, manifest string) string {
 	if skillDomain == "general" {
 		return `You are an Aegis OS general-purpose reasoning agent. ` +
 			`Answer questions and complete tasks using your own knowledge and reasoning. ` +
 			`When the task is complete, call task_complete with the final result. ` +
 			`Be concise and factual.`
 	}
-	return fmt.Sprintf(
+	base := fmt.Sprintf(
 		`You are an Aegis OS agent scoped to the "%s" skill domain. `+
 			`Execute the assigned task using only the capabilities available within that domain. `+
 			`When the task is complete, call task_complete with the final result. `+
 			`Be concise and factual.`,
 		skillDomain,
 	)
+	if manifest == "" {
+		return base
+	}
+	return base + "\n\nAvailable commands:\n" + manifest
 }

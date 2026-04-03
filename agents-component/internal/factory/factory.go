@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -58,7 +59,8 @@ type Factory struct {
 	generateID    IDGenerator
 	crashDetector *lifecycle.CrashDetector
 	maxRetries    int
-	tokenCounter  TokenCounter // optional; when nil, spawn context budget is not enforced
+	tokenCounter  TokenCounter      // optional; when nil, spawn context budget is not enforced
+	policy        *PermissionPolicy // optional; when nil, falls back to legacy domain.credential stub
 
 	// inFlightMu guards inFlightRequests.
 	inFlightMu       sync.Mutex
@@ -93,6 +95,12 @@ type Config struct {
 	CrashDetector *lifecycle.CrashDetector // optional; when set, Watch/Unwatch are called around spawn/terminate
 	MaxRetries    int                      // optional; max crash respawns before permanent termination. Default: 3.
 	TokenCounter  TokenCounter             // optional; when set, enforces the 2,048-token spawn context budget (EDD §13.3)
+
+	// Policy is the permission policy that maps skill domains to permitted Vault
+	// operation types. When set, PermissionsFor is called at provision time and
+	// an unknown domain causes spawn to fail (fail-secure). When nil, the legacy
+	// domain.credential stub is used — suitable for local dev and unit tests.
+	Policy *PermissionPolicy
 
 	// IdleSuspendTimeout is the duration an agent may remain IDLE before being
 	// auto-suspended by the idle sweep (OQ-03). 0 disables auto-suspension and
@@ -157,6 +165,7 @@ func New(cfg Config) (*Factory, error) {
 		crashDetector:            cfg.CrashDetector,
 		maxRetries:               maxRetries,
 		tokenCounter:             cfg.TokenCounter,
+		policy:                   cfg.Policy,
 		inFlightRequests:         make(map[string][]string),
 		idleSuspendTimeout:       cfg.IdleSuspendTimeout,
 		suspendWakeLatencyTarget: cfg.SuspendWakeLatencyTarget,
@@ -261,13 +270,25 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 		return fmt.Errorf("factory: skills.GetDomain %q: %w", entryDomain, err)
 	}
 
+	// Step 1a: Build the command manifest for the entry domain. GetCommands
+	// returns command-level nodes (name + description only, no parameter specs)
+	// which are serialised into the "- name: description" format injected into
+	// the system prompt. An empty manifest is valid — the agent can still
+	// discover commands reactively via the skills tools.
+	commands, err := f.skills.GetCommands(entryDomain)
+	if err != nil {
+		return fmt.Errorf("factory: skills.GetCommands %q: %w", entryDomain, err)
+	}
+	manifest := buildManifestText(commands)
+
 	// Step 1b: Enforce spawn context token budget (EDD §13.3, PRD FR-FAC-05).
-	// Counted components: system prompt + task payload + skill entry point domain name
-	// + permission token reference. The permission token is not yet available, so a
-	// fixed-length placeholder that approximates a real Vault token reference is used.
+	// Counted components: system prompt (including manifest) + task instructions
+	// + entry-point skill domain name + permission token reference.
+	// The permission token is not yet available, so a fixed-length placeholder
+	// that approximates a real Vault token reference is used.
 	// Abort immediately if the budget is exceeded — no agent is created.
 	if f.tokenCounter != nil {
-		ctxText := buildSpawnContextText(spawnSystemPrompt(entryDomain), spec.Instructions, entryDomain, permTokenPlaceholder)
+		ctxText := buildSpawnContextText(spawnSystemPrompt(entryDomain, manifest), spec.Instructions, entryDomain, permTokenPlaceholder)
 		count, err := f.tokenCounter.CountTokens(ctxText)
 		if err != nil {
 			return fmt.Errorf("factory: token count: %w", err)
@@ -280,7 +301,10 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 		}
 	}
 
-	permSet := permissionSetForDomains(spec.RequiredSkills)
+	permSet, err := f.resolvePermissions(spec.RequiredSkills, spec.TaskID, spec.TraceID, agentID)
+	if err != nil {
+		return err
+	}
 
 	// Allocate a VM ID now so it can be stored in the registry entry before the
 	// VM is launched. vm_id changes on respawn (same agent_id, new vm_id).
@@ -353,14 +377,15 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 
 	// Step 5: Spawn agent process.
 	vmCfg := lifecycle.VMConfig{
-		AgentID:       agentID,
-		VMID:          vmID,
-		TaskID:        spec.TaskID,
-		SkillDomain:   entryDomain,
-		CredentialPtr: token,
-		Instructions:  spec.Instructions,
-		TraceID:       spec.TraceID,
-		UserContextID: spec.UserContextID,
+		AgentID:         agentID,
+		VMID:            vmID,
+		TaskID:          spec.TaskID,
+		SkillDomain:     entryDomain,
+		CredentialPtr:   token,
+		Instructions:    spec.Instructions,
+		CommandManifest: manifest,
+		TraceID:         spec.TraceID,
+		UserContextID:   spec.UserContextID,
 	}
 	if err := f.lifecycle.Spawn(vmCfg); err != nil {
 		return fmt.Errorf("factory: lifecycle.Spawn: %w", err)
@@ -896,30 +921,73 @@ func (f *Factory) publishAccepted(agentID, agentType string, spec *types.TaskSpe
 	return nil
 }
 
-// permissionSetForDomains derives a credential permission set from skill domains.
-// In production this would be driven by a policy map; the stub grants one key per domain.
-func permissionSetForDomains(domains []string) []string {
+// resolvePermissions returns the permission set for the requested skill domains.
+// When a PermissionPolicy is configured it delegates to policy.PermissionsFor,
+// which fails-secure if any domain has no entry. When no policy is configured
+// it falls back to the legacy domain.credential stub — acceptable for local dev
+// and unit tests, but must not be used in production (no *.credential catch-all).
+func (f *Factory) resolvePermissions(domains []string, taskID, traceID, agentID string) ([]string, error) {
+	if f.policy != nil {
+		perms, err := f.policy.PermissionsFor(domains)
+		if err != nil {
+			_ = f.publishFailed(agentID, taskID,
+				"PERMISSION_POLICY_VIOLATION", err.Error(), traceID, "permission_resolution")
+			return nil, fmt.Errorf("factory: %w", err)
+		}
+		return perms, nil
+	}
+	// Legacy stub: grant one credential key per domain.
+	// Replace in production by supplying a PermissionPolicy in factory.Config.
 	perms := make([]string, len(domains))
 	for i, d := range domains {
 		perms[i] = d + ".credential"
 	}
-	return perms
+	return perms, nil
 }
 
 func defaultIDGenerator() string {
 	return fmt.Sprintf("agent-%d", time.Now().UnixNano())
 }
 
-// spawnSystemPrompt returns the domain-scoped system prompt that will be sent to
-// the agent at spawn time. Must stay in sync with buildSystemPrompt in cmd/agent-process/loop.go.
-func spawnSystemPrompt(skillDomain string) string {
-	return fmt.Sprintf(
+// buildManifestText serialises a slice of command-level SkillNodes into the
+// "- name: description\n" format injected into the system prompt. Commands are
+// sorted alphabetically so the output is deterministic (important for token
+// budget counting and test stability). Nodes without a description are still
+// included — the name alone is better than nothing.
+func buildManifestText(commands []*types.SkillNode) string {
+	if len(commands) == 0 {
+		return ""
+	}
+	sorted := make([]*types.SkillNode, len(commands))
+	copy(sorted, commands)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
+
+	var b strings.Builder
+	for _, c := range sorted {
+		b.WriteString("- ")
+		b.WriteString(c.Name)
+		b.WriteString(": ")
+		b.WriteString(c.Description)
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+// spawnSystemPrompt returns the domain-scoped system prompt (including command
+// manifest) that will be sent to the agent at spawn time.
+// Must stay in sync with buildSystemPrompt in cmd/agent-process/loop.go.
+func spawnSystemPrompt(skillDomain, manifest string) string {
+	base := fmt.Sprintf(
 		`You are an Aegis OS agent scoped to the "%s" skill domain. `+
 			`Execute the assigned task using only the capabilities available within that domain. `+
 			`When the task is complete, call task_complete with the final result. `+
 			`Be concise and factual.`,
 		skillDomain,
 	)
+	if manifest == "" {
+		return base
+	}
+	return base + "\n\nAvailable commands:\n" + manifest
 }
 
 // buildSpawnContextText assembles the full spawn-context string whose token count

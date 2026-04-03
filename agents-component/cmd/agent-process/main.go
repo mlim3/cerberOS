@@ -1,12 +1,14 @@
 // Package main is the agent-process binary that runs inside each Firecracker microVM.
 //
 // The binary is invoked by the Lifecycle Manager at spawn. It receives its initial
-// context from stdin as a JSON-encoded SpawnContext, executes the task using the
-// four-phase ReAct loop (EDD §13.1), and writes a JSON-encoded TaskOutput to
-// stdout. All diagnostic logs go to stderr so they do not contaminate the JSON
-// output stream.
+// context either from stdin (process-manager mode) or from the Firecracker MMDS
+// (Microvm Metadata Service) when AEGIS_MMDS_ENDPOINT is set in the environment.
 //
-// Inputs (stdin):
+// The binary executes the task using the four-phase ReAct loop (EDD §13.1) and
+// writes a JSON-encoded TaskOutput to stdout. All diagnostic logs go to stderr
+// so they do not contaminate the JSON output stream.
+//
+// Inputs (stdin or MMDS at AEGIS_MMDS_ENDPOINT):
 //
 //	{
 //	  "task_id":         "uuid",
@@ -14,6 +16,13 @@
 //	  "permission_token": "opaque-ref",
 //	  "instructions":    "Fetch the page at https://example.com",
 //	  "trace_id":        "uuid"
+//	}
+//
+// MMDS envelope (when AEGIS_MMDS_ENDPOINT is set):
+//
+//	{
+//	  "spawn_context": { ...SpawnContext fields... },
+//	  "env":           { "KEY": "VALUE", ... }
 //	}
 //
 // Outputs (stdout):
@@ -28,19 +37,31 @@
 //
 // Environment:
 //
-//	ANTHROPIC_API_KEY — required; injected by the Lifecycle Manager at spawn.
+//	ANTHROPIC_API_KEY     — required; injected by the Lifecycle Manager at spawn.
+//	AEGIS_MMDS_ENDPOINT   — when set, SpawnContext is read from this MMDS URL
+//	                        instead of stdin (Firecracker microVM mode).
 package main
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"strconv"
 
 	"github.com/cerberOS/agents-component/internal/skills"
 )
+
+// mmdsPayload is the envelope written to the Firecracker MMDS by the Lifecycle
+// Manager before InstanceStart. Agent-process reads this when AEGIS_MMDS_ENDPOINT
+// is set; falls back to reading SpawnContext from stdin otherwise.
+type mmdsPayload struct {
+	SpawnContext SpawnContext      `json:"spawn_context"`
+	Env          map[string]string `json:"env"`
+}
 
 // SpawnContext is the initial context injected by the Lifecycle Manager at spawn.
 // It is delivered as JSON via stdin.
@@ -49,6 +70,7 @@ type SpawnContext struct {
 	SkillDomain      string `json:"skill_domain"`
 	PermissionToken  string `json:"permission_token"` // opaque credential ref — never a raw credential value
 	Instructions     string `json:"instructions"`
+	CommandManifest  string `json:"command_manifest,omitempty"`  // "- name: description" list built by factory; injected into system prompt
 	RecoveredContext string `json:"recovered_context,omitempty"` // non-empty on respawn
 	TraceID          string `json:"trace_id"`
 	UserContextID    string `json:"user_context_id,omitempty"` // propagated from parent TaskSpec; echoed in all outbound events (issue #67)
@@ -66,15 +88,15 @@ type TaskOutput struct {
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 
-	var spawnCtx SpawnContext
-	if err := json.NewDecoder(os.Stdin).Decode(&spawnCtx); err != nil {
-		writeError(log, "", "", fmt.Sprintf("decode spawn context: %v", err))
+	spawnCtx, err := readSpawnContext(log)
+	if err != nil {
+		writeError(log, "", "", err.Error())
 		os.Exit(1)
 	}
 
 	log = log.With("task_id", spawnCtx.TaskID, "trace_id", spawnCtx.TraceID)
 
-	if err := validate(&spawnCtx); err != nil {
+	if err := validate(spawnCtx); err != nil {
 		writeError(log, spawnCtx.TaskID, spawnCtx.TraceID, err.Error())
 		os.Exit(1)
 	}
@@ -125,7 +147,7 @@ func main() {
 		}
 	}
 
-	result, err := RunLoop(ctx, log, &spawnCtx, ve, steerer, as, specBudget)
+	result, err := RunLoop(ctx, log, spawnCtx, ve, steerer, as, specBudget)
 	if err != nil {
 		writeError(log, spawnCtx.TaskID, spawnCtx.TraceID, err.Error())
 		os.Exit(1)
@@ -143,6 +165,57 @@ func main() {
 	}
 
 	log.Info("agent-process completed")
+}
+
+// readSpawnContext reads the SpawnContext from MMDS when AEGIS_MMDS_ENDPOINT is
+// set in the environment (Firecracker microVM mode), or from stdin otherwise
+// (process-manager / local-dev mode).
+//
+// When reading from MMDS the payload envelope also carries an "env" map of
+// key→value pairs forwarded from the host. These are applied to the process
+// environment so all subsequent os.Getenv calls observe the injected values.
+func readSpawnContext(log *slog.Logger) (*SpawnContext, error) {
+	mmdsEndpoint := os.Getenv("AEGIS_MMDS_ENDPOINT")
+	if mmdsEndpoint == "" {
+		// Stdin path — process-manager / local-dev mode.
+		var ctx SpawnContext
+		if err := json.NewDecoder(os.Stdin).Decode(&ctx); err != nil {
+			return nil, fmt.Errorf("decode spawn context from stdin: %w", err)
+		}
+		return &ctx, nil
+	}
+
+	// MMDS path — Firecracker microVM mode.
+	log.Info("reading spawn context from MMDS", "endpoint", mmdsEndpoint)
+
+	resp, err := http.Get(mmdsEndpoint) //nolint:noctx,gosec // endpoint is operator-controlled
+	if err != nil {
+		return nil, fmt.Errorf("fetch MMDS payload: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("fetch MMDS payload: unexpected status %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read MMDS response body: %w", err)
+	}
+
+	var payload mmdsPayload
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("decode MMDS payload: %w", err)
+	}
+
+	// Apply forwarded env vars so downstream os.Getenv calls observe them.
+	for k, v := range payload.Env {
+		if err := os.Setenv(k, v); err != nil {
+			log.Warn("failed to set env var from MMDS", "key", k, "error", err)
+		}
+	}
+
+	return &payload.SpawnContext, nil
 }
 
 // validate checks that all required SpawnContext fields are present.
