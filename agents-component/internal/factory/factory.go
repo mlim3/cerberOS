@@ -59,7 +59,8 @@ type Factory struct {
 	generateID    IDGenerator
 	crashDetector *lifecycle.CrashDetector
 	maxRetries    int
-	tokenCounter  TokenCounter // optional; when nil, spawn context budget is not enforced
+	tokenCounter  TokenCounter      // optional; when nil, spawn context budget is not enforced
+	policy        *PermissionPolicy // optional; when nil, falls back to legacy domain.credential stub
 
 	// inFlightMu guards inFlightRequests.
 	inFlightMu       sync.Mutex
@@ -94,6 +95,12 @@ type Config struct {
 	CrashDetector *lifecycle.CrashDetector // optional; when set, Watch/Unwatch are called around spawn/terminate
 	MaxRetries    int                      // optional; max crash respawns before permanent termination. Default: 3.
 	TokenCounter  TokenCounter             // optional; when set, enforces the 2,048-token spawn context budget (EDD §13.3)
+
+	// Policy is the permission policy that maps skill domains to permitted Vault
+	// operation types. When set, PermissionsFor is called at provision time and
+	// an unknown domain causes spawn to fail (fail-secure). When nil, the legacy
+	// domain.credential stub is used — suitable for local dev and unit tests.
+	Policy *PermissionPolicy
 
 	// IdleSuspendTimeout is the duration an agent may remain IDLE before being
 	// auto-suspended by the idle sweep (OQ-03). 0 disables auto-suspension and
@@ -158,6 +165,7 @@ func New(cfg Config) (*Factory, error) {
 		crashDetector:            cfg.CrashDetector,
 		maxRetries:               maxRetries,
 		tokenCounter:             cfg.TokenCounter,
+		policy:                   cfg.Policy,
 		inFlightRequests:         make(map[string][]string),
 		idleSuspendTimeout:       cfg.IdleSuspendTimeout,
 		suspendWakeLatencyTarget: cfg.SuspendWakeLatencyTarget,
@@ -293,7 +301,10 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 		}
 	}
 
-	permSet := permissionSetForDomains(spec.RequiredSkills)
+	permSet, err := f.resolvePermissions(spec.RequiredSkills, spec.TaskID, spec.TraceID, agentID)
+	if err != nil {
+		return err
+	}
 
 	// Allocate a VM ID now so it can be stored in the registry entry before the
 	// VM is launched. vm_id changes on respawn (same agent_id, new vm_id).
@@ -910,14 +921,28 @@ func (f *Factory) publishAccepted(agentID, agentType string, spec *types.TaskSpe
 	return nil
 }
 
-// permissionSetForDomains derives a credential permission set from skill domains.
-// In production this would be driven by a policy map; the stub grants one key per domain.
-func permissionSetForDomains(domains []string) []string {
+// resolvePermissions returns the permission set for the requested skill domains.
+// When a PermissionPolicy is configured it delegates to policy.PermissionsFor,
+// which fails-secure if any domain has no entry. When no policy is configured
+// it falls back to the legacy domain.credential stub — acceptable for local dev
+// and unit tests, but must not be used in production (no *.credential catch-all).
+func (f *Factory) resolvePermissions(domains []string, taskID, traceID, agentID string) ([]string, error) {
+	if f.policy != nil {
+		perms, err := f.policy.PermissionsFor(domains)
+		if err != nil {
+			_ = f.publishFailed(agentID, taskID,
+				"PERMISSION_POLICY_VIOLATION", err.Error(), traceID, "permission_resolution")
+			return nil, fmt.Errorf("factory: %w", err)
+		}
+		return perms, nil
+	}
+	// Legacy stub: grant one credential key per domain.
+	// Replace in production by supplying a PermissionPolicy in factory.Config.
 	perms := make([]string, len(domains))
 	for i, d := range domains {
 		perms[i] = d + ".credential"
 	}
-	return perms
+	return perms, nil
 }
 
 func defaultIDGenerator() string {

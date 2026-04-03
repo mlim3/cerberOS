@@ -207,6 +207,22 @@ func main() {
 		)
 	}
 
+	// Load the permission policy when AEGIS_PERMISSION_POLICY_PATH is set.
+	// When unset, the factory falls back to the legacy domain.credential stub
+	// which is acceptable for local dev but must not run in production.
+	var permPolicy *factory.PermissionPolicy
+	if policyPath := os.Getenv("AEGIS_PERMISSION_POLICY_PATH"); policyPath != "" {
+		pp, err := factory.LoadPermissionPolicy(policyPath)
+		if err != nil {
+			log.Error("permission policy load failed", "path", policyPath, "error", err)
+			os.Exit(1)
+		}
+		permPolicy = pp
+		log.Info("permission policy loaded", "path", policyPath)
+	} else {
+		log.Warn("AEGIS_PERMISSION_POLICY_PATH not set — using legacy domain.credential stub (not for production)")
+	}
+
 	f, err = factory.New(factory.Config{
 		Registry:                 reg,
 		Skills:                   skillMgr,
@@ -217,6 +233,7 @@ func main() {
 		Log:                      log,
 		CrashDetector:            crashDetector,
 		MaxRetries:               cfg.MaxAgentRetries,
+		Policy:                   permPolicy,
 		IdleSuspendTimeout:       cfg.IdleSuspendTimeout,
 		SuspendWakeLatencyTarget: cfg.SuspendWakeLatencyTarget,
 		OnSpawn:                  func(_ string) { rec.ObserveLifecycleEvent("spawn") },
