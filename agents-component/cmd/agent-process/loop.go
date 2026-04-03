@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -48,8 +49,9 @@ type pendingToolCall struct {
 // Outcomes are stored in the same index order as the assistant response so the
 // Anthropic API receives tool results in the required order.
 type toolOutcome struct {
-	call   pendingToolCall
-	result ToolResult
+	call      pendingToolCall
+	result    ToolResult
+	elapsedMS int64 // wall-clock execution time in milliseconds; used for skill_invocation telemetry
 }
 
 // RunLoop executes the ReAct loop until the task is complete or a termination
@@ -268,7 +270,9 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 				// Thread actCtx so vault operations are cancelled on steering interrupt.
 				// actParentID propagates to vault tools for session log linking (EDD §13.4).
 				toolCtx := WithParentEntryID(actCtx, actParentID)
-				outcomes[idx] = toolOutcome{call: c, result: dispatchTool(toolCtx, tools, c.name, c.input)}
+				start := time.Now()
+				result := dispatchTool(toolCtx, tools, c.name, c.input)
+				outcomes[idx] = toolOutcome{call: c, result: result, elapsedMS: time.Since(start).Milliseconds()}
 			}(i, call)
 		}
 		wg.Wait() // all concurrent dispatches complete (or are interrupted) before Phase 3
@@ -322,6 +326,18 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 			if o.call.name == toolNameTaskComplete && !o.result.IsError {
 				finalResult = o.result.Content
 				taskDone = true
+			}
+
+			// Emit skill_invocation telemetry for every domain tool call.
+			// task_complete is a control signal, not a skill — skip it.
+			if o.call.name != toolNameTaskComplete {
+				ve.EmitSkillInvocation(
+					spawnCtx.SkillDomain,
+					o.call.name,
+					drillDownDepth(o.call.name),
+					o.elapsedMS,
+					outcomeFromResult(o.result),
+				)
 			}
 
 			toolResults = append(toolResults,

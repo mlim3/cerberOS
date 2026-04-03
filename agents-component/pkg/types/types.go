@@ -367,6 +367,7 @@ const (
 	AuditEventTaskFailed           = "task_failed"
 	AuditEventAgentSpawnRequest    = "agent_spawn_request"  // parent agent requested a child agent (issue #67)
 	AuditEventAgentSpawnResponse   = "agent_spawn_response" // child agent result returned to parent (issue #67)
+	AuditEventSkillInvocation      = "skill_invocation"     // skill tool dispatched by the ReAct loop
 )
 
 // AuditEvent is published to aegis.orchestrator.audit.event (EDD §8.8).

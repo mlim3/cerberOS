@@ -273,6 +273,22 @@ func (ve *VaultExecutor) routeResult(data []byte) {
 	}
 }
 
+// EmitSkillInvocation publishes a skill_invocation audit event for the given
+// tool call outcome. It is nil-safe — when ve == nil (NATS absent) it is a
+// no-op so telemetry never affects the ReAct loop.
+func (ve *VaultExecutor) EmitSkillInvocation(domain, command, depth string, elapsedMS int64, outcome string) {
+	if ve == nil {
+		return
+	}
+	ve.emitAudit(types.AuditEventSkillInvocation, map[string]string{
+		"domain":           domain,
+		"command":          command,
+		"drill_down_depth": depth,
+		"elapsed_ms":       fmt.Sprintf("%d", elapsedMS),
+		"outcome":          outcome,
+	})
+}
+
 // emitAudit publishes an audit event to aegis.orchestrator.audit.event in a
 // background goroutine. Failures are logged and never propagated — audit
 // emission must not affect the vault execute flow.
