@@ -126,12 +126,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Lifecycle manager selection (highest-priority wins):
+	//   1. Firecracker microVMs — when AEGIS_FIRECRACKER_SOCKET_DIR is set (production).
+	//   2. OS process manager  — when AEGIS_AGENT_PROCESS_PATH is set (local dev / CI).
+	//   3. In-process stub     — fallback for unit tests; never use in production.
 	var lifecycleMgr lifecycle.Manager
-	if cfg.AgentProcessPath != "" {
+	if fcSocketDir := os.Getenv("AEGIS_FIRECRACKER_SOCKET_DIR"); fcSocketDir != "" {
+		log.Info("lifecycle: using Firecracker microVM manager", "socket_dir", fcSocketDir)
+		lifecycleMgr = lifecycle.NewFirecracker(fcSocketDir)
+	} else if cfg.AgentProcessPath != "" {
 		log.Info("lifecycle: using process manager", "binary", cfg.AgentProcessPath)
 		lifecycleMgr = lifecycle.NewProcess(cfg.AgentProcessPath)
 	} else {
-		log.Warn("lifecycle: AEGIS_AGENT_PROCESS_PATH not set — using in-process stub (not for production)")
+		log.Warn("lifecycle: AEGIS_AGENT_PROCESS_PATH and AEGIS_FIRECRACKER_SOCKET_DIR not set — using in-process stub (not for production)")
 		lifecycleMgr = lifecycle.New()
 	}
 
