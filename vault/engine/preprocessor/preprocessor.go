@@ -61,7 +61,7 @@ func (p *Preprocessor) Process(agent string, raw []byte) (*Result, error) {
 
 	// 4. Substitute placeholders
 	script := placeholderRe.ReplaceAllFunc(raw, func(match []byte) []byte {
-		key := string(placeholderRe.FindSubmatch(match)[1])
+		key := string(match[2 : len(match)-2])
 		if val, ok := secrets[key]; ok {
 			return []byte(val)
 		}
