@@ -87,7 +87,7 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 	// spawn_agent) are never evicted.
 	tools = applySpecBudget(budget, spawnCtx.SkillDomain, tools, log)
 	toolDefs := toolDefinitions(tools)
-	systemPrompt := buildSystemPrompt(spawnCtx.SkillDomain)
+	systemPrompt := buildSystemPrompt(spawnCtx.SkillDomain, spawnCtx.CommandManifest)
 
 	// Session log persists each turn to episodic memory (EDD §13.4).
 	// nil-safe: all methods are no-ops when sl is nil.
@@ -449,20 +449,29 @@ func contextWindowAction(totalTokens int64) contextAction {
 	}
 }
 
-// buildSystemPrompt constructs a domain-scoped system prompt. In M3 this will
-// include the full domain command manifest from the Skill Hierarchy Manager.
-func buildSystemPrompt(skillDomain string) string {
+// buildSystemPrompt constructs a domain-scoped system prompt that includes the
+// command manifest built by the factory at spawn time (EDD §13.1).
+//
+// manifest is the pre-formatted "- name: description\n..." list passed via
+// SpawnContext. When non-empty it is appended to the base prompt so the agent
+// knows what commands are available from turn 1 without a discovery round-trip.
+// For the "general" domain there is no skill manifest to inject.
+func buildSystemPrompt(skillDomain, manifest string) string {
 	if skillDomain == "general" {
 		return `You are an Aegis OS general-purpose reasoning agent. ` +
 			`Answer questions and complete tasks using your own knowledge and reasoning. ` +
 			`When the task is complete, call task_complete with the final result. ` +
 			`Be concise and factual.`
 	}
-	return fmt.Sprintf(
+	base := fmt.Sprintf(
 		`You are an Aegis OS agent scoped to the "%s" skill domain. `+
 			`Execute the assigned task using only the capabilities available within that domain. `+
 			`When the task is complete, call task_complete with the final result. `+
 			`Be concise and factual.`,
 		skillDomain,
 	)
+	if manifest == "" {
+		return base
+	}
+	return base + "\n\nAvailable commands:\n" + manifest
 }

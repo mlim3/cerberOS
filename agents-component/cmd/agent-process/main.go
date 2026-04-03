@@ -49,6 +49,7 @@ type SpawnContext struct {
 	SkillDomain      string `json:"skill_domain"`
 	PermissionToken  string `json:"permission_token"` // opaque credential ref — never a raw credential value
 	Instructions     string `json:"instructions"`
+	CommandManifest  string `json:"command_manifest,omitempty"`  // "- name: description" list built by factory; injected into system prompt
 	RecoveredContext string `json:"recovered_context,omitempty"` // non-empty on respawn
 	TraceID          string `json:"trace_id"`
 	UserContextID    string `json:"user_context_id,omitempty"` // propagated from parent TaskSpec; echoed in all outbound events (issue #67)
