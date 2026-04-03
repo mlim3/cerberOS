@@ -41,6 +41,13 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
+	// SIGHUP triggers a hot-reload of the skill configuration. The reload runs
+	// in a dedicated goroutine so the signal is never missed even if a previous
+	// reload is still running. The goroutine exits when the component shuts down.
+	sighupCh := make(chan os.Signal, 1)
+	signal.Notify(sighupCh, syscall.SIGHUP)
+	defer signal.Stop(sighupCh)
+
 	// Prometheus metrics recorder — wired into registry, skills, factory, and comms.
 	rec := metrics.NewRecorder()
 
@@ -157,6 +164,22 @@ func main() {
 	}
 
 	loadSkills(cfg.SkillsConfigPath, skillMgr, log)
+
+	// Start the SIGHUP hot-reload goroutine now that the skill manager is
+	// initialised and the initial skill tree is loaded.
+	go func() {
+		for {
+			select {
+			case <-sighupCh:
+				log.Info("SIGHUP received: reloading skill configuration",
+					"path", cfg.SkillsConfigPath,
+				)
+				reloadSkills(cfg.SkillsConfigPath, skillMgr, log)
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 
 	if cfg.IdleSuspendTimeout > 0 {
 		log.Info("OQ-03/OQ-06 suspension enabled",
@@ -391,4 +414,38 @@ func loadSkills(configPath string, mgr skills.Manager, log *slog.Logger) {
 			)
 		}
 	}
+}
+
+// reloadSkills hot-reloads the skill tree from configPath into mgr on SIGHUP.
+//
+// Config load or parse errors are logged and the existing tree is kept intact
+// (safe fallback). If mgr does not implement skills.Reloader (e.g. a test
+// stub), the call is a no-op with a warning log.
+func reloadSkills(configPath string, mgr skills.Manager, log *slog.Logger) {
+	cfg, err := skillsconfig.Load(configPath)
+	if err != nil {
+		log.Error("skill hot-reload: config load failed — keeping current tree",
+			"path", configPath,
+			"error", err,
+		)
+		return
+	}
+
+	reloader, ok := mgr.(skills.Reloader)
+	if !ok {
+		log.Warn("skill hot-reload: Manager does not implement Reloader — skipping")
+		return
+	}
+
+	result, err := reloader.Reload(cfg.ToSkillNodes())
+	if err != nil {
+		log.Error("skill hot-reload: reload failed — keeping current tree", "error", err)
+		return
+	}
+
+	log.Info("skill hot-reload complete",
+		"added", result.Added,
+		"removed", result.Removed,
+		"modified", result.Modified,
+	)
 }
