@@ -5,7 +5,7 @@ services:
   # by the comms layer. --store_dir persists stream state across restarts.
   nats:
     image: nats:2.10-alpine
-    command: ["--jetstream", "--store_dir=/data"]
+    command: ["--jetstream", "--store_dir=/data", "-m", "8222"]
     ports:
       - "4222:4222"   # client connections
       - "8222:8222"   # HTTP monitoring endpoint (nats.internal/varz etc.)
@@ -17,11 +17,27 @@ services:
       timeout: 3s
       retries: 5
 
+  # Partner simulator — responds to credential.request, vault.execute.request,
+  # state.write, and state.read.request with synthetic responses so the Agents
+  # Component can complete full task flows without a real Orchestrator or Vault.
+  # Not for production use.
+  simulator:
+    build: .
+    entrypoint: ["/app/simulator"]
+    depends_on:
+      nats:
+        condition: service_healthy
+    environment:
+      AEGIS_NATS_URL: nats://nats:4222
+    restart: unless-stopped
+
   aegis-agents:
     build: .
     depends_on:
       nats:
         condition: service_healthy
+      simulator:
+        condition: service_started
     environment:
       # Required
       AEGIS_NATS_URL: nats://nats:4222

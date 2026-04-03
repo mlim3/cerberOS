@@ -12,6 +12,7 @@ COPY . .
 
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /out/aegis-agents  ./cmd/aegis-agents
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /out/agent-process ./cmd/agent-process
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /out/simulator     ./cmd/simulator
 
 # Stage 2: minimal runtime image.
 # Both binaries land in /app so AEGIS_AGENT_PROCESS_PATH=/app/agent-process
@@ -25,6 +26,7 @@ RUN apk add --no-cache ca-certificates
 WORKDIR /app
 COPY --from=builder /out/aegis-agents  /app/aegis-agents
 COPY --from=builder /out/agent-process /app/agent-process
+COPY --from=builder /out/simulator     /app/simulator
 
 # Prometheus metrics endpoint — exposed so docker-compose and external scrapers
 # can reach it. The actual port is controlled by AEGIS_METRICS_PORT (default 9090).

@@ -78,6 +78,16 @@ func main() {
 	}
 	commsClient := metrics.WrapComms(rawComms, rec)
 
+	// Provision the two JetStream streams this component publishes to and
+	// consumes from. In a full deployment the Orchestrator owns stream creation;
+	// in standalone / dev / CI environments (like this Docker Compose setup)
+	// no Orchestrator is running, so we create them ourselves. The call is
+	// idempotent and safe to run on every startup.
+	if err := commsClient.EnsureStreams(); err != nil {
+		log.Error("stream provisioning failed", "error", err)
+		os.Exit(1)
+	}
+
 	reg := registry.New(registry.WithStateChangeHook(rec.ObserveStateChange))
 
 	// Wire the embedding model. If VOYAGE_API_KEY is present, use the Voyage AI
