@@ -208,8 +208,16 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 		// during this Act phase. Buffered size 1 — goroutine never blocks.
 		capturedDirectiveCh := make(chan *types.SteeringDirective, 1)
 
+		// steeringDone is used to synchronise with the steering goroutine before
+		// draining capturedDirectiveCh. Without it there is a race: cancelAct()
+		// fires, the main goroutine reaches the drain, but the steering goroutine
+		// has not yet written to capturedDirectiveCh — so the drain takes the
+		// default branch and silently drops the directive.
+		var steeringDone sync.WaitGroup
 		if steerer != nil {
+			steeringDone.Add(1)
 			go func() {
+				defer steeringDone.Done()
 				select {
 				case d := <-steerer.Chan():
 					dp := d // capture by value before sending pointer
@@ -291,6 +299,10 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 		toolInterrupted := actCtx.Err() != nil
 		// Stop the steering monitor goroutine; it will exit via actCtx.Done().
 		cancelAct()
+		// Wait for the steering goroutine to finish writing to capturedDirectiveCh
+		// before the drain below. Without this, the drain races with the goroutine
+		// and may take the default branch while the goroutine is mid-write.
+		steeringDone.Wait()
 
 		// --------------------------------------------------------------------
 		// Phase 3: Observe — process outcomes in index order.
