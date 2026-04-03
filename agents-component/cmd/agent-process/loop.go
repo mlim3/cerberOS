@@ -15,9 +15,11 @@ import (
 	"log/slog"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/cerberOS/agents-component/internal/skills"
 	"github.com/cerberOS/agents-component/pkg/types"
 )
 
@@ -47,8 +49,9 @@ type pendingToolCall struct {
 // Outcomes are stored in the same index order as the assistant response so the
 // Anthropic API receives tool results in the required order.
 type toolOutcome struct {
-	call   pendingToolCall
-	result ToolResult
+	call      pendingToolCall
+	result    ToolResult
+	elapsedMS int64 // wall-clock execution time in milliseconds; used for skill_invocation telemetry
 }
 
 // RunLoop executes the ReAct loop until the task is complete or a termination
@@ -63,9 +66,13 @@ type toolOutcome struct {
 // Phase 2 (Act) dispatches all tool calls in a response concurrently (OQ-09).
 // Results are collected in the original index order for Anthropic API compliance.
 //
+// budget optionally enforces a per-agent token ceiling on loaded SkillSpecs.
+// When non-nil, applySpecBudget filters tools to those that fit within the
+// ceiling (LRU eviction). Pass nil to disable budget enforcement.
+//
 // opts are forwarded to the Anthropic client constructor after the API key
 // option. Tests use this to inject option.WithBaseURL pointing at a mock server.
-func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *VaultExecutor, steerer *Steerer, as *AgentSpawner, opts ...option.RequestOption) (string, error) {
+func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *VaultExecutor, steerer *Steerer, as *AgentSpawner, budget *skills.SpecBudget, opts ...option.RequestOption) (string, error) {
 	apiKey := os.Getenv("ANTHROPIC_API_KEY")
 	if apiKey == "" {
 		return "", fmt.Errorf("ANTHROPIC_API_KEY environment variable is not set")
@@ -75,6 +82,10 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 	client := &c
 
 	tools := toolsForDomain(spawnCtx.SkillDomain, ve, as)
+	// Apply spec budget: register each tool's definition cost and evict LRU
+	// entries if the ceiling is exceeded. Pinned tools (task_complete,
+	// spawn_agent) are never evicted.
+	tools = applySpecBudget(budget, spawnCtx.SkillDomain, tools, log)
 	toolDefs := toolDefinitions(tools)
 	systemPrompt := buildSystemPrompt(spawnCtx.SkillDomain)
 
@@ -259,10 +270,22 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 				// Thread actCtx so vault operations are cancelled on steering interrupt.
 				// actParentID propagates to vault tools for session log linking (EDD §13.4).
 				toolCtx := WithParentEntryID(actCtx, actParentID)
-				outcomes[idx] = toolOutcome{call: c, result: dispatchTool(toolCtx, tools, c.name, c.input)}
+				start := time.Now()
+				result := dispatchTool(toolCtx, tools, c.name, c.input)
+				outcomes[idx] = toolOutcome{call: c, result: result, elapsedMS: time.Since(start).Milliseconds()}
 			}(i, call)
 		}
 		wg.Wait() // all concurrent dispatches complete (or are interrupted) before Phase 3
+
+		// Update LRU order for each successfully-dispatched tool so that
+		// recently-used specs are retained longest when the budget must evict.
+		if budget != nil {
+			for _, o := range outcomes {
+				if !o.result.IsError {
+					budget.Touch(spawnCtx.SkillDomain, o.call.name)
+				}
+			}
+		}
 
 		// Determine whether a steering interrupt fired during dispatch.
 		toolInterrupted := actCtx.Err() != nil
@@ -303,6 +326,18 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 			if o.call.name == toolNameTaskComplete && !o.result.IsError {
 				finalResult = o.result.Content
 				taskDone = true
+			}
+
+			// Emit skill_invocation telemetry for every domain tool call.
+			// task_complete is a control signal, not a skill — skip it.
+			if o.call.name != toolNameTaskComplete {
+				ve.EmitSkillInvocation(
+					spawnCtx.SkillDomain,
+					o.call.name,
+					drillDownDepth(o.call.name),
+					o.elapsedMS,
+					outcomeFromResult(o.result),
+				)
 			}
 
 			toolResults = append(toolResults,

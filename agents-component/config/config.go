@@ -78,6 +78,19 @@ type Config struct {
 	// Env: AEGIS_IDLE_SUSPEND_TIMEOUT (Go duration, e.g. "5m"). Default: 0 (disabled).
 	IdleSuspendTimeout time.Duration
 
+	// SkillsConfigPath is the path to a YAML or JSON skill definitions file.
+	// When set, it replaces the embedded default_skills.yaml for both M4
+	// registration (cmd/aegis-agents) and tool dispatch (cmd/agent-process).
+	// The file must follow the schema defined in internal/skillsconfig.
+	// Env: AEGIS_SKILLS_CONFIG_PATH (file path). Default: "" (use embedded default).
+	SkillsConfigPath string
+
+	// EmbeddingModel is the Voyage AI model used for semantic skill-search
+	// embeddings. A small, fast model is preferred because skill descriptions
+	// are short technical strings (≤300 chars).
+	// Env: AEGIS_EMBEDDING_MODEL. Default: "voyage-3-lite".
+	EmbeddingModel string
+
 	// SuspendWakeLatencyTarget is the expected latency budget for waking a SUSPENDED
 	// agent — from task.inbound receipt to the agent process being ACTIVE (OQ-06).
 	// This budget covers credential.authorize round-trip + VM spawn + process startup.
@@ -96,10 +109,16 @@ type Config struct {
 
 // Load reads configuration from environment variables and returns a validated Config.
 func Load() (*Config, error) {
+	embeddingModel := os.Getenv("AEGIS_EMBEDDING_MODEL")
+	if embeddingModel == "" {
+		embeddingModel = "voyage-3-lite"
+	}
 	c := &Config{
 		NATSURL:          os.Getenv("AEGIS_NATS_URL"),
 		ComponentID:      os.Getenv("AEGIS_COMPONENT_ID"),
 		AgentProcessPath: os.Getenv("AEGIS_AGENT_PROCESS_PATH"),
+		SkillsConfigPath: os.Getenv("AEGIS_SKILLS_CONFIG_PATH"),
+		EmbeddingModel:   embeddingModel,
 	}
 
 	if c.NATSURL == "" {
