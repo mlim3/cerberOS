@@ -225,6 +225,10 @@ func (ic *instrumentedComms) SubscribeDurable(subject, durable string, handler c
 	})
 }
 
+func (ic *instrumentedComms) EnsureStreams() error {
+	return ic.inner.EnsureStreams()
+}
+
 func (ic *instrumentedComms) Close() error {
 	return ic.inner.Close()
 }

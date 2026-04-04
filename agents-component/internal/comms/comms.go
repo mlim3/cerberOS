@@ -96,6 +96,14 @@ type Client interface {
 	// Use for all other inbound subjects.
 	SubscribeDurable(subject, durable string, handler MessageHandler) error
 
+	// EnsureStreams creates the two JetStream streams required by this component
+	// (AEGIS_AGENTS covering aegis.agents.> and AEGIS_ORCHESTRATOR covering
+	// aegis.orchestrator.>) if they do not already exist. Idempotent: safe to
+	// call on every startup. In a full deployment the Orchestrator provisions
+	// these; call this method for standalone / dev / CI environments where no
+	// Orchestrator is present.
+	EnsureStreams() error
+
 	// Close drains all subscriptions and the underlying connection.
 	Close() error
 }
@@ -318,6 +326,34 @@ func (c *natsClient) publishDeadLetter(
 	}
 }
 
+// EnsureStreams creates the AEGIS_AGENTS and AEGIS_ORCHESTRATOR JetStream
+// streams if they do not already exist. Each stream uses file storage and
+// limit-based retention. The call is idempotent: if a stream already exists
+// with any configuration it is left unchanged.
+func (c *natsClient) EnsureStreams() error {
+	streams := []struct {
+		name    string
+		subject string
+	}{
+		{"AEGIS_AGENTS", "aegis.agents.>"},
+		{"AEGIS_ORCHESTRATOR", "aegis.orchestrator.>"},
+	}
+	for _, s := range streams {
+		if _, err := c.js.StreamInfo(s.name); err == nil {
+			continue // stream already exists
+		}
+		if _, err := c.js.AddStream(&nats.StreamConfig{
+			Name:      s.name,
+			Subjects:  []string{s.subject},
+			Storage:   nats.FileStorage,
+			Retention: nats.LimitsPolicy,
+		}); err != nil {
+			return fmt.Errorf("comms: create stream %q: %w", s.name, err)
+		}
+	}
+	return nil
+}
+
 func (c *natsClient) Close() error {
 	c.mu.Lock()
 	for _, sub := range c.subs {
@@ -386,6 +422,8 @@ func (c *stubClient) Subscribe(subject string, handler MessageHandler) error {
 func (c *stubClient) SubscribeDurable(subject, _ string, handler MessageHandler) error {
 	return c.Subscribe(subject, handler)
 }
+
+func (c *stubClient) EnsureStreams() error { return nil }
 
 func (c *stubClient) Close() error {
 	c.mu.Lock()

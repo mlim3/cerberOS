@@ -169,6 +169,135 @@ The component responds on:
 
 ---
 
+## Using the NATS CLI
+
+The [NATS CLI](https://github.com/nats-io/natscli) (`nats`) is the easiest way to publish requests and subscribe to responses from the command line.
+
+### Install
+
+```bash
+# macOS
+brew install nats-io/nats-tools/nats
+
+# Go install
+go install github.com/nats-io/natscli/nats@latest
+```
+
+### 1. Start NATS and the simulator
+
+The simulator handles the Orchestrator side (credential grants, vault results, state writes) so the Agents Component can complete full task flows without a real partner service.
+
+```bash
+# Start NATS JetStream + partner simulator + aegis-agents in one command
+docker compose up
+```
+
+Or without Docker:
+
+```bash
+# Terminal 1 — NATS JetStream
+docker run --rm -p 4222:4222 -p 8222:8222 nats:2.10-alpine --jetstream
+
+# Terminal 2 — partner simulator
+AEGIS_NATS_URL=nats://localhost:4222 go run ./cmd/simulator/
+
+# Terminal 3 — aegis-agents
+AEGIS_NATS_URL=nats://localhost:4222 \
+AEGIS_AGENT_PROCESS_PATH=./agent-process \
+ANTHROPIC_API_KEY=<your-key> \
+  go run ./cmd/aegis-agents/
+```
+
+### 2. Subscribe to response subjects
+
+Open a terminal and subscribe before publishing so you don't miss early messages:
+
+```bash
+# Watch all responses in one stream
+nats sub "aegis.orchestrator.>" --server nats://localhost:4222
+
+# Or subscribe to specific subjects individually:
+
+# Immediate task acknowledgment (published before provisioning)
+nats sub aegis.orchestrator.task.accepted --server nats://localhost:4222
+
+# Final task result
+nats sub aegis.orchestrator.task.result --server nats://localhost:4222
+
+# Task failure (provisioning or execution error)
+nats sub aegis.orchestrator.task.failed --server nats://localhost:4222
+
+# Agent lifecycle state transitions (SPAWNING → ACTIVE → IDLE → TERMINATED)
+nats sub aegis.orchestrator.agent.status --server nats://localhost:4222
+```
+
+### 3. Submit a task request
+
+In a second terminal, publish a `task.inbound` message to `aegis.agents.task.inbound`.
+
+The envelope must be valid JSON with the required fields shown below. Every message the Agents Component receives must be wrapped in this envelope — unwrapped payloads are rejected.
+
+```bash
+nats pub aegis.agents.task.inbound '{
+  "message_id": "msg-001",
+  "message_type": "task.inbound",
+  "source_component": "orchestrator",
+  "correlation_id": "task-001",
+  "timestamp": "2026-01-01T00:00:00Z",
+  "schema_version": "1.0",
+  "payload": {
+    "task_id": "task-001",
+    "required_skills": ["general"],
+    "instructions": "Give me the steps to make a sandwich.",
+    "trace_id": "trace-abc123",
+    "user_context_id": "ctx-user-42"
+  }
+}' --server nats://localhost:4222
+```
+
+### Expected response sequence
+
+After publishing, the subscriber terminal should receive messages in this order:
+
+1. **`aegis.orchestrator.task.accepted`** — published within 5 seconds of receipt, before any provisioning work starts
+2. **`aegis.orchestrator.agent.status`** — one or more state transitions as the agent moves through `PENDING → SPAWNING → ACTIVE`
+3. **`aegis.orchestrator.task.result`** (or `task.failed`) — published when the agent finishes
+
+Each message is a JSON envelope. The task result payload looks like:
+
+```json
+{
+  "message_id": "...",
+  "message_type": "task.result",
+  "source_component": "agents",
+  "correlation_id": "task-001",
+  "timestamp": "...",
+  "schema_version": "1.0",
+  "payload": {
+    "task_id": "task-001",
+    "success": true,
+    "result": { ... },
+    "trace_id": "trace-abc123",
+    "user_context_id": "ctx-user-42"
+  }
+}
+```
+
+### Checking stream state
+
+```bash
+# List all JetStream streams
+nats stream ls --server nats://localhost:4222
+
+# Inspect the orchestrator stream (outbound from agents)
+nats stream info AEGIS_ORCHESTRATOR --server nats://localhost:4222
+
+# Inspect the agents stream (inbound to agents)
+nats stream info AEGIS_AGENTS --server nats://localhost:4222
+```
+
+---
+
 ## Responsibilities
 
 - **Agent Provisioning** — Spawn new agents when no capable agent exists; reuse IDLE or SUSPENDED agents when one matches

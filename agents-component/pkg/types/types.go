@@ -55,7 +55,8 @@ type AgentRecord struct {
 	SkillDomains  []string     `json:"skill_domains"`
 	PermissionSet []string     `json:"permission_set"`
 	AssignedTask  string       `json:"assigned_task,omitempty"`
-	StateHistory  []StateEvent `json:"state_history"` // append-only ordered log of all state transitions
+	Instructions  string       `json:"instructions,omitempty"` // original task instructions; retained for crash recovery respawn
+	StateHistory  []StateEvent `json:"state_history"`          // append-only ordered log of all state transitions
 	CreatedAt     time.Time    `json:"created_at"`
 	UpdatedAt     time.Time    `json:"updated_at"`
 }

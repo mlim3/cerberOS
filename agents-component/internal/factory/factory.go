@@ -318,6 +318,7 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 		SkillDomains:  spec.RequiredSkills,
 		PermissionSet: permSet,
 		AssignedTask:  spec.TaskID,
+		Instructions:  spec.Instructions,
 	}
 	if err := f.registry.Register(agent); err != nil {
 		return fmt.Errorf("factory: registry.Register: %w", err)
@@ -707,6 +708,7 @@ func (f *Factory) HandleCrash(agentID string) error {
 		TaskID:           agent.AssignedTask,
 		SkillDomain:      entryDomain,
 		CredentialPtr:    token,
+		Instructions:     agent.Instructions,
 		RecoveredContext: buildRecoveredContext(snapshot),
 	}
 	if err := f.lifecycle.Spawn(vmCfg); err != nil {
