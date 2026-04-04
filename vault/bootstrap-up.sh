@@ -32,8 +32,8 @@ docker compose -f "$MEMORY_DIR/docker-compose.yml" exec db \
   psql -U user -d memory_db -c "CREATE DATABASE openbao OWNER \"user\""
 
 # Start OpenBao (joins memory's network to reach 'db')
-echo "Starting OpenBao..."
-docker compose up -d openbao
+echo "Starting Vault..."
+docker compose up -d
 
 echo "Waiting for OpenBao to be reachable..."
 for i in $(seq 1 30); do
@@ -103,6 +103,40 @@ elif [ "$KV_RESP" = "400" ]; then
 else
   echo "  warning: KV mount returned HTTP $KV_RESP"
 fi
+
+# Create a least-privilege policy for the vault service
+echo "Creating vault-service policy..."
+POLICY_RESP=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$BAO_ADDR/v1/sys/policies/acl/vault-service" \
+  -H "X-Vault-Token: $ROOT_TOKEN" \
+  -d '{
+    "policy": "path \"kv/data/*\" { capabilities = [\"create\",\"read\",\"update\",\"delete\",\"list\"] }\npath \"kv/metadata/*\" { capabilities = [\"list\",\"read\",\"delete\"] }"
+  }')
+if [ "$POLICY_RESP" = "204" ] || [ "$POLICY_RESP" = "200" ]; then
+  echo "  vault-service policy created."
+else
+  echo "  warning: policy creation returned HTTP $POLICY_RESP"
+fi
+
+# Create a service token with the vault-service policy
+echo "Creating service token..."
+TOKEN_OUT=$(curl -s -X POST "$BAO_ADDR/v1/auth/token/create" \
+  -H "X-Vault-Token: $ROOT_TOKEN" \
+  -d '{"policies":["vault-service"],"display_name":"vault-service","no_parent":true}')
+SERVICE_TOKEN=$(echo "$TOKEN_OUT" | jq -r '.auth.client_token')
+if [ -z "$SERVICE_TOKEN" ] || [ "$SERVICE_TOKEN" = "null" ]; then
+  echo "error: failed to create service token"
+  echo "$TOKEN_OUT"
+  exit 1
+fi
+echo "  Service token created."
+
+# Write .env so docker compose injects BAO_TOKEN into the vault container
+echo "BAO_TOKEN=$SERVICE_TOKEN" > .env
+echo "  .env written with BAO_TOKEN."
+
+# Restart vault service so it picks up the token
+echo "Restarting vault service..."
+docker compose up -d vault
 
 echo "Running smoke test..."
 WRITE_RESP=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BAO_ADDR/v1/kv/data/test" \

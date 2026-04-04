@@ -20,6 +20,16 @@ const (
 	KindSecretAccess EventKind = "secret_access"
 	// KindInjection is emitted when an agent requests secret injection into a script.
 	KindInjection EventKind = "injection"
+	// KindError is emitted when an error occurs.
+	KindError EventKind = "error"
+	// KindWarning is emitted when a warning occurs.
+	KindWarning EventKind = "warning"
+	// KindInfo is emitted when an info occurs.
+	KindInfo EventKind = "info"
+	// KindDebug is emitted when a debug occurs.
+	KindDebug EventKind = "debug"
+	// KindTrace is emitted when a trace occurs.
+	KindTrace EventKind = "trace"
 )
 
 // Event is the unit of information written to every Exporter.
@@ -27,9 +37,13 @@ type Event struct {
 	Time    time.Time `json:"time"`
 	Kind    EventKind `json:"kind"`
 	Agent   string    `json:"agent"`
-	// Keys holds the secret names requested (never the values).
 	Keys    []string  `json:"keys,omitempty"`
 	Message string    `json:"message,omitempty"`
+	Error   string    `json:"error,omitempty"`
+	Warning string    `json:"warning,omitempty"`
+	Info    string    `json:"info,omitempty"`
+	Debug   string    `json:"debug,omitempty"`
+	Trace   string    `json:"trace,omitempty"`
 }
 
 // Exporter is the single extension point: implement this interface to send
