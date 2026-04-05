@@ -8,10 +8,26 @@ import {
   type OrchestratorStreamEvent,
   type CredentialRequest,
 } from '@cerberos/io-core';
+import {
+  appendLogEntry,
+  getSessionLogs,
+  getOrCreateSessionId,
+  type MemoryLogEntry,
+} from '@cerberos/io-core/memory-client'
+import { transcribe, warmupTranscription } from './transcription/runner'
 
-// In-memory storage (would be replaced with proper persistence in production)
+// In-memory task state (separate from log persistence)
 const tasks = new Map<string, StatusUpdate>();
-const logs: LogEntry[] = [];
+
+/** Maps MemoryLogEntry (user|assistant) back to LogEntry (user|orchestrator). */
+function memoryToLogEntry(m: MemoryLogEntry): LogEntry {
+  return {
+    taskId: m.taskId ?? '',
+    role: m.role === 'assistant' ? 'orchestrator' : 'user',
+    content: m.content,
+    at: m.createdAt,
+  }
+}
 
 type SsePush = (bytes: Uint8Array) => void;
 const sseClients = new Map<string, Set<SsePush>>();
@@ -140,14 +156,15 @@ app.post('/api/chat', async (c) => {
   const body = (await c.req.json()) as SendMessageRequest;
   const { taskId, content, conversationHistory } = body;
 
-  // Log user message
-  const userLogEntry: LogEntry = {
-    taskId,
+  // Log user message via memory client (uses in-memory when MEMORY_API_BASE is unset)
+  const sessionId = getOrCreateSessionId(taskId, '00000000-0000-0000-0000-000000000001')
+  await appendLogEntry({
+    sessionId,
+    userId: '00000000-0000-0000-0000-000000000001',
     role: 'user',
     content,
-    at: new Date().toISOString(),
-  };
-  logs.push(userLogEntry);
+    taskId,
+  })
 
   const workingStatus: StatusUpdate = {
     taskId,
@@ -171,12 +188,13 @@ app.post('/api/chat', async (c) => {
       controller.close();
 
       // Log assistant response after streaming completes
-      logs.push({
-        taskId,
-        role: 'orchestrator',
+      await appendLogEntry({
+        sessionId,
+        userId: '00000000-0000-0000-0000-000000000001',
+        role: 'assistant',
         content: accumulated,
-        at: new Date().toISOString(),
-      });
+        taskId,
+      })
 
       const doneStatus: StatusUpdate = {
         taskId,
@@ -200,15 +218,17 @@ app.post('/api/chat', async (c) => {
 });
 
 // Get logs for a task
-app.get('/api/logs/:taskId', (c) => {
+app.get('/api/logs/:taskId', async (c) => {
   const taskId = c.req.param('taskId');
-  const taskLogs = logs.filter(log => log.taskId === taskId);
-  return c.json({ logs: taskLogs });
+  const sessionId = getOrCreateSessionId(taskId, '00000000-0000-0000-0000-000000000001')
+  const memoryLogs = await getSessionLogs(sessionId, { taskId })
+  const logs = memoryLogs.map(memoryToLogEntry)
+  return c.json({ logs });
 });
 
-// Get all logs
+// Get all logs — session-scoped queries via /api/logs/:taskId are the intended API
 app.get('/api/logs', (c) => {
-  return c.json({ logs });
+  return c.json({ logs: [] });
 });
 
 // Credential submission endpoint (proxies to Memory Vault)
@@ -337,6 +357,29 @@ app.get('/api/events/:taskId', (c) => {
     },
   });
 });
+
+/** POST /api/voice/transcribe — transcribe audio using faster-whisper */
+app.post('/api/voice/transcribe', async (c) => {
+  const body = await c.req.json<{
+    audioData: string
+    format: string
+    language?: string
+  }>()
+
+  try {
+    const result = await transcribe({
+      audioData: body.audioData,
+      language: body.language,
+    })
+    return c.json(result)
+  } catch (err) {
+    console.error('[Voice] Transcription failed:', err)
+    return c.json({ error: String(err) }, 500)
+  }
+})
+
+// Warm up faster-whisper before accepting traffic
+warmupTranscription()
 
 export default {
   port: 3001,
