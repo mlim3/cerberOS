@@ -55,8 +55,10 @@ type AgentRecord struct {
 	SkillDomains  []string     `json:"skill_domains"`
 	PermissionSet []string     `json:"permission_set"`
 	AssignedTask  string       `json:"assigned_task,omitempty"`
-	Instructions  string       `json:"instructions,omitempty"` // original task instructions; retained for crash recovery respawn
-	StateHistory  []StateEvent `json:"state_history"`          // append-only ordered log of all state transitions
+	Instructions  string       `json:"instructions,omitempty"`    // original task instructions; retained for crash recovery respawn
+	TraceID       string       `json:"trace_id,omitempty"`        // propagated from TaskSpec; required for respawn after crash
+	UserContextID string       `json:"user_context_id,omitempty"` // propagated from TaskSpec; echoed in all outbound events
+	StateHistory  []StateEvent `json:"state_history"`             // append-only ordered log of all state transitions
 	CreatedAt     time.Time    `json:"created_at"`
 	UpdatedAt     time.Time    `json:"updated_at"`
 }
