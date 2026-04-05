@@ -20,9 +20,12 @@ import {
   subscribeOrchestratorTaskStream,
   orchestratorSseEnabled,
   formatExpectedNextInput,
+  buildApiUrl,
 } from './api/orchestrator'
 import { createWebSurface, type SurfaceAdapter } from './surface'
 import './App.css'
+
+const DEMO_MODE = import.meta.env.VITE_DEMO_MODE === 'true'
 
 const SETTINGS_STORAGE_KEY = 'cerberos-io-settings'
 
@@ -223,8 +226,10 @@ const mockTasks: Task[] = [
 ]
 
 function App() {
-  const [tasks, setTasks] = useState<Task[]>(mockTasks)
-  const [selectedTaskId, setSelectedTaskId] = useState<string>(mockTasks[0].id)
+  const [tasks, setTasks] = useState<Task[]>(DEMO_MODE ? mockTasks : [])
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(
+    DEMO_MODE ? mockTasks[0].id : null
+  )
   const [showSettings, setShowSettings] = useState(false)
   const [streamingForTaskId, setStreamingForTaskId] = useState<string | null>(null)
   const [streamingContent, setStreamingContent] = useState('')
@@ -321,6 +326,7 @@ function App() {
 
   // Offline / API-down: still show credential demo for task 13 (matches IO API demo push)
   useEffect(() => {
+    if (!DEMO_MODE) return
     if (!useMockHeartbeat) return
     if (selectedTaskId !== '13') return
     setCredentialRequests(prev => {
@@ -330,7 +336,7 @@ function App() {
         '13': { request: FALLBACK_TASK_13_CREDENTIAL, status: 'pending' },
       }
     })
-  }, [useMockHeartbeat, selectedTaskId])
+  }, [DEMO_MODE, useMockHeartbeat, selectedTaskId])
 
   // Refs to hold callbacks for SurfaceAdapter integration
   const tasksRef = useRef(tasks)
@@ -511,8 +517,21 @@ function App() {
     }
   }, [uiSettings.showActivityLog, tasks, addLogEntry, useMockHeartbeat])
 
-  const handleCreateTask = () => {
-    const newTaskId = nextId()
+  const handleCreateTask = async () => {
+    let newTaskId: string
+
+    try {
+      const res = await fetch(buildApiUrl('/api/tasks'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: '', userId: '00000000-0000-0000-0000-000000000001' }),
+      })
+      const data = await res.json()
+      newTaskId = data.taskId
+    } catch {
+      // API unreachable — fall back to local ID
+      newTaskId = nextId()
+    }
 
     const newTask: Task = {
       id: newTaskId,
@@ -805,7 +824,10 @@ function App() {
         <header className="header">
           <div className="header-task-info">
             <h1 className="header-title">
-              {selectedTask?.title || 'Select a task'}
+              {selectedTask?.title ||
+                (tasks.length === 0 && !DEMO_MODE
+                  ? 'No active tasks. Submit a prompt below to create one.'
+                  : 'Select a task')}
             </h1>
             {selectedTask && (
               <div className="header-meta">
