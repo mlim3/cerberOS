@@ -52,10 +52,11 @@ func (m *MemoryMock) Write(payload types.OrchestratorMemoryWritePayload) error {
 
 	// Validate data_type — reject untagged writes
 	switch payload.DataType {
-	case types.DataTypeTaskState, types.DataTypeAuditLog, types.DataTypeRecoveryEvent, types.DataTypePolicyEvent:
+	case types.DataTypeTaskState, types.DataTypePlanState, types.DataTypeSubtaskState,
+		types.DataTypeAuditLog, types.DataTypeRecoveryEvent, types.DataTypePolicyEvent:
 		// valid
 	default:
-		return fmt.Errorf("invalid data_type: %q — must be one of: task_state, audit_log, recovery_event, policy_event", payload.DataType)
+		return fmt.Errorf("invalid data_type: %q — must be one of: task_state, plan_state, subtask_state, audit_log, recovery_event, policy_event", payload.DataType)
 	}
 
 	m.Records = append(m.Records, types.MemoryRecord{

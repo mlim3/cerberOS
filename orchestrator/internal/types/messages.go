@@ -128,6 +128,28 @@ type StatusResponse struct {
 	ErrorCode   string `json:"error_code,omitempty"`
 }
 
+// ─── Task Decomposition Request / Response (NEW in v3.0) ──────────────────────
+// Outbound to Agents Component on aegis.agents.decomposition.request (§11.2).
+// Inbound from Agents Component on aegis.orchestrator.decomposition.response (§11.3).
+
+// DecompositionRequest is sent to the Planner Agent after policy validation (§FR-TD-01).
+// The Planner Agent must only assign skill domains within the provided policy_scope.
+type DecompositionRequest struct {
+	TaskID              string      `json:"task_id"`
+	OrchestratorTaskRef string      `json:"orchestrator_task_ref"`
+	UserID              string      `json:"user_id"`
+	RawInput            string      `json:"raw_input"`           // Verbatim from user_task.payload.raw_input
+	PolicyScope         PolicyScope `json:"policy_scope"`        // Ceiling for all subtask domains
+	UserContextID       string      `json:"user_context_id,omitempty"`
+}
+
+// DecompositionResponse is returned by the Planner Agent containing the execution plan (§11.5).
+type DecompositionResponse struct {
+	TaskID             string         `json:"task_id"`
+	Plan               ExecutionPlan  `json:"plan"`
+	GenerationMetadata map[string]any `json:"generation_metadata,omitempty"`
+}
+
 // ─── Metrics Payload ──────────────────────────────────────────────────────────
 // Emitted to aegis.orchestrator.metrics on a configurable interval (§15.2).
 

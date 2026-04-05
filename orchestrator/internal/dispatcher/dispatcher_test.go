@@ -1,23 +1,24 @@
-// Package dispatcher_test provides black-box tests for M2: Task Dispatcher.
+// Package dispatcher_test provides black-box tests for M2: Task Dispatcher (v3.0).
 //
-// Each test demonstrates a distinct scenario from the EDD (§7, §8, §17.3).
+// Each test demonstrates a distinct scenario from the EDD v3.0 (§7, §8, §17.3).
 // Run with:
 //
 //	cd orchestrator && go test ./internal/dispatcher/ -v
 //
 // Demo scenarios covered:
 //
-//	✅  Happy Path                 — task flows through DISPATCH_PENDING → DISPATCHED → task_accepted
-//	✅  Duplicate Task             — same task_id twice → DUPLICATE_TASK; no second agent touched
-//	✅  Policy Violation           — Vault denies → POLICY_VIOLATION; capability query NEVER called
-//	✅  Schema Errors              — empty skill domains, invalid priority, timeout out of range
-//	✅  Memory Fail                — memory write fails before dispatch → error; task_spec NOT published
-//	✅  Agents Unavailable         — capability query fails → AGENTS_UNAVAILABLE error
-//	✅  Dispatch Failure Recovery  — PublishTaskSpec fails → DELIVERY_FAILED + cleanup + revoke
-//	✅  Task Result                — HandleTaskResult writes COMPLETED state + delivers result + revokes credentials
-//	✅  Task Failed                — HandleTaskResult with success=false → FAILED state + tasksFailed counter
-//	✅  Metrics                    — counters track received, completed, failed, violations, queue depth
-//	✅  Active Tasks               — GetActiveTasks reflects in-flight tasks and clears on completion
+//	✅  Happy Path — Decomposition     — task flows DECOMPOSING → DecompositionResponse → PLAN_ACTIVE
+//	✅  Duplicate Task                 — same task_id twice → DUPLICATE_TASK; Planner Agent never contacted
+//	✅  Policy Violation               — Vault denies → POLICY_VIOLATION; decomposition request NEVER sent
+//	✅  Schema Errors                  — invalid UUID, priority, timeout; required_skill_domains now optional
+//	✅  Memory Fail Before Decompose   — memory write fails → error; decomposition request NOT published
+//	✅  Decomposition Publish Fail     — gateway fails → AGENTS_UNAVAILABLE; cleanup performed
+//	✅  Invalid Plan                   — circular deps, empty plan, scope violation → DECOMPOSITION_FAILED
+//	✅  Plan Complete                  — HandlePlanComplete writes COMPLETED + delivers result + revokes creds
+//	✅  Plan Failed                    — HandlePlanFailed writes FAILED + publishes error
+//	✅  Partial Complete               — HandlePlanFailed with partial=true writes PARTIAL_COMPLETE + result
+//	✅  Metrics                        — counters track received, completed, failed, violations, queue depth
+//	✅  Active Tasks                   — GetActiveTasks reflects in-flight tasks and clears on completion
 package dispatcher_test
 
 import (
@@ -36,19 +37,17 @@ import (
 
 // ── Lightweight mocks for dispatcher-internal interfaces ──────────────────────
 
-// gatewayMock records every outbound call the Dispatcher makes to M1.
+// gatewayMock records every outbound call the Dispatcher makes to M1 (v3.0 interface).
 type gatewayMock struct {
-	AcceptedCalls        []types.TaskAccepted
-	ErrorCalls           []types.ErrorResponse
-	TaskSpecCalls        []types.TaskSpec
-	CapabilityQueryCalls []types.CapabilityQuery
-	TaskResultCalls      []types.TaskResult
+	AcceptedCalls             []types.TaskAccepted
+	ErrorCalls                []types.ErrorResponse
+	DecompositionRequestCalls []types.DecompositionRequest
+	TaskResultCalls           []types.TaskResult
+	StatusUpdateCalls         []types.StatusResponse
 
-	CapabilityQueryResponse *types.CapabilityResponse
-	CapabilityQueryError    error
-	PublishSpecError        error
-	PublishAcceptedError    error
-	PublishResultError      error
+	PublishDecompositionError error
+	PublishAcceptedError      error
+	PublishResultError        error
 }
 
 func (g *gatewayMock) PublishTaskAccepted(_ string, a types.TaskAccepted) error {
@@ -61,30 +60,19 @@ func (g *gatewayMock) PublishError(_ string, e types.ErrorResponse) error {
 	return nil
 }
 
-func (g *gatewayMock) PublishTaskSpec(s types.TaskSpec) error {
-	g.TaskSpecCalls = append(g.TaskSpecCalls, s)
-	return g.PublishSpecError
-}
-
-func (g *gatewayMock) PublishCapabilityQuery(q types.CapabilityQuery) (*types.CapabilityResponse, error) {
-	g.CapabilityQueryCalls = append(g.CapabilityQueryCalls, q)
-	if g.CapabilityQueryError != nil {
-		return nil, g.CapabilityQueryError
-	}
-	return g.CapabilityQueryResponse, nil
-}
-
 func (g *gatewayMock) PublishTaskResult(_ string, r types.TaskResult) error {
 	g.TaskResultCalls = append(g.TaskResultCalls, r)
 	return g.PublishResultError
 }
 
-// newCapabilityResponse returns a default CapabilityResponse with a matched agent.
-func newCapabilityResponse(_ string) *types.CapabilityResponse {
-	return &types.CapabilityResponse{
-		Match:   types.CapabilityMatch_Match,
-		AgentID: "agent-42",
-	}
+func (g *gatewayMock) PublishDecompositionRequest(req types.DecompositionRequest) error {
+	g.DecompositionRequestCalls = append(g.DecompositionRequestCalls, req)
+	return g.PublishDecompositionError
+}
+
+func (g *gatewayMock) PublishStatusUpdate(_ string, s types.StatusResponse) error {
+	g.StatusUpdateCalls = append(g.StatusUpdateCalls, s)
+	return nil
 }
 
 // policyMock is a minimal controllable PolicyEnforcer.
@@ -106,7 +94,7 @@ func (p *policyMock) ValidateAndScope(taskID, orchRef, userID string, domains []
 		return types.PolicyScope{}, errors.New(reason)
 	}
 	return types.PolicyScope{
-		Domains:   domains,
+		Domains:   []string{"web", "research", "calendar"},
 		TokenRef:  "tok-" + taskID,
 		IssuedAt:  time.Now().UTC(),
 		ExpiresAt: time.Now().UTC().Add(1 * time.Hour),
@@ -132,47 +120,96 @@ type monitorMock struct {
 func (m *monitorMock) TrackTask(ts *types.TaskState) { m.TrackedTasks = append(m.TrackedTasks, ts) }
 func (m *monitorMock) UntrackTask(taskID string)     { m.UntrackedIDs = append(m.UntrackedIDs, taskID) }
 
+// executorMock records Execute calls and can inject failures.
+type executorMock struct {
+	ExecuteCalls []struct {
+		Plan types.ExecutionPlan
+		TS   *types.TaskState
+	}
+	ExecuteError error
+}
+
+func (e *executorMock) Execute(plan types.ExecutionPlan, ts *types.TaskState) error {
+	e.ExecuteCalls = append(e.ExecuteCalls, struct {
+		Plan types.ExecutionPlan
+		TS   *types.TaskState
+	}{plan, ts})
+	return e.ExecuteError
+}
+
 // ── Test Helpers ─────────────────────────────────────────────────────────────
 
 // newDispatcher builds a fully wired Dispatcher with fresh mocks.
-func newDispatcher(t *testing.T) (*dispatcher.Dispatcher, *gatewayMock, *policyMock, *monitorMock, *mocks.MemoryMock) {
+func newDispatcher(t *testing.T) (*dispatcher.Dispatcher, *gatewayMock, *policyMock, *monitorMock, *executorMock, *mocks.MemoryMock) {
 	t.Helper()
 	gw := &gatewayMock{}
 	pol := &policyMock{}
 	mon := &monitorMock{}
+	exec := &executorMock{}
 	mem := mocks.NewMemoryMock()
 
-	cfg := &config.OrchestratorConfig{NodeID: "test-node"}
-	d := dispatcher.New(cfg, mem, nil /* vault unused in dispatcher */, gw, pol, mon)
-	return d, gw, pol, mon, mem
+	cfg := &config.OrchestratorConfig{
+		NodeID:                      "test-node",
+		DecompositionTimeoutSeconds: 30,
+		MaxSubtasksPerPlan:          20,
+		PlanExecutorMaxParallel:     5,
+	}
+	d := dispatcher.New(cfg, mem, nil /* vault unused */, gw, pol, mon, exec)
+	return d, gw, pol, mon, exec, mem
 }
 
-// validTask returns a minimal, schema-valid UserTask ready for submission.
+// validTask returns a minimal, schema-valid UserTask for v3.0.
+// required_skill_domains is optional in v3.0 (FR-TRK-04).
 func validTask(taskID string) types.UserTask {
 	return types.UserTask{
-		TaskID:               taskID,
-		UserID:               "user-1",
-		RequiredSkillDomains: []string{"web"},
-		Priority:             5,
-		TimeoutSeconds:       60,
-		Payload:              json.RawMessage(`{"url":"https://example.com"}`),
-		CallbackTopic:        "aegis.user-io.results.task-1",
+		TaskID:         taskID,
+		UserID:         "user-1",
+		Priority:       5,
+		TimeoutSeconds: 60,
+		Payload:        json.RawMessage(`{"raw_input":"book a flight from NYC to LA"}`),
+		CallbackTopic:  "aegis.user-io.results.task-1",
 	}
 }
 
-// orchRefFromSpec extracts the orchestrator_task_ref from the first PublishTaskSpec call.
-func orchRefFromSpec(t *testing.T, gw *gatewayMock) string {
-	t.Helper()
-	if len(gw.TaskSpecCalls) == 0 {
-		t.Fatal("no task_spec was published")
+// validPlan returns a minimal valid 1-subtask execution plan.
+func validPlan(taskID string) types.ExecutionPlan {
+	return types.ExecutionPlan{
+		PlanID:       "plan-" + taskID,
+		ParentTaskID: taskID,
+		CreatedAt:    time.Now().UTC(),
+		Subtasks: []types.Subtask{
+			{
+				SubtaskID:            "s1",
+				RequiredSkillDomains: []string{"web"},
+				Action:               "search",
+				Instructions:         "Search for flights from NYC to LA",
+				DependsOn:            []string{},
+				TimeoutSeconds:       30,
+			},
+		},
 	}
-	return gw.TaskSpecCalls[0].OrchestratorTaskRef
+}
+
+// decompositionResponse wraps a plan as a DecompositionResponse for a given task.
+func decompositionResponse(taskID string, plan types.ExecutionPlan) types.DecompositionResponse {
+	return types.DecompositionResponse{
+		TaskID: taskID,
+		Plan:   plan,
+	}
+}
+
+// orchRefFromDecompositionRequest extracts orchestrator_task_ref from the first decomposition request.
+func orchRefFromDecompositionRequest(t *testing.T, gw *gatewayMock) string {
+	t.Helper()
+	if len(gw.DecompositionRequestCalls) == 0 {
+		t.Fatal("no decomposition request was published")
+	}
+	return gw.DecompositionRequestCalls[0].OrchestratorTaskRef
 }
 
 // latestTaskStateRecord returns the most recent task_state record for a task_id.
 func latestTaskStateRecord(t *testing.T, mem *mocks.MemoryMock, taskID string) types.TaskState {
 	t.Helper()
-
 	var last types.TaskState
 	found := false
 	for _, rec := range mem.Records {
@@ -193,7 +230,6 @@ func latestTaskStateRecord(t *testing.T, mem *mocks.MemoryMock, taskID string) t
 // taskStateHistory returns all persisted task states for a task_id in write order.
 func taskStateHistory(t *testing.T, mem *mocks.MemoryMock, taskID string) []types.TaskState {
 	t.Helper()
-
 	var states []types.TaskState
 	for _, rec := range mem.Records {
 		if rec.TaskID != taskID || rec.DataType != types.DataTypeTaskState {
@@ -208,149 +244,358 @@ func taskStateHistory(t *testing.T, mem *mocks.MemoryMock, taskID string) []type
 	return states
 }
 
-// ── Happy Path ───────────────────────────────────────────────────────────────
+// ── Happy Path: Inbound → DECOMPOSING ────────────────────────────────────────
 
-func TestHandleInboundTask_HappyPath_NewAgent(t *testing.T) {
-	d, gw, pol, mon, mem := newDispatcher(t)
-
-	gw.CapabilityQueryResponse = &types.CapabilityResponse{
-		Match:   types.CapabilityMatch_NoMatch,
-		AgentID: "agent-new",
-	}
+func TestHandleInboundTask_HappyPath_Decomposing(t *testing.T) {
+	d, gw, pol, mon, exec, mem := newDispatcher(t)
 
 	task := validTask("550e8400-e29b-41d4-a716-446655440000")
 	if err := d.HandleInboundTask(task); err != nil {
 		t.Fatalf("HandleInboundTask() error = %v, want nil", err)
 	}
 
+	// Policy must be called once.
 	if pol.ValidatedCalls != 1 {
 		t.Fatalf("policy.ValidatedCalls = %d, want 1", pol.ValidatedCalls)
 	}
-	if len(gw.CapabilityQueryCalls) != 1 {
-		t.Fatalf("capability queries = %d, want 1", len(gw.CapabilityQueryCalls))
+
+	// A decomposition request must be published.
+	if len(gw.DecompositionRequestCalls) != 1 {
+		t.Fatalf("decomposition requests = %d, want 1", len(gw.DecompositionRequestCalls))
 	}
-	if len(gw.TaskSpecCalls) != 1 {
-		t.Fatalf("task_spec publishes = %d, want 1", len(gw.TaskSpecCalls))
+	req := gw.DecompositionRequestCalls[0]
+	if req.TaskID != task.TaskID {
+		t.Fatalf("decomposition_request.task_id = %q, want %q", req.TaskID, task.TaskID)
 	}
-	if gw.TaskSpecCalls[0].TaskID != task.TaskID {
-		t.Fatalf("task_spec.task_id = %q, want %q", gw.TaskSpecCalls[0].TaskID, task.TaskID)
+	if req.OrchestratorTaskRef == "" || req.OrchestratorTaskRef == task.TaskID {
+		t.Fatal("decomposition_request.orchestrator_task_ref must be a distinct non-empty UUID")
 	}
-	if len(gw.AcceptedCalls) != 1 {
-		t.Fatalf("task_accepted publishes = %d, want 1", len(gw.AcceptedCalls))
+	if req.RawInput != "book a flight from NYC to LA" {
+		t.Fatalf("decomposition_request.raw_input = %q, want extracted value", req.RawInput)
+	}
+	if req.PolicyScope.TokenRef == "" {
+		t.Fatal("decomposition_request.policy_scope.token_ref is empty — policy scope not attached")
 	}
 
+	// No task_accepted yet (only after plan is validated).
+	if len(gw.AcceptedCalls) != 0 {
+		t.Fatalf("task_accepted publishes = %d, want 0 before plan is received", len(gw.AcceptedCalls))
+	}
+
+	// Executor must NOT be called yet.
+	if len(exec.ExecuteCalls) != 0 {
+		t.Fatalf("executor.Execute calls = %d, want 0 before decomposition response", len(exec.ExecuteCalls))
+	}
+
+	// Task must be persisted as DECOMPOSING.
 	rec := latestTaskStateRecord(t, mem, task.TaskID)
-	if rec.State != types.StateDispatched {
-		t.Fatalf("persisted state = %q, want DISPATCHED", rec.State)
-	}
-	if rec.AgentID != "agent-new" {
-		t.Fatalf("persisted agent_id = %q, want agent-new", rec.AgentID)
+	if rec.State != types.StateDecomposing {
+		t.Fatalf("persisted state = %q, want DECOMPOSING", rec.State)
 	}
 
+	// Task must be tracked.
 	if len(mon.TrackedTasks) != 1 {
 		t.Fatalf("monitor.TrackedTasks = %d, want 1", len(mon.TrackedTasks))
 	}
 
-	orchRef := orchRefFromSpec(t, gw)
-	if orchRef == task.TaskID {
-		t.Fatal("orchestrator_task_ref must be distinct from task_id")
-	}
 	if len(gw.ErrorCalls) != 0 {
 		t.Fatalf("unexpected errors published: %+v", gw.ErrorCalls)
 	}
+	_ = exec
 }
 
-func TestHandleInboundTask_HappyPath_ExistingAgent(t *testing.T) {
-	d, gw, _, _, _ := newDispatcher(t)
-	gw.CapabilityQueryResponse = &types.CapabilityResponse{
-		Match:   types.CapabilityMatch_Match,
-		AgentID: "agent-idle-42",
-	}
+// ── Happy Path: DecompositionResponse → PLAN_ACTIVE ──────────────────────────
+
+func TestHandleDecompositionResponse_ValidPlan_ActivatesPlanAndSendsAccepted(t *testing.T) {
+	d, gw, _, _, exec, mem := newDispatcher(t)
 
 	task := validTask("550e8400-e29b-41d4-a716-446655440001")
 	if err := d.HandleInboundTask(task); err != nil {
-		t.Fatalf("HandleInboundTask() error = %v, want nil", err)
+		t.Fatalf("setup HandleInboundTask() error = %v", err)
 	}
 
-	if gw.TaskSpecCalls[0].OrchestratorTaskRef == "" {
-		t.Fatal("task_spec missing orchestrator_task_ref")
+	plan := validPlan(task.TaskID)
+	resp := decompositionResponse(task.TaskID, plan)
+
+	if err := d.HandleDecompositionResponse(resp); err != nil {
+		t.Fatalf("HandleDecompositionResponse() error = %v, want nil", err)
 	}
-	if gw.AcceptedCalls[0].AgentID != "agent-idle-42" {
-		t.Fatalf("task_accepted.agent_id = %q, want agent-idle-42", gw.AcceptedCalls[0].AgentID)
+
+	// Task must be transitioned to PLAN_ACTIVE.
+	rec := latestTaskStateRecord(t, mem, task.TaskID)
+	if rec.State != types.StatePlanActive {
+		t.Fatalf("persisted state = %q, want PLAN_ACTIVE", rec.State)
 	}
-	if gw.TaskSpecCalls[0].PolicyScope.TokenRef == "" {
-		t.Fatal("task_spec.policy_scope.token_ref is empty — policy scope not attached")
+	if rec.PlanID != plan.PlanID {
+		t.Fatalf("persisted plan_id = %q, want %q", rec.PlanID, plan.PlanID)
+	}
+
+	// Executor must be called once with the plan.
+	if len(exec.ExecuteCalls) != 1 {
+		t.Fatalf("executor.Execute calls = %d, want 1", len(exec.ExecuteCalls))
+	}
+	if exec.ExecuteCalls[0].Plan.PlanID != plan.PlanID {
+		t.Fatalf("executor received plan_id = %q, want %q", exec.ExecuteCalls[0].Plan.PlanID, plan.PlanID)
+	}
+
+	// task_accepted must be sent after plan validation.
+	if len(gw.AcceptedCalls) != 1 {
+		t.Fatalf("task_accepted publishes = %d, want 1", len(gw.AcceptedCalls))
+	}
+	if gw.AcceptedCalls[0].OrchestratorTaskRef == "" {
+		t.Fatal("task_accepted.orchestrator_task_ref is empty")
+	}
+
+	// Plan state must also be persisted.
+	planFound := false
+	for _, rec := range mem.Records {
+		if rec.TaskID == task.TaskID && rec.DataType == types.DataTypePlanState {
+			planFound = true
+			break
+		}
+	}
+	if !planFound {
+		t.Fatal("plan_state record not found in Memory — plan was not persisted")
 	}
 }
 
-func TestHandleInboundTask_PersistsDispatchPendingThenDispatched(t *testing.T) {
-	d, gw, _, _, mem := newDispatcher(t)
-	gw.CapabilityQueryResponse = newCapabilityResponse("")
+// ── DecompositionResponse: State Guard ───────────────────────────────────────
 
-	task := validTask("550e8400-e29b-41d4-a716-446655440098")
-	if err := d.HandleInboundTask(task); err != nil {
-		t.Fatalf("HandleInboundTask() error = %v", err)
-	}
+func TestHandleDecompositionResponse_IgnoredIfNotDecomposing(t *testing.T) {
+	d, gw, _, _, exec, _ := newDispatcher(t)
 
-	states := taskStateHistory(t, mem, task.TaskID)
-	if len(states) < 2 {
-		t.Fatalf("persisted states = %d, want at least 2", len(states))
+	// Do not submit a task — respond for unknown task_id.
+	resp := decompositionResponse("550e8400-e29b-41d4-a716-446655440099", validPlan("550e8400-e29b-41d4-a716-446655440099"))
+	if err := d.HandleDecompositionResponse(resp); err != nil {
+		t.Fatalf("HandleDecompositionResponse() error = %v, want nil (unknown task silently ignored)", err)
 	}
-	if states[0].State != types.StateDispatchPending {
-		t.Fatalf("first persisted state = %q, want DISPATCH_PENDING", states[0].State)
+	if len(exec.ExecuteCalls) != 0 {
+		t.Fatal("executor.Execute called for unknown task — should be silently ignored")
 	}
-	if states[len(states)-1].State != types.StateDispatched {
-		t.Fatalf("last persisted state = %q, want DISPATCHED", states[len(states)-1].State)
+	if len(gw.AcceptedCalls) != 0 {
+		t.Fatal("task_accepted sent for unknown task")
 	}
 }
 
-// ── Deduplication ────────────────────────────────────────────────────────────
+// ── Plan Validation ───────────────────────────────────────────────────────────
 
-func TestHandleInboundTask_DuplicateTaskID_ReturnsCurrentStatus(t *testing.T) {
-	d, gw, _, _, _ := newDispatcher(t)
-	gw.CapabilityQueryResponse = newCapabilityResponse("")
+func TestHandleDecompositionResponse_EmptyPlan_DecompositionFailed(t *testing.T) {
+	d, gw, _, _, _, mem := newDispatcher(t)
 
-	task := validTask("550e8400-e29b-41d4-a716-446655440002")
+	task := validTask("550e8400-e29b-41d4-a716-446655440010")
+	_ = d.HandleInboundTask(task)
 
-	if err := d.HandleInboundTask(task); err != nil {
-		t.Fatalf("first HandleInboundTask() error = %v, want nil", err)
+	resp := types.DecompositionResponse{
+		TaskID: task.TaskID,
+		Plan:   types.ExecutionPlan{PlanID: "plan-empty", ParentTaskID: task.TaskID, Subtasks: []types.Subtask{}},
 	}
-	if err := d.HandleInboundTask(task); err != nil {
-		t.Fatalf("second HandleInboundTask() error = %v, want nil (idempotent)", err)
-	}
+	_ = d.HandleDecompositionResponse(resp)
 
-	if len(gw.CapabilityQueryCalls) != 1 {
-		t.Fatalf("capability queries = %d, want 1 (second must be deduped)", len(gw.CapabilityQueryCalls))
-	}
-	if len(gw.TaskSpecCalls) != 1 {
-		t.Fatalf("task_spec publishes = %d, want 1", len(gw.TaskSpecCalls))
-	}
 	if len(gw.ErrorCalls) != 1 {
-		t.Fatalf("error calls = %d, want 1 (DUPLICATE_TASK)", len(gw.ErrorCalls))
+		t.Fatalf("error calls = %d, want 1", len(gw.ErrorCalls))
 	}
-	if gw.ErrorCalls[0].ErrorCode != types.ErrCodeDuplicateTask {
-		t.Fatalf("error_code = %q, want DUPLICATE_TASK", gw.ErrorCalls[0].ErrorCode)
+	if gw.ErrorCalls[0].ErrorCode != types.ErrCodeEmptyPlan {
+		t.Fatalf("error_code = %q, want EMPTY_PLAN", gw.ErrorCalls[0].ErrorCode)
+	}
+
+	rec := latestTaskStateRecord(t, mem, task.TaskID)
+	if rec.State != types.StateDecompositionFailed {
+		t.Fatalf("persisted state = %q, want DECOMPOSITION_FAILED", rec.State)
+	}
+}
+
+func TestHandleDecompositionResponse_CircularDependency_DecompositionFailed(t *testing.T) {
+	d, gw, _, _, _, _ := newDispatcher(t)
+
+	task := validTask("550e8400-e29b-41d4-a716-446655440011")
+	_ = d.HandleInboundTask(task)
+
+	// s1 depends on s2, s2 depends on s1 → cycle.
+	cyclicPlan := types.ExecutionPlan{
+		PlanID:       "plan-cyclic",
+		ParentTaskID: task.TaskID,
+		Subtasks: []types.Subtask{
+			{SubtaskID: "s1", Action: "a", RequiredSkillDomains: []string{"web"}, DependsOn: []string{"s2"}, TimeoutSeconds: 30},
+			{SubtaskID: "s2", Action: "b", RequiredSkillDomains: []string{"web"}, DependsOn: []string{"s1"}, TimeoutSeconds: 30},
+		},
+	}
+	resp := decompositionResponse(task.TaskID, cyclicPlan)
+	_ = d.HandleDecompositionResponse(resp)
+
+	if len(gw.ErrorCalls) == 0 {
+		t.Fatal("expected error for cyclic plan, got none")
+	}
+	if gw.ErrorCalls[0].ErrorCode != types.ErrCodeInvalidPlan {
+		t.Fatalf("error_code = %q, want INVALID_PLAN", gw.ErrorCalls[0].ErrorCode)
+	}
+}
+
+func TestHandleDecompositionResponse_PlanTooLarge_DecompositionFailed(t *testing.T) {
+	d, gw, _, _, _, _ := newDispatcher(t)
+	task := validTask("550e8400-e29b-41d4-a716-446655440012")
+	_ = d.HandleInboundTask(task)
+
+	// Build a plan with 21 subtasks (MaxSubtasksPerPlan=20).
+	subtasks := make([]types.Subtask, 21)
+	for i := range subtasks {
+		subtasks[i] = types.Subtask{
+			SubtaskID:            fmt.Sprintf("s%d", i),
+			RequiredSkillDomains: []string{"web"},
+			Action:               "act",
+			DependsOn:            []string{},
+			TimeoutSeconds:       30,
+		}
+	}
+	resp := types.DecompositionResponse{
+		TaskID: task.TaskID,
+		Plan:   types.ExecutionPlan{PlanID: "plan-huge", ParentTaskID: task.TaskID, Subtasks: subtasks},
+	}
+	_ = d.HandleDecompositionResponse(resp)
+
+	if len(gw.ErrorCalls) == 0 {
+		t.Fatal("expected error for oversized plan")
+	}
+	if gw.ErrorCalls[0].ErrorCode != types.ErrCodePlanTooLarge {
+		t.Fatalf("error_code = %q, want PLAN_TOO_LARGE", gw.ErrorCalls[0].ErrorCode)
+	}
+}
+
+// ── Plan Completion Callbacks ──────────────────────────────────────────────────
+
+func TestHandlePlanComplete_WritesCompletedAndDeliversResult(t *testing.T) {
+	d, gw, pol, mon, _, mem := newDispatcher(t)
+
+	task := validTask("550e8400-e29b-41d4-a716-446655440020")
+	_ = d.HandleInboundTask(task)
+	plan := validPlan(task.TaskID)
+	_ = d.HandleDecompositionResponse(decompositionResponse(task.TaskID, plan))
+
+	// Retrieve the TaskState reference from the dispatcher.
+	activeTasks := d.GetActiveTasks()
+	if len(activeTasks) != 1 {
+		t.Fatalf("expected 1 active task, got %d", len(activeTasks))
+	}
+	ts := activeTasks[0]
+
+	// Simulate plan executor signalling completion.
+	results := []types.PriorResult{{SubtaskID: "s1", Result: json.RawMessage(`{"status":"ok"}`)}}
+	d.HandlePlanComplete(ts, results)
+
+	// Task must be persisted as COMPLETED.
+	rec := latestTaskStateRecord(t, mem, task.TaskID)
+	if rec.State != types.StateCompleted {
+		t.Fatalf("persisted state = %q, want COMPLETED", rec.State)
+	}
+	if rec.CompletedAt == nil {
+		t.Fatal("completed_at not set on COMPLETED task")
+	}
+
+	// task_result must be delivered.
+	if len(gw.TaskResultCalls) != 1 {
+		t.Fatalf("task_result publishes = %d, want 1", len(gw.TaskResultCalls))
+	}
+	if !gw.TaskResultCalls[0].Success {
+		t.Fatal("task_result.success = false, want true")
+	}
+
+	// Credentials must be revoked.
+	if len(pol.RevokedRefs) != 1 {
+		t.Fatalf("revoked refs = %d, want 1", len(pol.RevokedRefs))
+	}
+	if pol.RevokedRefs[0] != ts.OrchestratorTaskRef {
+		t.Fatalf("revoked ref = %q, want %q", pol.RevokedRefs[0], ts.OrchestratorTaskRef)
+	}
+
+	// Task must be removed from active tracking.
+	if len(d.GetActiveTasks()) != 0 {
+		t.Fatal("task still active after completion")
+	}
+	if len(mon.UntrackedIDs) != 1 {
+		t.Fatalf("monitor.UntrackTask called %d times, want 1", len(mon.UntrackedIDs))
+	}
+}
+
+func TestHandlePlanFailed_WritesFailedAndPublishesError(t *testing.T) {
+	d, gw, pol, _, _, mem := newDispatcher(t)
+
+	task := validTask("550e8400-e29b-41d4-a716-446655440021")
+	_ = d.HandleInboundTask(task)
+	plan := validPlan(task.TaskID)
+	_ = d.HandleDecompositionResponse(decompositionResponse(task.TaskID, plan))
+
+	activeTasks := d.GetActiveTasks()
+	ts := activeTasks[0]
+
+	d.HandlePlanFailed(ts, types.ErrCodeMaxRetriesExceeded, false, nil)
+
+	rec := latestTaskStateRecord(t, mem, task.TaskID)
+	if rec.State != types.StateFailed {
+		t.Fatalf("persisted state = %q, want FAILED", rec.State)
+	}
+	if rec.ErrorCode != types.ErrCodeMaxRetriesExceeded {
+		t.Fatalf("error_code = %q, want MAX_RETRIES_EXCEEDED", rec.ErrorCode)
+	}
+
+	if len(gw.ErrorCalls) != 1 {
+		t.Fatalf("error publishes = %d, want 1", len(gw.ErrorCalls))
+	}
+	if gw.ErrorCalls[0].ErrorCode != types.ErrCodeMaxRetriesExceeded {
+		t.Fatalf("error_code = %q, want MAX_RETRIES_EXCEEDED", gw.ErrorCalls[0].ErrorCode)
+	}
+
+	if len(pol.RevokedRefs) != 1 {
+		t.Fatalf("revoked refs = %d, want 1", len(pol.RevokedRefs))
+	}
+
+	if len(d.GetActiveTasks()) != 0 {
+		t.Fatal("task still active after failure")
+	}
+}
+
+func TestHandlePlanFailed_Partial_WritesPartialCompleteAndDeliversResult(t *testing.T) {
+	d, gw, _, _, _, mem := newDispatcher(t)
+
+	task := validTask("550e8400-e29b-41d4-a716-446655440022")
+	_ = d.HandleInboundTask(task)
+	plan := validPlan(task.TaskID)
+	_ = d.HandleDecompositionResponse(decompositionResponse(task.TaskID, plan))
+
+	activeTasks := d.GetActiveTasks()
+	ts := activeTasks[0]
+
+	partialResults := []types.PriorResult{{SubtaskID: "s1", Result: json.RawMessage(`{"done":true}`)}}
+	d.HandlePlanFailed(ts, types.ErrCodeMaxRetriesExceeded, true, partialResults)
+
+	rec := latestTaskStateRecord(t, mem, task.TaskID)
+	if rec.State != types.StatePartialComplete {
+		t.Fatalf("persisted state = %q, want PARTIAL_COMPLETE", rec.State)
+	}
+
+	// With partial results, a task_result is delivered (not a bare error).
+	if len(gw.TaskResultCalls) != 1 {
+		t.Fatalf("task_result publishes = %d, want 1 for partial completion", len(gw.TaskResultCalls))
+	}
+	if gw.TaskResultCalls[0].Success {
+		t.Fatal("task_result.success = true on partial completion — expected false")
 	}
 }
 
 // ── Policy Violation ─────────────────────────────────────────────────────────
 
-func TestHandleInboundTask_PolicyViolation_NoAgentTouched(t *testing.T) {
-	d, gw, pol, _, _ := newDispatcher(t)
+func TestHandleInboundTask_PolicyViolation_NoDecompositionRequest(t *testing.T) {
+	d, gw, pol, _, _, _ := newDispatcher(t)
 	pol.ShouldDeny = true
 	pol.DenyReason = "required domain 'financial' not in user policy"
 
-	task := validTask("550e8400-e29b-41d4-a716-446655440003")
+	task := validTask("550e8400-e29b-41d4-a716-446655440030")
 	err := d.HandleInboundTask(task)
 	if err == nil {
 		t.Fatal("HandleInboundTask() error = nil, want policy denied error")
 	}
 
-	if len(gw.CapabilityQueryCalls) != 0 {
-		t.Fatalf("capability queries = %d, want 0 (no agent should be touched on policy deny)", len(gw.CapabilityQueryCalls))
-	}
-	if len(gw.TaskSpecCalls) != 0 {
-		t.Fatal("task_spec was published — agent must not be touched on POLICY_VIOLATION")
+	if len(gw.DecompositionRequestCalls) != 0 {
+		t.Fatalf("decomposition requests = %d, want 0 — Planner Agent must not be contacted on policy deny",
+			len(gw.DecompositionRequestCalls))
 	}
 	if len(gw.ErrorCalls) != 1 {
 		t.Fatalf("error calls = %d, want 1 (POLICY_VIOLATION)", len(gw.ErrorCalls))
@@ -360,38 +605,43 @@ func TestHandleInboundTask_PolicyViolation_NoAgentTouched(t *testing.T) {
 	}
 }
 
-// ── Schema Validation ────────────────────────────────────────────────────────
+// ── Schema Validation ─────────────────────────────────────────────────────────
 
-func TestHandleInboundTask_EmptySkillDomains_InvalidTaskSpec(t *testing.T) {
-	d, gw, pol, _, _ := newDispatcher(t)
+func TestHandleInboundTask_OptionalSkillDomains_ValidInV3(t *testing.T) {
+	d, gw, pol, _, _, _ := newDispatcher(t)
 
-	task := validTask("550e8400-e29b-41d4-a716-446655440004")
-	task.RequiredSkillDomains = []string{}
+	// In v3.0 required_skill_domains is OPTIONAL (FR-TRK-04).
+	task := validTask("550e8400-e29b-41d4-a716-446655440040")
+	task.RequiredSkillDomains = nil // explicitly empty
 
 	err := d.HandleInboundTask(task)
-	if err == nil {
-		t.Fatal("HandleInboundTask() error = nil, want INVALID_TASK_SPEC")
+	if err != nil {
+		t.Fatalf("HandleInboundTask() error = %v, want nil — empty skill domains must be valid in v3.0", err)
 	}
 
-	if pol.ValidatedCalls != 0 {
-		t.Fatal("policy was called — must short-circuit on schema failure")
+	// Policy must still be called; decomposition request must still be published.
+	if pol.ValidatedCalls != 1 {
+		t.Fatal("policy was not called — optional skill domains should not block pipeline")
 	}
-	if len(gw.CapabilityQueryCalls) != 0 {
-		t.Fatal("capability query was called — must short-circuit on schema failure")
-	}
-	if len(gw.ErrorCalls) != 1 || gw.ErrorCalls[0].ErrorCode != types.ErrCodeInvalidTaskSpec {
-		t.Fatalf("error_code = %q, want INVALID_TASK_SPEC", safeErrorCode(gw))
+	if len(gw.DecompositionRequestCalls) != 1 {
+		t.Fatal("decomposition request was not published for task with empty skill domains")
 	}
 }
 
 func TestHandleInboundTask_MissingTaskID_InvalidTaskSpec(t *testing.T) {
-	d, gw, _, _, _ := newDispatcher(t)
+	d, gw, pol, _, _, _ := newDispatcher(t)
 
-	task := validTask("550e8400-e29b-41d4-a716-446655440005")
+	task := validTask("550e8400-e29b-41d4-a716-446655440041")
 	task.TaskID = ""
 
 	if err := d.HandleInboundTask(task); err == nil {
 		t.Fatal("HandleInboundTask() error = nil, want INVALID_TASK_SPEC")
+	}
+	if pol.ValidatedCalls != 0 {
+		t.Fatal("policy was called — must short-circuit on schema failure")
+	}
+	if len(gw.DecompositionRequestCalls) != 0 {
+		t.Fatal("decomposition request published on schema failure")
 	}
 	if gw.ErrorCalls[0].ErrorCode != types.ErrCodeInvalidTaskSpec {
 		t.Fatalf("error_code = %q, want INVALID_TASK_SPEC", gw.ErrorCalls[0].ErrorCode)
@@ -402,9 +652,9 @@ func TestHandleInboundTask_MissingTaskID_InvalidTaskSpec(t *testing.T) {
 }
 
 func TestHandleInboundTask_PriorityOutOfRange_InvalidTaskSpec(t *testing.T) {
-	d, gw, _, _, _ := newDispatcher(t)
+	d, gw, _, _, _, _ := newDispatcher(t)
 
-	task := validTask("550e8400-e29b-41d4-a716-446655440006")
+	task := validTask("550e8400-e29b-41d4-a716-446655440042")
 	task.Priority = 0
 
 	if err := d.HandleInboundTask(task); err == nil {
@@ -416,9 +666,9 @@ func TestHandleInboundTask_PriorityOutOfRange_InvalidTaskSpec(t *testing.T) {
 }
 
 func TestHandleInboundTask_TimeoutTooShort_InvalidTaskSpec(t *testing.T) {
-	d, gw, _, _, _ := newDispatcher(t)
+	d, gw, _, _, _, _ := newDispatcher(t)
 
-	task := validTask("550e8400-e29b-41d4-a716-446655440007")
+	task := validTask("550e8400-e29b-41d4-a716-446655440043")
 	task.TimeoutSeconds = 10
 
 	if err := d.HandleInboundTask(task); err == nil {
@@ -429,39 +679,20 @@ func TestHandleInboundTask_TimeoutTooShort_InvalidTaskSpec(t *testing.T) {
 	}
 }
 
-func TestHandleInboundTask_PayloadTooLarge_InvalidTaskSpec(t *testing.T) {
-	d, gw, _, _, _ := newDispatcher(t)
-
-	task := validTask("550e8400-e29b-41d4-a716-446655440008")
-	bigPayload := make([]byte, 1<<20+1)
-	for i := range bigPayload {
-		bigPayload[i] = 'x'
-	}
-	task.Payload = json.RawMessage(fmt.Sprintf("%q", string(bigPayload)))
-
-	if err := d.HandleInboundTask(task); err == nil {
-		t.Fatal("HandleInboundTask() error = nil, want INVALID_TASK_SPEC for oversized payload")
-	}
-	if gw.ErrorCalls[0].ErrorCode != types.ErrCodeInvalidTaskSpec {
-		t.Fatalf("error_code = %q, want INVALID_TASK_SPEC", gw.ErrorCalls[0].ErrorCode)
-	}
-}
-
 // ── Memory-Before-Dispatch Safety ────────────────────────────────────────────
 
-func TestHandleInboundTask_MemoryFailBeforeDispatch_NoOrphanedAgent(t *testing.T) {
-	d, gw, _, _, mem := newDispatcher(t)
-	gw.CapabilityQueryResponse = newCapabilityResponse("")
+func TestHandleInboundTask_MemoryFailBeforeDecomposition_NoOrphanedRequest(t *testing.T) {
+	d, gw, _, _, _, mem := newDispatcher(t)
 	mem.ShouldFailWrites = true
 
-	task := validTask("550e8400-e29b-41d4-a716-446655440009")
+	task := validTask("550e8400-e29b-41d4-a716-446655440050")
 	err := d.HandleInboundTask(task)
 	if err == nil {
 		t.Fatal("HandleInboundTask() error = nil, want memory error")
 	}
 
-	if len(gw.TaskSpecCalls) != 0 {
-		t.Fatal("task_spec was published despite memory write failure — this would create an orphaned agent")
+	if len(gw.DecompositionRequestCalls) != 0 {
+		t.Fatal("decomposition request published despite memory write failure — prevents safe recovery")
 	}
 	if len(gw.ErrorCalls) == 0 {
 		t.Fatal("no error sent to User I/O — caller must be notified of failure")
@@ -471,162 +702,72 @@ func TestHandleInboundTask_MemoryFailBeforeDispatch_NoOrphanedAgent(t *testing.T
 	}
 }
 
-// ── Agents Unavailable ───────────────────────────────────────────────────────
+// ── Decomposition Publish Failure ────────────────────────────────────────────
 
-func TestHandleInboundTask_AgentsUnavailable_ReturnsError(t *testing.T) {
-	d, gw, _, _, _ := newDispatcher(t)
-	gw.CapabilityQueryError = errors.New("capability_query timed out after 3s")
+func TestHandleInboundTask_DecompositionPublishFails_TaskFails(t *testing.T) {
+	d, gw, _, mon, _, _ := newDispatcher(t)
+	gw.PublishDecompositionError = errors.New("NATS publish failed")
 
-	task := validTask("550e8400-e29b-41d4-a716-44665544000a")
-	if err := d.HandleInboundTask(task); err == nil {
-		t.Fatal("HandleInboundTask() error = nil, want agents unavailable error")
-	}
-
-	if len(gw.TaskSpecCalls) != 0 {
-		t.Fatal("task_spec published despite agents being unavailable")
-	}
-	if len(gw.ErrorCalls) == 0 || gw.ErrorCalls[0].ErrorCode != types.ErrCodeAgentsUnavailable {
-		t.Fatalf("error_code = %q, want AGENTS_UNAVAILABLE", safeErrorCode(gw))
-	}
-}
-
-func TestHandleInboundTask_DispatchFailure_PersistsDeliveryFailedAndCleansUp(t *testing.T) {
-	d, gw, pol, mon, mem := newDispatcher(t)
-
-	gw.CapabilityQueryResponse = newCapabilityResponse("")
-	gw.PublishSpecError = errors.New("nats publish failed")
-
-	task := validTask("550e8400-e29b-41d4-a716-446655440099")
-
+	task := validTask("550e8400-e29b-41d4-a716-446655440051")
 	err := d.HandleInboundTask(task)
 	if err == nil {
-		t.Fatal("HandleInboundTask() error = nil, want dispatch error")
+		t.Fatal("HandleInboundTask() error = nil, want publish error")
 	}
 
-	rec := latestTaskStateRecord(t, mem, task.TaskID)
-	if rec.State != types.StateDeliveryFailed {
-		t.Fatalf("persisted state = %q, want DELIVERY_FAILED", rec.State)
-	}
-	if rec.ErrorCode != types.ErrCodeAgentsUnavailable {
-		t.Fatalf("persisted error_code = %q, want AGENTS_UNAVAILABLE", rec.ErrorCode)
-	}
-	if len(rec.StateHistory) == 0 || rec.StateHistory[len(rec.StateHistory)-1].State != types.StateDeliveryFailed {
-		t.Fatalf("last state history entry = %+v, want DELIVERY_FAILED", rec.StateHistory[len(rec.StateHistory)-1])
+	if len(gw.ErrorCalls) == 0 {
+		t.Fatal("no error sent to User I/O after decomposition publish failure")
 	}
 
-	if len(pol.RevokedRefs) != 1 {
-		t.Fatalf("revoked refs = %d, want 1", len(pol.RevokedRefs))
-	}
-
+	// Task should be cleaned up.
 	if len(d.GetActiveTasks()) != 0 {
-		t.Fatal("expected no active tasks after dispatch failure cleanup")
+		t.Fatal("active tasks not empty after decomposition failure")
 	}
 	if len(mon.UntrackedIDs) != 1 {
 		t.Fatalf("monitor.UntrackTask called %d times, want 1", len(mon.UntrackedIDs))
 	}
+}
 
+// ── Deduplication ─────────────────────────────────────────────────────────────
+
+func TestHandleInboundTask_DuplicateTaskID_ReturnsCurrentStatus(t *testing.T) {
+	d, gw, _, _, _, _ := newDispatcher(t)
+
+	task := validTask("550e8400-e29b-41d4-a716-446655440060")
+
+	if err := d.HandleInboundTask(task); err != nil {
+		t.Fatalf("first HandleInboundTask() error = %v, want nil", err)
+	}
+	if err := d.HandleInboundTask(task); err != nil {
+		t.Fatalf("second HandleInboundTask() error = %v, want nil (idempotent)", err)
+	}
+
+	if len(gw.DecompositionRequestCalls) != 1 {
+		t.Fatalf("decomposition requests = %d, want 1 (second must be deduped)", len(gw.DecompositionRequestCalls))
+	}
 	if len(gw.ErrorCalls) != 1 {
-		t.Fatalf("error calls = %d, want 1", len(gw.ErrorCalls))
+		t.Fatalf("error calls = %d, want 1 (DUPLICATE_TASK)", len(gw.ErrorCalls))
 	}
-	if gw.ErrorCalls[0].ErrorCode != types.ErrCodeAgentsUnavailable {
-		t.Fatalf("error_code = %q, want AGENTS_UNAVAILABLE", gw.ErrorCalls[0].ErrorCode)
-	}
-
-	_, _, _, _, queueDepth := d.GetMetrics()
-	if queueDepth != 0 {
-		t.Fatalf("queueDepth = %d, want 0 after cleanup", queueDepth)
-	}
-}
-
-// ── Task Result Processing ───────────────────────────────────────────────────
-
-func TestHandleTaskResult_WritesCompletedState_DeliversResult(t *testing.T) {
-	d, gw, pol, mon, mem := newDispatcher(t)
-	gw.CapabilityQueryResponse = newCapabilityResponse("")
-
-	task := validTask("550e8400-e29b-41d4-a716-44665544000b")
-	if err := d.HandleInboundTask(task); err != nil {
-		t.Fatalf("setup HandleInboundTask() error = %v", err)
-	}
-	orchRef := orchRefFromSpec(t, gw)
-
-	result := types.TaskResult{
-		OrchestratorTaskRef: orchRef,
-		AgentID:             "agent-42",
-		Success:             true,
-		Result:              json.RawMessage(`{"summary":"done"}`),
-		CompletedAt:         time.Now().UTC(),
-	}
-	if err := d.HandleTaskResult(result); err != nil {
-		t.Fatalf("HandleTaskResult() error = %v", err)
-	}
-
-	rec := latestTaskStateRecord(t, mem, task.TaskID)
-	if rec.State != types.StateCompleted {
-		t.Fatalf("persisted state = %q, want COMPLETED", rec.State)
-	}
-
-	if len(gw.TaskResultCalls) != 1 {
-		t.Fatalf("task_result publishes = %d, want 1", len(gw.TaskResultCalls))
-	}
-
-	if len(pol.RevokedRefs) != 1 {
-		t.Fatalf("revoked refs = %d, want 1", len(pol.RevokedRefs))
-	}
-	if pol.RevokedRefs[0] != orchRef {
-		t.Fatalf("revoked ref = %q, want %q", pol.RevokedRefs[0], orchRef)
-	}
-
-	if len(d.GetActiveTasks()) != 0 {
-		t.Fatal("task still in GetActiveTasks() after completion — expected empty")
-	}
-	if len(mon.UntrackedIDs) != 1 {
-		t.Fatalf("monitor.UntrackTask called %d times, want 1", len(mon.UntrackedIDs))
-	}
-}
-
-func TestHandleTaskResult_FailedTask_WritesFailedState(t *testing.T) {
-	d, gw, _, _, mem := newDispatcher(t)
-	gw.CapabilityQueryResponse = newCapabilityResponse("")
-
-	task := validTask("550e8400-e29b-41d4-a716-44665544000c")
-	if err := d.HandleInboundTask(task); err != nil {
-		t.Fatalf("setup error: %v", err)
-	}
-	orchRef := orchRefFromSpec(t, gw)
-
-	result := types.TaskResult{
-		OrchestratorTaskRef: orchRef,
-		AgentID:             "agent-42",
-		Success:             false,
-		ErrorCode:           types.ErrCodeTimedOut,
-		CompletedAt:         time.Now().UTC(),
-	}
-	if err := d.HandleTaskResult(result); err != nil {
-		t.Fatalf("HandleTaskResult() error = %v", err)
-	}
-
-	rec := latestTaskStateRecord(t, mem, task.TaskID)
-	if rec.State != types.StateFailed {
-		t.Fatalf("persisted state = %q, want FAILED", rec.State)
+	if gw.ErrorCalls[0].ErrorCode != types.ErrCodeDuplicateTask {
+		t.Fatalf("error_code = %q, want DUPLICATE_TASK", gw.ErrorCalls[0].ErrorCode)
 	}
 }
 
 // ── Metrics ──────────────────────────────────────────────────────────────────
 
 func TestGetMetrics_CountersTrackPipeline(t *testing.T) {
-	d, gw, pol, _, _ := newDispatcher(t)
-	gw.CapabilityQueryResponse = newCapabilityResponse("")
+	d, gw, pol, _, _, _ := newDispatcher(t)
 
-	task1 := validTask("550e8400-e29b-41d4-a716-44665544000d")
+	// Task 1: happy path.
+	task1 := validTask("550e8400-e29b-41d4-a716-446655440070")
 	_ = d.HandleInboundTask(task1)
 
+	// Task 2: policy violation.
 	pol.ShouldDeny = true
-	task2 := validTask("550e8400-e29b-41d4-a716-44665544000e")
+	task2 := validTask("550e8400-e29b-41d4-a716-446655440071")
 	_ = d.HandleInboundTask(task2)
 	pol.ShouldDeny = false
 
-	received, completed, failed, violations, queueDepth := d.GetMetrics()
+	received, completed, failed, violations, decompositionFailed, queueDepth := d.GetMetrics()
 
 	if received != 2 {
 		t.Fatalf("tasksReceived = %d, want 2", received)
@@ -638,14 +779,15 @@ func TestGetMetrics_CountersTrackPipeline(t *testing.T) {
 		t.Fatalf("queueDepth = %d, want 1 (task1 still in flight)", queueDepth)
 	}
 
-	orchRef := orchRefFromSpec(t, gw)
-	_ = d.HandleTaskResult(types.TaskResult{
-		OrchestratorTaskRef: orchRef,
-		Success:             true,
-		CompletedAt:         time.Now().UTC(),
-	})
+	// Now complete task1 via plan callbacks.
+	activeTasks := d.GetActiveTasks()
+	ts1 := activeTasks[0]
 
-	received, completed, failed, violations, queueDepth = d.GetMetrics()
+	plan := validPlan(task1.TaskID)
+	_ = d.HandleDecompositionResponse(decompositionResponse(task1.TaskID, plan))
+	d.HandlePlanComplete(ts1, []types.PriorResult{{SubtaskID: "s1", Result: json.RawMessage(`{}`)}})
+
+	received, completed, failed, violations, decompositionFailed, queueDepth = d.GetMetrics()
 	if completed != 1 {
 		t.Fatalf("tasksCompleted = %d, want 1", completed)
 	}
@@ -653,24 +795,24 @@ func TestGetMetrics_CountersTrackPipeline(t *testing.T) {
 		t.Fatalf("tasksFailed = %d, want 0", failed)
 	}
 	if queueDepth != 0 {
-		t.Fatalf("queueDepth = %d, want 0 (task completed)", queueDepth)
+		t.Fatalf("queueDepth = %d, want 0", queueDepth)
 	}
-	_ = received
-	_ = violations
+
+	_ = gw
+	_ = decompositionFailed
 }
 
-// ── Active Tasks Snapshot ────────────────────────────────────────────────────
+// ── Active Tasks Snapshot ─────────────────────────────────────────────────────
 
 func TestGetActiveTasks_ReflectsInFlightTasks(t *testing.T) {
-	d, gw, _, _, _ := newDispatcher(t)
-	gw.CapabilityQueryResponse = newCapabilityResponse("")
+	d, _, _, _, _, _ := newDispatcher(t)
 
 	if len(d.GetActiveTasks()) != 0 {
 		t.Fatal("expected 0 active tasks before any submission")
 	}
 
-	task1 := validTask("550e8400-e29b-41d4-a716-44665544000f")
-	task2 := validTask("550e8400-e29b-41d4-a716-446655440010")
+	task1 := validTask("550e8400-e29b-41d4-a716-446655440080")
+	task2 := validTask("550e8400-e29b-41d4-a716-446655440081")
 	_ = d.HandleInboundTask(task1)
 	_ = d.HandleInboundTask(task2)
 
@@ -678,275 +820,274 @@ func TestGetActiveTasks_ReflectsInFlightTasks(t *testing.T) {
 		t.Fatalf("active tasks = %d, want 2", len(d.GetActiveTasks()))
 	}
 
-	orchRef1 := gw.TaskSpecCalls[0].OrchestratorTaskRef
-	_ = d.HandleTaskResult(types.TaskResult{
-		OrchestratorTaskRef: orchRef1,
-		Success:             true,
-		CompletedAt:         time.Now().UTC(),
-	})
+	// Complete task1.
+	activeTasks := d.GetActiveTasks()
+	var ts1 *types.TaskState
+	for _, ts := range activeTasks {
+		if ts.TaskID == task1.TaskID {
+			ts1 = ts
+			break
+		}
+	}
+	if ts1 == nil {
+		t.Fatal("could not find task1 in active tasks")
+	}
+
+	plan1 := validPlan(task1.TaskID)
+	_ = d.HandleDecompositionResponse(decompositionResponse(task1.TaskID, plan1))
+	d.HandlePlanComplete(ts1, nil)
 
 	if len(d.GetActiveTasks()) != 1 {
 		t.Fatalf("active tasks = %d, want 1 after first completion", len(d.GetActiveTasks()))
 	}
 }
 
-// ── Dispatcher Demo Flow ─────────────────────────────────────────────────────
+// ── Dispatcher Demo Flow (v3.0) ───────────────────────────────────────────────
 
-func TestDispatcherDemoFlow(t *testing.T) {
+func TestDispatcherDemoFlow_V3(t *testing.T) {
 	gw := &gatewayMock{}
 	pol := &policyMock{}
 	mon := &monitorMock{}
+	exec := &executorMock{}
 	mem := mocks.NewMemoryMock()
-	cfg := &config.OrchestratorConfig{NodeID: "demo-node"}
-	d := dispatcher.New(cfg, mem, nil, gw, pol, mon)
-
-	gw.CapabilityQueryResponse = &types.CapabilityResponse{
-		Match:   types.CapabilityMatch_Match,
-		AgentID: "agent-demo-42",
+	cfg := &config.OrchestratorConfig{
+		NodeID:                      "demo-node",
+		DecompositionTimeoutSeconds: 30,
+		MaxSubtasksPerPlan:          20,
+		PlanExecutorMaxParallel:     5,
 	}
+	d := dispatcher.New(cfg, mem, nil, gw, pol, mon, exec)
 
-	t.Log("demo setup: Task Dispatcher wired to mocks for Gateway, PolicyEnforcer, Monitor, and MemoryClient")
-	t.Log("demo setup: all external components (NATS, Vault, DB) replaced by in-process test doubles")
+	t.Log("demo setup: Task Dispatcher v3.0 wired to mocks for Gateway, PolicyEnforcer, Monitor, PlanExecutor, MemoryClient")
+	t.Log("demo setup: all external components (NATS, Vault, DB, Planner Agent) replaced by in-process test doubles")
 
-	t.Log("─────────────────────────────────────────────────────")
-	t.Log("step 1: happy path — submitting a valid task")
+	t.Log("─────────────────────────────────────────────────────────────────────")
+	t.Log("step 1: happy path — task submitted, flows to DECOMPOSING")
 
 	task1 := types.UserTask{
-		TaskID:               "550e8400-e29b-41d4-a716-446655440000",
-		UserID:               "user-alice",
-		RequiredSkillDomains: []string{"web", "research"},
-		Priority:             7,
-		TimeoutSeconds:       120,
-		Payload:              json.RawMessage(`{"url":"https://example.com","action":"summarise"}`),
-		CallbackTopic:        "aegis.user-io.results.task-1",
+		TaskID:         "550e8400-e29b-41d4-a716-446655440000",
+		UserID:         "user-alice",
+		Priority:       7,
+		TimeoutSeconds: 120,
+		Payload:        json.RawMessage(`{"raw_input":"book a flight from NYC to LA for next Friday"}`),
+		CallbackTopic:  "aegis.user-io.results.task-1",
 	}
 
 	if err := d.HandleInboundTask(task1); err != nil {
 		t.Fatalf("step 1: HandleInboundTask() error = %v, want nil", err)
 	}
 
-	orchRef1 := gw.TaskSpecCalls[0].OrchestratorTaskRef
+	orchRef1 := orchRefFromDecompositionRequest(t, gw)
 	if orchRef1 == task1.TaskID {
 		t.Fatal("step 1: orchestrator_task_ref must be distinct from task_id")
 	}
 	t.Logf("step 1: generated orchestrator_task_ref=%s (distinct from task_id=%s)", orchRef1, task1.TaskID)
 
-	if gw.TaskSpecCalls[0].PolicyScope.TokenRef == "" {
-		t.Fatal("step 1: task_spec.policy_scope.token_ref is empty — policy scope not attached")
+	req1 := gw.DecompositionRequestCalls[0]
+	if req1.PolicyScope.TokenRef == "" {
+		t.Fatal("step 1: decomposition_request.policy_scope.token_ref is empty")
 	}
-	t.Logf("step 1: policy_scope attached — token_ref=%s domains=%v",
-		gw.TaskSpecCalls[0].PolicyScope.TokenRef,
-		gw.TaskSpecCalls[0].PolicyScope.Domains,
-	)
+	t.Logf("step 1: policy_scope attached to decomposition_request — token_ref=%s domains=%v",
+		req1.PolicyScope.TokenRef, req1.PolicyScope.Domains)
+	t.Logf("step 1: raw_input forwarded to Planner Agent: %q", req1.RawInput)
 
-	stateHistory := taskStateHistory(t, mem, task1.TaskID)
-	if len(stateHistory) < 2 {
-		t.Fatalf("step 1: expected at least 2 persisted task states, got %d", len(stateHistory))
+	s1 := taskStateHistory(t, mem, task1.TaskID)
+	if len(s1) < 1 || s1[len(s1)-1].State != types.StateDecomposing {
+		t.Fatalf("step 1: persisted state = %q, want DECOMPOSING", s1[len(s1)-1].State)
 	}
-	if stateHistory[0].State != types.StateDispatchPending {
-		t.Fatalf("step 1: first persisted state = %q, want DISPATCH_PENDING", stateHistory[0].State)
+	t.Log("step 1 complete: task persisted as DECOMPOSING, decomposition request sent to Planner Agent ✓")
+
+	if len(gw.AcceptedCalls) != 0 {
+		t.Fatal("step 1: task_accepted must NOT be sent until after plan is validated")
 	}
-	if stateHistory[len(stateHistory)-1].State != types.StateDispatched {
-		t.Fatalf("step 1: final persisted state = %q, want DISPATCHED", stateHistory[len(stateHistory)-1].State)
+	t.Log("step 1: task_accepted deferred — waiting for Planner Agent response ✓")
+
+	t.Log("─────────────────────────────────────────────────────────────────────")
+	t.Log("step 2: Planner Agent responds with a 3-subtask plan")
+
+	plan1 := types.ExecutionPlan{
+		PlanID:       "plan-flight-booking",
+		ParentTaskID: task1.TaskID,
+		CreatedAt:    time.Now().UTC(),
+		Subtasks: []types.Subtask{
+			{SubtaskID: "s1", Action: "search_flights", RequiredSkillDomains: []string{"web"},
+				Instructions: "Search for flights from NYC to LA for next Friday",
+				DependsOn:    []string{}, TimeoutSeconds: 30},
+			{SubtaskID: "s2", Action: "find_hotels", RequiredSkillDomains: []string{"web"},
+				Instructions: "Find hotels near LAX with a pool",
+				DependsOn:    []string{"s1"}, TimeoutSeconds: 30},
+			{SubtaskID: "s3", Action: "present_options", RequiredSkillDomains: []string{"calendar"},
+				Instructions: "Format and present flight + hotel options to user",
+				DependsOn:    []string{"s1", "s2"}, TimeoutSeconds: 30},
+		},
 	}
-	t.Logf("step 1: task_state persisted in order — %s → %s",
-		stateHistory[0].State, stateHistory[len(stateHistory)-1].State)
+
+	resp1 := decompositionResponse(task1.TaskID, plan1)
+	if err := d.HandleDecompositionResponse(resp1); err != nil {
+		t.Fatalf("step 2: HandleDecompositionResponse() error = %v", err)
+	}
+
+	if len(exec.ExecuteCalls) != 1 {
+		t.Fatalf("step 2: executor.Execute calls = %d, want 1", len(exec.ExecuteCalls))
+	}
+	if exec.ExecuteCalls[0].Plan.PlanID != plan1.PlanID {
+		t.Fatalf("step 2: executor received plan_id = %q, want %q", exec.ExecuteCalls[0].Plan.PlanID, plan1.PlanID)
+	}
+	t.Logf("step 2: plan validated and handed to Plan Executor — plan_id=%s subtasks=%d",
+		plan1.PlanID, len(plan1.Subtasks))
 
 	if len(gw.AcceptedCalls) != 1 {
-		t.Fatalf("step 1: task_accepted publishes = %d, want 1", len(gw.AcceptedCalls))
+		t.Fatalf("step 2: task_accepted publishes = %d, want 1", len(gw.AcceptedCalls))
 	}
-	t.Logf("step 1: task_accepted sent to User I/O — agent_id=%s orch_ref=%s",
-		gw.AcceptedCalls[0].AgentID, gw.AcceptedCalls[0].OrchestratorTaskRef)
-	t.Log("step 1 complete: task dispatched successfully ✓")
+	t.Logf("step 2: task_accepted sent to User I/O — orchestrator_task_ref=%s",
+		gw.AcceptedCalls[0].OrchestratorTaskRef)
 
-	t.Log("─────────────────────────────────────────────────────")
-	t.Log("step 2: duplicate task — submitting the same task_id a second time")
+	s2 := taskStateHistory(t, mem, task1.TaskID)
+	if s2[len(s2)-1].State != types.StatePlanActive {
+		t.Fatalf("step 2: persisted state = %q, want PLAN_ACTIVE", s2[len(s2)-1].State)
+	}
+	t.Log("step 2 complete: plan active, subtask dispatch delegated to Plan Executor ✓")
 
+	t.Log("─────────────────────────────────────────────────────────────────────")
+	t.Log("step 3: duplicate task — same task_id submitted again")
+
+	gw.ErrorCalls = nil
 	if err := d.HandleInboundTask(task1); err != nil {
-		t.Fatalf("step 2: HandleInboundTask() error = %v, want nil (idempotent no-op)", err)
+		t.Fatalf("step 3: HandleInboundTask() error = %v, want nil (idempotent no-op)", err)
 	}
 
-	if len(gw.CapabilityQueryCalls) != 1 {
-		t.Fatalf("step 2: capability queries = %d, want 1 (second must be rejected at dedup)", len(gw.CapabilityQueryCalls))
+	if len(gw.DecompositionRequestCalls) != 1 {
+		t.Fatalf("step 3: decomposition requests = %d, want 1 (second must be rejected at dedup)",
+			len(gw.DecompositionRequestCalls))
 	}
 	if len(gw.ErrorCalls) != 1 || gw.ErrorCalls[0].ErrorCode != types.ErrCodeDuplicateTask {
-		t.Fatalf("step 2: error_code = %q, want DUPLICATE_TASK", safeErrorCode(gw))
+		t.Fatalf("step 3: error_code = %q, want DUPLICATE_TASK", safeErrorCode(gw))
 	}
-	t.Logf("step 2: DUPLICATE_TASK returned for task_id=%s — current_state mentioned in message: %q",
-		task1.TaskID, gw.ErrorCalls[0].UserMessage)
-	t.Log("step 2 complete: duplicate rejected; no second agent spawned ✓")
+	t.Logf("step 3: DUPLICATE_TASK returned — current_state mentioned: %q", gw.ErrorCalls[0].UserMessage)
+	t.Log("step 3 complete: duplicate rejected at dedup; no second Planner Agent call ✓")
 
 	gw.ErrorCalls = nil
 
-	t.Log("─────────────────────────────────────────────────────")
-	t.Log("step 3: policy violation — Vault denies task for user-bob")
+	t.Log("─────────────────────────────────────────────────────────────────────")
+	t.Log("step 4: policy violation — Vault denies task for out-of-scope domain")
 
 	pol.ShouldDeny = true
-	pol.DenyReason = "required domain 'financial' not in user-bob policy"
+	pol.DenyReason = "required domain 'financial' not in user policy"
 
 	task2 := types.UserTask{
-		TaskID:               "550e8400-e29b-41d4-a716-446655440001",
-		UserID:               "user-bob",
-		RequiredSkillDomains: []string{"financial"},
-		Priority:             5,
-		TimeoutSeconds:       60,
-		Payload:              json.RawMessage(`{}`),
-		CallbackTopic:        "aegis.user-io.results.task-2",
+		TaskID:         "550e8400-e29b-41d4-a716-446655440001",
+		UserID:         "user-bob",
+		Priority:       5,
+		TimeoutSeconds: 60,
+		Payload:        json.RawMessage(`{"raw_input":"transfer money to account 12345"}`),
+		CallbackTopic:  "aegis.user-io.results.task-2",
 	}
 
-	capQueriesBefore := len(gw.CapabilityQueryCalls)
+	decompBefore := len(gw.DecompositionRequestCalls)
 	if err := d.HandleInboundTask(task2); err == nil {
-		t.Fatal("step 3: HandleInboundTask() error = nil, want policy denied error")
+		t.Fatal("step 4: HandleInboundTask() error = nil, want policy denied error")
 	}
 
-	if len(gw.CapabilityQueryCalls) != capQueriesBefore {
-		t.Fatal("step 3: capability query was called — agent must never be touched on POLICY_VIOLATION")
-	}
-	if len(gw.TaskSpecCalls) != 1 {
-		t.Fatal("step 3: task_spec count changed — no new dispatch should occur on POLICY_VIOLATION")
+	if len(gw.DecompositionRequestCalls) != decompBefore {
+		t.Fatal("step 4: decomposition request sent — Planner Agent must not be contacted on POLICY_VIOLATION")
 	}
 	if len(gw.ErrorCalls) != 1 || gw.ErrorCalls[0].ErrorCode != types.ErrCodePolicyViolation {
-		t.Fatalf("step 3: error_code = %q, want POLICY_VIOLATION", safeErrorCode(gw))
+		t.Fatalf("step 4: error_code = %q, want POLICY_VIOLATION", safeErrorCode(gw))
 	}
-	t.Logf("step 3: POLICY_VIOLATION sent to User I/O — message: %q", gw.ErrorCalls[0].UserMessage)
-	t.Log("step 3 complete: policy enforced; no agent was provisioned ✓")
+	t.Log("step 4 complete: POLICY_VIOLATION enforced before any decomposition ✓")
 
 	pol.ShouldDeny = false
 	gw.ErrorCalls = nil
 
-	t.Log("─────────────────────────────────────────────────────")
-	t.Log("step 4: schema rejection — task submitted with empty required_skill_domains")
+	t.Log("─────────────────────────────────────────────────────────────────────")
+	t.Log("step 5: plan completion — all subtasks complete, task reaches COMPLETED")
 
-	task3 := types.UserTask{
-		TaskID:               "550e8400-e29b-41d4-a716-446655440002",
-		UserID:               "user-carol",
-		RequiredSkillDomains: []string{},
-		Priority:             3,
-		TimeoutSeconds:       30,
-		Payload:              json.RawMessage(`{}`),
-		CallbackTopic:        "aegis.user-io.results.task-3",
+	activeTasks := d.GetActiveTasks()
+	if len(activeTasks) != 1 {
+		t.Fatalf("step 5: expected 1 active task (task1), got %d", len(activeTasks))
 	}
+	ts1 := activeTasks[0]
 
-	policyCallsBefore := pol.ValidatedCalls
-	if err := d.HandleInboundTask(task3); err == nil {
-		t.Fatal("step 4: HandleInboundTask() error = nil, want INVALID_TASK_SPEC")
+	aggregatedResults := []types.PriorResult{
+		{SubtaskID: "s1", Result: json.RawMessage(`{"flights":["UA123","AA456"]}`)},
+		{SubtaskID: "s2", Result: json.RawMessage(`{"hotels":["Marriott LAX","Hilton Garden"]}`)},
+		{SubtaskID: "s3", Result: json.RawMessage(`{"presentation":"Here are your options..."}`)},
 	}
-	if pol.ValidatedCalls != policyCallsBefore {
-		t.Fatal("step 4: policy enforcer was called — must short-circuit on schema failure")
+	d.HandlePlanComplete(ts1, aggregatedResults)
+
+	finalRec := latestTaskStateRecord(t, mem, task1.TaskID)
+	if finalRec.State != types.StateCompleted {
+		t.Fatalf("step 5: persisted state = %q, want COMPLETED", finalRec.State)
 	}
-	if len(gw.ErrorCalls) != 1 || gw.ErrorCalls[0].ErrorCode != types.ErrCodeInvalidTaskSpec {
-		t.Fatalf("step 4: error_code = %q, want INVALID_TASK_SPEC", safeErrorCode(gw))
-	}
-	t.Logf("step 4: INVALID_TASK_SPEC returned — reason: %q", gw.ErrorCalls[0].UserMessage)
-	t.Log("step 4 complete: schema validated before any downstream call ✓")
-
-	gw.ErrorCalls = nil
-
-	t.Log("─────────────────────────────────────────────────────")
-	t.Log("step 5: task result — agent reports success for task-1")
-
-	result1 := types.TaskResult{
-		OrchestratorTaskRef: orchRef1,
-		AgentID:             "agent-demo-42",
-		Success:             true,
-		Result:              json.RawMessage(`{"summary":"Example.com is a placeholder domain."}`),
-		CompletedAt:         time.Now().UTC(),
-	}
-
-	if err := d.HandleTaskResult(result1); err != nil {
-		t.Fatalf("step 5: HandleTaskResult() error = %v", err)
-	}
-
-	rec1Final := latestTaskStateRecord(t, mem, task1.TaskID)
-	if rec1Final.State != types.StateCompleted {
-		t.Fatalf("step 5: persisted state = %q, want COMPLETED", rec1Final.State)
-	}
-	t.Logf("step 5: task_state updated in Memory — state=%s completed_at=%s",
-		rec1Final.State, rec1Final.CompletedAt.Format(time.RFC3339))
-
 	if len(gw.TaskResultCalls) != 1 {
 		t.Fatalf("step 5: task_result publishes = %d, want 1", len(gw.TaskResultCalls))
 	}
-	t.Logf("step 5: task_result delivered to callback_topic=%s", task1.CallbackTopic)
-
-	if len(pol.RevokedRefs) != 1 || pol.RevokedRefs[0] != orchRef1 {
-		t.Fatalf("step 5: revoked refs = %v, want [%s]", pol.RevokedRefs, orchRef1)
+	if len(pol.RevokedRefs) == 0 {
+		t.Fatal("step 5: no credentials revoked after task completion")
 	}
-	t.Logf("step 5: credential revocation triggered for orchestrator_task_ref=%s", pol.RevokedRefs[0])
+	t.Logf("step 5: task COMPLETED — result delivered to callback, credentials revoked for orchRef=%s",
+		pol.RevokedRefs[0])
+	t.Log("step 5 complete: plan completion handled correctly ✓")
 
-	if len(d.GetActiveTasks()) != 0 {
-		t.Fatalf("step 5: active tasks = %d, want 0 after completion", len(d.GetActiveTasks()))
+	t.Log("─────────────────────────────────────────────────────────────────────")
+	t.Log("step 6: invalid plan — Planner Agent returns a plan with circular deps")
+
+	task3 := types.UserTask{
+		TaskID:         "550e8400-e29b-41d4-a716-446655440002",
+		UserID:         "user-carol",
+		Priority:       3,
+		TimeoutSeconds: 60,
+		Payload:        json.RawMessage(`{"raw_input":"do impossible circular task"}`),
+		CallbackTopic:  "aegis.user-io.results.task-3",
 	}
-	t.Log("step 5 complete: result processed, credentials revoked, task untracked ✓")
+	_ = d.HandleInboundTask(task3)
 
-	t.Log("─────────────────────────────────────────────────────")
-	t.Log("step 6: failed task — agent reports failure, state transitions to FAILED")
-
-	task4 := types.UserTask{
-		TaskID:               "550e8400-e29b-41d4-a716-446655440003",
-		UserID:               "user-alice",
-		RequiredSkillDomains: []string{"code"},
-		Priority:             5,
-		TimeoutSeconds:       30,
-		Payload:              json.RawMessage(`{"repo":"github.com/example/broken"}`),
-		CallbackTopic:        "aegis.user-io.results.task-4",
+	cyclicPlan := types.ExecutionPlan{
+		PlanID:       "plan-cyclic",
+		ParentTaskID: task3.TaskID,
+		Subtasks: []types.Subtask{
+			{SubtaskID: "s1", Action: "a", RequiredSkillDomains: []string{"web"}, DependsOn: []string{"s2"}, TimeoutSeconds: 30},
+			{SubtaskID: "s2", Action: "b", RequiredSkillDomains: []string{"web"}, DependsOn: []string{"s1"}, TimeoutSeconds: 30},
+		},
 	}
-	if err := d.HandleInboundTask(task4); err != nil {
-		t.Fatalf("step 6: HandleInboundTask() error = %v", err)
+	_ = d.HandleDecompositionResponse(decompositionResponse(task3.TaskID, cyclicPlan))
+
+	rec3 := latestTaskStateRecord(t, mem, task3.TaskID)
+	if rec3.State != types.StateDecompositionFailed {
+		t.Fatalf("step 6: persisted state = %q, want DECOMPOSITION_FAILED", rec3.State)
 	}
-	orchRef4 := gw.TaskSpecCalls[len(gw.TaskSpecCalls)-1].OrchestratorTaskRef
+	t.Logf("step 6: DECOMPOSITION_FAILED for circular plan — error_code=%s", rec3.ErrorCode)
+	t.Log("step 6 complete: invalid plan rejected before any agent dispatch ✓")
 
-	result4 := types.TaskResult{
-		OrchestratorTaskRef: orchRef4,
-		AgentID:             "agent-demo-42",
-		Success:             false,
-		ErrorCode:           types.ErrCodeTimedOut,
-		CompletedAt:         time.Now().UTC(),
-	}
-	if err := d.HandleTaskResult(result4); err != nil {
-		t.Fatalf("step 6: HandleTaskResult() error = %v", err)
-	}
+	t.Log("─────────────────────────────────────────────────────────────────────")
+	t.Log("step 7: final metrics")
 
-	rec4 := latestTaskStateRecord(t, mem, task4.TaskID)
-	if rec4.State != types.StateFailed {
-		t.Fatalf("step 6: persisted state = %q, want FAILED", rec4.State)
-	}
-	t.Logf("step 6: task_state updated in Memory — state=%s error_code=%s",
-		rec4.State, result4.ErrorCode)
-	t.Log("step 6 complete: failure path handled correctly ✓")
+	received, completed, failed, violations, decompositionFailed, queueDepth := d.GetMetrics()
+	t.Logf("step 7: tasks_received=%d tasks_completed=%d tasks_failed=%d policy_violations=%d decomposition_failed=%d queue_depth=%d",
+		received, completed, failed, violations, decompositionFailed, queueDepth)
 
-	t.Log("─────────────────────────────────────────────────────")
-	t.Log("step 7: metrics — reading final counters")
-
-	received, completed, failed, violations, queueDepth := d.GetMetrics()
-	t.Logf("step 7: tasks_received=%d tasks_completed=%d tasks_failed=%d policy_violations=%d queue_depth=%d",
-		received, completed, failed, violations, queueDepth)
-
-	if received != 5 {
-		t.Fatalf("step 7: tasksReceived = %d, want 5", received)
+	if received != 4 { // task1, task1-dup, task2 (policy), task3
+		t.Fatalf("step 7: tasksReceived = %d, want 4", received)
 	}
 	if completed != 1 {
 		t.Fatalf("step 7: tasksCompleted = %d, want 1 (task1)", completed)
-	}
-	if failed != 1 {
-		t.Fatalf("step 7: tasksFailed = %d, want 1 (task4)", failed)
 	}
 	if violations != 1 {
 		t.Fatalf("step 7: policyViolations = %d, want 1 (task2)", violations)
 	}
 	if queueDepth != 0 {
-		t.Fatalf("step 7: queueDepth = %d, want 0 (all dispatched tasks have completed)", queueDepth)
+		t.Fatalf("step 7: queueDepth = %d, want 0", queueDepth)
 	}
 	t.Log("step 7 complete: all counters match expected values ✓")
 
-	t.Log("─────────────────────────────────────────────────────")
-	t.Log("demo summary: Task Dispatcher completed all 7 steps against mock dependencies")
-	t.Log("demo summary: no real NATS broker, Vault, or database was used")
+	t.Log("─────────────────────────────────────────────────────────────────────")
+	t.Log("demo summary: Task Dispatcher v3.0 completed all 7 steps")
+	t.Log("demo summary: no real NATS, Vault, database, or Planner Agent used")
 	t.Logf("demo summary: memory records written=%d | policy calls=%d | revocations=%d",
 		mem.WriteCallCount, pol.ValidatedCalls, len(pol.RevokedRefs))
 }
 
-// ── helpers ──────────────────────────────────────────────────────────────────
+// ── helpers ───────────────────────────────────────────────────────────────────
 
 func safeErrorCode(gw *gatewayMock) string {
 	if len(gw.ErrorCalls) == 0 {

@@ -1,0 +1,485 @@
+// Package executor implements M7: Plan Executor.
+//
+// The Plan Executor manages execution of structured plans returned by the Planner Agent.
+// It receives an execution plan from the Task Dispatcher, dispatches subtasks in
+// topological (DAG) order, pipes outputs between dependent subtasks, and signals
+// the Dispatcher on plan completion or failure.
+//
+// Responsibilities (§4.1 M7):
+//   - Validate plan dependency graph (rejects cycles, empty plans, oversized plans)
+//   - Dispatch subtasks in topological order via Communications Gateway
+//   - Track each subtask's state independently (PENDING → DISPATCHED → COMPLETED/FAILED/BLOCKED)
+//   - Pipe subtask output into dependent subtasks via prior_results[] injection (§FR-TD-06)
+//   - Aggregate final results when all subtasks complete
+//   - Signal Task Dispatcher on plan completion or failure
+//   - Persist subtask state to Memory Interface on every transition
+//   - Support up to PLAN_EXECUTOR_MAX_PARALLEL concurrent subtask dispatches
+//
+// Subtask States (§9.2):
+//
+//	PENDING → DISPATCH_PENDING → DISPATCHED → RUNNING → COMPLETED (terminal)
+//	PENDING → BLOCKED (terminal — dependency failed)
+//	DISPATCHED → FAILED (terminal — max retries exceeded)
+//	DISPATCHED → TIMED_OUT (terminal — subtask timeout)
+package executor
+
+import (
+	"crypto/rand"
+	"encoding/json"
+	"fmt"
+	"log"
+	"os"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/mlim3/cerberOS/orchestrator/internal/config"
+	"github.com/mlim3/cerberOS/orchestrator/internal/interfaces"
+	"github.com/mlim3/cerberOS/orchestrator/internal/types"
+)
+
+// ── Internal Interface Definitions ───────────────────────────────────────────
+
+// Gateway defines the outbound operations the Plan Executor needs from M1.
+type Gateway interface {
+	PublishTaskSpec(spec types.TaskSpec) error
+	PublishCapabilityQuery(query types.CapabilityQuery) (*types.CapabilityResponse, error)
+	PublishStatusUpdate(userContextID string, status types.StatusResponse) error
+}
+
+// PolicyEnforcer defines the credential revocation the Plan Executor needs from M3.
+type PolicyEnforcer interface {
+	RevokeCredentials(orchestratorTaskRef string) error
+}
+
+// ── Plan Completion Callbacks ──────────────────────────────────────────────────
+
+// OnPlanCompleteFn is called by the Plan Executor when all subtasks complete successfully.
+type OnPlanCompleteFn func(ts *types.TaskState, aggregatedResults []types.PriorResult)
+
+// OnPlanFailedFn is called when the plan cannot complete.
+// partial=true means some subtasks completed; partialResults carries their outputs.
+type OnPlanFailedFn func(ts *types.TaskState, errorCode string, partial bool, partialResults []types.PriorResult)
+
+// ── planExecution tracks the live state of one running plan ──────────────────
+
+type planExecution struct {
+	plan types.ExecutionPlan
+	ts   *types.TaskState
+	mu   sync.Mutex
+
+	// subtasks maps subtask_id → *types.SubtaskState
+	subtasks map[string]*types.SubtaskState
+
+	// orchRefIndex maps orchestrator_task_ref → subtask_id
+	// Used to route task_result back to the right subtask.
+	orchRefIndex map[string]string
+
+	// dispatchedCount tracks how many subtasks are currently in DISPATCHED/RUNNING.
+	dispatchedCount int32
+}
+
+// ── PlanExecutor ─────────────────────────────────────────────────────────────
+
+// PlanExecutor is M7: Plan Executor.
+type PlanExecutor struct {
+	cfg    *config.OrchestratorConfig
+	memory interfaces.MemoryClient
+	gw     Gateway
+	policy PolicyEnforcer
+	logger *log.Logger
+
+	// activePlans maps plan_id → *planExecution
+	activePlans sync.Map
+
+	// orchRefToPlan maps orchestrator_task_ref (subtask) → plan_id
+	// Used in HandleSubtaskResult to find the plan a result belongs to.
+	orchRefToPlan sync.Map
+
+	onPlanComplete OnPlanCompleteFn
+	onPlanFailed   OnPlanFailedFn
+}
+
+// New creates a new PlanExecutor.
+// onComplete and onFailed are called by the executor when a plan reaches a terminal state.
+func New(
+	cfg *config.OrchestratorConfig,
+	memory interfaces.MemoryClient,
+	gw Gateway,
+	policy PolicyEnforcer,
+	onComplete OnPlanCompleteFn,
+	onFailed OnPlanFailedFn,
+) *PlanExecutor {
+	return &PlanExecutor{
+		cfg:            cfg,
+		memory:         memory,
+		gw:             gw,
+		policy:         policy,
+		logger:         log.New(os.Stdout, "[executor] ", log.LstdFlags|log.LUTC),
+		onPlanComplete: onComplete,
+		onPlanFailed:   onFailed,
+	}
+}
+
+// ── Execute — entry point from Task Dispatcher ────────────────────────────────
+
+// Execute initializes all subtasks as PENDING and dispatches those with no dependencies.
+// Called by Task Dispatcher after plan validation succeeds (§17.3).
+func (e *PlanExecutor) Execute(plan types.ExecutionPlan, ts *types.TaskState) error {
+	exec := &planExecution{
+		plan:         plan,
+		ts:           ts,
+		subtasks:     make(map[string]*types.SubtaskState, len(plan.Subtasks)),
+		orchRefIndex: make(map[string]string),
+	}
+
+	now := time.Now().UTC()
+
+	// Initialize all subtask states as PENDING.
+	for _, st := range plan.Subtasks {
+		timeoutAt := now.Add(time.Duration(st.TimeoutSeconds) * time.Second)
+		sub := &types.SubtaskState{
+			SubtaskID:            st.SubtaskID,
+			PlanID:               plan.PlanID,
+			TaskID:               ts.TaskID,
+			State:                types.SubtaskStatePending,
+			RequiredSkillDomains: st.RequiredSkillDomains,
+			DependsOn:            st.DependsOn,
+			TimeoutAt:            &timeoutAt,
+		}
+		exec.subtasks[st.SubtaskID] = sub
+		e.persistSubtaskState(sub, ts.OrchestratorTaskRef, now)
+	}
+
+	e.activePlans.Store(plan.PlanID, exec)
+
+	// Dispatch subtasks that have no dependencies.
+	e.dispatchReadySubtasks(exec)
+
+	return nil
+}
+
+// HandleSubtaskResult processes an inbound task_result for a subtask.
+// Routes by OrchestratorTaskRef → planID → subtask, marks COMPLETED,
+// pipes result to dependents, checks plan completion (§17.3).
+func (e *PlanExecutor) HandleSubtaskResult(result types.TaskResult) error {
+	// Resolve which plan/subtask this result belongs to.
+	planIDVal, ok := e.orchRefToPlan.Load(result.OrchestratorTaskRef)
+	if !ok {
+		e.logger.Printf("task result for unknown orchRef: %s", result.OrchestratorTaskRef)
+		return nil // stale result; ignore
+	}
+	planID := planIDVal.(string)
+
+	execVal, ok := e.activePlans.Load(planID)
+	if !ok {
+		return nil // plan already completed
+	}
+	exec := execVal.(*planExecution)
+
+	exec.mu.Lock()
+	defer exec.mu.Unlock()
+
+	// Find the subtask by orchRef.
+	subtaskID, ok := exec.orchRefIndex[result.OrchestratorTaskRef]
+	if !ok {
+		return nil
+	}
+	sub := exec.subtasks[subtaskID]
+
+	// Revoke credentials for this subtask's agent.
+	if err := e.policy.RevokeCredentials(result.OrchestratorTaskRef); err != nil {
+		e.logger.Printf("subtask credential revocation failed: orchRef=%s error=%v",
+			result.OrchestratorTaskRef, err)
+	}
+
+	now := time.Now().UTC()
+
+	if result.Success {
+		sub.State = types.SubtaskStateCompleted
+		sub.Result = result.Result
+		sub.AgentID = result.AgentID
+		sub.CompletedAt = &now
+	} else {
+		sub.State = types.SubtaskStateFailed
+		sub.ErrorCode = result.ErrorCode
+		sub.CompletedAt = &now
+	}
+	e.persistSubtaskState(sub, exec.ts.OrchestratorTaskRef, now)
+	atomic.AddInt32(&exec.dispatchedCount, -1)
+
+	e.orchRefToPlan.Delete(result.OrchestratorTaskRef)
+
+	if result.Success {
+		// Dispatch any subtasks that are now unblocked.
+		e.dispatchReadySubtasks(exec)
+	} else {
+		// Block all subtasks that depend on the failed subtask.
+		e.blockDependents(exec, subtaskID, now)
+	}
+
+	// Check if the plan has reached a terminal state.
+	e.checkPlanCompletion(exec)
+
+	return nil
+}
+
+// ── Dispatch Helpers ──────────────────────────────────────────────────────────
+
+// dispatchReadySubtasks finds all PENDING subtasks whose dependencies are all COMPLETED
+// and dispatches them (subject to PLAN_EXECUTOR_MAX_PARALLEL limit).
+func (e *PlanExecutor) dispatchReadySubtasks(exec *planExecution) {
+	for _, st := range exec.plan.Subtasks {
+		sub := exec.subtasks[st.SubtaskID]
+		if sub.State != types.SubtaskStatePending {
+			continue
+		}
+
+		// Check parallel dispatch limit.
+		if int(atomic.LoadInt32(&exec.dispatchedCount)) >= e.cfg.PlanExecutorMaxParallel {
+			break
+		}
+
+		// Check all dependencies are COMPLETED.
+		if !e.allDependenciesMet(exec, sub.DependsOn) {
+			continue
+		}
+
+		// Collect prior_results from completed dependencies.
+		sub.PriorResults = e.collectPriorResults(exec, sub.DependsOn)
+
+		e.dispatchSubtask(exec, st, sub)
+	}
+}
+
+// dispatchSubtask sends a capability_query then publishes a task_spec for one subtask.
+func (e *PlanExecutor) dispatchSubtask(exec *planExecution, st types.Subtask, sub *types.SubtaskState) {
+	now := time.Now().UTC()
+
+	// Transition to DISPATCH_PENDING and persist before publishing.
+	sub.State = types.SubtaskStateDispatchPending
+	e.persistSubtaskState(sub, exec.ts.OrchestratorTaskRef, now)
+
+	// Generate a unique orchestrator_task_ref for this subtask dispatch.
+	orchRef := newUUID()
+	sub.OrchestratorTaskRef = orchRef
+
+	// Register reverse lookup before publishing (prevents lost results on race).
+	exec.orchRefIndex[orchRef] = sub.SubtaskID
+	e.orchRefToPlan.Store(orchRef, exec.plan.PlanID)
+
+	// Query capability before dispatching (§FR-ALC-01).
+	capResp, err := e.gw.PublishCapabilityQuery(types.CapabilityQuery{
+		OrchestratorTaskRef:  orchRef,
+		RequiredSkillDomains: st.RequiredSkillDomains,
+	})
+	if err != nil {
+		e.logger.Printf("capability query failed: plan_id=%s subtask_id=%s error=%v",
+			exec.plan.PlanID, sub.SubtaskID, err)
+		sub.State = types.SubtaskStateFailed
+		sub.ErrorCode = types.ErrCodeAgentsUnavailable
+		sub.CompletedAt = &now
+		e.persistSubtaskState(sub, exec.ts.OrchestratorTaskRef, now)
+		e.orchRefToPlan.Delete(orchRef)
+		delete(exec.orchRefIndex, orchRef)
+		e.blockDependents(exec, sub.SubtaskID, now)
+		e.checkPlanCompletion(exec)
+		return
+	}
+
+	// Build and publish task_spec with inherited policy_scope.
+	priorResultsJSON, _ := json.Marshal(sub.PriorResults)
+	// Merge subtask params and prior_results into the payload.
+	payloadMap := map[string]json.RawMessage{
+		"action":        mustMarshal(st.Action),
+		"instructions":  mustMarshal(st.Instructions),
+		"params":        mustMarshal(st.Params),
+		"prior_results": priorResultsJSON,
+	}
+	payloadBytes, _ := json.Marshal(payloadMap)
+
+	spec := types.TaskSpec{
+		OrchestratorTaskRef:  orchRef,
+		TaskID:               sub.TaskID,
+		UserID:               exec.ts.UserID,
+		RequiredSkillDomains: st.RequiredSkillDomains,
+		PolicyScope:          exec.ts.PolicyScope, // Inherited, never expanded (§13.2)
+		TimeoutSeconds:       st.TimeoutSeconds,
+		Payload:              payloadBytes,
+		CallbackTopic:        exec.ts.CallbackTopic,
+		UserContextID:        exec.ts.UserContextID,
+	}
+
+	if err := e.gw.PublishTaskSpec(spec); err != nil {
+		e.logger.Printf("task_spec publish failed: plan_id=%s subtask_id=%s error=%v",
+			exec.plan.PlanID, sub.SubtaskID, err)
+		sub.State = types.SubtaskStateDeliveryFailed
+		sub.ErrorCode = types.ErrCodeAgentsUnavailable
+		sub.CompletedAt = &now
+		e.persistSubtaskState(sub, exec.ts.OrchestratorTaskRef, now)
+		_ = e.policy.RevokeCredentials(orchRef)
+		e.orchRefToPlan.Delete(orchRef)
+		delete(exec.orchRefIndex, orchRef)
+		e.blockDependents(exec, sub.SubtaskID, now)
+		e.checkPlanCompletion(exec)
+		return
+	}
+
+	// Transition to DISPATCHED after successful publish.
+	dispatchedAt := time.Now().UTC()
+	sub.State = types.SubtaskStateDispatched
+	sub.AgentID = capResp.AgentID
+	sub.DispatchedAt = &dispatchedAt
+	e.persistSubtaskState(sub, exec.ts.OrchestratorTaskRef, dispatchedAt)
+	atomic.AddInt32(&exec.dispatchedCount, 1)
+
+	e.logger.Printf("subtask dispatched: plan_id=%s subtask_id=%s orchRef=%s agent_id=%s",
+		exec.plan.PlanID, sub.SubtaskID, orchRef, capResp.AgentID)
+}
+
+// blockDependents marks all subtasks that (transitively) depend on a failed subtask as BLOCKED.
+func (e *PlanExecutor) blockDependents(exec *planExecution, failedID string, now time.Time) {
+	for _, st := range exec.plan.Subtasks {
+		sub := exec.subtasks[st.SubtaskID]
+		if sub.State != types.SubtaskStatePending {
+			continue
+		}
+		for _, dep := range sub.DependsOn {
+			if dep == failedID {
+				sub.State = types.SubtaskStateBlocked
+				sub.ErrorCode = fmt.Sprintf("dependency %q failed", failedID)
+				sub.CompletedAt = &now
+				e.persistSubtaskState(sub, exec.ts.OrchestratorTaskRef, now)
+				// Recursively block subtasks that depend on this one.
+				e.blockDependents(exec, sub.SubtaskID, now)
+				break
+			}
+		}
+	}
+}
+
+// checkPlanCompletion checks if all subtasks have reached terminal states and signals
+// the Dispatcher via the registered callback.
+func (e *PlanExecutor) checkPlanCompletion(exec *planExecution) {
+	allTerminal := true
+	anyFailed := false
+	anyBlocked := false
+	var completedResults []types.PriorResult
+
+	for _, sub := range exec.subtasks {
+		if !types.IsTerminalSubtaskState(sub.State) {
+			allTerminal = false
+			break
+		}
+		if sub.State == types.SubtaskStateCompleted {
+			completedResults = append(completedResults, types.PriorResult{
+				SubtaskID: sub.SubtaskID,
+				Result:    sub.Result,
+			})
+		}
+		if sub.State == types.SubtaskStateFailed || sub.State == types.SubtaskStateDeliveryFailed ||
+			sub.State == types.SubtaskStateTimedOut {
+			anyFailed = true
+		}
+		if sub.State == types.SubtaskStateBlocked {
+			anyBlocked = true
+		}
+	}
+
+	if !allTerminal {
+		return
+	}
+
+	// Remove from active maps before calling callbacks (prevents double-fire).
+	e.activePlans.Delete(exec.plan.PlanID)
+
+	if !anyFailed && !anyBlocked {
+		// All subtasks completed successfully.
+		e.logger.Printf("plan completed: plan_id=%s subtasks=%d", exec.plan.PlanID, len(exec.subtasks))
+		if e.onPlanComplete != nil {
+			e.onPlanComplete(exec.ts, completedResults)
+		}
+		return
+	}
+
+	// Some subtasks failed or were blocked.
+	partial := len(completedResults) > 0
+	errorCode := types.ErrCodeMaxRetriesExceeded
+	if anyBlocked && !anyFailed {
+		errorCode = types.ErrCodeInvalidPlan // all failures are blocked deps
+	}
+
+	e.logger.Printf("plan failed: plan_id=%s partial=%v error_code=%s", exec.plan.PlanID, partial, errorCode)
+	if e.onPlanFailed != nil {
+		e.onPlanFailed(exec.ts, errorCode, partial, completedResults)
+	}
+}
+
+// ── Dependency Helpers ────────────────────────────────────────────────────────
+
+// allDependenciesMet returns true if every subtask_id in deps has state COMPLETED.
+func (e *PlanExecutor) allDependenciesMet(exec *planExecution, deps []string) bool {
+	for _, depID := range deps {
+		dep, ok := exec.subtasks[depID]
+		if !ok || dep.State != types.SubtaskStateCompleted {
+			return false
+		}
+	}
+	return true
+}
+
+// collectPriorResults gathers the results of all completed dependency subtasks.
+func (e *PlanExecutor) collectPriorResults(exec *planExecution, deps []string) []types.PriorResult {
+	var results []types.PriorResult
+	for _, depID := range deps {
+		if dep, ok := exec.subtasks[depID]; ok && dep.State == types.SubtaskStateCompleted {
+			results = append(results, types.PriorResult{
+				SubtaskID: depID,
+				Result:    dep.Result,
+			})
+		}
+	}
+	return results
+}
+
+// ── Memory Persistence ────────────────────────────────────────────────────────
+
+func (e *PlanExecutor) persistSubtaskState(sub *types.SubtaskState, orchRef string, timestamp time.Time) {
+	payload, err := json.Marshal(sub)
+	if err != nil {
+		e.logger.Printf("marshal subtask state failed: subtask_id=%s error=%v", sub.SubtaskID, err)
+		return
+	}
+
+	if err := e.memory.Write(types.OrchestratorMemoryWritePayload{
+		OrchestratorTaskRef: orchRef,
+		TaskID:              sub.TaskID,
+		PlanID:              sub.PlanID,
+		SubtaskID:           sub.SubtaskID,
+		DataType:            types.DataTypeSubtaskState,
+		Timestamp:           timestamp,
+		Payload:             payload,
+	}); err != nil {
+		e.logger.Printf("subtask state persist failed: subtask_id=%s error=%v", sub.SubtaskID, err)
+	}
+}
+
+// ── Utilities ─────────────────────────────────────────────────────────────────
+
+// mustMarshal marshals v to JSON; returns null bytes on error.
+func mustMarshal(v any) json.RawMessage {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return json.RawMessage("null")
+	}
+	return b
+}
+
+// newUUID generates a random UUID v4 using crypto/rand.
+func newUUID() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // variant bits
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
+}

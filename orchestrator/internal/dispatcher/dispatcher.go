@@ -2,20 +2,33 @@
 //
 // The Task Dispatcher is the central coordinator for all incoming task routing
 // decisions. It is the only module that drives the full task pipeline from
-// receipt to dispatch.
+// receipt to decomposition and plan execution.
 //
 // Responsibilities (§4.1 M2):
 //   - Validate user_task schema — reject invalid specs immediately
 //   - Perform deduplication check via Memory Interface using task_id
 //   - Route to Policy Enforcer for permission validation before any agent interaction
-//   - Dispatch validated, scoped task_spec to Agents Component via Gateway
-//   - Track active tasks and correlate incoming results to originating user_task
+//   - After policy validation, send task_decomposition_request to Planner Agent (§FR-TD-01)
+//   - Receive task_decomposition_response, validate plan, pass to Plan Executor
+//   - Track active tasks and correlate plan results back to originating user_task
 //   - Monitor queue depth and emit queue_pressure metric at high-water mark
 //
 // CRITICAL ordering (§14.1):
 //
 //	Persist task state to Memory BEFORE dispatching to Agents Component.
 //	This prevents orphaned agents if Memory fails post-dispatch.
+//
+// v3.0 Pipeline (§7 Flows 1–3.5):
+//
+//	1. Schema validation — INVALID_TASK_SPEC on failure
+//	2. Deduplication check — DUPLICATE_TASK if task_id seen within idempotency window
+//	3. Generate orchestrator_task_ref (distinct UUID)
+//	4. Policy validation — POLICY_VIOLATION on deny; Planner Agent never contacted on deny
+//	5. Persist DECOMPOSING state to Memory (BEFORE decomposition request — §14.1)
+//	6. Publish task_decomposition_request to Planner Agent via Gateway
+//	7. Start decomposition timeout goroutine (DECOMPOSITION_TIMEOUT_SECONDS)
+//	8. On DecompositionResponse: validate plan → pass to Plan Executor → persist PLAN_ACTIVE
+//	9. Send task_accepted to User I/O after plan is valid and execution starts
 package dispatcher
 
 import (
@@ -46,9 +59,9 @@ const defaultIdempotencyWindow = 300 // seconds
 type Gateway interface {
 	PublishTaskAccepted(callbackTopic string, accepted types.TaskAccepted) error
 	PublishError(callbackTopic string, resp types.ErrorResponse) error
-	PublishTaskSpec(spec types.TaskSpec) error
-	PublishCapabilityQuery(query types.CapabilityQuery) (*types.CapabilityResponse, error)
 	PublishTaskResult(callbackTopic string, result types.TaskResult) error
+	PublishDecompositionRequest(req types.DecompositionRequest) error
+	PublishStatusUpdate(userContextID string, status types.StatusResponse) error
 }
 
 // PolicyEnforcer defines the policy operations the Dispatcher needs from M3.
@@ -63,6 +76,11 @@ type TaskMonitor interface {
 	UntrackTask(taskID string)
 }
 
+// PlanExecutor defines the plan execution interface the Dispatcher delegates to (M7).
+type PlanExecutor interface {
+	Execute(plan types.ExecutionPlan, ts *types.TaskState) error
+}
+
 // ── Dispatcher ────────────────────────────────────────────────────────────────
 
 // Dispatcher is M2: Task Dispatcher.
@@ -71,23 +89,22 @@ type Dispatcher struct {
 	memory interfaces.MemoryClient
 	vault  interfaces.VaultClient
 
-	gateway Gateway
-	policy  PolicyEnforcer
-	monitor TaskMonitor
-	logger  *log.Logger
+	gateway  Gateway
+	policy   PolicyEnforcer
+	monitor  TaskMonitor
+	executor PlanExecutor
+	logger   *log.Logger
 
 	// activeTasks maps task_id → *TaskState for all non-terminal in-flight tasks.
 	activeTasks sync.Map
 
-	// orchRefIndex maps orchestrator_task_ref → task_id for reverse lookup on task results.
-	orchRefIndex sync.Map
-
 	// Metrics — use atomic operations to avoid a global lock.
-	tasksReceived    int64
-	tasksCompleted   int64
-	tasksFailed      int64
-	policyViolations int64
-	queueDepth       int64
+	tasksReceived       int64
+	tasksCompleted      int64
+	tasksFailed         int64
+	policyViolations    int64
+	decompositionFailed int64
+	queueDepth          int64
 }
 
 // New creates a new Dispatcher.
@@ -98,33 +115,33 @@ func New(
 	gw Gateway,
 	policy PolicyEnforcer,
 	monitor TaskMonitor,
+	executor PlanExecutor,
 ) *Dispatcher {
 	return &Dispatcher{
-		cfg:     cfg,
-		memory:  memory,
-		vault:   vault,
-		gateway: gw,
-		policy:  policy,
-		monitor: monitor,
-		logger:  log.New(os.Stdout, "[dispatcher] ", log.LstdFlags|log.LUTC),
+		cfg:      cfg,
+		memory:   memory,
+		vault:    vault,
+		gateway:  gw,
+		policy:   policy,
+		monitor:  monitor,
+		executor: executor,
+		logger:   log.New(os.Stdout, "[dispatcher] ", log.LstdFlags|log.LUTC),
 	}
 }
 
 // ── Inbound Task Pipeline ─────────────────────────────────────────────────────
 
 // HandleInboundTask is the entry point for all user_task messages from the Gateway.
-// Implements the full validation → dedup → policy → dispatch pipeline (§7, §17.3).
+// Implements the full validation → dedup → policy → decomposition pipeline (§7, §17.3).
 //
 // Pipeline (§7):
 //  1. Schema validation — INVALID_TASK_SPEC on failure
 //  2. Deduplication check — DUPLICATE_TASK if task_id seen within idempotency window
 //  3. Generate orchestrator_task_ref (distinct UUID)
-//  4. Policy validation — POLICY_VIOLATION on deny; no agent is ever touched on deny
-//  5. Capability query to Agents Component
-//  6. Persist DISPATCH_PENDING state to Memory (BEFORE dispatch — §14.1)
-//  7. Dispatch task_spec to Agents Component
-//  8. On success, persist DISPATCHED state; on failure, persist DELIVERY_FAILED
-//  9. Confirm task_accepted to User I/O
+//  4. Policy validation — POLICY_VIOLATION on deny; Planner Agent never contacted
+//  5. Persist DECOMPOSING state to Memory BEFORE sending decomposition request (§14.1)
+//  6. Publish task_decomposition_request to Planner Agent
+//  7. Start decomposition timeout goroutine
 func (d *Dispatcher) HandleInboundTask(task types.UserTask) error {
 	atomic.AddInt64(&d.tasksReceived, 1)
 
@@ -173,22 +190,7 @@ func (d *Dispatcher) HandleInboundTask(task types.UserTask) error {
 		return fmt.Errorf("policy validation denied: %w", err)
 	}
 
-	// ── Step 5: Capability query ───────────────────────────────────────────
-	capResp, err := d.gateway.PublishCapabilityQuery(types.CapabilityQuery{
-		OrchestratorTaskRef:  orchRef,
-		RequiredSkillDomains: task.RequiredSkillDomains,
-	})
-	if err != nil {
-		d.logger.Printf("capability query failed: task_id=%s error=%v", task.TaskID, err)
-		_ = d.gateway.PublishError(task.CallbackTopic, types.ErrorResponse{
-			TaskID:      task.TaskID,
-			ErrorCode:   types.ErrCodeAgentsUnavailable,
-			UserMessage: "No capable agent is available for this task.",
-		})
-		return fmt.Errorf("capability query: %w", err)
-	}
-
-	// ── Build initial task state as DISPATCH_PENDING ───────────────────────
+	// ── Build initial task state as DECOMPOSING ────────────────────────────
 	now := time.Now().UTC()
 	timeoutAt := now.Add(time.Duration(task.TimeoutSeconds) * time.Second)
 
@@ -196,10 +198,9 @@ func (d *Dispatcher) HandleInboundTask(task types.UserTask) error {
 		OrchestratorTaskRef:  orchRef,
 		TaskID:               task.TaskID,
 		UserID:               task.UserID,
-		State:                types.StateDispatchPending,
+		State:                types.StateDecomposing,
 		RequiredSkillDomains: task.RequiredSkillDomains,
 		PolicyScope:          scope,
-		AgentID:              capResp.AgentID,
 		TimeoutAt:            &timeoutAt,
 		CallbackTopic:        task.CallbackTopic,
 		UserContextID:        task.UserContextID,
@@ -207,185 +208,226 @@ func (d *Dispatcher) HandleInboundTask(task types.UserTask) error {
 		Payload:              task.Payload,
 		StateHistory: []types.StateEvent{
 			{State: types.StateReceived, Timestamp: now, NodeID: d.cfg.NodeID},
-			{State: types.StateDispatchPending, Timestamp: now, NodeID: d.cfg.NodeID},
+			{State: types.StateDecomposing, Timestamp: now, NodeID: d.cfg.NodeID},
 		},
 	}
 
-	// ── Step 6: Persist DISPATCH_PENDING BEFORE dispatch ───────────────────
+	// ── Step 5: Persist DECOMPOSING BEFORE sending decomposition request ───
 	if err := d.persistTaskState(ts, now); err != nil {
-		d.logger.Printf("memory write failed before dispatch: task_id=%s error=%v", task.TaskID, err)
+		d.logger.Printf("memory write failed before decomposition: task_id=%s error=%v", task.TaskID, err)
 		_ = d.gateway.PublishError(task.CallbackTopic, types.ErrorResponse{
 			TaskID:      task.TaskID,
 			ErrorCode:   types.ErrCodeStorageUnavailable,
 			UserMessage: "Unable to persist task state. Task not dispatched.",
 		})
-		return fmt.Errorf("persist dispatch pending state: %w", err)
+		return fmt.Errorf("persist decomposing state: %w", err)
 	}
 
 	// Register with in-memory tracking and monitor.
 	d.activeTasks.Store(task.TaskID, ts)
-	d.orchRefIndex.Store(orchRef, task.TaskID)
 	d.monitor.TrackTask(ts)
 	atomic.AddInt64(&d.queueDepth, 1)
 
-	// ── Step 7: Dispatch task_spec ─────────────────────────────────────────
-	spec := types.TaskSpec{
-		OrchestratorTaskRef:  orchRef,
-		TaskID:               task.TaskID,
-		UserID:               task.UserID,
-		RequiredSkillDomains: task.RequiredSkillDomains,
-		PolicyScope:          scope,
-		TimeoutSeconds:       task.TimeoutSeconds,
-		Payload:              task.Payload,
-		CallbackTopic:        task.CallbackTopic,
-		UserContextID:        task.UserContextID,
-	}
+	// ── Step 6: Publish task_decomposition_request to Planner Agent ────────
+	// Extract raw_input from payload for the Planner Agent.
+	rawInput := extractRawInput(task.Payload)
 
-	if err := d.gateway.PublishTaskSpec(spec); err != nil {
-		failTime := time.Now().UTC()
-
-		ts.State = types.StateDeliveryFailed
-		ts.ErrorCode = types.ErrCodeAgentsUnavailable
-		ts.StateHistory = append(ts.StateHistory, types.StateEvent{
-			State:     types.StateDeliveryFailed,
-			Timestamp: failTime,
-			Reason:    err.Error(),
-			NodeID:    d.cfg.NodeID,
-		})
-
-		if persistErr := d.persistTaskState(ts, failTime); persistErr != nil {
-			d.logger.Printf(
-				"failed to persist DELIVERY_FAILED state: task_id=%s orchestrator_task_ref=%s error=%v",
-				task.TaskID, orchRef, persistErr,
-			)
-		}
-
-		if revokeErr := d.policy.RevokeCredentials(orchRef); revokeErr != nil {
-			d.logger.Printf(
-				"credential revocation failed after dispatch failure: orchestrator_task_ref=%s error=%v",
-				orchRef, revokeErr,
-			)
-		}
-
-		d.activeTasks.Delete(task.TaskID)
-		d.orchRefIndex.Delete(orchRef)
-		d.monitor.UntrackTask(task.TaskID)
-		atomic.AddInt64(&d.queueDepth, -1)
-
-		d.logger.Printf(
-			"task dispatch failed: task_id=%s orchestrator_task_ref=%s agent_id=%s error=%v",
-			task.TaskID, orchRef, capResp.AgentID, err,
-		)
-
-		_ = d.gateway.PublishError(task.CallbackTopic, types.ErrorResponse{
-			TaskID:      task.TaskID,
-			ErrorCode:   types.ErrCodeAgentsUnavailable,
-			UserMessage: "Task could not be delivered to an available agent.",
-		})
-
-		return fmt.Errorf("dispatch task_spec: %w", err)
-	}
-
-	// ── Step 8: Persist DISPATCHED after successful publish ────────────────
-	dispatchTime := time.Now().UTC()
-	ts.State = types.StateDispatched
-	ts.DispatchedAt = &dispatchTime
-	ts.StateHistory = append(ts.StateHistory, types.StateEvent{
-		State:     types.StateDispatched,
-		Timestamp: dispatchTime,
-		NodeID:    d.cfg.NodeID,
-	})
-
-	if err := d.persistTaskState(ts, dispatchTime); err != nil {
-		d.logger.Printf(
-			"failed to persist DISPATCHED state after publish: task_id=%s orchestrator_task_ref=%s error=%v",
-			task.TaskID, orchRef, err,
-		)
-		// Do not fail the request here — the agent has already received the task.
-		// This should be handled by recovery / reconciliation later.
-	}
-
-	// ── Step 9: Confirm task_accepted to User I/O ──────────────────────────
-	accepted := types.TaskAccepted{
+	req := types.DecompositionRequest{
+		TaskID:              task.TaskID,
 		OrchestratorTaskRef: orchRef,
-		AgentID:             capResp.AgentID,
-		EstimatedCompletion: dispatchTime.Add(time.Duration(task.TimeoutSeconds) * time.Second),
-	}
-	if err := d.gateway.PublishTaskAccepted(task.CallbackTopic, accepted); err != nil {
-		d.logger.Printf("publish task_accepted failed: task_id=%s error=%v", task.TaskID, err)
-		// Non-fatal: task is already dispatched and persisted.
+		UserID:              task.UserID,
+		RawInput:            rawInput,
+		PolicyScope:         scope,
+		UserContextID:       task.UserContextID,
 	}
 
-	d.logger.Printf(
-		"task dispatched: task_id=%s orchestrator_task_ref=%s agent_id=%s match=%s",
-		task.TaskID, orchRef, capResp.AgentID, capResp.Match,
-	)
+	if err := d.gateway.PublishDecompositionRequest(req); err != nil {
+		d.logger.Printf("decomposition request publish failed: task_id=%s error=%v", task.TaskID, err)
+		d.failTask(ts, types.ErrCodeAgentsUnavailable, "Could not reach Planner Agent. Please retry.")
+		return fmt.Errorf("publish decomposition request: %w", err)
+	}
+
+	// ── Step 7: Start decomposition timeout goroutine ──────────────────────
+	go d.watchDecompositionTimeout(ts)
+
+	d.logger.Printf("task sent for decomposition: task_id=%s orchestrator_task_ref=%s", task.TaskID, orchRef)
 	return nil
 }
 
-// HandleTaskResult processes an inbound task_result from the Agents Component.
-// Writes COMPLETED or FAILED state to Memory, delivers result to callback_topic,
-// and triggers credential revocation (§7 Flow 5).
-func (d *Dispatcher) HandleTaskResult(result types.TaskResult) error {
-	// Resolve task_id from orchestrator_task_ref.
-	taskIDVal, ok := d.orchRefIndex.Load(result.OrchestratorTaskRef)
+// HandleDecompositionResponse processes a task_decomposition_response from the Planner Agent.
+// Validates the plan, transitions task to PLAN_ACTIVE, passes plan to Plan Executor,
+// and sends task_accepted to User I/O (§7 Flow 3.5, §8.1 steps 13–22).
+func (d *Dispatcher) HandleDecompositionResponse(resp types.DecompositionResponse) error {
+	tsVal, ok := d.activeTasks.Load(resp.TaskID)
 	if !ok {
-		return fmt.Errorf("unknown orchestrator_task_ref: %s", result.OrchestratorTaskRef)
-	}
-	taskID := taskIDVal.(string)
-
-	tsVal, ok := d.activeTasks.Load(taskID)
-	if !ok {
-		return fmt.Errorf("no active task for task_id: %s", taskID)
+		// Task may have timed out already — ignore stale response.
+		d.logger.Printf("decomposition response for unknown/timed-out task: task_id=%s", resp.TaskID)
+		return nil
 	}
 	ts := tsVal.(*types.TaskState)
 
-	now := time.Now().UTC()
-
-	// Determine terminal state.
-	newState := types.StateCompleted
-	if !result.Success {
-		newState = types.StateFailed
+	// Guard: only act if task is still DECOMPOSING.
+	if ts.State != types.StateDecomposing {
+		d.logger.Printf("decomposition response ignored — task not in DECOMPOSING state: task_id=%s state=%s",
+			resp.TaskID, ts.State)
+		return nil
 	}
 
-	ts.State = newState
-	ts.CompletedAt = &now
-	ts.AgentID = result.AgentID
+	// ── Validate plan ──────────────────────────────────────────────────────
+	if err := d.validatePlan(resp.Plan, ts); err != nil {
+		d.logger.Printf("plan validation failed: task_id=%s error=%v", resp.TaskID, err)
+		errorCode := classifyPlanError(err)
+		d.failTask(ts, errorCode, fmt.Sprintf("Execution plan is invalid: %s", err.Error()))
+		return fmt.Errorf("plan validation: %w", err)
+	}
+
+	// ── Transition to PLAN_ACTIVE ──────────────────────────────────────────
+	now := time.Now().UTC()
+	ts.State = types.StatePlanActive
+	ts.PlanID = resp.Plan.PlanID
 	ts.StateHistory = append(ts.StateHistory, types.StateEvent{
-		State:     newState,
+		State:     types.StatePlanActive,
 		Timestamp: now,
 		NodeID:    d.cfg.NodeID,
 	})
 
-	// Write terminal state to Memory.
 	if err := d.persistTaskState(ts, now); err != nil {
-		d.logger.Printf("memory write failed on task result: task_id=%s error=%v", taskID, err)
+		d.logger.Printf("memory write failed on PLAN_ACTIVE: task_id=%s error=%v", resp.TaskID, err)
+		// Non-fatal: plan will still proceed. Reconciliation handles it later.
 	}
 
-	// Deliver result to callback_topic.
-	if err := d.gateway.PublishTaskResult(ts.CallbackTopic, result); err != nil {
-		d.logger.Printf("publish task_result failed: task_id=%s error=%v", taskID, err)
+	// Persist the plan itself.
+	if err := d.persistPlanState(resp.Plan, ts.TaskID, ts.OrchestratorTaskRef, now); err != nil {
+		d.logger.Printf("plan state persist failed: task_id=%s plan_id=%s error=%v",
+			resp.TaskID, resp.Plan.PlanID, err)
+		// Non-fatal: executor holds plan in memory.
 	}
 
-	// Trigger credential revocation (non-blocking on error).
-	if err := d.policy.RevokeCredentials(ts.OrchestratorTaskRef); err != nil {
-		d.logger.Printf("credential revocation failed: orchestrator_task_ref=%s error=%v", ts.OrchestratorTaskRef, err)
+	// ── Hand off to Plan Executor ──────────────────────────────────────────
+	if err := d.executor.Execute(resp.Plan, ts); err != nil {
+		d.logger.Printf("plan executor failed to start: task_id=%s error=%v", resp.TaskID, err)
+		d.failTask(ts, types.ErrCodeAgentsUnavailable, "Failed to start plan execution.")
+		return fmt.Errorf("plan executor execute: %w", err)
 	}
 
-	// Untrack the task.
-	d.activeTasks.Delete(taskID)
-	d.orchRefIndex.Delete(result.OrchestratorTaskRef)
-	d.monitor.UntrackTask(taskID)
-	atomic.AddInt64(&d.queueDepth, -1)
-
-	if result.Success {
-		atomic.AddInt64(&d.tasksCompleted, 1)
+	// ── Send task_accepted to User I/O (§8.1 step 22) ────────────────────
+	// Estimated completion = now + remaining timeout.
+	var estimatedCompletion time.Time
+	if ts.TimeoutAt != nil {
+		estimatedCompletion = *ts.TimeoutAt
 	} else {
-		atomic.AddInt64(&d.tasksFailed, 1)
+		estimatedCompletion = now.Add(5 * time.Minute) // fallback
 	}
 
-	d.logger.Printf("task result processed: task_id=%s state=%s", taskID, newState)
+	accepted := types.TaskAccepted{
+		OrchestratorTaskRef: ts.OrchestratorTaskRef,
+		EstimatedCompletion: estimatedCompletion,
+	}
+	if err := d.gateway.PublishTaskAccepted(ts.CallbackTopic, accepted); err != nil {
+		d.logger.Printf("publish task_accepted failed: task_id=%s error=%v", resp.TaskID, err)
+		// Non-fatal: plan is running; user may poll for status.
+	}
+
+	d.logger.Printf("plan execution started: task_id=%s plan_id=%s subtasks=%d",
+		resp.TaskID, resp.Plan.PlanID, len(resp.Plan.Subtasks))
 	return nil
+}
+
+// HandlePlanComplete is called by the Plan Executor when all subtasks complete successfully.
+// Writes COMPLETED state, delivers aggregated result to User I/O, revokes credentials.
+func (d *Dispatcher) HandlePlanComplete(ts *types.TaskState, aggregatedResults []types.PriorResult) {
+	now := time.Now().UTC()
+
+	ts.State = types.StateCompleted
+	ts.CompletedAt = &now
+	ts.StateHistory = append(ts.StateHistory, types.StateEvent{
+		State:     types.StateCompleted,
+		Timestamp: now,
+		NodeID:    d.cfg.NodeID,
+	})
+
+	if err := d.persistTaskState(ts, now); err != nil {
+		d.logger.Printf("memory write failed on task completion: task_id=%s error=%v", ts.TaskID, err)
+	}
+
+	// Build and deliver final task result.
+	resultsJSON, _ := json.Marshal(aggregatedResults)
+	result := types.TaskResult{
+		OrchestratorTaskRef: ts.OrchestratorTaskRef,
+		Success:             true,
+		Result:              resultsJSON,
+		CompletedAt:         now,
+	}
+	if err := d.gateway.PublishTaskResult(ts.CallbackTopic, result); err != nil {
+		d.logger.Printf("publish task_result failed: task_id=%s error=%v", ts.TaskID, err)
+	}
+
+	if err := d.policy.RevokeCredentials(ts.OrchestratorTaskRef); err != nil {
+		d.logger.Printf("credential revocation failed: orchestrator_task_ref=%s error=%v",
+			ts.OrchestratorTaskRef, err)
+	}
+
+	d.activeTasks.Delete(ts.TaskID)
+	d.monitor.UntrackTask(ts.TaskID)
+	atomic.AddInt64(&d.queueDepth, -1)
+	atomic.AddInt64(&d.tasksCompleted, 1)
+
+	d.logger.Printf("task completed: task_id=%s plan_id=%s", ts.TaskID, ts.PlanID)
+}
+
+// HandlePlanFailed is called by the Plan Executor when the plan cannot complete.
+// Writes FAILED or PARTIAL_COMPLETE state, delivers error to User I/O.
+func (d *Dispatcher) HandlePlanFailed(ts *types.TaskState, errorCode string, partial bool, partialResults []types.PriorResult) {
+	now := time.Now().UTC()
+
+	finalState := types.StateFailed
+	if partial {
+		finalState = types.StatePartialComplete
+	}
+
+	ts.State = finalState
+	ts.ErrorCode = errorCode
+	ts.CompletedAt = &now
+	ts.StateHistory = append(ts.StateHistory, types.StateEvent{
+		State:     finalState,
+		Timestamp: now,
+		Reason:    errorCode,
+		NodeID:    d.cfg.NodeID,
+	})
+
+	if err := d.persistTaskState(ts, now); err != nil {
+		d.logger.Printf("memory write failed on task failure: task_id=%s error=%v", ts.TaskID, err)
+	}
+
+	if partial && len(partialResults) > 0 {
+		resultsJSON, _ := json.Marshal(partialResults)
+		result := types.TaskResult{
+			OrchestratorTaskRef: ts.OrchestratorTaskRef,
+			Success:             false,
+			Result:              resultsJSON,
+			ErrorCode:           errorCode,
+			CompletedAt:         now,
+		}
+		_ = d.gateway.PublishTaskResult(ts.CallbackTopic, result)
+	} else {
+		_ = d.gateway.PublishError(ts.CallbackTopic, types.ErrorResponse{
+			TaskID:      ts.TaskID,
+			ErrorCode:   errorCode,
+			UserMessage: humanReadableError(errorCode),
+		})
+	}
+
+	if err := d.policy.RevokeCredentials(ts.OrchestratorTaskRef); err != nil {
+		d.logger.Printf("credential revocation failed: orchestrator_task_ref=%s error=%v",
+			ts.OrchestratorTaskRef, err)
+	}
+
+	d.activeTasks.Delete(ts.TaskID)
+	d.monitor.UntrackTask(ts.TaskID)
+	atomic.AddInt64(&d.queueDepth, -1)
+	atomic.AddInt64(&d.tasksFailed, 1)
+
+	d.logger.Printf("task %s: task_id=%s plan_id=%s error_code=%s", finalState, ts.TaskID, ts.PlanID, errorCode)
 }
 
 // ── Read-only Accessors ───────────────────────────────────────────────────────
@@ -404,15 +446,182 @@ func (d *Dispatcher) GetActiveTasks() []*types.TaskState {
 }
 
 // GetMetrics returns current task counters for metrics emission (§15.2).
-func (d *Dispatcher) GetMetrics() (received, completed, failed, violations, queueDepth int64) {
+func (d *Dispatcher) GetMetrics() (received, completed, failed, violations, decompositionFailed, queueDepth int64) {
 	return atomic.LoadInt64(&d.tasksReceived),
 		atomic.LoadInt64(&d.tasksCompleted),
 		atomic.LoadInt64(&d.tasksFailed),
 		atomic.LoadInt64(&d.policyViolations),
+		atomic.LoadInt64(&d.decompositionFailed),
 		atomic.LoadInt64(&d.queueDepth)
 }
 
 // ── Internal Helpers ──────────────────────────────────────────────────────────
+
+// watchDecompositionTimeout fires DECOMPOSITION_TIMEOUT if task is still DECOMPOSING
+// after DecompositionTimeoutSeconds (§FR-TD-02, §8.5).
+func (d *Dispatcher) watchDecompositionTimeout(ts *types.TaskState) {
+	timeout := time.Duration(d.cfg.DecompositionTimeoutSeconds) * time.Second
+	<-time.After(timeout)
+
+	tsVal, ok := d.activeTasks.Load(ts.TaskID)
+	if !ok {
+		return // Task already completed or was cleaned up.
+	}
+	current := tsVal.(*types.TaskState)
+	if current.State != types.StateDecomposing {
+		return // Task has moved on (plan received).
+	}
+
+	atomic.AddInt64(&d.decompositionFailed, 1)
+	d.logger.Printf("decomposition timeout: task_id=%s orchestrator_task_ref=%s timeout=%s",
+		ts.TaskID, ts.OrchestratorTaskRef, timeout)
+	d.failTask(current, types.ErrCodeDecompositionTimeout,
+		fmt.Sprintf("Planner Agent did not respond within %d seconds.", d.cfg.DecompositionTimeoutSeconds))
+}
+
+// failTask transitions a task to a terminal failure state, publishes error, and cleans up.
+func (d *Dispatcher) failTask(ts *types.TaskState, errorCode, userMessage string) {
+	now := time.Now().UTC()
+
+	ts.State = types.StateDecompositionFailed
+	ts.ErrorCode = errorCode
+	ts.CompletedAt = &now
+	ts.StateHistory = append(ts.StateHistory, types.StateEvent{
+		State:     types.StateDecompositionFailed,
+		Timestamp: now,
+		Reason:    errorCode,
+		NodeID:    d.cfg.NodeID,
+	})
+
+	if err := d.persistTaskState(ts, now); err != nil {
+		d.logger.Printf("memory write failed on task failure: task_id=%s error=%v", ts.TaskID, err)
+	}
+
+	_ = d.gateway.PublishError(ts.CallbackTopic, types.ErrorResponse{
+		TaskID:      ts.TaskID,
+		ErrorCode:   errorCode,
+		UserMessage: userMessage,
+	})
+
+	d.activeTasks.Delete(ts.TaskID)
+	d.monitor.UntrackTask(ts.TaskID)
+	atomic.AddInt64(&d.queueDepth, -1)
+}
+
+// validatePlan checks an execution plan for structural validity (§FR-TD-04, §FR-TD-07).
+func (d *Dispatcher) validatePlan(plan types.ExecutionPlan, ts *types.TaskState) error {
+	if len(plan.Subtasks) == 0 {
+		return fmt.Errorf("%s: plan has no subtasks", types.ErrCodeEmptyPlan)
+	}
+	if len(plan.Subtasks) > d.cfg.MaxSubtasksPerPlan {
+		return fmt.Errorf("%s: plan has %d subtasks, max is %d",
+			types.ErrCodePlanTooLarge, len(plan.Subtasks), d.cfg.MaxSubtasksPerPlan)
+	}
+
+	// Build a set of subtask IDs for dependency validation.
+	subtaskIDs := make(map[string]bool, len(plan.Subtasks))
+	for _, st := range plan.Subtasks {
+		if subtaskIDs[st.SubtaskID] {
+			return fmt.Errorf("%s: duplicate subtask_id %q", types.ErrCodeInvalidPlan, st.SubtaskID)
+		}
+		subtaskIDs[st.SubtaskID] = true
+	}
+
+	// Validate depends_on references exist and check for scope violations.
+	scopeDomains := make(map[string]bool, len(ts.PolicyScope.Domains))
+	for _, d := range ts.PolicyScope.Domains {
+		scopeDomains[d] = true
+	}
+
+	for _, st := range plan.Subtasks {
+		for _, dep := range st.DependsOn {
+			if !subtaskIDs[dep] {
+				return fmt.Errorf("%s: subtask %q depends on unknown subtask_id %q",
+					types.ErrCodeInvalidPlan, st.SubtaskID, dep)
+			}
+		}
+		// Scope violation check: each subtask's required domains must be within policy_scope.
+		for _, domain := range st.RequiredSkillDomains {
+			if len(scopeDomains) > 0 && !scopeDomains[domain] {
+				return fmt.Errorf("%s: subtask %q requires domain %q outside policy scope",
+					types.ErrCodeScopeViolation, st.SubtaskID, domain)
+			}
+		}
+	}
+
+	// Detect circular dependencies via topological sort (Kahn's algorithm).
+	if hasCycle(plan.Subtasks) {
+		return fmt.Errorf("%s: circular dependency detected in plan", types.ErrCodeInvalidPlan)
+	}
+
+	return nil
+}
+
+// hasCycle returns true if the subtask dependency graph contains a cycle.
+func hasCycle(subtasks []types.Subtask) bool {
+	inDegree := make(map[string]int, len(subtasks))
+	for _, st := range subtasks {
+		if _, ok := inDegree[st.SubtaskID]; !ok {
+			inDegree[st.SubtaskID] = 0
+		}
+		for _, dep := range st.DependsOn {
+			inDegree[dep]++ // we're doing reverse; simpler: count how many depend on each
+			_ = dep
+		}
+	}
+
+	// Proper Kahn's: build in-degree count for each node.
+	indeg := make(map[string]int, len(subtasks))
+	for _, st := range subtasks {
+		if _, ok := indeg[st.SubtaskID]; !ok {
+			indeg[st.SubtaskID] = 0
+		}
+		for range st.DependsOn {
+			indeg[st.SubtaskID]++
+		}
+	}
+
+	queue := []string{}
+	for id, deg := range indeg {
+		if deg == 0 {
+			queue = append(queue, id)
+		}
+	}
+
+	visited := 0
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		visited++
+		// For each subtask whose depends_on includes cur, decrement its in-degree.
+		for _, st := range subtasks {
+			for _, dep := range st.DependsOn {
+				if dep == cur {
+					indeg[st.SubtaskID]--
+					if indeg[st.SubtaskID] == 0 {
+						queue = append(queue, st.SubtaskID)
+					}
+				}
+			}
+		}
+	}
+
+	return visited != len(subtasks)
+}
+
+// classifyPlanError maps a validation error message to the appropriate error code.
+func classifyPlanError(err error) string {
+	msg := err.Error()
+	for _, code := range []string{
+		types.ErrCodeEmptyPlan, types.ErrCodePlanTooLarge,
+		types.ErrCodeScopeViolation, types.ErrCodeInvalidPlan,
+	} {
+		if len(msg) >= len(code) && msg[:len(code)] == code {
+			return code
+		}
+	}
+	return types.ErrCodeInvalidPlan
+}
 
 // dedupCheck queries Memory for an existing task_state within the idempotency window.
 // Returns the existing TaskState if a duplicate is found, or nil if the task is new.
@@ -449,12 +658,44 @@ func (d *Dispatcher) persistTaskState(ts *types.TaskState, timestamp time.Time) 
 	})
 }
 
+func (d *Dispatcher) persistPlanState(plan types.ExecutionPlan, taskID, orchRef string, timestamp time.Time) error {
+	planPayload, err := json.Marshal(plan)
+	if err != nil {
+		return fmt.Errorf("marshal plan: %w", err)
+	}
+
+	return d.memory.Write(types.OrchestratorMemoryWritePayload{
+		OrchestratorTaskRef: orchRef,
+		TaskID:              taskID,
+		PlanID:              plan.PlanID,
+		DataType:            types.DataTypePlanState,
+		Timestamp:           timestamp,
+		Payload:             planPayload,
+	})
+}
+
+// extractRawInput attempts to pull raw_input from the user task payload.
+// If the payload is not a JSON object or raw_input is missing, returns the full payload as string.
+func extractRawInput(payload []byte) string {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &m); err != nil {
+		return string(payload)
+	}
+	if raw, ok := m["raw_input"]; ok {
+		var s string
+		if err := json.Unmarshal(raw, &s); err == nil {
+			return s
+		}
+	}
+	return string(payload)
+}
+
 // validateSchema checks all required fields on a UserTask (§5.1, §FR-TRK-02, §FR-TRK-04).
 //
 // Rules:
 //   - task_id: required, UUID v4 format
 //   - user_id: required, non-empty
-//   - required_skill_domains: required, min 1 item
+//   - required_skill_domains: OPTIONAL in v3.0 (FR-TRK-04)
 //   - priority: 1–10
 //   - timeout_seconds: 30–86400
 //   - payload: max 1MB serialized
@@ -469,9 +710,7 @@ func validateSchema(task types.UserTask) error {
 	if task.UserID == "" {
 		return fmt.Errorf("user_id is required")
 	}
-	if len(task.RequiredSkillDomains) == 0 {
-		return fmt.Errorf("required_skill_domains must have at least one entry")
-	}
+	// required_skill_domains is OPTIONAL in v3.0 (FR-TRK-04).
 	if task.Priority < 1 || task.Priority > 10 {
 		return fmt.Errorf("priority must be 1–10, got %d", task.Priority)
 	}
@@ -490,9 +729,29 @@ func validateSchema(task types.UserTask) error {
 	return nil
 }
 
-// isValidUUID returns true if s matches the general UUID string format
-// (8-4-4-4-12 hex characters with dashes).
-// check valid UUID v4 in subsequent phase
+// humanReadableError returns a user-facing message for a given error code.
+func humanReadableError(code string) string {
+	switch code {
+	case types.ErrCodeDecompositionTimeout:
+		return "The Planner Agent did not respond in time. Please retry."
+	case types.ErrCodeInvalidPlan:
+		return "The execution plan returned by the Planner Agent was invalid."
+	case types.ErrCodeEmptyPlan:
+		return "The Planner Agent returned an empty plan with no subtasks."
+	case types.ErrCodePlanTooLarge:
+		return "The Planner Agent returned a plan that exceeds the maximum allowed size."
+	case types.ErrCodeScopeViolation:
+		return "The Planner Agent requested capabilities outside your authorized scope."
+	case types.ErrCodeMaxRetriesExceeded:
+		return "Maximum recovery attempts exceeded. Task could not complete."
+	case types.ErrCodeTimedOut:
+		return "Task exceeded its maximum allowed time."
+	default:
+		return "Task failed. Please retry or contact support."
+	}
+}
+
+// isValidUUID returns true if s matches the general UUID string format.
 func isValidUUID(s string) bool {
 	if len(s) != 36 {
 		return false

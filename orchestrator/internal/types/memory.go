@@ -11,6 +11,8 @@ import (
 
 const (
 	DataTypeTaskState     = "task_state"
+	DataTypePlanState     = "plan_state"     // NEW v3.0 — execution plan records
+	DataTypeSubtaskState  = "subtask_state"  // NEW v3.0 — per-subtask state records
 	DataTypeAuditLog      = "audit_log"
 	DataTypeRecoveryEvent = "recovery_event"
 	DataTypePolicyEvent   = "policy_event"
@@ -23,7 +25,9 @@ const (
 type OrchestratorMemoryWritePayload struct {
 	OrchestratorTaskRef string          `json:"orchestrator_task_ref"`
 	TaskID              string          `json:"task_id"`
-	DataType            string          `json:"data_type"` // Must be one of DataType* constants
+	PlanID              string          `json:"plan_id,omitempty"`    // NEW v3.0 — set for plan_state and subtask_state writes
+	SubtaskID           string          `json:"subtask_id,omitempty"` // NEW v3.0 — set for subtask_state writes
+	DataType            string          `json:"data_type"`            // Must be one of DataType* constants
 	Timestamp           time.Time       `json:"timestamp"`
 	Payload             json.RawMessage `json:"payload"`
 	TTLSeconds          int             `json:"ttl_seconds,omitempty"` // 0 = no expiry (audit records)

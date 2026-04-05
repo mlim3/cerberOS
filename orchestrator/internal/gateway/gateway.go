@@ -8,13 +8,17 @@
 //   - Validate message envelope schema on all inbound messages (§13.5)
 //   - Route parsed user_task to Task Dispatcher
 //   - Route agent_status_update events to Task Monitor
+//   - Route task_decomposition_response to Task Dispatcher (NEW v3.0)
+//   - Route task_result to Plan Executor (NEW v3.0 — was missing)
 //   - Publish all outbound messages (results, errors, status, metrics)
 //   - Manage NATS consumer ACK/NAK and dead-letter monitoring
 //
-// NATS Topic Hierarchy (§11.5):
+// NATS Topic Hierarchy (§11.8):
 //   - INBOUND:  aegis.orchestrator.tasks.inbound
 //   - INBOUND:  aegis.agents.status.events
 //   - INBOUND:  aegis.agents.capability.response  (reply to capability queries)
+//   - INBOUND:  aegis.orchestrator.decomposition.response  (NEW v3.0)
+//   - INBOUND:  aegis.orchestrator.tasks.results.>          (previously missing)
 //   - OUTBOUND: aegis.orchestrator.tasks.results.>
 //   - OUTBOUND: aegis.orchestrator.status.events
 //   - OUTBOUND: aegis.orchestrator.errors
@@ -25,6 +29,7 @@
 //   - OUTBOUND: aegis.agents.capability.query
 //   - OUTBOUND: aegis.agents.lifecycle.terminate
 //   - OUTBOUND: aegis.agents.tasks.cancel
+//   - OUTBOUND: aegis.agents.decomposition.request  (NEW v3.0)
 package gateway
 
 import (
@@ -45,10 +50,13 @@ const (
 	TopicTasksInbound            = "aegis.orchestrator.tasks.inbound"
 	TopicAgentStatusEvents       = "aegis.agents.status.events"
 	TopicCapabilityQueryResponse = "aegis.agents.capability.response"
+	TopicDecompositionResponse   = "aegis.orchestrator.decomposition.response" // NEW v3.0
+	TopicTaskResults             = "aegis.orchestrator.tasks.results.>"         // NEW v3.0 — was missing
 	TopicAgentTasksInbound       = "aegis.agents.tasks.inbound"
 	TopicCapabilityQuery         = "aegis.agents.capability.query"
 	TopicAgentTerminate          = "aegis.agents.lifecycle.terminate"
 	TopicTaskCancel              = "aegis.agents.tasks.cancel"
+	TopicDecompositionRequest    = "aegis.agents.decomposition.request"         // NEW v3.0
 	TopicOrchestratorErrors      = "aegis.orchestrator.errors"
 	TopicAuditEvents             = "aegis.orchestrator.audit.events"
 	TopicMetrics                 = "aegis.orchestrator.metrics"
@@ -74,8 +82,11 @@ type TaskHandler func(task types.UserTask) error
 // AgentStatusHandler is the callback the Task Monitor registers to receive agent status updates.
 type AgentStatusHandler func(update types.AgentStatusUpdate) error
 
-// TaskResultHandler is the callback the Task Dispatcher registers to receive task results.
+// TaskResultHandler is the callback the Plan Executor registers to receive task results.
 type TaskResultHandler func(result types.TaskResult) error
+
+// DecompositionResponseHandler is the callback the Task Dispatcher registers for decomposition responses (NEW v3.0).
+type DecompositionResponseHandler func(resp types.DecompositionResponse) error
 
 // ── Gateway ───────────────────────────────────────────────────────────────────
 
@@ -85,9 +96,10 @@ type Gateway struct {
 	nodeID string
 	logger *log.Logger
 
-	taskHandler        TaskHandler
-	agentStatusHandler AgentStatusHandler
-	taskResultHandler  TaskResultHandler
+	taskHandler                 TaskHandler
+	agentStatusHandler          AgentStatusHandler
+	taskResultHandler           TaskResultHandler
+	decompositionResponseHandler DecompositionResponseHandler // NEW v3.0
 
 	// pendingCapabilityQueries tracks in-flight capability query requests.
 	// key: correlationID (orchestrator_task_ref), value: chan *types.CapabilityResponse
@@ -116,9 +128,15 @@ func (g *Gateway) RegisterAgentStatusHandler(h AgentStatusHandler) {
 }
 
 // RegisterTaskResultHandler registers the callback for task_result messages.
-// Must be called before Start(). Registered by Task Dispatcher.
+// Must be called before Start(). Registered by Plan Executor (M7).
 func (g *Gateway) RegisterTaskResultHandler(h TaskResultHandler) {
 	g.taskResultHandler = h
+}
+
+// RegisterDecompositionResponseHandler registers the callback for task_decomposition_response messages (NEW v3.0).
+// Must be called before Start(). Registered by Task Dispatcher.
+func (g *Gateway) RegisterDecompositionResponseHandler(h DecompositionResponseHandler) {
+	g.decompositionResponseHandler = h
 }
 
 // Start subscribes to all inbound NATS topics and begins message processing.
@@ -132,6 +150,14 @@ func (g *Gateway) Start() error {
 	}
 	if err := g.nats.Subscribe(TopicCapabilityQueryResponse, g.handleCapabilityResponse); err != nil {
 		return fmt.Errorf("subscribe %s: %w", TopicCapabilityQueryResponse, err)
+	}
+	// NEW v3.0: subscribe for decomposition responses from Planner Agent.
+	if err := g.nats.Subscribe(TopicDecompositionResponse, g.handleRawDecompositionResponse); err != nil {
+		return fmt.Errorf("subscribe %s: %w", TopicDecompositionResponse, err)
+	}
+	// FIX: subscribe for task results from Agents Component (was missing before v3.0).
+	if err := g.nats.Subscribe(TopicTaskResults, g.handleRawTaskResult); err != nil {
+		return fmt.Errorf("subscribe %s: %w", TopicTaskResults, err)
 	}
 	g.logger.Printf("gateway started on node %s — subscribed to inbound topics", g.nodeID)
 	return nil
@@ -207,6 +233,46 @@ func (g *Gateway) handleCapabilityResponse(subject string, data []byte) error {
 	return nil
 }
 
+// handleRawDecompositionResponse handles aegis.orchestrator.decomposition.response (NEW v3.0).
+// Routes parsed DecompositionResponse to the Task Dispatcher.
+func (g *Gateway) handleRawDecompositionResponse(subject string, data []byte) error {
+	envelope, err := validateEnvelope(data)
+	if err != nil {
+		g.logger.Printf("rejected malformed decomposition response envelope: %v", err)
+		return err
+	}
+
+	var resp types.DecompositionResponse
+	if err := json.Unmarshal(envelope.Payload, &resp); err != nil {
+		return fmt.Errorf("deserialize decomposition_response: %w", err)
+	}
+
+	if g.decompositionResponseHandler == nil {
+		return fmt.Errorf("no decomposition response handler registered")
+	}
+	return g.decompositionResponseHandler(resp)
+}
+
+// handleRawTaskResult handles aegis.orchestrator.tasks.results.> (FIX — was missing before v3.0).
+// Routes parsed TaskResult to the Plan Executor (M7).
+func (g *Gateway) handleRawTaskResult(subject string, data []byte) error {
+	envelope, err := validateEnvelope(data)
+	if err != nil {
+		g.logger.Printf("rejected malformed task result envelope: %v", err)
+		return err
+	}
+
+	var result types.TaskResult
+	if err := json.Unmarshal(envelope.Payload, &result); err != nil {
+		return fmt.Errorf("deserialize task_result: %w", err)
+	}
+
+	if g.taskResultHandler == nil {
+		return fmt.Errorf("no task result handler registered")
+	}
+	return g.taskResultHandler(result)
+}
+
 // ── Outbound: to User I/O Component ──────────────────────────────────────────
 
 // PublishTaskAccepted notifies User I/O that a task was accepted (§FR-ALC-03).
@@ -230,6 +296,11 @@ func (g *Gateway) PublishTaskResult(callbackTopic string, result types.TaskResul
 }
 
 // ── Outbound: to Agents Component ────────────────────────────────────────────
+
+// PublishDecompositionRequest sends a task_decomposition_request to the Planner Agent (NEW v3.0).
+func (g *Gateway) PublishDecompositionRequest(req types.DecompositionRequest) error {
+	return g.publishEnvelope(TopicDecompositionRequest, "task_decomposition_request", req.OrchestratorTaskRef, req)
+}
 
 // PublishTaskSpec dispatches a validated task_spec to the Agents Component (§11.2).
 func (g *Gateway) PublishTaskSpec(spec types.TaskSpec) error {

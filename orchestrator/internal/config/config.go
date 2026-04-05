@@ -27,6 +27,11 @@ type OrchestratorConfig struct {
 	VaultFailureMode       VaultFailureMode // VAULT_FAILURE_MODE — default: FAIL_CLOSED
 	VaultPolicyCacheTTL    int              // VAULT_POLICY_CACHE_TTL_SECONDS — default: 60
 
+	// Task decomposition (NEW in v3.0)
+	DecompositionTimeoutSeconds int // DECOMPOSITION_TIMEOUT_SECONDS — default: 30
+	MaxSubtasksPerPlan          int // MAX_SUBTASKS_PER_PLAN — default: 20
+	PlanExecutorMaxParallel     int // PLAN_EXECUTOR_MAX_PARALLEL — default: 5
+
 	// Task lifecycle
 	MaxTaskRetries          int // MAX_TASK_RETRIES — default: 3
 	TaskDedupWindowSeconds  int // TASK_DEDUP_WINDOW_SECONDS — default: 300
@@ -85,6 +90,11 @@ func Load() (*OrchestratorConfig, error) {
 	}
 
 	cfg.VaultPolicyCacheTTL = envInt("VAULT_POLICY_CACHE_TTL_SECONDS", 60)
+
+	// ── Task decomposition (NEW in v3.0) ─────────────────────────────────────
+	cfg.DecompositionTimeoutSeconds = envInt("DECOMPOSITION_TIMEOUT_SECONDS", 30)
+	cfg.MaxSubtasksPerPlan          = envInt("MAX_SUBTASKS_PER_PLAN", 20)
+	cfg.PlanExecutorMaxParallel     = envInt("PLAN_EXECUTOR_MAX_PARALLEL", 5)
 
 	// ── Task lifecycle ───────────────────────────────────────────────────────
 	cfg.MaxTaskRetries         = envInt("MAX_TASK_RETRIES", 3)
