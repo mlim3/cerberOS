@@ -287,27 +287,28 @@ func (e *PlanExecutor) dispatchSubtask(exec *planExecution, st types.Subtask, su
 		return
 	}
 
-	// Build and publish task_spec with inherited policy_scope.
+	// Build and publish task.inbound with inherited policy_scope.
 	priorResultsJSON, _ := json.Marshal(sub.PriorResults)
-	// Merge subtask params and prior_results into the payload.
-	payloadMap := map[string]json.RawMessage{
-		"action":        mustMarshal(st.Action),
-		"instructions":  mustMarshal(st.Instructions),
-		"params":        mustMarshal(st.Params),
-		"prior_results": priorResultsJSON,
-	}
-	payloadBytes, _ := json.Marshal(payloadMap)
+	instructions := buildSubtaskInstructions(st, sub.PriorResults)
 
 	spec := types.TaskSpec{
 		OrchestratorTaskRef:  orchRef,
-		TaskID:               sub.TaskID,
+		TaskID:               orchRef,
 		UserID:               exec.ts.UserID,
 		RequiredSkillDomains: st.RequiredSkillDomains,
 		PolicyScope:          exec.ts.PolicyScope, // Inherited, never expanded (§13.2)
 		TimeoutSeconds:       st.TimeoutSeconds,
-		Payload:              payloadBytes,
-		CallbackTopic:        exec.ts.CallbackTopic,
-		UserContextID:        exec.ts.UserContextID,
+		Payload:              priorResultsJSON,
+		Instructions:         instructions,
+		Metadata: map[string]string{
+			"task_kind":      "subtask",
+			"parent_task_id": exec.ts.TaskID,
+			"plan_id":        exec.plan.PlanID,
+			"subtask_id":     sub.SubtaskID,
+			"action":         st.Action,
+		},
+		CallbackTopic: exec.ts.CallbackTopic,
+		UserContextID: exec.ts.UserContextID,
 	}
 
 	if err := e.gw.PublishTaskSpec(spec); err != nil {
@@ -473,6 +474,24 @@ func mustMarshal(v any) json.RawMessage {
 		return json.RawMessage("null")
 	}
 	return b
+}
+
+func buildSubtaskInstructions(st types.Subtask, priorResults []types.PriorResult) string {
+	priorResultsJSON, _ := json.Marshal(priorResults)
+	paramsJSON, _ := json.Marshal(st.Params)
+
+	return fmt.Sprintf(
+		"Execute this subtask.\n"+
+			"Action: %s\n"+
+			"Instructions: %s\n"+
+			"Parameters JSON: %s\n"+
+			"Prior results JSON: %s\n"+
+			"Return the task outcome directly and concisely.",
+		st.Action,
+		st.Instructions,
+		string(paramsJSON),
+		string(priorResultsJSON),
+	)
 }
 
 // newUUID generates a random UUID v4 using crypto/rand.

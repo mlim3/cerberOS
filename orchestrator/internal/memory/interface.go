@@ -48,8 +48,8 @@ type Interface struct {
 }
 
 const (
-	writeMaxAttempts     = 3
-	initialRetryBackoff  = 50 * time.Millisecond
+	writeMaxAttempts    = 3
+	initialRetryBackoff = 50 * time.Millisecond
 )
 
 // New creates a new Memory Interface wrapping the given MemoryClient.
@@ -160,7 +160,8 @@ func validateWritePayload(payload types.OrchestratorMemoryWritePayload) error {
 
 func isValidDataType(dataType string) bool {
 	switch dataType {
-	case types.DataTypeTaskState, types.DataTypeAuditLog, types.DataTypeRecoveryEvent, types.DataTypePolicyEvent:
+	case types.DataTypeTaskState, types.DataTypePlanState, types.DataTypeSubtaskState,
+		types.DataTypeAuditLog, types.DataTypeRecoveryEvent, types.DataTypePolicyEvent:
 		return true
 	default:
 		return false

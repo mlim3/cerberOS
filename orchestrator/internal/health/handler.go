@@ -37,14 +37,14 @@ import (
 
 // HealthStatus represents the /health response body (§12.2).
 type HealthStatus struct {
-	Status         string `json:"status"`          // healthy | degraded | unhealthy
-	ActiveTasks    int    `json:"active_tasks"`
-	QueueDepth     int64  `json:"queue_depth"`
-	VaultReachable bool   `json:"vault_reachable"`
-	MemoryReachable bool  `json:"memory_reachable"`
-	NATSConnected  bool   `json:"nats_connected"`
-	UptimeSeconds  int64  `json:"uptime_seconds"`
-	NodeID         string `json:"node_id"`
+	Status          string `json:"status"` // healthy | degraded | unhealthy
+	ActiveTasks     int    `json:"active_tasks"`
+	QueueDepth      int64  `json:"queue_depth"`
+	VaultReachable  bool   `json:"vault_reachable"`
+	MemoryReachable bool   `json:"memory_reachable"`
+	NATSConnected   bool   `json:"nats_connected"`
+	UptimeSeconds   int64  `json:"uptime_seconds"`
+	NodeID          string `json:"node_id"`
 }
 
 // ActiveTaskProvider is implemented by Task Dispatcher / Monitor to report
@@ -125,7 +125,28 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 //   - Memory: every memoryIntervalSeconds → h.memoryOK.Store(...)
 //   - NATS:   every natsIntervalSeconds   → h.nats.IsConnected()
 func (h *Handler) StartMonitorLoop(vaultIntervalSeconds, memoryIntervalSeconds int) {
-	// TODO Phase 7
+	if vaultIntervalSeconds <= 0 {
+		vaultIntervalSeconds = 10
+	}
+	if memoryIntervalSeconds <= 0 {
+		memoryIntervalSeconds = 10
+	}
+
+	go func() {
+		ticker := time.NewTicker(time.Duration(vaultIntervalSeconds) * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			h.vaultOK.Store(h.vault == nil || h.vault.HealthCheck() == nil)
+		}
+	}()
+
+	go func() {
+		ticker := time.NewTicker(time.Duration(memoryIntervalSeconds) * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			h.memoryOK.Store(h.memory == nil || h.memory.Ping() == nil)
+		}
+	}()
 }
 
 // SetQueueDepth updates the queue depth reported in /health.

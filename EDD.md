@@ -42,7 +42,7 @@
 
 ## 1. Component Overview
 
-The Orchestrator is the central control plane of Aegis OS. It is the single point of authority for receiving user-originated tasks, enforcing security policy, coordinating task decomposition via a Planner Agent, coordinating agent provisioning through the Agents Component, and managing the full execution lifecycle of every task from receipt to result delivery.
+The Orchestrator is the central control plane of Aegis OS. It is the single point of authority for receiving user-originated tasks, enforcing security policy, coordinating task decomposition via a planner task executed by the Agents Component, coordinating agent provisioning through the Agents Component, and managing the full execution lifecycle of every task from receipt to result delivery.
 
 The Orchestrator does **not** execute tasks itself. **It contains no LLM and performs no natural language understanding.** It is a **Policy Enforcement Point (PEP)** and a **deterministic coordinator**: every task that enters the system must pass through the Orchestrator's validation pipeline before any agent is activated, any credential is pre-authorized, or any result is delivered back to the user.
 
@@ -50,7 +50,7 @@ Four core concerns define the Orchestrator's responsibility:
 
 - **Task Authority:** The Orchestrator is the exclusive entry point for all tasks from the User I/O Component. No agent can be provisioned without an Orchestrator-issued `task_spec`.
 - **Policy Enforcement:** Before any task is dispatched, the Orchestrator validates it against Vault-held security policies and enforces permission boundaries. Tasks that fail policy checks are rejected — not silently dropped.
-- **Task Decomposition Coordination:** The Orchestrator routes every incoming task to a Planner Agent for decomposition. The Planner Agent returns a structured execution plan with subtasks, agent assignments, and dependencies. The Orchestrator then executes the plan by dispatching subtasks to the Agents Component.
+- **Task Decomposition Coordination:** The Orchestrator routes every incoming task to the Agents Component as a standard `task.inbound` request targeting the `general` skill domain with planner-specific instructions. The planner task returns a structured execution plan with subtasks, agent assignments, and dependencies. The Orchestrator then executes the plan by dispatching subtasks to the Agents Component.
 - **Lifecycle Coordination:** The Orchestrator tracks every active task and subtask, monitors agent health via the Agents Component, and drives recovery when agents fail. It is the authority on whether a task is RUNNING, RECOVERING, COMPLETED, or FAILED.
 
 > **ℹ NOTE:** The Orchestrator is a stateless coordinator. All task state, plan state, subtask state, and agent state is persisted via the Memory Component. This enables horizontal scaling, crash recovery, and node migration without data loss.
@@ -65,7 +65,7 @@ The Orchestrator and Agents Component have a strict principal-agent relationship
 
 Communication between the Orchestrator and Agents Component is **exclusively via NATS JetStream** through the Communications Component. No direct calls.
 
-The Planner Agent is a specialized agent living in the Agents Component. It has an LLM and is responsible for parsing raw user input and producing a structured execution plan. The Orchestrator treats the Planner Agent as just another agent — it sends a decomposition request and receives a plan back.
+The Planner Agent is a logical role implemented as a standard agent task in the Agents Component. It has an LLM and is responsible for parsing raw user input and producing a structured execution plan. The Orchestrator treats the planner as just another agent task: it sends a standard `task.inbound` request with planner instructions and receives the plan through the normal `task.result` / `task.failed` subjects.
 
 ### 2.2 Policy-First Design
 
@@ -104,7 +104,7 @@ The Orchestrator sits at the center of the Aegis OS control plane, interfacing w
 | External Component | Direction | Protocol | Data Exchanged |
 |---|---|---|---|
 | User I/O Component | Bidirectional | NATS / Comms Interface | Inbound: `user_task` (with raw NL input in payload). Outbound: `task_result`, `task_status_update`, `clarification_request`, `error_response` |
-| Agents Component | Bidirectional | NATS / Comms Interface | Outbound: `task_decomposition_request` (to Planner Agent), `task_spec` (per subtask), `capability_query`, `agent_terminate`. Inbound: `task_decomposition_response`, `task_result`, `agent_status_update`, `capability_response` |
+| Agents Component | Bidirectional | NATS / Comms Interface | Outbound: `task.inbound` (planner + subtasks), `capability_query`, `agent_terminate`. Inbound: `task.accepted`, `task.result`, `task.failed`, `agent.status`, `capability.response` |
 | Vault (OpenBao) | Bidirectional | OpenBao HTTP API | Outbound: `policy_validation_request`, `token_revoke`. Inbound: `policy_result`, `scoped_token` |
 | Memory Component | Bidirectional | Memory Interface abstraction | Outbound: tagged task state writes, plan state writes, subtask state writes, audit events. Inbound: task state reads for recovery and deduplication |
 | Communications (NATS) | Bidirectional | NATS JetStream | All inter-component messages routed through NATS streams. Orchestrator publishes and subscribes via defined topic hierarchy. |
@@ -121,18 +121,18 @@ The Orchestrator consists of **seven internal modules**. Each module has a singl
 
 | | |
 |---|---|
-| **Responsibilities** | Single inbound/outbound gateway for all NATS messaging. Receives `user_task` from User I/O Component. Routes outbound messages (results, status, errors, decomposition requests) to User I/O and Agents Component. Enforces message envelope validation — rejects malformed messages before they enter the pipeline. Manages NATS consumer ACK/NAK and dead-letter queue monitoring. |
-| **Inputs** | `user_task` from User I/O (via NATS); `task_decomposition_response` from Agents Component (via NATS); `task_result` and `agent_status_update` from Agents Component (via NATS); internal messages from Task Dispatcher and Plan Executor |
-| **Outputs** | Parsed `user_task` to Task Dispatcher; routed responses to User I/O and Agents Component; `task_decomposition_request` to Agents Component; `task_spec` per subtask to Agents Component |
+| **Responsibilities** | Single inbound/outbound gateway for all NATS messaging. Receives `user_task` from User I/O Component. Routes outbound messages (results, status, errors, planner tasks, subtask tasks) to User I/O and Agents Component. Enforces message envelope validation — rejects malformed messages before they enter the pipeline. Adapts internal Orchestrator structs to the real Agents Component wire schema. Manages NATS consumer ACK/NAK and dead-letter queue monitoring. |
+| **Inputs** | `user_task` from User I/O (via NATS); `task.result`, `task.failed`, and `agent.status` from Agents Component (via NATS); internal messages from Task Dispatcher and Plan Executor |
+| **Outputs** | Parsed `user_task` to Task Dispatcher; routed responses to User I/O and Agents Component; planner `task.inbound` to Agents Component; subtask `task.inbound` to Agents Component |
 | **Interfaces With** | Task Dispatcher (internal), Plan Executor (internal), NATS / Communications Component (external) |
 
 #### M2: Task Dispatcher
 
 | | |
 |---|---|
-| **Responsibilities** | Central coordinator for all incoming task routing decisions. Validates `user_task` envelope; rejects invalid specs immediately. Performs deduplication check via Memory Component using `task_id`. Routes to Policy Enforcer for permission validation before any agent interaction. **After policy validation, sends a `task_decomposition_request` to the Planner Agent (via Agents Component) instead of directly dispatching a task_spec.** When the Planner Agent returns a `task_decomposition_response` containing an execution plan, the Task Dispatcher validates the plan and passes it to the Plan Executor (M7) for subtask-level dispatch. Tracks top-level task status and correlates plan results back to the originating `user_task`. Persists `DISPATCH_PENDING` before publishing decomposition request; persists `DECOMPOSING` after successful publish. |
-| **Inputs** | Parsed `user_task` from Communications Gateway; `policy_result` from Policy Enforcer; `task_decomposition_response` from Comms Gateway (via Agents Component); `plan_completed`/`plan_failed` from Plan Executor; `dedup_result` from Memory Interface |
-| **Outputs** | `policy_check_request` to Policy Enforcer; `task_decomposition_request` to Communications Gateway (for Planner Agent); `execution_plan` to Plan Executor (M7); `task_accepted`/`task_failed`/`policy_violation` to Communications Gateway (for User I/O) |
+| **Responsibilities** | Central coordinator for all incoming task routing decisions. Validates `user_task` envelope; rejects invalid specs immediately. Performs deduplication check via Memory Component using `task_id`. Routes to Policy Enforcer for permission validation before any agent interaction. **After policy validation, dispatches a standard `task.inbound` request to the Agents Component targeting the `general` skill domain with planner-specific instructions.** When the planner task returns a JSON execution plan through the normal `task.result` path, the Task Dispatcher validates the plan and passes it to the Plan Executor (M7) for subtask-level dispatch. Tracks top-level task status and correlates plan results back to the originating `user_task`. Persists `DECOMPOSING` before publishing the planner task. |
+| **Inputs** | Parsed `user_task` from Communications Gateway; `policy_result` from Policy Enforcer; planner `task.result` / `task.failed` from Comms Gateway (via Agents Component); `plan_completed`/`plan_failed` from Plan Executor; `dedup_result` from Memory Interface |
+| **Outputs** | `policy_check_request` to Policy Enforcer; planner `task.inbound` to Communications Gateway; `execution_plan` to Plan Executor (M7); `task_accepted`/`task_failed`/`policy_violation` to Communications Gateway (for User I/O) |
 | **Interfaces With** | Communications Gateway, Policy Enforcer, Plan Executor (M7), Memory Interface, Recovery Manager |
 
 #### M3: Policy Enforcer
@@ -219,9 +219,9 @@ The Orchestrator consists of **seven internal modules**. Each module has a singl
 
 | ID | Requirement | Priority |
 |---|---|---|
-| FR-TD-01 | After policy validation, the Task Dispatcher SHALL send a `task_decomposition_request` to the Agents Component containing the user's raw input and the validated `policy_scope`. The Orchestrator SHALL NOT attempt to interpret, classify, or decompose the task itself. | MUST |
-| FR-TD-02 | The Orchestrator SHALL wait for a `task_decomposition_response` from the Agents Component within a configurable timeout (`DECOMPOSITION_TIMEOUT_SECONDS`, default: 30). On timeout, the task SHALL be marked `DECOMPOSITION_FAILED` and returned to User I/O. | MUST |
-| FR-TD-03 | The `task_decomposition_response` SHALL contain a structured execution plan: an ordered list of subtasks, each with a `subtask_id`, `required_skill_domains[]`, `action`, `instructions`, `params`, `depends_on[]`, and `timeout_seconds`. | MUST |
+| FR-TD-01 | After policy validation, the Task Dispatcher SHALL send a standard `task.inbound` request to the Agents Component containing planner-specific `instructions`, `required_skills=["general"]`, and correlation metadata. The Orchestrator SHALL NOT attempt to interpret, classify, or decompose the task itself. | MUST |
+| FR-TD-02 | The Orchestrator SHALL wait for the planner task's terminal response from the Agents Component within a configurable timeout (`DECOMPOSITION_TIMEOUT_SECONDS`, default: 30). On timeout, the task SHALL be marked `DECOMPOSITION_FAILED` and returned to User I/O. | MUST |
+| FR-TD-03 | The planner task's successful `task.result` SHALL contain a structured execution plan: an ordered list of subtasks, each with a `subtask_id`, `required_skill_domains[]`, `action`, `instructions`, `params`, `depends_on[]`, and `timeout_seconds`. | MUST |
 | FR-TD-04 | The Plan Executor (M7) SHALL validate the execution plan's dependency graph. Circular dependencies SHALL be rejected with `INVALID_PLAN`. Plans with zero subtasks SHALL be rejected with `EMPTY_PLAN`. Plans exceeding `MAX_SUBTASKS_PER_PLAN` SHALL be rejected with `PLAN_TOO_LARGE`. | MUST |
 | FR-TD-05 | The Plan Executor SHALL dispatch subtasks in topological order based on `depends_on[]`. Subtasks with no unmet dependencies MAY be dispatched in parallel, up to `PLAN_EXECUTOR_MAX_PARALLEL`. Each subtask SHALL be dispatched as an independent `task_spec` to the Agents Component with its own `policy_scope` (inherited from the parent task, never expanded). | MUST |
 | FR-TD-06 | When a subtask completes, the Plan Executor SHALL inject its result into the payload of all dependent subtasks as `prior_results[{subtask_id, result}]` before dispatching them. This enables result piping across the subtask chain. | MUST |
@@ -302,15 +302,15 @@ The Orchestrator consists of **seven internal modules**. Each module has a singl
 3. OpenBao returns: `ALLOW + effective_scope`, or `DENY + reason`.
 4. Policy Enforcer writes an `audit_event` to Memory Interface **regardless of outcome**.
 5. On ALLOW: Policy Enforcer returns `policy_result (ALLOWED, policy_scope)` to Task Dispatcher.
-6. On DENY: Policy Enforcer returns `policy_result (DENIED, reason)`. Task Dispatcher returns `POLICY_VIOLATION` to User I/O. **No decomposition request is sent. No agent is touched.**
+6. On DENY: Policy Enforcer returns `policy_result (DENIED, reason)`. Task Dispatcher returns `POLICY_VIOLATION` to User I/O. **No planner task is sent. No agent is touched.**
 
 ### Flow 3.5: Task Decomposition (NEW in v3.0)
 1. Policy validation completes with ALLOW. Task Dispatcher has the validated `policy_scope`.
 2. Task Dispatcher persists task state as `DECOMPOSING` to Memory Interface.
-3. Task Dispatcher publishes a `task_decomposition_request` to `aegis.agents.decomposition.request` via the Communications Gateway. The request contains: `task_id`, `user_id`, `raw_input` (from `payload`), `policy_scope`, `user_context_id`.
-4. The Agents Component routes this request to a Planner Agent (a standard agent with an LLM that understands natural language and knows the available skill domains within the policy scope).
-5. The Planner Agent decomposes the task and publishes a `task_decomposition_response` to `aegis.orchestrator.decomposition.response` containing a structured execution plan.
-6. Task Dispatcher validates the plan: checks for circular dependencies, empty plan, plan size, and subtask scope violations.
+3. Task Dispatcher publishes a standard `task.inbound` message to `aegis.agents.task.inbound` via the Communications Gateway. The payload uses `required_skills: ["general"]`, planner-specific `instructions`, and `trace_id = orchestrator_task_ref`.
+4. The Agents Component provisions or reuses a general-purpose agent and runs the planner task.
+5. The planner agent decomposes the task and returns the execution plan through the normal `aegis.orchestrator.task.result` subject. On provisioning / execution failure it returns `aegis.orchestrator.task.failed`.
+6. Task Dispatcher parses the planner result into `ExecutionPlan` JSON, then validates the plan: checks for circular dependencies, empty plan, plan size, and subtask scope violations.
 7. If the plan is invalid, Task Dispatcher returns `DECOMPOSITION_FAILED` or `INVALID_PLAN` to User I/O.
 8. If the plan is valid, Task Dispatcher passes it to the Plan Executor (M7) and persists the plan state (`PLAN_ACTIVE`) to Memory Interface.
 
@@ -318,12 +318,12 @@ The Orchestrator consists of **seven internal modules**. Each module has a singl
 1. Plan Executor identifies subtasks with no unmet dependencies (initially, those with empty `depends_on[]`).
 2. For each ready subtask, Plan Executor sends `capability_query` to Agents Component on `aegis.agents.capability.query`.
 3. Agents Component returns `capability_response`: `match | partial_match | no_match`.
-4. Plan Executor assembles a `task_spec` (with inherited `policy_scope`) and publishes to `aegis.agents.tasks.inbound`.
-5. Agents Component responds with `task_accepted (agent_id, estimated_completion)` or `provisioning_error`.
+4. Plan Executor assembles an internal `task_spec`, which the Communications Gateway translates into `task.inbound` and publishes to `aegis.agents.task.inbound`.
+5. Agents Component responds with `task.accepted (agent_id, estimated_completion)` or `task.failed`.
 6. Plan Executor persists subtask state (`DISPATCH_PENDING`) to Memory Interface **before** publishing `task_spec`. After successful publish, it persists `DISPATCHED`. If publish fails, it persists `DELIVERY_FAILED` for that subtask.
 
 ### Flow 5: Subtask Monitoring, Result Piping, and Completion
-1. Task Monitor subscribes to `agent_status_update` events on `aegis.agents.status.events`.
+1. Task Monitor subscribes to `agent.status` events on `aegis.orchestrator.agent.status`.
 2. As agents progress, intermediate updates are forwarded to User I/O Component if `user_context_id` is present.
 3. On `task_result` from Agents Component for a subtask: Plan Executor writes COMPLETED state for that subtask to Memory, checks if any dependent subtasks are now ready, and injects the result into their `prior_results[]` before dispatching them.
 4. When all subtasks reach terminal states, Plan Executor aggregates results and signals `plan_completed` to Task Dispatcher.
@@ -357,16 +357,16 @@ The Orchestrator consists of **seven internal modules**. Each module has a singl
 8. Policy Enforcer → Memory Interface: write `audit_event {ALLOW, task_id, user_id, timestamp}`
 9. Policy Enforcer → Task Dispatcher: `policy_result {ALLOWED, policy_scope}`
 10. Task Dispatcher → Memory Interface: write `task_state {DECOMPOSING, task_id, timestamp}`
-11. Task Dispatcher → Comms Gateway: `task_decomposition_request` (`aegis.agents.decomposition.request`)
-12. Agents Component routes to Planner Agent. Planner Agent decomposes the task.
-13. Agents Component → Comms Gateway: `task_decomposition_response` with execution plan (`aegis.orchestrator.decomposition.response`)
+11. Task Dispatcher → Comms Gateway: planner `task.inbound` (`aegis.agents.task.inbound`) with `required_skills=["general"]`
+12. Agents Component runs the planner task on a general-purpose agent.
+13. Agents Component → Comms Gateway: planner `task.result` with execution plan JSON (`aegis.orchestrator.task.result`)
 14. Task Dispatcher validates plan → Plan Executor: `execution_plan`
 15. Plan Executor → Memory Interface: write `plan_state {PLAN_ACTIVE, plan_id, task_id}`
 16. Plan Executor identifies subtask `s1` (no dependencies) → dispatch immediately
 17. Plan Executor → Agents Component: `capability_query` for s1 (`aegis.agents.capability.query`)
 18. Agents Component → Plan Executor: `capability_response {no_match, provisioning_estimate: 28s}`
 19. Plan Executor → Memory Interface: write `subtask_state {DISPATCH_PENDING, s1, timestamp}`
-20. Plan Executor → Agents Component: `task_spec` for s1 (`aegis.agents.tasks.inbound`) with `policy_scope` attached
+20. Plan Executor → Comms Gateway → Agents Component: translated `task.inbound` for s1 (`aegis.agents.task.inbound`)
 21. Plan Executor → Memory Interface: write `subtask_state {DISPATCHED, s1, timestamp}`
 22. Task Dispatcher → User I/O: `task_accepted {task_id, plan_id, estimated_completion_at}`
 23. *(agent provisions, executes, returns result for s1)*
@@ -618,9 +618,9 @@ Stored in Memory Component, **append-only**. Every state transition and policy d
 
 | Message Type | NATS Topic | Trigger |
 |---|---|---|
-| `task_decomposition_request` | `aegis.agents.decomposition.request` | After policy validation; sent to Planner Agent |
-| `task_spec` | `aegis.agents.tasks.inbound` | Per subtask, when dependencies satisfied |
-| `capability_query` | `aegis.agents.capability.query` | Before every subtask dispatch |
+| `task.inbound` (planner) | `aegis.agents.task.inbound` | After policy validation; sent to a general-purpose agent with planner instructions |
+| `task.inbound` (subtask) | `aegis.agents.task.inbound` | Per subtask, when dependencies satisfied |
+| `capability.query` | `aegis.agents.capability.query` | Before every subtask dispatch |
 | `agent_terminate` | `aegis.agents.lifecycle.terminate` | Timeout exceeded or max retries reached |
 | `task_cancel` | `aegis.agents.tasks.cancel` | Policy violation or irrecoverable failure |
 
@@ -628,30 +628,33 @@ Stored in Memory Component, **append-only**. Every state transition and policy d
 
 | Message Type | NATS Topic | Trigger |
 |---|---|---|
-| `task_decomposition_response` | `aegis.orchestrator.decomposition.response` | Planner Agent returns execution plan |
-| `task_accepted` | `aegis.orchestrator.tasks.accepted` | Agent confirms subtask receipt |
-| `task_result` | `aegis.orchestrator.tasks.results.>` | Subtask execution complete |
-| `agent_status_update` | `aegis.orchestrator.agent.status` | Agent lifecycle state change |
-| `capability_response` | `aegis.orchestrator.capability.response` | Response to capability query |
+| `task.accepted` | `aegis.orchestrator.task.accepted` | Agent confirms receipt of planner or subtask work |
+| `task.result` | `aegis.orchestrator.task.result` | Planner task returns plan JSON, or subtask execution completes |
+| `task.failed` | `aegis.orchestrator.task.failed` | Planner or subtask provisioning / execution failed before a result could be produced |
+| `agent.status` | `aegis.orchestrator.agent.status` | Agent lifecycle state change |
+| `capability.response` | `aegis.orchestrator.capability.response` | Response to capability query |
 
-### 11.4 `task_decomposition_request` Payload Schema
+### 11.4 Planner `task.inbound` Payload Schema
 
-| Field | Type | Description |
-|---|---|---|
-| `task_id` | UUID | The originating task's ID. |
-| `orchestrator_task_ref` | UUID | Internal Orchestrator reference. |
-| `user_id` | string | User identifier for context. |
-| `raw_input` | string | The user's natural-language text. Passed verbatim from `user_task.payload.raw_input`. |
-| `policy_scope` | object | The validated policy scope from the Policy Enforcer. The Planner Agent must only assign skill domains within this scope. |
-| `user_context_id` | UUID \| null | Optional. Allows the Planner Agent to query user context for personalized decomposition. |
-
-### 11.5 `task_decomposition_response` Payload Schema
+The planner call uses the same agents-component wire schema as every other task:
 
 | Field | Type | Description |
 |---|---|---|
-| `task_id` | UUID | Echoed from the request for correlation. |
-| `plan` | ExecutionPlan | See §10.3 for schema. |
-| `generation_metadata` | object | Optional. Planner Agent metadata (model used, generation time, token count). |
+| `task_id` | UUID | The orchestrator-generated planner task ID. In implementation this is the top-level `orchestrator_task_ref`. |
+| `required_skills` | string[] | Always `["general"]` for decomposition. |
+| `instructions` | string | Planner-specific prompt containing the raw user task, the required `ExecutionPlan` JSON schema, and scope constraints. |
+| `metadata` | object | Optional flat string map. Includes `orchestrator_task_ref`, `user_id`, `callback_topic`, and planner markers. |
+| `trace_id` | UUID | Set to the top-level `orchestrator_task_ref` for correlation. |
+| `user_context_id` | UUID \| null | Optional user context identifier. |
+
+### 11.5 Planner Result Handling
+
+The planner returns through the normal agents-component terminal subjects:
+
+| Subject | Behavior |
+|---|---|
+| `aegis.orchestrator.task.result` | `payload.result` contains the execution plan as JSON (or a JSON string). The Dispatcher parses it into `ExecutionPlan` and validates it. |
+| `aegis.orchestrator.task.failed` | Planner provisioning / execution failed. The Dispatcher marks the top-level task `DECOMPOSITION_FAILED` / `AGENTS_UNAVAILABLE`. |
 
 ### 11.6 Outbound: Policy Enforcer → Vault (OpenBao)
 
@@ -679,13 +682,12 @@ All interactions are mediated by M6 (Memory Interface). **Direct Memory Componen
 | Topic | Direction | Delivery | Max Payload |
 |---|---|---|---|
 | `aegis.orchestrator.tasks.inbound` | INBOUND | At-least-once | 1 MB |
-| `aegis.orchestrator.decomposition.response` | INBOUND | At-least-once | 256 KB |
-| `aegis.orchestrator.tasks.accepted` | INBOUND | At-least-once | 8 KB |
-| `aegis.orchestrator.tasks.results.>` | INBOUND | At-least-once | 2 MB |
+| `aegis.orchestrator.task.accepted` | INBOUND | At-least-once | 8 KB |
+| `aegis.orchestrator.task.result` | INBOUND | At-least-once | 2 MB |
+| `aegis.orchestrator.task.failed` | INBOUND | At-least-once | 32 KB |
 | `aegis.orchestrator.agent.status` | INBOUND | At-least-once | 8 KB |
 | `aegis.orchestrator.capability.response` | INBOUND | At-most-once | 16 KB |
-| `aegis.agents.decomposition.request` | OUTBOUND | At-least-once | 256 KB |
-| `aegis.agents.tasks.inbound` | OUTBOUND | At-least-once | 1 MB |
+| `aegis.agents.task.inbound` | OUTBOUND | At-least-once | 1 MB |
 | `aegis.agents.capability.query` | OUTBOUND | At-most-once | 8 KB |
 | `aegis.agents.lifecycle.terminate` | OUTBOUND | At-least-once | 8 KB |
 | `aegis.orchestrator.status.events` | OUTBOUND | At-least-once | 8 KB |
@@ -777,7 +779,7 @@ Messages without a valid envelope are rejected by the Communications Gateway bef
 
 ### 13.6 Planner Agent Scope Enforcement
 
-The Planner Agent receives the parent task's `policy_scope` in every `task_decomposition_request`. It is constrained to produce subtasks whose `required_skill_domains` fall entirely within this scope. If the Planner Agent returns a plan with any subtask requiring out-of-scope domains, the Plan Executor rejects the plan with `SCOPE_VIOLATION` and the task is terminated.
+The planner task receives the parent task's effective scope constraints in its generated instructions and associated metadata. It is constrained to produce subtasks whose `required_skill_domains` fall entirely within this scope. If the planner returns a plan with any subtask requiring out-of-scope domains, the Plan Executor rejects the plan with `SCOPE_VIOLATION` and the task is terminated.
 
 ### 13.7 Security Classification
 

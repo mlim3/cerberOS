@@ -10,17 +10,18 @@ import (
 // Messages without a valid envelope are rejected by the Communications Gateway.
 
 type MessageEnvelope struct {
-	MessageID       string          `json:"message_id"`        // UUID
-	MessageType     string          `json:"message_type"`      // e.g. "task_spec", "capability_query"
-	SourceComponent string          `json:"source_component"`  // always "orchestrator"
-	CorrelationID   string          `json:"correlation_id"`    // task UUID
+	MessageID       string          `json:"message_id"`       // UUID
+	MessageType     string          `json:"message_type"`     // e.g. "task_spec", "capability_query"
+	SourceComponent string          `json:"source_component"` // always "orchestrator"
+	CorrelationID   string          `json:"correlation_id"`   // task UUID
 	Timestamp       time.Time       `json:"timestamp"`
-	SchemaVersion   string          `json:"schema_version"`    // "1.0"
+	SchemaVersion   string          `json:"schema_version"` // "1.0"
 	Payload         json.RawMessage `json:"payload"`
 }
 
 // ─── Capability Query / Response ──────────────────────────────────────────────
-// Outbound to Agents Component on aegis.agents.capability.query (§11.2).
+// Internal orchestrator view of the capability query flow.
+// The Gateway adapts these structs to the agents-component wire schema.
 
 type CapabilityQuery struct {
 	OrchestratorTaskRef  string   `json:"orchestrator_task_ref"`
@@ -38,29 +39,42 @@ const (
 type CapabilityResponse struct {
 	OrchestratorTaskRef  string          `json:"orchestrator_task_ref"`
 	Match                CapabilityMatch `json:"match"`
-	AgentID              string          `json:"agent_id,omitempty"`          // Set if match or partial_match
+	AgentID              string          `json:"agent_id,omitempty"` // Set if match or partial_match
 	ProvisioningEstimate int             `json:"provisioning_estimate_seconds,omitempty"`
 }
 
 // ─── Task Spec ────────────────────────────────────────────────────────────────
-// Outbound to Agents Component on aegis.agents.tasks.inbound (§11.2).
-// Contains policy_scope — the immutable ceiling for all agent credential requests.
+// Internal orchestrator view of an agent task dispatch.
+// The Gateway converts this into the agents-component task.inbound wire schema:
+//   - task_id
+//   - required_skills
+//   - instructions
+//   - metadata
+//   - trace_id
+//   - user_context_id
+//
+// PolicyScope and CallbackTopic remain internal orchestrator concerns and are
+// preserved here so Dispatcher / Executor / Recovery can reuse the same struct.
 
 type TaskSpec struct {
-	OrchestratorTaskRef  string          `json:"orchestrator_task_ref"`
-	TaskID               string          `json:"task_id"`
-	UserID               string          `json:"user_id"`
-	RequiredSkillDomains []string        `json:"required_skill_domains"`
-	PolicyScope          PolicyScope     `json:"policy_scope"` // Immutable. Agent cannot exceed this scope.
-	TimeoutSeconds       int             `json:"timeout_seconds"`
-	Payload              json.RawMessage `json:"payload"`
-	CallbackTopic        string          `json:"callback_topic"`
-	UserContextID        string          `json:"user_context_id,omitempty"`
-	ProgressSummary      string          `json:"progress_summary,omitempty"` // Set on recovery re-dispatch
+	OrchestratorTaskRef  string            `json:"orchestrator_task_ref"`
+	TaskID               string            `json:"task_id"`
+	UserID               string            `json:"user_id"`
+	RequiredSkillDomains []string          `json:"required_skill_domains"`
+	PolicyScope          PolicyScope       `json:"policy_scope"` // Immutable. Agent cannot exceed this scope.
+	TimeoutSeconds       int               `json:"timeout_seconds"`
+	Payload              json.RawMessage   `json:"payload"`
+	Instructions         string            `json:"instructions,omitempty"`
+	Metadata             map[string]string `json:"metadata,omitempty"`
+	CallbackTopic        string            `json:"callback_topic"`
+	UserContextID        string            `json:"user_context_id,omitempty"`
+	ProgressSummary      string            `json:"progress_summary,omitempty"` // Set on recovery re-dispatch
 }
 
 // ─── Task Accepted / Result ───────────────────────────────────────────────────
-// Inbound from Agents Component after task_spec dispatch.
+// Internal orchestrator view of inbound terminal agent events.
+// The Gateway maps the agents-component payloads/envelope correlation IDs into
+// these structs so downstream modules can remain stable.
 
 type TaskAccepted struct {
 	OrchestratorTaskRef string    `json:"orchestrator_task_ref"`
@@ -70,6 +84,7 @@ type TaskAccepted struct {
 
 type TaskResult struct {
 	OrchestratorTaskRef string          `json:"orchestrator_task_ref"`
+	TaskID              string          `json:"task_id,omitempty"`
 	AgentID             string          `json:"agent_id"`
 	Success             bool            `json:"success"`
 	Result              json.RawMessage `json:"result"`
@@ -78,7 +93,8 @@ type TaskResult struct {
 }
 
 // ─── Agent Status Update ──────────────────────────────────────────────────────
-// Inbound from Agents Component on aegis.agents.status.events.
+// Internal orchestrator view of agent lifecycle status updates. The Gateway
+// maps the agents-component status payload into this shape.
 
 type AgentState string
 
@@ -122,15 +138,17 @@ type ErrorResponse struct {
 }
 
 type StatusResponse struct {
-	TaskID      string `json:"task_id"`
-	State       string `json:"state"`
-	AgentID     string `json:"agent_id,omitempty"`
-	ErrorCode   string `json:"error_code,omitempty"`
+	TaskID    string `json:"task_id"`
+	State     string `json:"state"`
+	AgentID   string `json:"agent_id,omitempty"`
+	ErrorCode string `json:"error_code,omitempty"`
 }
 
 // ─── Task Decomposition Request / Response (NEW in v3.0) ──────────────────────
-// Outbound to Agents Component on aegis.agents.decomposition.request (§11.2).
-// Inbound from Agents Component on aegis.orchestrator.decomposition.response (§11.3).
+// Internal planning data structures.
+// Decomposition is now performed by dispatching a standard task.inbound request
+// to a general-purpose agent; these structs are kept for internal validation and
+// Dispatcher/Executor handoff after the planner agent's JSON result is parsed.
 
 // DecompositionRequest is sent to the Planner Agent after policy validation (§FR-TD-01).
 // The Planner Agent must only assign skill domains within the provided policy_scope.
@@ -138,8 +156,8 @@ type DecompositionRequest struct {
 	TaskID              string      `json:"task_id"`
 	OrchestratorTaskRef string      `json:"orchestrator_task_ref"`
 	UserID              string      `json:"user_id"`
-	RawInput            string      `json:"raw_input"`           // Verbatim from user_task.payload.raw_input
-	PolicyScope         PolicyScope `json:"policy_scope"`        // Ceiling for all subtask domains
+	RawInput            string      `json:"raw_input"`    // Verbatim from user_task.payload.raw_input
+	PolicyScope         PolicyScope `json:"policy_scope"` // Ceiling for all subtask domains
 	UserContextID       string      `json:"user_context_id,omitempty"`
 }
 
@@ -154,14 +172,14 @@ type DecompositionResponse struct {
 // Emitted to aegis.orchestrator.metrics on a configurable interval (§15.2).
 
 type MetricsPayload struct {
-	NodeID                         string    `json:"node_id"`
-	Timestamp                      time.Time `json:"timestamp"`
-	TasksReceivedTotal             int64     `json:"orchestrator_tasks_received_total"`
-	TasksCompletedTotal            int64     `json:"orchestrator_tasks_completed_total"`
-	TasksFailedTotal               int64     `json:"orchestrator_tasks_failed_total"`
-	PolicyViolationsTotal          int64     `json:"orchestrator_policy_violations_total"`
-	RecoveryAttemptsTotal          int64     `json:"orchestrator_recovery_attempts_total"`
-	ActiveTasks                    int64     `json:"orchestrator_active_tasks"`
-	VaultAvailable                 int       `json:"orchestrator_vault_available"` // 1 = reachable, 0 = unreachable
-	QueueDepth                     int64     `json:"queue_depth"`
+	NodeID                string    `json:"node_id"`
+	Timestamp             time.Time `json:"timestamp"`
+	TasksReceivedTotal    int64     `json:"orchestrator_tasks_received_total"`
+	TasksCompletedTotal   int64     `json:"orchestrator_tasks_completed_total"`
+	TasksFailedTotal      int64     `json:"orchestrator_tasks_failed_total"`
+	PolicyViolationsTotal int64     `json:"orchestrator_policy_violations_total"`
+	RecoveryAttemptsTotal int64     `json:"orchestrator_recovery_attempts_total"`
+	ActiveTasks           int64     `json:"orchestrator_active_tasks"`
+	VaultAvailable        int       `json:"orchestrator_vault_available"` // 1 = reachable, 0 = unreachable
+	QueueDepth            int64     `json:"queue_depth"`
 }

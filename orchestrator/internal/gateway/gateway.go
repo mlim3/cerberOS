@@ -8,28 +8,26 @@
 //   - Validate message envelope schema on all inbound messages (§13.5)
 //   - Route parsed user_task to Task Dispatcher
 //   - Route agent_status_update events to Task Monitor
-//   - Route task_decomposition_response to Task Dispatcher (NEW v3.0)
-//   - Route task_result to Plan Executor (NEW v3.0 — was missing)
+//   - Route terminal agent task outcomes to the Dispatcher / Plan Executor
 //   - Publish all outbound messages (results, errors, status, metrics)
 //   - Manage NATS consumer ACK/NAK and dead-letter monitoring
 //
 // NATS Topic Hierarchy (§11.8):
 //   - INBOUND:  aegis.orchestrator.tasks.inbound
-//   - INBOUND:  aegis.agents.status.events
-//   - INBOUND:  aegis.agents.capability.response  (reply to capability queries)
-//   - INBOUND:  aegis.orchestrator.decomposition.response  (NEW v3.0)
-//   - INBOUND:  aegis.orchestrator.tasks.results.>          (previously missing)
-//   - OUTBOUND: aegis.orchestrator.tasks.results.>
+//   - INBOUND:  aegis.orchestrator.agent.status
+//   - INBOUND:  aegis.orchestrator.capability.response  (reply to capability queries)
+//   - INBOUND:  aegis.orchestrator.task.accepted
+//   - INBOUND:  aegis.orchestrator.task.result
+//   - INBOUND:  aegis.orchestrator.task.failed
 //   - OUTBOUND: aegis.orchestrator.status.events
 //   - OUTBOUND: aegis.orchestrator.errors
 //   - OUTBOUND: aegis.orchestrator.audit.events
 //   - OUTBOUND: aegis.orchestrator.metrics
 //   - OUTBOUND: aegis.orchestrator.tasks.deadletter
-//   - OUTBOUND: aegis.agents.tasks.inbound
+//   - OUTBOUND: aegis.agents.task.inbound
 //   - OUTBOUND: aegis.agents.capability.query
 //   - OUTBOUND: aegis.agents.lifecycle.terminate
 //   - OUTBOUND: aegis.agents.tasks.cancel
-//   - OUTBOUND: aegis.agents.decomposition.request  (NEW v3.0)
 package gateway
 
 import (
@@ -38,6 +36,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -48,15 +47,15 @@ import (
 // NATS topic constants.
 const (
 	TopicTasksInbound            = "aegis.orchestrator.tasks.inbound"
-	TopicAgentStatusEvents       = "aegis.agents.status.events"
-	TopicCapabilityQueryResponse = "aegis.agents.capability.response"
-	TopicDecompositionResponse   = "aegis.orchestrator.decomposition.response" // NEW v3.0
-	TopicTaskResults             = "aegis.orchestrator.tasks.results.>"         // NEW v3.0 — was missing
-	TopicAgentTasksInbound       = "aegis.agents.tasks.inbound"
+	TopicAgentStatusEvents       = "aegis.orchestrator.agent.status"
+	TopicCapabilityQueryResponse = "aegis.orchestrator.capability.response"
+	TopicTaskAccepted            = "aegis.orchestrator.task.accepted"
+	TopicTaskResult              = "aegis.orchestrator.task.result"
+	TopicTaskFailed              = "aegis.orchestrator.task.failed"
+	TopicAgentTasksInbound       = "aegis.agents.task.inbound"
 	TopicCapabilityQuery         = "aegis.agents.capability.query"
 	TopicAgentTerminate          = "aegis.agents.lifecycle.terminate"
 	TopicTaskCancel              = "aegis.agents.tasks.cancel"
-	TopicDecompositionRequest    = "aegis.agents.decomposition.request"         // NEW v3.0
 	TopicOrchestratorErrors      = "aegis.orchestrator.errors"
 	TopicAuditEvents             = "aegis.orchestrator.audit.events"
 	TopicMetrics                 = "aegis.orchestrator.metrics"
@@ -85,9 +84,6 @@ type AgentStatusHandler func(update types.AgentStatusUpdate) error
 // TaskResultHandler is the callback the Plan Executor registers to receive task results.
 type TaskResultHandler func(result types.TaskResult) error
 
-// DecompositionResponseHandler is the callback the Task Dispatcher registers for decomposition responses (NEW v3.0).
-type DecompositionResponseHandler func(resp types.DecompositionResponse) error
-
 // ── Gateway ───────────────────────────────────────────────────────────────────
 
 // Gateway is M1: Communications Gateway.
@@ -96,13 +92,12 @@ type Gateway struct {
 	nodeID string
 	logger *log.Logger
 
-	taskHandler                 TaskHandler
-	agentStatusHandler          AgentStatusHandler
-	taskResultHandler           TaskResultHandler
-	decompositionResponseHandler DecompositionResponseHandler // NEW v3.0
+	taskHandler        TaskHandler
+	agentStatusHandler AgentStatusHandler
+	taskResultHandler  TaskResultHandler
 
 	// pendingCapabilityQueries tracks in-flight capability query requests.
-	// key: correlationID (orchestrator_task_ref), value: chan *types.CapabilityResponse
+	// key: query_id, value: chan *types.CapabilityResponse
 	pendingCapabilityQueries sync.Map
 }
 
@@ -127,16 +122,10 @@ func (g *Gateway) RegisterAgentStatusHandler(h AgentStatusHandler) {
 	g.agentStatusHandler = h
 }
 
-// RegisterTaskResultHandler registers the callback for task_result messages.
-// Must be called before Start(). Registered by Plan Executor (M7).
+// RegisterTaskResultHandler registers the callback for terminal agent task
+// outcomes. Must be called before Start(). Registered by the Dispatcher.
 func (g *Gateway) RegisterTaskResultHandler(h TaskResultHandler) {
 	g.taskResultHandler = h
-}
-
-// RegisterDecompositionResponseHandler registers the callback for task_decomposition_response messages (NEW v3.0).
-// Must be called before Start(). Registered by Task Dispatcher.
-func (g *Gateway) RegisterDecompositionResponseHandler(h DecompositionResponseHandler) {
-	g.decompositionResponseHandler = h
 }
 
 // Start subscribes to all inbound NATS topics and begins message processing.
@@ -151,13 +140,14 @@ func (g *Gateway) Start() error {
 	if err := g.nats.Subscribe(TopicCapabilityQueryResponse, g.handleCapabilityResponse); err != nil {
 		return fmt.Errorf("subscribe %s: %w", TopicCapabilityQueryResponse, err)
 	}
-	// NEW v3.0: subscribe for decomposition responses from Planner Agent.
-	if err := g.nats.Subscribe(TopicDecompositionResponse, g.handleRawDecompositionResponse); err != nil {
-		return fmt.Errorf("subscribe %s: %w", TopicDecompositionResponse, err)
+	if err := g.nats.Subscribe(TopicTaskAccepted, g.handleRawTaskAccepted); err != nil {
+		return fmt.Errorf("subscribe %s: %w", TopicTaskAccepted, err)
 	}
-	// FIX: subscribe for task results from Agents Component (was missing before v3.0).
-	if err := g.nats.Subscribe(TopicTaskResults, g.handleRawTaskResult); err != nil {
-		return fmt.Errorf("subscribe %s: %w", TopicTaskResults, err)
+	if err := g.nats.Subscribe(TopicTaskResult, g.handleRawTaskResult); err != nil {
+		return fmt.Errorf("subscribe %s: %w", TopicTaskResult, err)
+	}
+	if err := g.nats.Subscribe(TopicTaskFailed, g.handleRawTaskFailed); err != nil {
+		return fmt.Errorf("subscribe %s: %w", TopicTaskFailed, err)
 	}
 	g.logger.Printf("gateway started on node %s — subscribed to inbound topics", g.nodeID)
 	return nil
@@ -202,15 +192,28 @@ func (g *Gateway) handleRawAgentStatus(subject string, data []byte) error {
 		return err
 	}
 
-	var update types.AgentStatusUpdate
-	if err := json.Unmarshal(envelope.Payload, &update); err != nil {
-		return fmt.Errorf("deserialize agent_status_update: %w", err)
+	var payload struct {
+		AgentID string `json:"agent_id"`
+		TaskID  string `json:"task_id"`
+		State   string `json:"state"`
+		Message string `json:"message"`
+		Reason  string `json:"reason"`
+	}
+	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
+		return fmt.Errorf("deserialize agent.status: %w", err)
 	}
 
 	if g.agentStatusHandler == nil {
 		return fmt.Errorf("no agent status handler registered")
 	}
-	return g.agentStatusHandler(update)
+	return g.agentStatusHandler(types.AgentStatusUpdate{
+		AgentID:             payload.AgentID,
+		OrchestratorTaskRef: envelope.CorrelationID,
+		TaskID:              payload.TaskID,
+		State:               types.AgentState(payload.State),
+		ProgressSummary:     firstNonEmpty(payload.Message, payload.Reason),
+		Reason:              firstNonEmpty(payload.Reason, payload.Message),
+	})
 }
 
 // handleCapabilityResponse handles inbound capability query replies.
@@ -221,40 +224,53 @@ func (g *Gateway) handleCapabilityResponse(subject string, data []byte) error {
 		return err
 	}
 
-	var resp types.CapabilityResponse
-	if err := json.Unmarshal(envelope.Payload, &resp); err != nil {
-		return fmt.Errorf("deserialize capability_response: %w", err)
+	var payload struct {
+		QueryID  string   `json:"query_id"`
+		Domains  []string `json:"domains"`
+		HasMatch bool     `json:"has_match"`
+		TraceID  string   `json:"trace_id"`
+	}
+	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
+		return fmt.Errorf("deserialize capability.response: %w", err)
 	}
 
-	// Route to the waiting channel keyed by correlationID (= orchestrator_task_ref)
-	if ch, ok := g.pendingCapabilityQueries.Load(envelope.CorrelationID); ok {
-		ch.(chan *types.CapabilityResponse) <- &resp
+	queryID := firstNonEmpty(payload.QueryID, envelope.CorrelationID)
+	if ch, ok := g.pendingCapabilityQueries.Load(queryID); ok {
+		match := types.CapabilityMatch_NoMatch
+		if payload.HasMatch {
+			match = types.CapabilityMatch_Match
+		}
+		ch.(chan *types.CapabilityResponse) <- &types.CapabilityResponse{
+			OrchestratorTaskRef: queryID,
+			Match:               match,
+		}
 	}
 	return nil
 }
 
-// handleRawDecompositionResponse handles aegis.orchestrator.decomposition.response (NEW v3.0).
-// Routes parsed DecompositionResponse to the Task Dispatcher.
-func (g *Gateway) handleRawDecompositionResponse(subject string, data []byte) error {
+// handleRawTaskAccepted accepts and validates task.accepted messages even though
+// the current orchestrator pipeline does not need to act on them synchronously.
+func (g *Gateway) handleRawTaskAccepted(subject string, data []byte) error {
 	envelope, err := validateEnvelope(data)
 	if err != nil {
-		g.logger.Printf("rejected malformed decomposition response envelope: %v", err)
+		g.logger.Printf("rejected malformed task accepted envelope: %v", err)
 		return err
 	}
 
-	var resp types.DecompositionResponse
-	if err := json.Unmarshal(envelope.Payload, &resp); err != nil {
-		return fmt.Errorf("deserialize decomposition_response: %w", err)
+	var accepted struct {
+		TaskID                string     `json:"task_id"`
+		AgentID               string     `json:"agent_id"`
+		AgentType             string     `json:"agent_type"`
+		EstimatedCompletionAt *time.Time `json:"estimated_completion_at"`
 	}
-
-	if g.decompositionResponseHandler == nil {
-		return fmt.Errorf("no decomposition response handler registered")
+	if err := json.Unmarshal(envelope.Payload, &accepted); err != nil {
+		return fmt.Errorf("deserialize task.accepted: %w", err)
 	}
-	return g.decompositionResponseHandler(resp)
+	_ = accepted
+	return nil
 }
 
-// handleRawTaskResult handles aegis.orchestrator.tasks.results.> (FIX — was missing before v3.0).
-// Routes parsed TaskResult to the Plan Executor (M7).
+// handleRawTaskResult handles aegis.orchestrator.task.result.
 func (g *Gateway) handleRawTaskResult(subject string, data []byte) error {
 	envelope, err := validateEnvelope(data)
 	if err != nil {
@@ -262,15 +278,68 @@ func (g *Gateway) handleRawTaskResult(subject string, data []byte) error {
 		return err
 	}
 
-	var result types.TaskResult
-	if err := json.Unmarshal(envelope.Payload, &result); err != nil {
-		return fmt.Errorf("deserialize task_result: %w", err)
+	var payload struct {
+		TaskID      string          `json:"task_id"`
+		AgentID     string          `json:"agent_id"`
+		Success     bool            `json:"success"`
+		Result      json.RawMessage `json:"result"`
+		Output      json.RawMessage `json:"output"`
+		ErrorCode   string          `json:"error_code"`
+		Error       string          `json:"error"`
+		CompletedAt time.Time       `json:"completed_at"`
+	}
+	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
+		return fmt.Errorf("deserialize task.result: %w", err)
 	}
 
 	if g.taskResultHandler == nil {
 		return fmt.Errorf("no task result handler registered")
 	}
+	result := types.TaskResult{
+		OrchestratorTaskRef: envelope.CorrelationID,
+		TaskID:              payload.TaskID,
+		AgentID:             payload.AgentID,
+		Success:             payload.Success,
+		Result:              firstNonEmptyJSON(payload.Result, payload.Output),
+		ErrorCode:           payload.ErrorCode,
+		CompletedAt:         payload.CompletedAt,
+	}
+	if !result.Success && result.ErrorCode == "" && payload.Error != "" {
+		result.ErrorCode = payload.Error
+	}
 	return g.taskResultHandler(result)
+}
+
+// handleRawTaskFailed normalizes task.failed into the same internal TaskResult
+// path used for task.result so Dispatcher / Executor can handle a single stream.
+func (g *Gateway) handleRawTaskFailed(subject string, data []byte) error {
+	envelope, err := validateEnvelope(data)
+	if err != nil {
+		g.logger.Printf("rejected malformed task failed envelope: %v", err)
+		return err
+	}
+
+	var payload struct {
+		TaskID       string `json:"task_id"`
+		AgentID      string `json:"agent_id"`
+		ErrorCode    string `json:"error_code"`
+		ErrorMessage string `json:"error_message"`
+	}
+	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
+		return fmt.Errorf("deserialize task.failed: %w", err)
+	}
+	if g.taskResultHandler == nil {
+		return fmt.Errorf("no task result handler registered")
+	}
+
+	return g.taskResultHandler(types.TaskResult{
+		OrchestratorTaskRef: envelope.CorrelationID,
+		TaskID:              payload.TaskID,
+		AgentID:             payload.AgentID,
+		Success:             false,
+		ErrorCode:           firstNonEmpty(payload.ErrorCode, payload.ErrorMessage),
+		CompletedAt:         envelope.Timestamp,
+	})
 }
 
 // ── Outbound: to User I/O Component ──────────────────────────────────────────
@@ -297,24 +366,46 @@ func (g *Gateway) PublishTaskResult(callbackTopic string, result types.TaskResul
 
 // ── Outbound: to Agents Component ────────────────────────────────────────────
 
-// PublishDecompositionRequest sends a task_decomposition_request to the Planner Agent (NEW v3.0).
-func (g *Gateway) PublishDecompositionRequest(req types.DecompositionRequest) error {
-	return g.publishEnvelope(TopicDecompositionRequest, "task_decomposition_request", req.OrchestratorTaskRef, req)
-}
-
-// PublishTaskSpec dispatches a validated task_spec to the Agents Component (§11.2).
+// PublishTaskSpec dispatches a validated task.inbound request to the Agents
+// Component. The internal TaskSpec is adapted to the agents-component schema.
 func (g *Gateway) PublishTaskSpec(spec types.TaskSpec) error {
-	return g.publishEnvelope(TopicAgentTasksInbound, "task_spec", spec.OrchestratorTaskRef, spec)
+	wire := struct {
+		TaskID         string            `json:"task_id"`
+		RequiredSkills []string          `json:"required_skills"`
+		Instructions   string            `json:"instructions"`
+		Metadata       map[string]string `json:"metadata,omitempty"`
+		TraceID        string            `json:"trace_id"`
+		UserContextID  string            `json:"user_context_id,omitempty"`
+	}{
+		TaskID:         spec.TaskID,
+		RequiredSkills: spec.RequiredSkillDomains,
+		Instructions:   buildAgentInstructions(spec),
+		Metadata:       buildAgentMetadata(spec),
+		TraceID:        spec.OrchestratorTaskRef,
+		UserContextID:  spec.UserContextID,
+	}
+	return g.publishEnvelope(TopicAgentTasksInbound, "task.inbound", spec.OrchestratorTaskRef, wire)
 }
 
 // PublishCapabilityQuery sends a capability query and waits for the response.
 // Blocks up to CapabilityQueryTimeout. Returns error on timeout (§FR-ALC-01).
 func (g *Gateway) PublishCapabilityQuery(query types.CapabilityQuery) (*types.CapabilityResponse, error) {
 	responseCh := make(chan *types.CapabilityResponse, 1)
-	g.pendingCapabilityQueries.Store(query.OrchestratorTaskRef, responseCh)
-	defer g.pendingCapabilityQueries.Delete(query.OrchestratorTaskRef)
+	queryID := query.OrchestratorTaskRef
+	g.pendingCapabilityQueries.Store(queryID, responseCh)
+	defer g.pendingCapabilityQueries.Delete(queryID)
 
-	if err := g.publishEnvelope(TopicCapabilityQuery, "capability_query", query.OrchestratorTaskRef, query); err != nil {
+	wire := struct {
+		QueryID string   `json:"query_id"`
+		Domains []string `json:"domains"`
+		TraceID string   `json:"trace_id"`
+	}{
+		QueryID: queryID,
+		Domains: query.RequiredSkillDomains,
+		TraceID: query.OrchestratorTaskRef,
+	}
+
+	if err := g.publishEnvelope(TopicCapabilityQuery, "capability.query", queryID, wire); err != nil {
 		return nil, fmt.Errorf("publish capability_query: %w", err)
 	}
 
@@ -324,6 +415,49 @@ func (g *Gateway) PublishCapabilityQuery(query types.CapabilityQuery) (*types.Ca
 	case <-time.After(CapabilityQueryTimeout):
 		return nil, fmt.Errorf("capability_query timed out after %s", CapabilityQueryTimeout)
 	}
+}
+
+func firstNonEmptyJSON(values ...json.RawMessage) json.RawMessage {
+	for _, v := range values {
+		if len(v) != 0 && string(v) != "null" {
+			return v
+		}
+	}
+	return nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func buildAgentMetadata(spec types.TaskSpec) map[string]string {
+	meta := map[string]string{
+		"orchestrator_task_ref": spec.OrchestratorTaskRef,
+		"user_id":               spec.UserID,
+		"callback_topic":        spec.CallbackTopic,
+	}
+	if spec.ProgressSummary != "" {
+		meta["progress_summary"] = spec.ProgressSummary
+	}
+	for k, v := range spec.Metadata {
+		meta[k] = v
+	}
+	return meta
+}
+
+func buildAgentInstructions(spec types.TaskSpec) string {
+	if strings.TrimSpace(spec.Instructions) != "" {
+		return spec.Instructions
+	}
+	if len(spec.Payload) == 0 {
+		return "Complete the assigned task."
+	}
+	return "Complete the assigned task using this JSON payload as context:\n" + string(spec.Payload)
 }
 
 // PublishAgentTerminate instructs the Agents Component to terminate an agent (§11.2).
