@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 import { AudioCapture, type CaptureResult } from '../voice/AudioCapture'
 
 interface VoiceRecorderProps {
@@ -13,6 +13,14 @@ export function VoiceRecorder({ onTranscription, disabled, onAudioCapture }: Voi
   const [transcribing, setTranscribing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const captureRef = useRef<AudioCapture | null>(null)
+  const [voiceEnabled, setVoiceEnabled] = useState<boolean | null>(null)
+
+  useEffect(() => {
+    fetch('/api/status')
+      .then(r => r.json())
+      .then((data: { voice_enabled?: boolean }) => setVoiceEnabled(data.voice_enabled ?? true))
+      .catch(() => setVoiceEnabled(true))
+  }, [])
 
   const handleClick = useCallback(async () => {
     if (recording) {
@@ -41,9 +49,13 @@ export function VoiceRecorder({ onTranscription, disabled, onAudioCapture }: Voi
           throw new Error(`Transcription failed: ${res.status}`)
         }
 
-        const { text } = await res.json() as { text: string }
-        if (text.trim()) {
-          onTranscription(text.trim())
+        const data = await res.json() as { text: string; disabled?: boolean }
+        if (data.disabled) {
+          setError('Voice transcription is disabled in this deployment.')
+          return
+        }
+        if (data.text.trim()) {
+          onTranscription(data.text.trim())
         }
       } catch (err) {
         setError(String(err))
@@ -63,8 +75,8 @@ export function VoiceRecorder({ onTranscription, disabled, onAudioCapture }: Voi
     }
   }, [recording, onTranscription, onAudioCapture])
 
-  if (!AudioCapture.isSupported()) {
-    return null // Voice not supported in this browser
+  if (voiceEnabled === false || !AudioCapture.isSupported()) {
+    return null
   }
 
   return (

@@ -165,6 +165,7 @@ app.get('/api/health', (c) => {
 
 app.get('/api/status', (c) => {
   log('GET', '/api/status')
+  const stt = (process.env.STT_PROVIDER ?? 'local').toLowerCase()
   return c.json({
     io_api: 'ok',
     demo_mode: DEMO_MODE,
@@ -172,6 +173,7 @@ app.get('/api/status', (c) => {
     memory: process.env.MEMORY_API_BASE ? 'configured' : 'disconnected',
     nats: natsClient ? 'configured' : 'disconnected',
     web_dashboard: process.env.NODE_ENV === 'production' ? 'serving' : 'dev',
+    voice_enabled: stt !== 'disabled' && stt !== 'off' && stt !== 'none',
   })
 });
 

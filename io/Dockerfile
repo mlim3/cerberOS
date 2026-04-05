@@ -32,24 +32,21 @@ RUN cd surfaces/web && bun run build
 # =============================================================================
 FROM oven/bun:1 AS runtime
 
+ARG ENABLE_VOICE=false
+
 WORKDIR /app
 
-# Install ffmpeg (audio format conversion)
-RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
-
-# Install Python + faster-whisper
-RUN apt-get update && apt-get install -y \
-    python3 python3-pip python3-venv \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install faster-whisper (Cython-compiled, no compilation needed at build time)
-RUN python3 -m venv /opt/venv
-RUN /opt/venv/bin/pip install faster-whisper
-
-# Download whisper model at build time (base.en ~140MB)
-# This avoids download on every container start
-ENV WHISPER_MODEL=base.en
-RUN /opt/venv/bin/python3 -c "from faster_whisper import download_model; download_model('$WHISPER_MODEL', output_dir='/app/whisper-models')"
+# Voice / local STT: ffmpeg, Python, faster-whisper, and ~140MB Whisper model.
+# Set ENABLE_VOICE=true at build time for full transcription (slow image build).
+# Default false = smaller/faster builds; run with STT_PROVIDER=disabled (see docker-compose).
+RUN if [ "$ENABLE_VOICE" = "true" ]; then \
+    apt-get update && apt-get install -y ffmpeg \
+      python3 python3-pip python3-venv \
+      && rm -rf /var/lib/apt/lists/* \
+    && python3 -m venv /opt/venv \
+    && /opt/venv/bin/pip install --no-cache-dir faster-whisper \
+    && /opt/venv/bin/python3 -c "from faster_whisper import download_model; download_model('base.en', output_dir='/app/whisper-models')"; \
+  fi
 
 # Copy the full Bun workspace (needed for @cerberos/io-core workspace dep)
 COPY package.json ./

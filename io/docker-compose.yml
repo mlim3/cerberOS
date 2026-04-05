@@ -3,6 +3,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # false = skip ffmpeg, Python, faster-whisper, and model download (fast build)
+        # true  = full local STT; set STT_PROVIDER=local below
+        ENABLE_VOICE: "false"
     ports:
       - "3001:3001"
     environment:
@@ -30,12 +34,12 @@ services:
       # Set to 'debug' for full JSON request/response bodies in logs
       # - LOG_LEVEL=debug
 
-      # ── Voice (optional) ──
-      - STT_PROVIDER=local
+      # ── Voice / STT ──
+      # disabled = stub API (fast Docker default). Use local + ENABLE_VOICE=true build for Whisper.
+      - STT_PROVIDER=disabled
     networks:
       - cerberos
 
 networks:
   cerberos:
     name: cerberos
-    external: true

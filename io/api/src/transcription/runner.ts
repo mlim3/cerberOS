@@ -14,8 +14,16 @@ const SCRIPT_PATH = new URL('./cli.py', import.meta.url).pathname
 // Cloud fallback config
 const STT_PROVIDER = process.env.STT_PROVIDER ?? 'local'
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY ?? ''
-const STT_API_URL = process.env.STt_API_URL ?? 'https://api.openai.com/v1/audio/transcriptions'
+const STT_API_URL =
+  process.env.STT_API_URL ??
+  process.env.STt_API_URL ??
+  'https://api.openai.com/v1/audio/transcriptions'
 const STT_MODEL = process.env.STT_MODEL ?? 'whisper-1'
+
+function isSttDisabled(): boolean {
+  const p = STT_PROVIDER.toLowerCase()
+  return p === 'disabled' || p === 'off' || p === 'none'
+}
 
 let proc: ReturnType<typeof spawn> | null = null
 let ready = false
@@ -82,6 +90,8 @@ export interface TranscriptionResult {
   text: string
   language: string
   duration: number
+  /** Present when STT_PROVIDER is disabled — UI can show a friendly message */
+  disabled?: boolean
 }
 
 export interface TranscriptionOptions {
@@ -145,6 +155,15 @@ async function transcribeViaCloud(options: TranscriptionOptions): Promise<Transc
  * falls back to cloud STT API on failure.
  */
 export async function transcribe(options: TranscriptionOptions): Promise<TranscriptionResult> {
+  if (isSttDisabled()) {
+    return {
+      text: '',
+      language: options.language ?? 'en',
+      duration: 0,
+      disabled: true,
+    }
+  }
+
   // Cloud-only mode: skip local
   if (STT_PROVIDER === 'cloud') {
     return transcribeViaCloud(options)
@@ -189,6 +208,11 @@ export async function transcribe(options: TranscriptionOptions): Promise<Transcr
  * Call this once when the io-api server starts.
  */
 export async function warmupTranscription(): Promise<void> {
+  if (isSttDisabled()) {
+    console.log('[Transcription] STT disabled — skipping model warmup')
+    return
+  }
+
   if (STT_PROVIDER === 'cloud') {
     console.log('[Transcription] Cloud-only mode — skipping model warmup')
     return
