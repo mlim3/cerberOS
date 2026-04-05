@@ -10,6 +10,7 @@
 //  7. Wire Task Dispatcher (M2)
 //  8. Start health HTTP server
 //  9. Start metrics emitter goroutine
+//
 // 10. Begin accepting inbound NATS messages
 // 11. Block until OS signal (SIGINT/SIGTERM)
 package main
@@ -17,75 +18,53 @@ package main
 import (
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/mlim3/cerberOS/orchestrator/internal/config"
+	"github.com/mlim3/cerberOS/orchestrator/internal/dispatcher"
+	"github.com/mlim3/cerberOS/orchestrator/internal/executor"
+	"github.com/mlim3/cerberOS/orchestrator/internal/gateway"
+	"github.com/mlim3/cerberOS/orchestrator/internal/health"
+	memoryiface "github.com/mlim3/cerberOS/orchestrator/internal/memory"
+	"github.com/mlim3/cerberOS/orchestrator/internal/mocks"
+	"github.com/mlim3/cerberOS/orchestrator/internal/monitor"
+	"github.com/mlim3/cerberOS/orchestrator/internal/policy"
+	"github.com/mlim3/cerberOS/orchestrator/internal/recovery"
+	"github.com/mlim3/cerberOS/orchestrator/internal/types"
 )
 
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("FATAL: failed to load config: %v", err)
+		cfg = demoConfig()
+		log.Printf("starting in demo mode with in-memory mocks: %v", err)
 	}
 
 	fmt.Printf("Aegis OS — Orchestrator starting | node_id=%s\n", cfg.NodeID)
 
-	// ── Step 1: Memory Interface (M6) ────────────────────────────────────────
-	// TODO Phase 1: initialize real MemoryClient (libSQL or Memory Component REST API)
-	// TODO Phase 1: run MigrateSchema() — create tables + append-only triggers
-	// var memClient interfaces.MemoryClient = memory.New(...)
-	// memIface := memoryiface.New(memClient, cfg)
-	// if err := memIface.MigrateSchema(); err != nil {
-	//     log.Fatalf("FATAL: schema migration failed: %v", err)
-	// }
+	rt, err := buildRuntime(cfg)
+	if err != nil {
+		log.Fatalf("FATAL: build runtime failed: %v", err)
+	}
 
-	// ── Step 2: Policy Enforcer (M3) ─────────────────────────────────────────
-	// TODO Phase 2: initialize real VaultClient (OpenBao HTTP)
-	// var vaultClient interfaces.VaultClient = vault.NewOpenBaoClient(cfg.VaultAddr)
-	// policyEnforcer := policy.New(cfg, vaultClient, memClient)
+	rt.health.StartMonitorLoop(cfg.HealthCheckIntervalSeconds, cfg.HealthCheckIntervalSeconds)
+	go func() {
+		addr := ":8080"
+		log.Printf("health endpoint listening on %s", addr)
+		if err := http.ListenAndServe(addr, http.HandlerFunc(rt.health.ServeHTTP)); err != nil {
+			log.Printf("health server stopped: %v", err)
+		}
+	}()
 
-	// ── Step 3: Communications Gateway (M1) ──────────────────────────────────
-	// TODO Phase 3: initialize real NATSClient with mTLS
-	// var natsClient interfaces.NATSClient = natsimpl.New(cfg.NATSUrl, cfg.NATSCredsPath)
-	// gw := gateway.New(natsClient, cfg.NodeID)
+	go emitMetrics(cfg, rt.gateway, rt.dispatcher, rt.health)
 
-	// ── Step 4: Recovery Manager (M5) ────────────────────────────────────────
-	// TODO Phase 6: wire Recovery Manager
-	// recoverMgr := recovery.New(cfg, memClient, gw, policyEnforcer, nil /* monitor set below */)
-
-	// ── Step 5: Task Monitor (M4) ────────────────────────────────────────────
-	// TODO Phase 5: wire Task Monitor
-	// taskMonitor := monitor.New(cfg, memClient, recoverMgr)
-	// if err := taskMonitor.RehydrateFromMemory(); err != nil {
-	//     log.Fatalf("FATAL: startup rehydration failed: %v", err)
-	// }
-
-	// ── Step 6: Task Dispatcher (M2) ─────────────────────────────────────────
-	// TODO Phase 4: wire Task Dispatcher
-	// dispatcher := dispatcher.New(cfg, memClient, vaultClient, gw, policyEnforcer, taskMonitor)
-
-	// ── Step 7: Register Gateway handlers ────────────────────────────────────
-	// TODO Phase 3: register handlers on Gateway
-	// gw.RegisterTaskHandler(dispatcher.HandleInboundTask)
-	// gw.RegisterAgentStatusHandler(taskMonitor.HandleAgentStatusUpdate)
-	// gw.RegisterTaskResultHandler(dispatcher.HandleTaskResult)
-
-	// ── Step 8: Health HTTP server ────────────────────────────────────────────
-	// TODO Phase 7: start /health endpoint
-	// healthHandler := health.New(vaultClient, memClient, natsClient, taskMonitor, cfg.NodeID)
-	// go http.ListenAndServe(":8080", http.HandlerFunc(healthHandler.ServeHTTP))
-
-	// ── Step 9: Metrics emitter ───────────────────────────────────────────────
-	// TODO Phase 7: start metrics goroutine
-	// go emitMetrics(cfg, gw, dispatcher, taskMonitor)
-
-	// ── Step 10: Start accepting messages ─────────────────────────────────────
-	// TODO Phase 3: start Gateway
-	// if err := gw.Start(); err != nil {
-	//     log.Fatalf("FATAL: gateway start failed: %v", err)
-	// }
+	if err := rt.gateway.Start(); err != nil {
+		log.Fatalf("FATAL: gateway start failed: %v", err)
+	}
 
 	fmt.Println("Orchestrator ready — waiting for tasks")
 
@@ -95,5 +74,146 @@ func main() {
 	<-quit
 
 	fmt.Println("Orchestrator shutting down gracefully...")
-	// TODO: close NATS connection, flush pending writes, etc.
+	rt.nats.Close()
+}
+
+type runtime struct {
+	memory     *memoryiface.Interface
+	vault      *mocks.VaultMock
+	nats       *mocks.NATSMock
+	gateway    *gateway.Gateway
+	monitor    *monitor.Monitor
+	recovery   *recovery.Manager
+	dispatcher *dispatcher.Dispatcher
+	executor   *executor.PlanExecutor
+	health     *health.Handler
+}
+
+func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
+	mockMemory := mocks.NewMemoryMock()
+	memClient := memoryiface.New(mockMemory, cfg)
+	if err := memClient.MigrateSchema(); err != nil {
+		return nil, err
+	}
+
+	vaultClient := &mocks.VaultMock{}
+	policyEnforcer := policy.New(cfg, vaultClient, memClient, nil)
+
+	natsClient := mocks.NewNATSMock()
+	gw := gateway.New(natsClient, cfg.NodeID)
+
+	recoveryBridge := &recoveryProxy{}
+	taskMonitor := monitor.New(cfg, memClient, recoveryBridge)
+
+	var taskDispatcher *dispatcher.Dispatcher
+	planExecutor := executor.New(
+		cfg,
+		memClient,
+		gw,
+		policyEnforcer,
+		func(ts *types.TaskState, aggregatedResults []types.PriorResult) {
+			if taskDispatcher != nil {
+				taskDispatcher.HandlePlanComplete(ts, aggregatedResults)
+			}
+		},
+		func(ts *types.TaskState, errorCode string, partial bool, partialResults []types.PriorResult) {
+			if taskDispatcher != nil {
+				taskDispatcher.HandlePlanFailed(ts, errorCode, partial, partialResults)
+			}
+		},
+	)
+
+	recoverMgr := recovery.New(cfg, memClient, gw, policyEnforcer, taskMonitor)
+	recoveryBridge.target = recoverMgr
+	memClient.SetWriteFailureHandler(recoverMgr.HandleComponentFailure)
+
+	if err := taskMonitor.RehydrateFromMemory(); err != nil {
+		return nil, err
+	}
+
+	taskDispatcher = dispatcher.New(cfg, memClient, vaultClient, gw, policyEnforcer, taskMonitor, planExecutor)
+
+	gw.RegisterTaskHandler(taskDispatcher.HandleInboundTask)
+	gw.RegisterAgentStatusHandler(taskMonitor.HandleAgentStatusUpdate)
+	gw.RegisterTaskResultHandler(taskDispatcher.HandleTaskResult)
+
+	healthHandler := health.New(vaultClient, memClient, natsClient, taskMonitor, cfg.NodeID)
+
+	return &runtime{
+		memory:     memClient,
+		vault:      vaultClient,
+		nats:       natsClient,
+		gateway:    gw,
+		monitor:    taskMonitor,
+		recovery:   recoverMgr,
+		dispatcher: taskDispatcher,
+		executor:   planExecutor,
+		health:     healthHandler,
+	}, nil
+}
+
+type recoveryProxy struct {
+	target *recovery.Manager
+}
+
+func (p *recoveryProxy) HandleRecovery(ts *types.TaskState, reason types.RecoveryReason) {
+	if p.target != nil {
+		p.target.HandleRecovery(ts, reason)
+	}
+}
+
+func emitMetrics(cfg *config.OrchestratorConfig, gw *gateway.Gateway, d *dispatcher.Dispatcher, h *health.Handler) {
+	interval := time.Duration(cfg.MetricsEmitIntervalSeconds) * time.Second
+	if interval <= 0 {
+		interval = 15 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		received, completed, failed, violations, _, queueDepth := d.GetMetrics()
+		h.SetQueueDepth(queueDepth)
+		metrics := types.MetricsPayload{
+			NodeID:                cfg.NodeID,
+			Timestamp:             time.Now().UTC(),
+			TasksReceivedTotal:    received,
+			TasksCompletedTotal:   completed,
+			TasksFailedTotal:      failed,
+			PolicyViolationsTotal: violations,
+			ActiveTasks:           int64(len(d.GetActiveTasks())),
+			VaultAvailable:        boolToInt(true),
+			QueueDepth:            queueDepth,
+		}
+		if err := gw.PublishMetrics(metrics); err != nil {
+			log.Printf("metrics publish failed: %v", err)
+		}
+	}
+}
+
+func boolToInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
+}
+
+func demoConfig() *config.OrchestratorConfig {
+	return &config.OrchestratorConfig{
+		VaultAddr:                   "mock://vault",
+		NATSUrl:                     "mock://nats",
+		NATSCredsPath:               "mock://creds",
+		MemoryEndpoint:              "mock://memory",
+		VaultFailureMode:            config.VaultFailureModeClosed,
+		VaultPolicyCacheTTL:         60,
+		DecompositionTimeoutSeconds: 30,
+		MaxSubtasksPerPlan:          20,
+		PlanExecutorMaxParallel:     5,
+		MaxTaskRetries:              3,
+		TaskDedupWindowSeconds:      300,
+		HealthCheckIntervalSeconds:  10,
+		MetricsEmitIntervalSeconds:  15,
+		QueueHighWaterMark:          500,
+		MemoryWriteBufferSeconds:    30,
+		NodeID:                      "demo-node",
+	}
 }

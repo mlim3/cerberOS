@@ -53,9 +53,8 @@ func newGateway(t *testing.T) (*gateway.Gateway, *mocks.NATSMock) {
 func TestGatewayStart_SubscribesToInboundTopics(t *testing.T) {
 	_, nats := newGateway(t)
 
-	// v3.0 adds 2 more subscriptions: decomposition.response and tasks.results.>
-	if nats.SubscribeCallCount != 5 {
-		t.Fatalf("SubscribeCallCount = %d, want 5 (tasks.inbound, status.events, capability.response, decomposition.response, tasks.results)", nats.SubscribeCallCount)
+	if nats.SubscribeCallCount != 6 {
+		t.Fatalf("SubscribeCallCount = %d, want 6 (tasks.inbound, agent.status, capability.response, task.accepted, task.result, task.failed)", nats.SubscribeCallCount)
 	}
 }
 
@@ -252,17 +251,29 @@ func TestPublishTaskSpec_PublishesToAgentsTopic(t *testing.T) {
 	if err := json.Unmarshal(msgs[0], &envelope); err != nil {
 		t.Fatalf("invalid envelope: %v", err)
 	}
-	if envelope.MessageType != "task_spec" {
-		t.Fatalf("envelope.MessageType = %q, want task_spec", envelope.MessageType)
+	if envelope.MessageType != "task.inbound" {
+		t.Fatalf("envelope.MessageType = %q, want task.inbound", envelope.MessageType)
 	}
 
-	// Verify policy_scope is preserved in the payload
-	var decodedSpec types.TaskSpec
-	if err := json.Unmarshal(envelope.Payload, &decodedSpec); err != nil {
-		t.Fatalf("decode task_spec payload error = %v", err)
+	// Verify the payload is translated into the agents-component wire schema.
+	var decodedSpec struct {
+		TaskID         string            `json:"task_id"`
+		RequiredSkills []string          `json:"required_skills"`
+		Instructions   string            `json:"instructions"`
+		Metadata       map[string]string `json:"metadata"`
+		TraceID        string            `json:"trace_id"`
 	}
-	if decodedSpec.PolicyScope.TokenRef != "tok-1" {
-		t.Fatalf("decodedSpec.PolicyScope.TokenRef = %q, want tok-1", decodedSpec.PolicyScope.TokenRef)
+	if err := json.Unmarshal(envelope.Payload, &decodedSpec); err != nil {
+		t.Fatalf("decode task.inbound payload error = %v", err)
+	}
+	if decodedSpec.TraceID != "orch-1" {
+		t.Fatalf("decodedSpec.TraceID = %q, want orch-1", decodedSpec.TraceID)
+	}
+	if len(decodedSpec.RequiredSkills) != 1 || decodedSpec.RequiredSkills[0] != "web" {
+		t.Fatalf("decodedSpec.RequiredSkills = %v, want [web]", decodedSpec.RequiredSkills)
+	}
+	if decodedSpec.Metadata["orchestrator_task_ref"] != "orch-1" {
+		t.Fatalf("decodedSpec.Metadata[orchestrator_task_ref] = %q, want orch-1", decodedSpec.Metadata["orchestrator_task_ref"])
 	}
 }
 
@@ -310,12 +321,13 @@ func TestPublishCapabilityQuery_ReceivesResponse(t *testing.T) {
 	// Simulate the Agents Component responding asynchronously
 	go func() {
 		time.Sleep(10 * time.Millisecond)
-		resp := types.CapabilityResponse{
-			OrchestratorTaskRef: "orch-1",
-			Match:               types.CapabilityMatch_Match,
-			AgentID:             "agent-42",
+		resp := map[string]any{
+			"query_id":  "orch-1",
+			"domains":   []string{"web"},
+			"has_match": true,
+			"trace_id":  "orch-1",
 		}
-		data := newEnvelopedMessage(t, "capability_response", "orch-1", resp)
+		data := newEnvelopedMessage(t, "capability.response", "orch-1", resp)
 		_ = nats.Deliver(gateway.TopicCapabilityQueryResponse, data)
 	}()
 
@@ -330,9 +342,6 @@ func TestPublishCapabilityQuery_ReceivesResponse(t *testing.T) {
 	}
 	if result.Match != types.CapabilityMatch_Match {
 		t.Fatalf("result.Match = %q, want match", result.Match)
-	}
-	if result.AgentID != "agent-42" {
-		t.Fatalf("result.AgentID = %q, want agent-42", result.AgentID)
 	}
 }
 
@@ -426,9 +435,8 @@ func TestGatewayDemoFlow(t *testing.T) {
 	if err := gw.Start(); err != nil {
 		t.Fatalf("step 1: Start() error = %v", err)
 	}
-	// v3.0: 5 subscriptions (tasks.inbound, status.events, capability.response, decomposition.response, tasks.results)
-	if nats.SubscribeCallCount != 5 {
-		t.Fatalf("step 1: SubscribeCallCount = %d, want 5", nats.SubscribeCallCount)
+	if nats.SubscribeCallCount != 6 {
+		t.Fatalf("step 1: SubscribeCallCount = %d, want 6", nats.SubscribeCallCount)
 	}
 	if !gw.IsConnected() {
 		t.Fatal("step 1: IsConnected() = false, want true")
@@ -477,13 +485,13 @@ func TestGatewayDemoFlow(t *testing.T) {
 	t.Log("step 3: dead-letter — delivering a malformed envelope (missing message_id)")
 
 	badEnvelope, _ := json.Marshal(map[string]any{
-		"message_id":        "", // intentionally empty — fails validation
-		"message_type":      "user_task",
-		"source_component":  "user-io",
-		"correlation_id":    "task-bad",
-		"timestamp":         time.Now().UTC(),
-		"schema_version":    "1.0",
-		"payload":           json.RawMessage(`{}`),
+		"message_id":       "", // intentionally empty — fails validation
+		"message_type":     "user_task",
+		"source_component": "user-io",
+		"correlation_id":   "task-bad",
+		"timestamp":        time.Now().UTC(),
+		"schema_version":   "1.0",
+		"payload":          json.RawMessage(`{}`),
 	})
 
 	deliverErr := nats.Deliver(gateway.TopicTasksInbound, badEnvelope)
@@ -500,7 +508,7 @@ func TestGatewayDemoFlow(t *testing.T) {
 	t.Log("step 3 complete: malformed envelope rejected and dead-lettered ✓")
 
 	// ── Step 4: Agent Status — Valid status update routed to handler ───────
-	// An agent_status_update arrives on aegis.agents.status.events.
+	// An agent.status event arrives on aegis.orchestrator.agent.status.
 	// The gateway validates, deserializes, and calls the registered status handler.
 	t.Log("─────────────────────────────────────────────────────")
 	t.Log("step 4: agent status — delivering an agent_status_update envelope")
@@ -511,20 +519,19 @@ func TestGatewayDemoFlow(t *testing.T) {
 		return nil
 	})
 
-	statusUpdate := types.AgentStatusUpdate{
-		AgentID:             "agent-42",
-		OrchestratorTaskRef: "orch-demo-1",
-		TaskID:              inboundTask.TaskID,
-		State:               types.AgentStateActive,
-		ProgressSummary:     "Fetching page content...",
+	statusUpdate := map[string]any{
+		"agent_id": "agent-42",
+		"task_id":  inboundTask.TaskID,
+		"state":    string(types.AgentStateActive),
+		"message":  "Fetching page content...",
 	}
-	statusData := newEnvelopedMessage(t, "agent_status_update", "orch-demo-1", statusUpdate)
+	statusData := newEnvelopedMessage(t, "agent.status", "orch-demo-1", statusUpdate)
 
 	if err := nats.Deliver(gateway.TopicAgentStatusEvents, statusData); err != nil {
 		t.Fatalf("step 4: Deliver() error = %v", err)
 	}
-	if receivedStatus.AgentID != statusUpdate.AgentID {
-		t.Fatalf("step 4: receivedStatus.AgentID = %q, want %q", receivedStatus.AgentID, statusUpdate.AgentID)
+	if receivedStatus.AgentID != "agent-42" {
+		t.Fatalf("step 4: receivedStatus.AgentID = %q, want agent-42", receivedStatus.AgentID)
 	}
 	t.Logf("step 4: status handler called — agent_id=%s state=%s progress=%q",
 		receivedStatus.AgentID, receivedStatus.State, receivedStatus.ProgressSummary)
@@ -564,9 +571,9 @@ func TestGatewayDemoFlow(t *testing.T) {
 		errEnvelope.MessageType, errEnvelope.SourceComponent, errEnvelope.CorrelationID)
 	t.Log("step 5 complete: error wrapped in signed envelope and published ✓")
 
-	// ── Step 6: Publish TaskSpec — policy_scope preserved ─────────────────
-	// The dispatcher calls PublishTaskSpec with a policy_scope attached.
-	// Verify the scope survives serialization through the envelope.
+	// ── Step 6: Publish TaskSpec — translated to task.inbound ──────────────
+	// The dispatcher calls PublishTaskSpec; the gateway must translate it into
+	// the agents-component wire schema.
 	t.Log("─────────────────────────────────────────────────────")
 	t.Log("step 6: publish task_spec — verifying policy_scope is preserved in payload")
 
@@ -594,16 +601,22 @@ func TestGatewayDemoFlow(t *testing.T) {
 	if err := json.Unmarshal(specMsgs[0], &specEnvelope); err != nil {
 		t.Fatalf("step 6: invalid envelope: %v", err)
 	}
-	var decodedSpec types.TaskSpec
+	var decodedSpec struct {
+		TaskID         string            `json:"task_id"`
+		RequiredSkills []string          `json:"required_skills"`
+		Instructions   string            `json:"instructions"`
+		Metadata       map[string]string `json:"metadata"`
+		TraceID        string            `json:"trace_id"`
+	}
 	if err := json.Unmarshal(specEnvelope.Payload, &decodedSpec); err != nil {
-		t.Fatalf("step 6: decode task_spec payload error = %v", err)
+		t.Fatalf("step 6: decode task.inbound payload error = %v", err)
 	}
-	if decodedSpec.PolicyScope.TokenRef != "tok-demo-abc123" {
-		t.Fatalf("step 6: policy_scope.token_ref = %q, want tok-demo-abc123", decodedSpec.PolicyScope.TokenRef)
+	if decodedSpec.TraceID != "orch-demo-1" {
+		t.Fatalf("step 6: trace_id = %q, want orch-demo-1", decodedSpec.TraceID)
 	}
-	t.Logf("step 6: task_spec published to %s — policy_scope.token_ref=%s domains=%v",
-		gateway.TopicAgentTasksInbound, decodedSpec.PolicyScope.TokenRef, decodedSpec.PolicyScope.Domains)
-	t.Log("step 6 complete: task_spec dispatched with policy_scope intact ✓")
+	t.Logf("step 6: task.inbound published to %s — required_skills=%v trace_id=%s",
+		gateway.TopicAgentTasksInbound, decodedSpec.RequiredSkills, decodedSpec.TraceID)
+	t.Log("step 6 complete: task_spec translated to task.inbound ✓")
 
 	// ── Step 7: Publish AgentTerminate ────────────────────────────────────
 	// The Recovery Manager calls PublishAgentTerminate to stop a timed-out agent.
@@ -627,19 +640,19 @@ func TestGatewayDemoFlow(t *testing.T) {
 
 	// ── Step 8: Capability Query — async request/response ─────────────────
 	// The dispatcher calls PublishCapabilityQuery which blocks waiting for a
-	// capability_response keyed by correlationID (orchestrator_task_ref).
-	// The Agents Component responds asynchronously on the response topic.
+	// capability.response keyed by query_id/correlationID.
 	t.Log("─────────────────────────────────────────────────────")
 	t.Log("step 8: capability query — async request/response via correlationID matching")
 
 	go func() {
 		time.Sleep(10 * time.Millisecond)
-		resp := types.CapabilityResponse{
-			OrchestratorTaskRef: "orch-demo-cap",
-			Match:               types.CapabilityMatch_Match,
-			AgentID:             "agent-idle-7",
+		resp := map[string]any{
+			"query_id":  "orch-demo-cap",
+			"domains":   []string{"web"},
+			"has_match": true,
+			"trace_id":  "orch-demo-cap",
 		}
-		respData := newEnvelopedMessage(t, "capability_response", "orch-demo-cap", resp)
+		respData := newEnvelopedMessage(t, "capability.response", "orch-demo-cap", resp)
 		_ = nats.Deliver(gateway.TopicCapabilityQueryResponse, respData)
 	}()
 
@@ -653,8 +666,7 @@ func TestGatewayDemoFlow(t *testing.T) {
 	if capResult.Match != types.CapabilityMatch_Match {
 		t.Fatalf("step 8: capResult.Match = %q, want match", capResult.Match)
 	}
-	t.Logf("step 8: capability_response received — match=%s agent_id=%s",
-		capResult.Match, capResult.AgentID)
+	t.Logf("step 8: capability_response received — match=%s", capResult.Match)
 	t.Log("step 8 complete: capability query matched by correlationID ✓")
 
 	// ── Step 9: NATS Disconnect — connection failure reflected ────────────

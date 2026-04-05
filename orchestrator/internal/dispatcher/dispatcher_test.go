@@ -9,9 +9,9 @@
 //
 //	✅  Happy Path — Decomposition     — task flows DECOMPOSING → DecompositionResponse → PLAN_ACTIVE
 //	✅  Duplicate Task                 — same task_id twice → DUPLICATE_TASK; Planner Agent never contacted
-//	✅  Policy Violation               — Vault denies → POLICY_VIOLATION; decomposition request NEVER sent
+//	✅  Policy Violation               — Vault denies → POLICY_VIOLATION; planner task NEVER sent
 //	✅  Schema Errors                  — invalid UUID, priority, timeout; required_skill_domains now optional
-//	✅  Memory Fail Before Decompose   — memory write fails → error; decomposition request NOT published
+//	✅  Memory Fail Before Decompose   — memory write fails → error; planner task NOT published
 //	✅  Decomposition Publish Fail     — gateway fails → AGENTS_UNAVAILABLE; cleanup performed
 //	✅  Invalid Plan                   — circular deps, empty plan, scope violation → DECOMPOSITION_FAILED
 //	✅  Plan Complete                  — HandlePlanComplete writes COMPLETED + delivers result + revokes creds
@@ -39,15 +39,15 @@ import (
 
 // gatewayMock records every outbound call the Dispatcher makes to M1 (v3.0 interface).
 type gatewayMock struct {
-	AcceptedCalls             []types.TaskAccepted
-	ErrorCalls                []types.ErrorResponse
-	DecompositionRequestCalls []types.DecompositionRequest
-	TaskResultCalls           []types.TaskResult
-	StatusUpdateCalls         []types.StatusResponse
+	AcceptedCalls     []types.TaskAccepted
+	ErrorCalls        []types.ErrorResponse
+	TaskSpecCalls     []types.TaskSpec
+	TaskResultCalls   []types.TaskResult
+	StatusUpdateCalls []types.StatusResponse
 
-	PublishDecompositionError error
-	PublishAcceptedError      error
-	PublishResultError        error
+	PublishTaskSpecError error
+	PublishAcceptedError error
+	PublishResultError   error
 }
 
 func (g *gatewayMock) PublishTaskAccepted(_ string, a types.TaskAccepted) error {
@@ -65,9 +65,9 @@ func (g *gatewayMock) PublishTaskResult(_ string, r types.TaskResult) error {
 	return g.PublishResultError
 }
 
-func (g *gatewayMock) PublishDecompositionRequest(req types.DecompositionRequest) error {
-	g.DecompositionRequestCalls = append(g.DecompositionRequestCalls, req)
-	return g.PublishDecompositionError
+func (g *gatewayMock) PublishTaskSpec(spec types.TaskSpec) error {
+	g.TaskSpecCalls = append(g.TaskSpecCalls, spec)
+	return g.PublishTaskSpecError
 }
 
 func (g *gatewayMock) PublishStatusUpdate(_ string, s types.StatusResponse) error {
@@ -126,6 +126,7 @@ type executorMock struct {
 		Plan types.ExecutionPlan
 		TS   *types.TaskState
 	}
+	ResultCalls  []types.TaskResult
 	ExecuteError error
 }
 
@@ -135,6 +136,11 @@ func (e *executorMock) Execute(plan types.ExecutionPlan, ts *types.TaskState) er
 		TS   *types.TaskState
 	}{plan, ts})
 	return e.ExecuteError
+}
+
+func (e *executorMock) HandleSubtaskResult(result types.TaskResult) error {
+	e.ResultCalls = append(e.ResultCalls, result)
+	return nil
 }
 
 // ── Test Helpers ─────────────────────────────────────────────────────────────
@@ -198,13 +204,13 @@ func decompositionResponse(taskID string, plan types.ExecutionPlan) types.Decomp
 	}
 }
 
-// orchRefFromDecompositionRequest extracts orchestrator_task_ref from the first decomposition request.
-func orchRefFromDecompositionRequest(t *testing.T, gw *gatewayMock) string {
+// orchRefFromPlannerTask extracts orchestrator_task_ref from the first planner task.
+func orchRefFromPlannerTask(t *testing.T, gw *gatewayMock) string {
 	t.Helper()
-	if len(gw.DecompositionRequestCalls) == 0 {
-		t.Fatal("no decomposition request was published")
+	if len(gw.TaskSpecCalls) == 0 {
+		t.Fatal("no planner task was published")
 	}
-	return gw.DecompositionRequestCalls[0].OrchestratorTaskRef
+	return gw.TaskSpecCalls[0].OrchestratorTaskRef
 }
 
 // latestTaskStateRecord returns the most recent task_state record for a task_id.
@@ -259,22 +265,25 @@ func TestHandleInboundTask_HappyPath_Decomposing(t *testing.T) {
 		t.Fatalf("policy.ValidatedCalls = %d, want 1", pol.ValidatedCalls)
 	}
 
-	// A decomposition request must be published.
-	if len(gw.DecompositionRequestCalls) != 1 {
-		t.Fatalf("decomposition requests = %d, want 1", len(gw.DecompositionRequestCalls))
+	// A planner task must be published to the general agent.
+	if len(gw.TaskSpecCalls) != 1 {
+		t.Fatalf("planner task publishes = %d, want 1", len(gw.TaskSpecCalls))
 	}
-	req := gw.DecompositionRequestCalls[0]
-	if req.TaskID != task.TaskID {
-		t.Fatalf("decomposition_request.task_id = %q, want %q", req.TaskID, task.TaskID)
+	req := gw.TaskSpecCalls[0]
+	if req.TaskID != req.OrchestratorTaskRef {
+		t.Fatalf("planner task_id = %q, want orchestrator_task_ref", req.TaskID)
 	}
 	if req.OrchestratorTaskRef == "" || req.OrchestratorTaskRef == task.TaskID {
-		t.Fatal("decomposition_request.orchestrator_task_ref must be a distinct non-empty UUID")
+		t.Fatal("planner orchestrator_task_ref must be a distinct non-empty UUID")
 	}
-	if req.RawInput != "book a flight from NYC to LA" {
-		t.Fatalf("decomposition_request.raw_input = %q, want extracted value", req.RawInput)
+	if got := req.RequiredSkillDomains; len(got) != 1 || got[0] != "general" {
+		t.Fatalf("planner required_skill_domains = %v, want [general]", got)
+	}
+	if !strings.Contains(req.Instructions, "book a flight from NYC to LA") {
+		t.Fatalf("planner instructions = %q, want raw_input included", req.Instructions)
 	}
 	if req.PolicyScope.TokenRef == "" {
-		t.Fatal("decomposition_request.policy_scope.token_ref is empty — policy scope not attached")
+		t.Fatal("planner policy_scope.token_ref is empty — policy scope not attached")
 	}
 
 	// No task_accepted yet (only after plan is validated).
@@ -593,9 +602,9 @@ func TestHandleInboundTask_PolicyViolation_NoDecompositionRequest(t *testing.T) 
 		t.Fatal("HandleInboundTask() error = nil, want policy denied error")
 	}
 
-	if len(gw.DecompositionRequestCalls) != 0 {
-		t.Fatalf("decomposition requests = %d, want 0 — Planner Agent must not be contacted on policy deny",
-			len(gw.DecompositionRequestCalls))
+	if len(gw.TaskSpecCalls) != 0 {
+		t.Fatalf("planner task publishes = %d, want 0 — Planner Agent must not be contacted on policy deny",
+			len(gw.TaskSpecCalls))
 	}
 	if len(gw.ErrorCalls) != 1 {
 		t.Fatalf("error calls = %d, want 1 (POLICY_VIOLATION)", len(gw.ErrorCalls))
@@ -619,12 +628,12 @@ func TestHandleInboundTask_OptionalSkillDomains_ValidInV3(t *testing.T) {
 		t.Fatalf("HandleInboundTask() error = %v, want nil — empty skill domains must be valid in v3.0", err)
 	}
 
-	// Policy must still be called; decomposition request must still be published.
+	// Policy must still be called; planner task must still be published.
 	if pol.ValidatedCalls != 1 {
 		t.Fatal("policy was not called — optional skill domains should not block pipeline")
 	}
-	if len(gw.DecompositionRequestCalls) != 1 {
-		t.Fatal("decomposition request was not published for task with empty skill domains")
+	if len(gw.TaskSpecCalls) != 1 {
+		t.Fatal("planner task was not published for task with empty skill domains")
 	}
 }
 
@@ -640,8 +649,8 @@ func TestHandleInboundTask_MissingTaskID_InvalidTaskSpec(t *testing.T) {
 	if pol.ValidatedCalls != 0 {
 		t.Fatal("policy was called — must short-circuit on schema failure")
 	}
-	if len(gw.DecompositionRequestCalls) != 0 {
-		t.Fatal("decomposition request published on schema failure")
+	if len(gw.TaskSpecCalls) != 0 {
+		t.Fatal("planner task published on schema failure")
 	}
 	if gw.ErrorCalls[0].ErrorCode != types.ErrCodeInvalidTaskSpec {
 		t.Fatalf("error_code = %q, want INVALID_TASK_SPEC", gw.ErrorCalls[0].ErrorCode)
@@ -691,8 +700,8 @@ func TestHandleInboundTask_MemoryFailBeforeDecomposition_NoOrphanedRequest(t *te
 		t.Fatal("HandleInboundTask() error = nil, want memory error")
 	}
 
-	if len(gw.DecompositionRequestCalls) != 0 {
-		t.Fatal("decomposition request published despite memory write failure — prevents safe recovery")
+	if len(gw.TaskSpecCalls) != 0 {
+		t.Fatal("planner task published despite memory write failure — prevents safe recovery")
 	}
 	if len(gw.ErrorCalls) == 0 {
 		t.Fatal("no error sent to User I/O — caller must be notified of failure")
@@ -706,7 +715,7 @@ func TestHandleInboundTask_MemoryFailBeforeDecomposition_NoOrphanedRequest(t *te
 
 func TestHandleInboundTask_DecompositionPublishFails_TaskFails(t *testing.T) {
 	d, gw, _, mon, _, _ := newDispatcher(t)
-	gw.PublishDecompositionError = errors.New("NATS publish failed")
+	gw.PublishTaskSpecError = errors.New("NATS publish failed")
 
 	task := validTask("550e8400-e29b-41d4-a716-446655440051")
 	err := d.HandleInboundTask(task)
@@ -741,8 +750,8 @@ func TestHandleInboundTask_DuplicateTaskID_ReturnsCurrentStatus(t *testing.T) {
 		t.Fatalf("second HandleInboundTask() error = %v, want nil (idempotent)", err)
 	}
 
-	if len(gw.DecompositionRequestCalls) != 1 {
-		t.Fatalf("decomposition requests = %d, want 1 (second must be deduped)", len(gw.DecompositionRequestCalls))
+	if len(gw.TaskSpecCalls) != 1 {
+		t.Fatalf("planner task publishes = %d, want 1 (second must be deduped)", len(gw.TaskSpecCalls))
 	}
 	if len(gw.ErrorCalls) != 1 {
 		t.Fatalf("error calls = %d, want 1 (DUPLICATE_TASK)", len(gw.ErrorCalls))
@@ -877,25 +886,25 @@ func TestDispatcherDemoFlow_V3(t *testing.T) {
 		t.Fatalf("step 1: HandleInboundTask() error = %v, want nil", err)
 	}
 
-	orchRef1 := orchRefFromDecompositionRequest(t, gw)
+	orchRef1 := orchRefFromPlannerTask(t, gw)
 	if orchRef1 == task1.TaskID {
 		t.Fatal("step 1: orchestrator_task_ref must be distinct from task_id")
 	}
 	t.Logf("step 1: generated orchestrator_task_ref=%s (distinct from task_id=%s)", orchRef1, task1.TaskID)
 
-	req1 := gw.DecompositionRequestCalls[0]
+	req1 := gw.TaskSpecCalls[0]
 	if req1.PolicyScope.TokenRef == "" {
-		t.Fatal("step 1: decomposition_request.policy_scope.token_ref is empty")
+		t.Fatal("step 1: planner task policy_scope.token_ref is empty")
 	}
-	t.Logf("step 1: policy_scope attached to decomposition_request — token_ref=%s domains=%v",
+	t.Logf("step 1: policy_scope attached to planner task — token_ref=%s domains=%v",
 		req1.PolicyScope.TokenRef, req1.PolicyScope.Domains)
-	t.Logf("step 1: raw_input forwarded to Planner Agent: %q", req1.RawInput)
+	t.Logf("step 1: raw_input embedded in planner instructions: %q", req1.Instructions)
 
 	s1 := taskStateHistory(t, mem, task1.TaskID)
 	if len(s1) < 1 || s1[len(s1)-1].State != types.StateDecomposing {
 		t.Fatalf("step 1: persisted state = %q, want DECOMPOSING", s1[len(s1)-1].State)
 	}
-	t.Log("step 1 complete: task persisted as DECOMPOSING, decomposition request sent to Planner Agent ✓")
+	t.Log("step 1 complete: task persisted as DECOMPOSING, planner task sent to general agent ✓")
 
 	if len(gw.AcceptedCalls) != 0 {
 		t.Fatal("step 1: task_accepted must NOT be sent until after plan is validated")
@@ -956,9 +965,9 @@ func TestDispatcherDemoFlow_V3(t *testing.T) {
 		t.Fatalf("step 3: HandleInboundTask() error = %v, want nil (idempotent no-op)", err)
 	}
 
-	if len(gw.DecompositionRequestCalls) != 1 {
-		t.Fatalf("step 3: decomposition requests = %d, want 1 (second must be rejected at dedup)",
-			len(gw.DecompositionRequestCalls))
+	if len(gw.TaskSpecCalls) != 1 {
+		t.Fatalf("step 3: planner task publishes = %d, want 1 (second must be rejected at dedup)",
+			len(gw.TaskSpecCalls))
 	}
 	if len(gw.ErrorCalls) != 1 || gw.ErrorCalls[0].ErrorCode != types.ErrCodeDuplicateTask {
 		t.Fatalf("step 3: error_code = %q, want DUPLICATE_TASK", safeErrorCode(gw))
@@ -983,13 +992,13 @@ func TestDispatcherDemoFlow_V3(t *testing.T) {
 		CallbackTopic:  "aegis.user-io.results.task-2",
 	}
 
-	decompBefore := len(gw.DecompositionRequestCalls)
+	decompBefore := len(gw.TaskSpecCalls)
 	if err := d.HandleInboundTask(task2); err == nil {
 		t.Fatal("step 4: HandleInboundTask() error = nil, want policy denied error")
 	}
 
-	if len(gw.DecompositionRequestCalls) != decompBefore {
-		t.Fatal("step 4: decomposition request sent — Planner Agent must not be contacted on POLICY_VIOLATION")
+	if len(gw.TaskSpecCalls) != decompBefore {
+		t.Fatal("step 4: planner task sent — Planner Agent must not be contacted on POLICY_VIOLATION")
 	}
 	if len(gw.ErrorCalls) != 1 || gw.ErrorCalls[0].ErrorCode != types.ErrCodePolicyViolation {
 		t.Fatalf("step 4: error_code = %q, want POLICY_VIOLATION", safeErrorCode(gw))

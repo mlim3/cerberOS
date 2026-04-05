@@ -8,8 +8,9 @@
 //   - Validate user_task schema — reject invalid specs immediately
 //   - Perform deduplication check via Memory Interface using task_id
 //   - Route to Policy Enforcer for permission validation before any agent interaction
-//   - After policy validation, send task_decomposition_request to Planner Agent (§FR-TD-01)
-//   - Receive task_decomposition_response, validate plan, pass to Plan Executor
+//   - After policy validation, dispatch a standard task.inbound request to a
+//     general-purpose planner agent (§FR-TD-01)
+//   - Parse the planner task result, validate plan, pass to Plan Executor
 //   - Track active tasks and correlate plan results back to originating user_task
 //   - Monitor queue depth and emit queue_pressure metric at high-water mark
 //
@@ -20,15 +21,15 @@
 //
 // v3.0 Pipeline (§7 Flows 1–3.5):
 //
-//	1. Schema validation — INVALID_TASK_SPEC on failure
-//	2. Deduplication check — DUPLICATE_TASK if task_id seen within idempotency window
-//	3. Generate orchestrator_task_ref (distinct UUID)
-//	4. Policy validation — POLICY_VIOLATION on deny; Planner Agent never contacted on deny
-//	5. Persist DECOMPOSING state to Memory (BEFORE decomposition request — §14.1)
-//	6. Publish task_decomposition_request to Planner Agent via Gateway
-//	7. Start decomposition timeout goroutine (DECOMPOSITION_TIMEOUT_SECONDS)
-//	8. On DecompositionResponse: validate plan → pass to Plan Executor → persist PLAN_ACTIVE
-//	9. Send task_accepted to User I/O after plan is valid and execution starts
+//  1. Schema validation — INVALID_TASK_SPEC on failure
+//  2. Deduplication check — DUPLICATE_TASK if task_id seen within idempotency window
+//  3. Generate orchestrator_task_ref (distinct UUID)
+//  4. Policy validation — POLICY_VIOLATION on deny; Planner Agent never contacted on deny
+//  5. Persist DECOMPOSING state to Memory (BEFORE planner dispatch — §14.1)
+//  6. Publish a standard general-agent task via Gateway
+//  7. Start decomposition timeout goroutine (DECOMPOSITION_TIMEOUT_SECONDS)
+//  8. On planner task result: parse + validate plan → pass to Plan Executor → persist PLAN_ACTIVE
+//  9. Send task_accepted to User I/O after plan is valid and execution starts
 package dispatcher
 
 import (
@@ -37,6 +38,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -60,7 +62,7 @@ type Gateway interface {
 	PublishTaskAccepted(callbackTopic string, accepted types.TaskAccepted) error
 	PublishError(callbackTopic string, resp types.ErrorResponse) error
 	PublishTaskResult(callbackTopic string, result types.TaskResult) error
-	PublishDecompositionRequest(req types.DecompositionRequest) error
+	PublishTaskSpec(spec types.TaskSpec) error
 	PublishStatusUpdate(userContextID string, status types.StatusResponse) error
 }
 
@@ -79,6 +81,7 @@ type TaskMonitor interface {
 // PlanExecutor defines the plan execution interface the Dispatcher delegates to (M7).
 type PlanExecutor interface {
 	Execute(plan types.ExecutionPlan, ts *types.TaskState) error
+	HandleSubtaskResult(result types.TaskResult) error
 }
 
 // ── Dispatcher ────────────────────────────────────────────────────────────────
@@ -97,6 +100,10 @@ type Dispatcher struct {
 
 	// activeTasks maps task_id → *TaskState for all non-terminal in-flight tasks.
 	activeTasks sync.Map
+
+	// pendingDecompositions tracks top-level tasks currently waiting for a
+	// planner agent result. key = top-level orchestrator_task_ref.
+	pendingDecompositions sync.Map
 
 	// Metrics — use atomic operations to avoid a global lock.
 	tasksReceived       int64
@@ -139,8 +146,8 @@ func New(
 //  2. Deduplication check — DUPLICATE_TASK if task_id seen within idempotency window
 //  3. Generate orchestrator_task_ref (distinct UUID)
 //  4. Policy validation — POLICY_VIOLATION on deny; Planner Agent never contacted
-//  5. Persist DECOMPOSING state to Memory BEFORE sending decomposition request (§14.1)
-//  6. Publish task_decomposition_request to Planner Agent
+//  5. Persist DECOMPOSING state to Memory BEFORE sending planner dispatch (§14.1)
+//  6. Publish a standard task.inbound request to a general planner agent
 //  7. Start decomposition timeout goroutine
 func (d *Dispatcher) HandleInboundTask(task types.UserTask) error {
 	atomic.AddInt64(&d.tasksReceived, 1)
@@ -212,7 +219,7 @@ func (d *Dispatcher) HandleInboundTask(task types.UserTask) error {
 		},
 	}
 
-	// ── Step 5: Persist DECOMPOSING BEFORE sending decomposition request ───
+	// ── Step 5: Persist DECOMPOSING BEFORE sending planner dispatch ────────
 	if err := d.persistTaskState(ts, now); err != nil {
 		d.logger.Printf("memory write failed before decomposition: task_id=%s error=%v", task.TaskID, err)
 		_ = d.gateway.PublishError(task.CallbackTopic, types.ErrorResponse{
@@ -228,30 +235,72 @@ func (d *Dispatcher) HandleInboundTask(task types.UserTask) error {
 	d.monitor.TrackTask(ts)
 	atomic.AddInt64(&d.queueDepth, 1)
 
-	// ── Step 6: Publish task_decomposition_request to Planner Agent ────────
-	// Extract raw_input from payload for the Planner Agent.
+	// ── Step 6: Publish planner task via standard task.inbound ─────────────
 	rawInput := extractRawInput(task.Payload)
-
-	req := types.DecompositionRequest{
-		TaskID:              task.TaskID,
-		OrchestratorTaskRef: orchRef,
-		UserID:              task.UserID,
-		RawInput:            rawInput,
-		PolicyScope:         scope,
-		UserContextID:       task.UserContextID,
+	spec := types.TaskSpec{
+		OrchestratorTaskRef:  orchRef,
+		TaskID:               orchRef,
+		UserID:               task.UserID,
+		RequiredSkillDomains: []string{"general"},
+		PolicyScope:          scope,
+		TimeoutSeconds:       minInt(task.TimeoutSeconds, d.cfg.DecompositionTimeoutSeconds),
+		Payload:              task.Payload,
+		Instructions:         buildDecompositionInstructions(task.TaskID, rawInput, scope),
+		Metadata: map[string]string{
+			"task_kind":      "decomposition",
+			"parent_task_id": task.TaskID,
+		},
+		CallbackTopic:   task.CallbackTopic,
+		UserContextID:   task.UserContextID,
+		ProgressSummary: "Generating execution plan",
 	}
 
-	if err := d.gateway.PublishDecompositionRequest(req); err != nil {
-		d.logger.Printf("decomposition request publish failed: task_id=%s error=%v", task.TaskID, err)
+	if err := d.gateway.PublishTaskSpec(spec); err != nil {
+		d.logger.Printf("planner task publish failed: task_id=%s error=%v", task.TaskID, err)
 		d.failTask(ts, types.ErrCodeAgentsUnavailable, "Could not reach Planner Agent. Please retry.")
-		return fmt.Errorf("publish decomposition request: %w", err)
+		return fmt.Errorf("publish planner task: %w", err)
 	}
+	d.pendingDecompositions.Store(orchRef, task.TaskID)
 
 	// ── Step 7: Start decomposition timeout goroutine ──────────────────────
 	go d.watchDecompositionTimeout(ts)
 
-	d.logger.Printf("task sent for decomposition: task_id=%s orchestrator_task_ref=%s", task.TaskID, orchRef)
+	d.logger.Printf("task sent to planner agent: task_id=%s orchestrator_task_ref=%s", task.TaskID, orchRef)
 	return nil
+}
+
+// HandleTaskResult routes terminal agent outcomes. Planner-task results are
+// parsed into execution plans; all other outcomes are delegated to the executor
+// as subtask results.
+func (d *Dispatcher) HandleTaskResult(result types.TaskResult) error {
+	if _, ok := d.pendingDecompositions.Load(result.OrchestratorTaskRef); ok {
+		d.pendingDecompositions.Delete(result.OrchestratorTaskRef)
+		if !result.Success {
+			if ts := d.activeTaskByOrchRef(result.OrchestratorTaskRef); ts != nil {
+				msg := "Planner agent failed to produce an execution plan."
+				if result.ErrorCode != "" {
+					msg = fmt.Sprintf("Planner agent failed: %s", result.ErrorCode)
+				}
+				d.failTask(ts, types.ErrCodeAgentsUnavailable, msg)
+			}
+			return nil
+		}
+
+		plan, err := parseExecutionPlan(result.Result)
+		if err != nil {
+			if ts := d.activeTaskByOrchRef(result.OrchestratorTaskRef); ts != nil {
+				d.failTask(ts, types.ErrCodeInvalidPlan,
+					fmt.Sprintf("Planner agent returned an invalid plan: %v", err))
+			}
+			return fmt.Errorf("parse planner result: %w", err)
+		}
+		return d.HandleDecompositionResponse(types.DecompositionResponse{
+			TaskID: plan.ParentTaskID,
+			Plan:   plan,
+		})
+	}
+
+	return d.executor.HandleSubtaskResult(result)
 }
 
 // HandleDecompositionResponse processes a task_decomposition_response from the Planner Agent.
@@ -285,6 +334,7 @@ func (d *Dispatcher) HandleDecompositionResponse(resp types.DecompositionRespons
 	now := time.Now().UTC()
 	ts.State = types.StatePlanActive
 	ts.PlanID = resp.Plan.PlanID
+	d.pendingDecompositions.Delete(ts.OrchestratorTaskRef)
 	ts.StateHistory = append(ts.StateHistory, types.StateEvent{
 		State:     types.StatePlanActive,
 		Timestamp: now,
@@ -482,6 +532,7 @@ func (d *Dispatcher) watchDecompositionTimeout(ts *types.TaskState) {
 // failTask transitions a task to a terminal failure state, publishes error, and cleans up.
 func (d *Dispatcher) failTask(ts *types.TaskState, errorCode, userMessage string) {
 	now := time.Now().UTC()
+	d.pendingDecompositions.Delete(ts.OrchestratorTaskRef)
 
 	ts.State = types.StateDecompositionFailed
 	ts.ErrorCode = errorCode
@@ -688,6 +739,78 @@ func extractRawInput(payload []byte) string {
 		}
 	}
 	return string(payload)
+}
+
+func buildDecompositionInstructions(taskID, rawInput string, scope types.PolicyScope) string {
+	domains := "[]"
+	if len(scope.Domains) > 0 {
+		raw, _ := json.Marshal(scope.Domains)
+		domains = string(raw)
+	}
+
+	return fmt.Sprintf(
+		"Decompose the user's task into a JSON execution plan for downstream agents.\n"+
+			"Return JSON only. Do not wrap the result in markdown fences. Do not include commentary.\n"+
+			"The JSON schema is:\n"+
+			"{\"plan_id\":\"string\",\"parent_task_id\":\"%s\",\"created_at\":\"RFC3339 timestamp\",\"subtasks\":[{\"subtask_id\":\"string\",\"required_skill_domains\":[\"domain\"],\"action\":\"string\",\"instructions\":\"string\",\"params\":{},\"depends_on\":[\"subtask_id\"],\"timeout_seconds\":30}]}\n"+
+			"Rules:\n"+
+			"- parent_task_id must equal %q\n"+
+			"- required_skill_domains for every subtask must be a subset of %s\n"+
+			"- Use an empty array for depends_on when a subtask has no dependencies\n"+
+			"- Keep the plan concise and executable\n"+
+			"User task:\n%s",
+		taskID,
+		taskID,
+		domains,
+		rawInput,
+	)
+}
+
+func parseExecutionPlan(raw json.RawMessage) (types.ExecutionPlan, error) {
+	var plan types.ExecutionPlan
+	if len(raw) == 0 {
+		return plan, fmt.Errorf("empty planner result")
+	}
+	if err := json.Unmarshal(raw, &plan); err == nil && plan.PlanID != "" {
+		return plan, nil
+	}
+
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		s = strings.TrimSpace(s)
+		s = strings.TrimPrefix(s, "```json")
+		s = strings.TrimPrefix(s, "```")
+		s = strings.TrimSuffix(s, "```")
+		s = strings.TrimSpace(s)
+		if err := json.Unmarshal([]byte(s), &plan); err == nil && plan.PlanID != "" {
+			return plan, nil
+		}
+	}
+
+	return plan, fmt.Errorf("planner result is not a valid execution plan JSON object")
+}
+
+func (d *Dispatcher) activeTaskByOrchRef(orchRef string) *types.TaskState {
+	var found *types.TaskState
+	d.activeTasks.Range(func(_, v any) bool {
+		ts, ok := v.(*types.TaskState)
+		if ok && ts.OrchestratorTaskRef == orchRef {
+			found = ts
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+func minInt(a, b int) int {
+	if a <= 0 {
+		return b
+	}
+	if b <= 0 || a < b {
+		return a
+	}
+	return b
 }
 
 // validateSchema checks all required fields on a UserTask (§5.1, §FR-TRK-02, §FR-TRK-04).
