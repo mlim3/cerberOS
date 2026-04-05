@@ -319,6 +319,8 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 		PermissionSet: permSet,
 		AssignedTask:  spec.TaskID,
 		Instructions:  spec.Instructions,
+		TraceID:       spec.TraceID,
+		UserContextID: spec.UserContextID,
 	}
 	if err := f.registry.Register(agent); err != nil {
 		return fmt.Errorf("factory: registry.Register: %w", err)
@@ -710,6 +712,8 @@ func (f *Factory) HandleCrash(agentID string) error {
 		CredentialPtr:    token,
 		Instructions:     agent.Instructions,
 		RecoveredContext: buildRecoveredContext(snapshot),
+		TraceID:          agent.TraceID,
+		UserContextID:    agent.UserContextID,
 	}
 	if err := f.lifecycle.Spawn(vmCfg); err != nil {
 		return fmt.Errorf("factory: HandleCrash: lifecycle.Spawn: %w", err)
