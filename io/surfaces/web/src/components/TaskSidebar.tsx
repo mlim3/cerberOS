@@ -6,7 +6,7 @@ import './TaskSidebar.css'
 
 interface TaskSidebarProps {
   tasks: Task[]
-  selectedTaskId: string
+  selectedTaskId: string | null
   onSelectTask: (id: string) => void
   settings: UISettings
   taskHeartbeats: Record<string, number>

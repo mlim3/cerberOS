@@ -5,6 +5,7 @@
   "main": "./src/types.ts",
   "types": "./src/types.ts",
   "exports": {
-    ".": "./src/types.ts"
+    ".": "./src/types.ts",
+    "./memory-client": "./src/memory-client.ts"
   }
 }

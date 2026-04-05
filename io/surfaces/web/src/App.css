@@ -115,10 +115,15 @@
   text-align: center;
 }
 
-.empty-state-icon {
-  font-size: 64px;
+.empty-state-ascii {
+  font-family: monospace;
+  font-size: 10px;
+  line-height: 1.2;
+  color: var(--text-secondary);
   margin-bottom: 24px;
-  opacity: 0.7;
+  opacity: 0.6;
+  white-space: pre;
+  letter-spacing: -0.5px;
 }
 
 .empty-state-title {

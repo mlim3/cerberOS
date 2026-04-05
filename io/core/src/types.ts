@@ -191,6 +191,9 @@ export interface ProcessedInput {
   content: string;
   taskId?: string;
   metadata?: Record<string, unknown>;
+  // Voice-specific:
+  audioDurationMs?: number;
+  transcriptionConfidence?: number;
 }
 
 /** Agent response to deliver to the user */
