@@ -1,0 +1,220 @@
+# default_skills.yaml — built-in skill tree for the Aegis OS Agents Component.
+#
+# This file is the single authoritative definition of all built-in skills.
+# It is embedded in both cmd/aegis-agents (M4 registration) and cmd/agent-process
+# (tool dispatch) and used automatically when AEGIS_SKILLS_CONFIG_PATH is unset.
+#
+# To extend the skill set: add a new command here, add its Execute function to
+# cmd/agent-process, and register the implementation name in builtin_registry.go.
+#
+# Schema per command:
+#   name:                    snake_case identifier (max 64 chars)
+#   label:                   human-readable name for monitoring/audit (never sent to LLM)
+#   description:             what the tool does and when NOT to use it (max 300 chars)
+#   implementation:          name in the agent-process builtin_registry
+#   required_credential_types: empty = local-only; non-empty = vault execution required
+#   timeout_seconds:         0 = default 30s; hard max 300s
+#   parameters:
+#     - name:        parameter name (key in the JSON input schema)
+#       type:        string | integer | object | array | boolean
+#       required:    true | false
+#       description: parameter description (required for Tool Contract compliance)
+#       enum:        [value1, value2]  # optional
+#       additional_properties_type: string  # optional; used for type: object params
+#                                           # with uniform-value maps (e.g. variables map)
+
+domains:
+  - name: web
+    commands:
+      - name: web_fetch
+        label: 'Web Fetch'
+        description: 'Fetch the content of a URL via HTTP GET or POST. Use for web pages, REST APIs, or any HTTP resource that does not require authentication. Do NOT use for operations requiring authentication — those require vault execution.'
+        implementation: web_fetch
+        required_credential_types: []
+        timeout_seconds: 30
+        parameters:
+          - name: url
+            type: string
+            required: true
+            description: 'The fully-qualified URL to fetch (must include scheme: https:// or http://).'
+          - name: method
+            type: string
+            required: false
+            description: 'HTTP method. Allowed: GET, POST. Defaults to GET when omitted.'
+            enum: [GET, POST]
+
+      - name: vault_web_fetch
+        label: 'Vault Web Fetch'
+        description: 'Fetch a URL using a stored API credential managed by the Vault. Use for authenticated HTTP requests (APIs requiring an API key). Do NOT use for public URLs — use web_fetch instead. Do NOT include credential values in any parameter.'
+        implementation: vault_web_fetch
+        required_credential_types: [web_api_key]
+        timeout_seconds: 35
+        parameters:
+          - name: url
+            type: string
+            required: true
+            description: 'The fully-qualified URL to fetch (must include scheme: https:// or http://).'
+          - name: method
+            type: string
+            required: false
+            description: 'HTTP method. Allowed: GET, POST. Defaults to GET when omitted.'
+            enum: [GET, POST]
+
+  - name: data
+    commands:
+      - name: data_transform
+        label: 'Data Transform'
+        description: 'Transform or inspect a local JSON value. Use to extract fields, list object keys, or measure array length. Do NOT use when the data must be fetched from an authenticated source — use vault_data_read for that.'
+        implementation: data_transform
+        required_credential_types: []
+        timeout_seconds: 10
+        parameters:
+          - name: data
+            type: string
+            required: true
+            description: 'The JSON value to operate on, encoded as a string.'
+          - name: path
+            type: string
+            required: false
+            description: 'Dot-notation path to navigate before applying the operation. Examples: ".name", ".users.0.email". Omit or pass "." to operate on the root value.'
+          - name: operation
+            type: string
+            required: true
+            description: 'What to do at the resolved path. "extract": return the JSON value. "keys": return sorted keys of a JSON object. "length": return array length, object key count, or string byte length.'
+            enum: [extract, keys, length]
+
+      - name: vault_data_read
+        label: 'Vault Data Read'
+        description: 'Read records from an authenticated data store via the Vault. Provide a collection name and query expression. Do NOT use for unauthenticated HTTP sources — use web_fetch. Do NOT include credential values in any parameter.'
+        implementation: vault_data_read
+        required_credential_types: [data_read_key]
+        timeout_seconds: 35
+        parameters:
+          - name: collection
+            type: string
+            required: true
+            description: 'Name of the table, index, or collection to read from (e.g. "users", "orders").'
+          - name: query
+            type: string
+            required: true
+            description: 'Query expression or record ID. Interpretation is data-store specific (e.g. a SQL WHERE clause, a document ID, or a filter string).'
+
+      - name: vault_data_write
+        label: 'Vault Data Write'
+        description: 'Write or upsert a JSON record into an authenticated data store via the Vault. Provide a collection name and a JSON-encoded record object. Do NOT use for reading — use vault_data_read. Do NOT include credential values in any parameter.'
+        implementation: vault_data_write
+        required_credential_types: [data_write_key]
+        timeout_seconds: 35
+        parameters:
+          - name: collection
+            type: string
+            required: true
+            description: 'Name of the table, index, or collection to write to (e.g. "users", "events").'
+          - name: record
+            type: string
+            required: true
+            description: 'The record to write, encoded as a JSON object string. Must be a valid JSON object.'
+
+  - name: comms
+    commands:
+      - name: comms_format
+        label: 'Comms Format'
+        description: 'Render a message template by replacing {{variable}} placeholders with supplied values. Use to compose notification or report bodies before sending. Do NOT use this tool to deliver the message — call vault_comms_send for sending.'
+        implementation: comms_format
+        required_credential_types: []
+        timeout_seconds: 5
+        parameters:
+          - name: template
+            type: string
+            required: true
+            description: 'Message template string. Use {{variable_name}} syntax for placeholders (e.g. "Hello, {{name}}!").'
+          - name: variables
+            type: object
+            required: false
+            description: 'Map of placeholder names to string substitution values. Each key corresponds to a {{key}} in the template.'
+            additional_properties_type: string
+
+      - name: vault_comms_send
+        label: 'Vault Comms Send'
+        description: 'Send a formatted message to an authenticated channel (email, Slack, webhook) via the Vault. Compose the message first with comms_format. Do NOT use for channels that require no credentials. Do NOT include credential values in any parameter.'
+        implementation: vault_comms_send
+        required_credential_types: [comms_api_key]
+        timeout_seconds: 35
+        parameters:
+          - name: channel
+            type: string
+            required: true
+            description: 'Logical channel identifier configured in the Vault (e.g. "ops-alerts", "customer-support"). Do NOT pass raw URLs, API keys, or webhook URLs.'
+          - name: message
+            type: string
+            required: true
+            description: 'The fully-rendered message body to send. Use comms_format to render templates before calling this tool.'
+          - name: subject
+            type: string
+            required: false
+            description: 'Subject line for channels that support it (e.g. email). Omit for channels that do not use subjects (e.g. Slack).'
+
+  - name: storage
+    commands:
+      - name: vault_storage_read
+        label: 'Vault Storage Read'
+        description: 'Read a file or object from authenticated cloud storage via the Vault. Specify bucket and object key. Do NOT use for public URLs — use web_fetch instead. Do NOT include credential values in any parameter.'
+        implementation: vault_storage_read
+        required_credential_types: [storage_credential]
+        timeout_seconds: 65
+        parameters:
+          - name: bucket
+            type: string
+            required: true
+            description: 'Bucket or container name as configured in the Vault storage credential (e.g. "prod-assets", "reports-archive").'
+          - name: key
+            type: string
+            required: true
+            description: 'Object key or file path within the bucket (e.g. "reports/2024-01.csv", "images/logo.png").'
+
+      - name: vault_storage_write
+        label: 'Vault Storage Write'
+        description: 'Write or overwrite an object in authenticated cloud storage via the Vault. Specify bucket, key, and content. Do NOT use for reading — use vault_storage_read. Do NOT include credential values in any parameter.'
+        implementation: vault_storage_write
+        required_credential_types: [storage_credential]
+        timeout_seconds: 65
+        parameters:
+          - name: bucket
+            type: string
+            required: true
+            description: 'Bucket or container name as configured in the Vault storage credential (e.g. "prod-assets", "reports-archive").'
+          - name: key
+            type: string
+            required: true
+            description: 'Object key or file path to write within the bucket (e.g. "reports/2024-01.csv"). Existing objects are overwritten.'
+          - name: content
+            type: string
+            required: true
+            description: 'Content to write to the object. For binary data, use base64 encoding and set content_type accordingly.'
+          - name: content_type
+            type: string
+            required: false
+            description: 'MIME type of the content (e.g. "text/plain", "application/json", "image/png"). Defaults to "application/octet-stream" when omitted.'
+
+      - name: vault_storage_list
+        label: 'Vault Storage List'
+        description: 'List objects in an authenticated cloud storage bucket via the Vault. Returns object keys and metadata. Use an optional prefix to narrow results. Do NOT use to read object content — use vault_storage_read. Do NOT include credential values in any parameter.'
+        implementation: vault_storage_list
+        required_credential_types: [storage_credential]
+        timeout_seconds: 35
+        parameters:
+          - name: bucket
+            type: string
+            required: true
+            description: 'Bucket or container name as configured in the Vault storage credential (e.g. "prod-assets", "reports-archive").'
+          - name: prefix
+            type: string
+            required: false
+            description: 'Optional key prefix to filter results (e.g. "reports/2024-"). Omit to list all objects in the bucket.'
+          - name: max_results
+            type: integer
+            required: false
+            description: 'Maximum number of objects to return. Defaults to 100 when omitted; hard cap enforced by the Vault.'
+
+  - name: general
+    commands: []

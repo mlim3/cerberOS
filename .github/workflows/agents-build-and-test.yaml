@@ -1,0 +1,32 @@
+name: Agents Component Build & Test
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "agents-component/**"
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - "agents-component/**"
+
+jobs:
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./agents-component
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: 'agents-component/go.mod'
+        cache-dependency-path: 'agents-component/go.sum'
+    - name: Build
+      run: go build -v ./...
+    - name: Vet
+      run: go vet ./...
+    - name: Test
+      run: go test -count=1 ./...

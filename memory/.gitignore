@@ -1,0 +1,37 @@
+# Binaries
+/bin/
+/build/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test output
+*.test
+*.out
+coverage.out
+
+# Logs
+*.log
+
+# Environment files
+.env
+.env.*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Go workspace file (optional)
+go.work
+
+*.local
+docker-compose.override.yml
+
+configs/local.yaml

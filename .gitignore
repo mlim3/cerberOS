@@ -1,0 +1,94 @@
+# Project
+context/
+
+# OS / filesystem
+.DS_Store
+.DS_Store?
+.AppleDouble
+.LSOverride
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
+.Spotlight-V100
+.Trashes
+
+# IDE / editors
+.idea/
+*.iml
+.vscode/
+*.sublime-project
+*.sublime-workspace
+*.code-workspace
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+
+# Build / artifacts
+build/
+dist/
+dist-ssr/
+out/
+target/
+bin/
+vendor/
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.dylib
+*.pyc
+__pycache__/
+*.egg-info/
+.eggs/
+*.class
+*.jar
+*.war
+node_modules/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+*.local
+*.pem
+*.key
+secrets/
+
+# Logs / temp
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+logs/
+tmp/
+temp/
+.cache/
+
+# Coverage / test
+.coverage
+htmlcov/
+.pytest_cache/
+.tox/
+*.cover
+*.lcov
+
+# Misc
+*.bak
+*.tmp
+*.temp
+*.orig
+.todos/
+
+# Claude Code
+.sidecar/
+CLAUDE.md
+todo/
+*.td*
+td.json

@@ -1,0 +1,20 @@
+# Version control
+.git
+.gitignore
+
+# Test code and fixtures — not needed in the image
+test/
+
+# Documentation
+docs/
+*.pdf
+README.md
+CLAUDE.md
+
+# Local dev artifacts
+*.env
+.env*
+!.env.example
+
+# Build outputs that should not bleed into the Docker build context
+agent-process
