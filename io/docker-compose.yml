@@ -1,0 +1,18 @@
+services:
+  io-api:
+    build:
+      context: "."
+      dockerfile: api/Dockerfile
+    ports:
+      - "3001:3001"
+    environment:
+      - MEMORY_API_BASE=http://memory-api:8080
+      - STT_PROVIDER=local
+      # - OPENAI_API_KEY=   # Uncomment and set for cloud fallback
+    networks:
+      - cerberOS
+
+networks:
+  cerberOS:
+    name: cerberOS
+    external: false
