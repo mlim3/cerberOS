@@ -38,6 +38,13 @@ type VMConfig struct {
 	RecoveredContext string // non-empty on respawn: serialised CrashSnapshot for checkpoint resume
 	TraceID          string
 	UserContextID    string // propagated from TaskSpec; echoed in all outbound events (issue #67)
+
+	// OnComplete is called by the process manager when the agent process exits.
+	// output holds the raw TaskOutput JSON written to stdout; exitErr is non-nil
+	// when the process exited with a non-zero status. The factory uses this to
+	// call CompleteTask on clean exit rather than waiting for the crash detector
+	// to misinterpret heartbeat silence as a crash.
+	OnComplete func(agentID string, output []byte, exitErr error)
 }
 
 // HealthStatus is the result of a health probe for a running agent.
@@ -153,6 +160,9 @@ func (m *processManager) Spawn(config VMConfig) error {
 	go func() {
 		entry.exitErr = cmd.Wait()
 		close(entry.done)
+		if config.OnComplete != nil {
+			config.OnComplete(config.AgentID, entry.stdout.Bytes(), entry.exitErr)
+		}
 	}()
 
 	return nil
