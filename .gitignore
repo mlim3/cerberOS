@@ -1,6 +1,9 @@
 # Project
 context/
 
+# Implementation plans (private, not pushed)
+plans/
+
 # OS / filesystem
 .DS_Store
 .DS_Store?

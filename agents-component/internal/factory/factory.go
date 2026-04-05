@@ -6,6 +6,8 @@ package factory
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -319,6 +321,8 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 		PermissionSet: permSet,
 		AssignedTask:  spec.TaskID,
 		Instructions:  spec.Instructions,
+		TraceID:       spec.TraceID,
+		UserContextID: spec.UserContextID,
 	}
 	if err := f.registry.Register(agent); err != nil {
 		return fmt.Errorf("factory: registry.Register: %w", err)
@@ -387,6 +391,7 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 		CommandManifest: manifest,
 		TraceID:         spec.TraceID,
 		UserContextID:   spec.UserContextID,
+		OnComplete:      f.processCompletionHandler(agentID),
 	}
 	if err := f.lifecycle.Spawn(vmCfg); err != nil {
 		return fmt.Errorf("factory: lifecycle.Spawn: %w", err)
@@ -422,6 +427,41 @@ func (f *Factory) assignTask(agentID string, spec *types.TaskSpec) error {
 		return fmt.Errorf("factory: registry.AssignTask: %w", err)
 	}
 	return f.publishStatus(agentID, spec.TaskID, registry.StateActive, spec.TraceID)
+}
+
+// processCompletionHandler returns the OnComplete callback set on VMConfig at
+// spawn time. When the agent-process exits cleanly (exitErr == nil) it decodes
+// the TaskOutput from stdout and calls CompleteTask, which unregisters the
+// agent from crash monitoring before the heartbeat detector can misfire.
+// Non-zero exits are left to the crash detector so recovery follows the normal
+// HandleCrash path.
+func (f *Factory) processCompletionHandler(agentID string) func(string, []byte, error) {
+	return func(_ string, output []byte, exitErr error) {
+		if exitErr != nil {
+			// Process crashed or was killed — crash detector will fire after
+			// heartbeat timeout and call HandleCrash. Nothing to do here.
+			return
+		}
+		var out struct {
+			TraceID string `json:"trace_id"`
+			Success bool   `json:"success"`
+			Result  string `json:"result,omitempty"`
+			Error   string `json:"error,omitempty"`
+		}
+		if err := json.Unmarshal(output, &out); err != nil {
+			f.log.Error("agent-process: failed to decode TaskOutput",
+				"agent_id", agentID, "error", err)
+			return
+		}
+		var taskErr error
+		if !out.Success {
+			taskErr = errors.New(out.Error)
+		}
+		if err := f.CompleteTask(agentID, "", out.TraceID, out.Result, taskErr); err != nil {
+			f.log.Error("agent-process: CompleteTask failed",
+				"agent_id", agentID, "error", err)
+		}
+	}
 }
 
 // CompleteTask collects results, writes to Memory, publishes task_result, and
@@ -710,6 +750,9 @@ func (f *Factory) HandleCrash(agentID string) error {
 		CredentialPtr:    token,
 		Instructions:     agent.Instructions,
 		RecoveredContext: buildRecoveredContext(snapshot),
+		TraceID:          agent.TraceID,
+		UserContextID:    agent.UserContextID,
+		OnComplete:       f.processCompletionHandler(agentID),
 	}
 	if err := f.lifecycle.Spawn(vmCfg); err != nil {
 		return fmt.Errorf("factory: HandleCrash: lifecycle.Spawn: %w", err)

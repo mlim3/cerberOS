@@ -1,0 +1,45 @@
+services:
+  io:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # false = skip ffmpeg, Python, faster-whisper, and model download (fast build)
+        # true  = full local STT; set STT_PROVIDER=local below
+        ENABLE_VOICE: "false"
+    ports:
+      - "3001:3001"
+    environment:
+      - NODE_ENV=production
+
+      # ── Demo Mode ──
+      # Set to 'true' for presentation mode (mock tasks, fake responses, credential demo)
+      # Default 'false' = integration mode (empty state, real orchestrator communication)
+      - DEMO_MODE=false
+
+      # ── Orchestrator Integration ──
+      # NATS connection (required for real orchestrator communication)
+      # - NATS_URL=nats://nats:4222
+      # - NATS_CREDS_PATH=/run/secrets/nats.creds
+      # HTTP bridge (alternative to NATS for testing)
+      # Orchestrator can POST events to http://<io-host>:3001/api/orchestrator/stream-events
+
+      # ── Memory Integration ──
+      # - MEMORY_API_BASE=http://memory-api:8080
+      # - MEMORY_API_KEY=
+      # - MEMORY_VAULT_URL=http://memory-api:8080/api/v1/vault
+      # - MEMORY_VAULT_API_KEY=
+
+      # ── Logging ──
+      # Set to 'debug' for full JSON request/response bodies in logs
+      # - LOG_LEVEL=debug
+
+      # ── Voice / STT ──
+      # disabled = stub API (fast Docker default). Use local + ENABLE_VOICE=true build for Whisper.
+      - STT_PROVIDER=disabled
+    networks:
+      - cerberos
+
+networks:
+  cerberos:
+    name: cerberos

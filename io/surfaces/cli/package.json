@@ -3,16 +3,19 @@
   "version": "0.1.0",
   "type": "module",
   "bin": {
-    "cerberos-cli": "./src/index.ts"
+    "cerberos": "./src/cli.ts"
   },
   "scripts": {
-    "start": "bun run ./src/index.ts",
-    "dev": "bun --watch run ./src/index.ts"
+    "dev": "bun run --watch src/cli.ts",
+    "start": "bun run src/cli.ts",
+    "build": "bun build src/cli.ts --outdir ./dist --target bun",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@cerberos/io-core": "workspace:*"
   },
   "devDependencies": {
-    "@types/node": "^25.4.0"
+    "@types/bun": "^1.0.0",
+    "@types/node": "^20.0.0"
   }
 }

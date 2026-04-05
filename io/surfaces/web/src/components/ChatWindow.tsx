@@ -2,7 +2,9 @@ import { useState, useRef, useEffect } from 'react'
 import type { Task, CredentialRequest, CredentialRequestStatus } from '@cerberos/io-core'
 import type { UISettings } from './SettingsPanel'
 import CredentialRequestCard from './CredentialRequestCard'
+import { VoiceRecorder } from './VoiceRecorder'
 import './ChatWindow.css'
+import './VoiceRecorder.css'
 
 interface ChatWindowProps {
   task: Task
@@ -157,6 +159,12 @@ function ChatWindow({
           </div>
         )}
         <form className="chat-input-form" onSubmit={handleSubmit}>
+          <VoiceRecorder
+            onTranscription={(text) => {
+              onSendMessage(task.id, text)
+            }}
+            disabled={isStreaming}
+          />
           <input
             ref={inputRef}
             type="text"
