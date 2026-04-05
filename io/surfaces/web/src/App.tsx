@@ -308,6 +308,7 @@ function App() {
       }
     }
 
+    if (!selectedTaskId) return
     const unsub = subscribeOrchestratorTaskStream(selectedTaskId, {
       onOpen: () => {
         if (!cancelled) setUseMockHeartbeat(false)
@@ -824,10 +825,7 @@ function App() {
         <header className="header">
           <div className="header-task-info">
             <h1 className="header-title">
-              {selectedTask?.title ||
-                (tasks.length === 0 && !DEMO_MODE
-                  ? 'No active tasks. Submit a prompt below to create one.'
-                  : 'Select a task')}
+              {selectedTask?.title ?? ''}
             </h1>
             {selectedTask && (
               <div className="header-meta">
@@ -866,9 +864,15 @@ function App() {
           />
         ) : (
           <div className="empty-state">
-            <div className="empty-state-icon">🤖</div>
-            <h2 className="empty-state-title">Select a task to begin</h2>
-            <p className="empty-state-text">Choose a task from the sidebar to view its conversation and provide feedback to the agent.</p>
+            <pre className="empty-state-ascii">{`
+  ██████╗███████╗██████╗ ██████╗ ███████╗██████╗  ██████╗ ███████╗
+ ██╔════╝██╔════╝██╔══██╗██╔══██╗██╔════╝██╔══██╗██╔═══██╗██╔════╝
+ ██║     █████╗  ██████╔╝██████╔╝█████╗  ██████╔╝██║   ██║███████╗
+ ██║     ██╔══╝  ██╔══██╗██╔══██╗██╔══╝  ██╔══██╗██║   ██║╚════██║
+ ╚██████╗███████╗██║  ██║██████╔╝███████╗██║  ██║╚██████╔╝███████║
+  ╚═════╝╚══════╝╚═╝  ╚═╝╚═════╝ ╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝`}</pre>
+            <h2 className="empty-state-title">Create a new task to begin</h2>
+            <p className="empty-state-text">Press "Create New Task" in the sidebar to start working with the agent.</p>
           </div>
         )}
         {showSettings && (

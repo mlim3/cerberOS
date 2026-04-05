@@ -52,34 +52,24 @@ export class AudioCapture {
 
     this.mediaRecorder = new MediaRecorder(stream, { mimeType })
 
-    return new Promise((resolve, reject) => {
-      if (!this.mediaRecorder) return reject(new Error('MediaRecorder not initialized'))
-
-      this.mediaRecorder.ondataavailable = (e) => {
-        if (e.data.size > 0) {
-          this.audioChunks.push(e.data)
-        }
+    this.mediaRecorder.ondataavailable = (e) => {
+      if (e.data.size > 0) {
+        this.audioChunks.push(e.data)
       }
+    }
 
-      this.mediaRecorder.onstop = () => {
-        // Stop all tracks
-        stream.getTracks().forEach(t => t.stop())
-        resolve()
+    this.mediaRecorder.onerror = () => {
+      stream.getTracks().forEach(t => t.stop())
+    }
+
+    this.mediaRecorder.start()
+
+    // Auto-stop after max duration
+    setTimeout(() => {
+      if (this.mediaRecorder?.state === 'recording') {
+        this.mediaRecorder.stop()
       }
-
-      this.mediaRecorder.onerror = (e) => {
-        reject(new Error(`MediaRecorder error: ${e}`))
-      }
-
-      this.mediaRecorder.start()
-
-      // Auto-stop after max duration
-      setTimeout(() => {
-        if (this.mediaRecorder?.state === 'recording') {
-          this.mediaRecorder.stop()
-        }
-      }, this.config.maxDurationMs)
-    })
+    }, this.config.maxDurationMs)
   }
 
   /** Stop recording and return base64 audio */
@@ -88,20 +78,19 @@ export class AudioCapture {
       throw new Error('Not recording')
     }
 
-    this.mediaRecorder.stop()
-    this.mediaRecorder = null
+    const recorder = this.mediaRecorder
 
-    // Wait for onstop to fire
+    // Wait for onstop to fire (which collects final chunks) before proceeding
     await new Promise<void>(resolve => {
-      const check = () => {
-        if (!this.mediaRecorder || this.mediaRecorder.state === 'inactive') {
-          resolve()
-        } else {
-          setTimeout(check, 50)
-        }
+      recorder.onstop = () => {
+        // Stop all tracks on the stream
+        recorder.stream.getTracks().forEach(t => t.stop())
+        resolve()
       }
-      check()
+      recorder.stop()
     })
+
+    this.mediaRecorder = null
 
     const blob = new Blob(this.audioChunks, { type: this.audioChunks[0]?.type ?? this.config.mimeType })
     const arrayBuffer = await blob.arrayBuffer()

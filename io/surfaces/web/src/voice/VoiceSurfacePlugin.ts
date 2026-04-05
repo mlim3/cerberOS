@@ -5,11 +5,10 @@
  */
 
 import type { WebSurfaceAdapter } from '../surface/WebSurfaceAdapter'
-import { AudioCapture, type CaptureResult } from './AudioCapture'
 
 export function attachVoiceToSurface(
-  surface: WebSurfaceAdapter,
-  options?: { onTranscribing?: (v: boolean) => void }
+  _surface: WebSurfaceAdapter,
+  _options?: { onTranscribing?: (v: boolean) => void }
 ): () => void {
   // VoiceRecorder is React-based — for the adapter, we provide a raw capture API
   // The React component handles UI; this plugin handles the transcription pipeline

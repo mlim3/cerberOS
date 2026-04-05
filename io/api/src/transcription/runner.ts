@@ -5,8 +5,7 @@
  */
 
 import { spawn } from 'child_process'
-import { writeFileSync, unlinkSync } from 'fs'
-import { mkdtempSync } from 'path'
+import { writeFileSync, unlinkSync, mkdtempSync } from 'fs'
 import { randomUUID } from 'crypto'
 
 const VENV_PYTHON = '/opt/venv/bin/python3'
