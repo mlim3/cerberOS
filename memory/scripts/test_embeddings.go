@@ -83,17 +83,17 @@ func queryInfo(query string) {
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
-	
+
 	if resp.StatusCode != http.StatusOK {
 		log.Fatalf("Query returned status %d: %s", resp.StatusCode, string(body))
 	}
-	
+
 	var result map[string]interface{}
 	json.Unmarshal(body, &result)
-	
+
 	data := result["data"].(map[string]interface{})
 	results := data["results"].([]interface{})
-	
+
 	for i, r := range results {
 		res := r.(map[string]interface{})
 		fmt.Printf("Match %d (Similarity: %.4f): %s\n", i+1, res["similarityScore"], res["text"])
