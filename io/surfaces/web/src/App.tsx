@@ -291,7 +291,7 @@ function App() {
           ),
         )
         setTaskHeartbeats(prev => ({ ...prev, [p.taskId]: Date.now() }))
-      } else {
+      } else if (ev.type === 'credential_request') {
         setCredentialRequests(prev => {
           const ex = prev[ev.payload.taskId]
           if (
@@ -620,47 +620,14 @@ function App() {
         })
       }
 
-      // Special handling for a brand new task: no streamed reply,
-      // just acknowledge and move it into the working state with ~1 min ETA.
-      if (task.title === 'New Task' && task.messages.length === 0 && task.status === 'awaiting_feedback') {
-        const summarySnippet = userContent.length > 80 ? `${userContent.slice(0, 77)}…` : userContent
-        const agentMsg: Message = {
-          id: nextId(),
-          role: 'agent',
-          content: `cerberOS: I've noted your input («${summarySnippet}»). I'm working on a concrete plan now; expect a proposal in about a minute.`,
-          timestamp: timeLabel(),
-        }
-
+      // For a brand-new task, set the title from the first message content.
+      if (task.title === 'New Task' && task.messages.length === 0) {
+        const titleSnippet = userContent.length > 60 ? `${userContent.slice(0, 57)}…` : userContent
         setTasks(prev =>
           prev.map(t =>
-            t.id === taskId
-              ? {
-                  ...t,
-                  status: 'working',
-                  lastUpdate: 'Agent is drafting a plan…',
-                  expectedNextInput: '~1 min',
-                  messages: [...t.messages, agentMsg],
-                }
-              : t
+            t.id === taskId ? { ...t, title: titleSnippet } : t
           )
         )
-
-        if (uiSettings.showActivityLog) {
-          addLogEntry({
-            type: 'agent_response',
-            taskId,
-            taskTitle: task.title.slice(0, 20),
-            message: 'Agent acknowledged new task and is planning.',
-          })
-          addLogEntry({
-            type: 'status_change',
-            taskId,
-            taskTitle: task.title.slice(0, 20),
-            message: 'Task moved to working; next input expected in ~1 min.',
-          })
-        }
-
-        return
       }
 
       setStreamingForTaskId(taskId)

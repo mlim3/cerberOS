@@ -15,7 +15,10 @@ import { connect, type NatsConnection, type JetStreamClient, type Subscription }
 // ── NATS subjects (aligned with agents-component/internal/comms/subjects.go) ──
 
 /** IO publishes user tasks here for the orchestrator to pick up. */
-export const SUBJECT_TASK_INBOUND = 'aegis.orchestrator.task.inbound'
+export const SUBJECT_TASK_INBOUND = 'aegis.orchestrator.tasks.inbound'
+
+/** IO subscribes to this wildcard for orchestrator responses on per-task callback topics. */
+export const SUBJECT_IO_RESULTS = 'aegis.io.results.>'
 
 /** Orchestrator publishes task completion/results here. */
 export const SUBJECT_TASK_RESULT = 'aegis.orchestrator.task.result'
@@ -34,9 +37,21 @@ export interface NatsConfig {
   credsPath?: string
 }
 
+export interface UserTaskPayload {
+  task_id: string
+  user_id: string
+  content: string
+  priority?: number
+  timeout_seconds?: number
+  payload?: { raw_input: string }
+  callback_topic?: string
+  required_skill_domains?: string[]
+  user_context_id?: string
+}
+
 export interface IONatsClient {
   connected: boolean
-  publishUserTask(envelope: unknown): Promise<void>
+  publishUserTask(task: UserTaskPayload): Promise<void>
   subscribe(channel: string, handler: (msg: unknown) => void): () => void
   close(): void
 }
@@ -62,6 +77,11 @@ function buildEnvelope(messageType: string, correlationId: string, payload: unkn
     schema_version: '1.0',
     payload,
   }
+}
+
+/** Build a callback topic for a given task. */
+export function callbackTopicForTask(taskId: string): string {
+  return `aegis.io.results.${taskId}`
 }
 
 /**
@@ -136,11 +156,19 @@ export function createNatsClient(config: NatsConfig): IONatsClient | null {
       return isConnected
     },
 
-    async publishUserTask(payload: unknown) {
+    async publishUserTask(task: UserTaskPayload) {
       if (!js) throw new Error('NATS JetStream not connected')
-      const taskPayload = payload as { taskId?: string; task_id?: string }
-      const correlationId = taskPayload.taskId ?? taskPayload.task_id ?? ''
-      const envelope = buildEnvelope('task.inbound', correlationId, payload)
+      const natsPayload = {
+        task_id: task.task_id,
+        user_id: task.user_id,
+        required_skill_domains: task.required_skill_domains ?? ['general'],
+        priority: task.priority ?? 5,
+        timeout_seconds: task.timeout_seconds ?? 120,
+        payload: task.payload ?? { raw_input: task.content },
+        callback_topic: task.callback_topic ?? callbackTopicForTask(task.task_id),
+        user_context_id: task.user_context_id,
+      }
+      const envelope = buildEnvelope('user_task', task.task_id, natsPayload)
       const data = new TextEncoder().encode(JSON.stringify(envelope))
       await js.publish(SUBJECT_TASK_INBOUND, data)
     },
