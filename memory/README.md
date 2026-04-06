@@ -4,6 +4,36 @@ Version: v1
 Implementation Language: Go  
 Database: PostgreSQL with pgvector
 
+## CLI Tool
+
+The memory service includes a hybrid CLI tool that allows other services or scripts to interact with the memory database directly (avoiding HTTP network latency) or fallback to the HTTP API.
+
+### Build the CLI
+
+```bash
+cd /Users/aniketthakker/Downloads/cerberOS/memory
+go build -o memory-cli ./cmd/cli
+```
+
+### Usage
+
+By default, the CLI will attempt to connect to the HTTP API at `http://localhost:8080`.
+
+```bash
+# Query facts using HTTP API
+./memory-cli chat history --session <session-uuid> --limit 10
+./memory-cli facts query --user <user-uuid> "what is my favorite color?"
+```
+
+#### Direct Database Connection (Zero Latency)
+
+To bypass the HTTP API and connect directly to the database, provide the `-db` flag or set the standard DB environment variables (`DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`).
+
+```bash
+# Connect directly to the DB to avoid network hops
+./memory-cli -db="postgres://user:pass@localhost:5432/memory_db" facts query --user <user-uuid> "tell me about myself"
+```
+
 ## Swagger Generation
 
 Swagger is generated from handler annotations with `swaggo/swag`.
