@@ -486,6 +486,17 @@ func (h *PersonalInfoHandler) UpdateFact(w http.ResponseWriter, r *http.Request)
 }
 
 // DeleteFact deletes a fact for a user
+// @Summary Delete a fact
+// @Description Deletes a fact for a user
+// @Tags personal_info
+// @Produce json
+// @Param userId path string true "User ID"
+// @Param factId path string true "Fact ID"
+// @Success 200 {object} map[string]interface{} "OK"
+// @Failure 400 {object} map[string]interface{} "Bad Request"
+// @Failure 404 {object} map[string]interface{} "Not Found"
+// @Failure 500 {object} map[string]interface{} "Internal Server Error"
+// @Router /api/v1/personal_info/{userId}/facts/{factId} [delete]
 func (h *PersonalInfoHandler) DeleteFact(w http.ResponseWriter, r *http.Request) {
 	userId := r.PathValue("userId")
 	factId := r.PathValue("factId")

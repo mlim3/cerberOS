@@ -31,6 +31,7 @@ func NewAgentHandler(repo *storage.AgentLogsRepository) *AgentHandler {
 // @Success 201 "Created"
 // @Failure 400 "Bad Request"
 // @Failure 500 "Internal Server Error"
+// @Router /api/v1/agent/{taskId}/executions [post]
 // @Router /api/v1/agents/tasks/{taskId}/executions [post]
 func (h *AgentHandler) HandleCreateTaskExecution(w http.ResponseWriter, r *http.Request) {
 	taskId := r.PathValue("taskId")
@@ -145,6 +146,7 @@ func (h *AgentHandler) HandleCreateTaskExecution(w http.ResponseWriter, r *http.
 // @Success 200 {array} storage.AgentLogsSchemaTaskExecution "List of task executions"
 // @Failure 400 "Bad Request"
 // @Failure 500 "Internal Server Error"
+// @Router /api/v1/agent/{taskId}/executions [get]
 // @Router /api/v1/agents/tasks/{taskId}/executions [get]
 func (h *AgentHandler) HandleGetExecutions(w http.ResponseWriter, r *http.Request) {
 	taskId := r.PathValue("taskId")

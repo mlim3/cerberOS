@@ -142,6 +142,60 @@ definitions:
 info:
   contact: {}
 paths:
+  /api/v1/agent/{taskId}/executions:
+    get:
+      description: Fetches and returns the chronological log of an agent's work for
+        a specific taskId
+      parameters:
+      - description: Task ID
+        in: path
+        name: taskId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: List of task executions
+          schema:
+            items:
+              $ref: '#/definitions/github_com_mlim3_cerberOS_memory_internal_storage.AgentLogsSchemaTaskExecution'
+            type: array
+        "400":
+          description: Bad Request
+        "500":
+          description: Internal Server Error
+      summary: Get task executions
+      tags:
+      - agents
+    post:
+      consumes:
+      - application/json
+      description: Creates a new task execution log for an agent
+      parameters:
+      - description: Task ID
+        in: path
+        name: taskId
+        required: true
+        type: string
+      - description: Task Execution Payload
+        in: body
+        name: request
+        required: true
+        schema:
+          type: object
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+        "400":
+          description: Bad Request
+        "500":
+          description: Internal Server Error
+      summary: Create task execution log
+      tags:
+      - agents
   /api/v1/agents/tasks/{taskId}/executions:
     get:
       description: Fetches and returns the chronological log of an agent's work for
@@ -269,6 +323,25 @@ paths:
       summary: Create a new chat message
       tags:
       - chat
+  /api/v1/healthz:
+    get:
+      description: Returns service health and database connectivity status
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Healthy
+          schema:
+            additionalProperties: true
+            type: object
+        "503":
+          description: Degraded
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Health check
+      tags:
+      - system
   /api/v1/personal_info/{userId}/all:
     get:
       description: Retrieves all stored facts and chunks for a user
@@ -300,6 +373,45 @@ paths:
       tags:
       - personal_info
   /api/v1/personal_info/{userId}/facts/{factId}:
+    delete:
+      description: Deletes a fact for a user
+      parameters:
+      - description: User ID
+        in: path
+        name: userId
+        required: true
+        type: string
+      - description: Fact ID
+        in: path
+        name: factId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Delete a fact
+      tags:
+      - personal_info
     put:
       consumes:
       - application/json
