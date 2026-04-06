@@ -16,7 +16,7 @@ import {
   type MemoryLogEntry,
 } from '@cerberos/io-core/memory-client'
 import { transcribe, warmupTranscription } from './transcription/runner'
-import { createNatsClient } from './nats/client'
+import { createNatsClient, SUBJECT_TASK_INBOUND } from './nats/client'
 
 // =============================================================================
 // Configuration
@@ -216,7 +216,20 @@ app.post('/api/tasks', async (c) => {
   tasks.set(taskId, task)
   broadcastStatus(taskId, task)
 
-  // TODO (Step 5): If NATS connected, publish UserTask envelope
+  // Publish UserTask envelope to orchestrator via NATS when connected
+  if (natsClient?.connected) {
+    try {
+      await natsClient.publishUserTask({
+        task_id: taskId,
+        content,
+        user_id: userId ?? '00000000-0000-0000-0000-000000000001',
+        created_at: new Date().toISOString(),
+      })
+      log('NATS', `Published UserTask to ${SUBJECT_TASK_INBOUND} taskId=${taskId}`)
+    } catch (err) {
+      log('NATS', `Failed to publish UserTask: ${err}`)
+    }
+  }
 
   return c.json({ taskId, status: 'created' })
 });

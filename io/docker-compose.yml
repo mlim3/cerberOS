@@ -1,4 +1,13 @@
 services:
+  nats:
+    image: nats:2-alpine
+    command: ["--jetstream", "--store_dir", "/data"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"   # monitoring
+    networks:
+      - cerberos
+
   io:
     build:
       context: .
@@ -9,6 +18,8 @@ services:
         ENABLE_VOICE: "false"
     ports:
       - "3001:3001"
+    depends_on:
+      - nats
     environment:
       - NODE_ENV=production
 
@@ -19,7 +30,7 @@ services:
 
       # ── Orchestrator Integration ──
       # NATS connection (required for real orchestrator communication)
-      # - NATS_URL=nats://nats:4222
+      - NATS_URL=nats://nats:4222
       # - NATS_CREDS_PATH=/run/secrets/nats.creds
       # HTTP bridge (alternative to NATS for testing)
       # Orchestrator can POST events to http://<io-host>:3001/api/orchestrator/stream-events
@@ -32,7 +43,7 @@ services:
 
       # ── Logging ──
       # Set to 'debug' for full JSON request/response bodies in logs
-      # - LOG_LEVEL=debug
+      - LOG_LEVEL=debug
 
       # ── Voice / STT ──
       # disabled = stub API (fast Docker default). Use local + ENABLE_VOICE=true build for Whisper.
@@ -42,4 +53,4 @@ services:
 
 networks:
   cerberos:
-    name: cerberos
+    external: true
