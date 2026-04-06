@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@cerberos/io-core": "workspace:*",
-    "hono": "^4.0.0"
+    "hono": "^4.0.0",
+    "nats": "^2.29.3"
   }
 }
