@@ -4,6 +4,24 @@ Version: v1
 Implementation Language: Go  
 Database: PostgreSQL with pgvector
 
+## Swagger Generation
+
+Swagger is generated from handler annotations with `swaggo/swag`.
+
+From `/Users/colbydobson/cs/cerberOS/memory`, run:
+
+```bash
+go generate ./cmd/server
+```
+
+That regenerates:
+
+- `docs/docs.go`
+- `docs/swagger.json`
+- `docs/swagger.yaml`
+
+The server imports the generated docs package and serves Swagger UI at `http://localhost:8080/swagger/index.html`.
+
 ## 1. Architectural Overview
 
 The Memory Service acts as the central memory layer for the AI OS. It follows a logically distributed architecture on a single PostgreSQL instance, with strict sharding keys that allow physical distribution in the future. Externally, it exposes domain-specific, versioned REST endpoints. Internally, it routes these requests to isolated PostgreSQL schemas, ensuring clear service boundaries, security, and optimized querying.

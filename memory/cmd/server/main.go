@@ -1,3 +1,15 @@
+//go:generate go run github.com/swaggo/swag/cmd/swag@v1.16.6 init -g cmd/server/main.go -o docs
+
+// Package main runs the memory service API.
+//
+// @title Memory Service API
+// @version v1
+// @description REST API for CerberOS memory, chat, personal info, system event, vault, and agent execution services.
+// @BasePath /
+// @schemes http
+// @securityDefinitions.apikey ApiKeyAuth
+// @in header
+// @name X-Internal-API-Key
 package main
 
 import (
@@ -12,12 +24,48 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
+	docs "github.com/mlim3/cerberOS/memory/docs"
 	"github.com/mlim3/cerberOS/memory/internal/api"
 	"github.com/mlim3/cerberOS/memory/internal/logic"
 	"github.com/mlim3/cerberOS/memory/internal/storage"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	httpSwagger "github.com/swaggo/http-swagger"
 )
+
+// newHealthzHandler reports process and database health.
+// @Summary Health check
+// @Description Returns service health and database connectivity status
+// @Tags system
+// @Produce json
+// @Success 200 {object} map[string]interface{} "Healthy"
+// @Failure 503 {object} map[string]interface{} "Degraded"
+// @Router /api/v1/healthz [get]
+func newHealthzHandler(db *storage.PostgresDB, logger *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		status := "healthy"
+		dbStatus := "connected"
+
+		if err := db.Ping(r.Context()); err != nil {
+			logger.Error("database ping failed", "error", err)
+			status = "degraded"
+			dbStatus = "disconnected"
+		}
+
+		resp := map[string]any{
+			"status":    status,
+			"database":  dbStatus,
+			"timestamp": time.Now().UTC().Format(time.RFC3339),
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if status == "degraded" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		} else {
+			w.WriteHeader(http.StatusOK)
+		}
+		json.NewEncoder(w).Encode(api.SuccessResponse(resp))
+	}
+}
 
 func main() {
 	// Initialize structured logging
@@ -100,31 +148,14 @@ func main() {
 	// Set up the router using Go 1.22's enhanced mux
 	mux := http.NewServeMux()
 
+	docs.SwaggerInfo.Title = "Memory Service API"
+	docs.SwaggerInfo.Description = "REST API for CerberOS memory, chat, personal info, system event, vault, and agent execution services."
+	docs.SwaggerInfo.Version = "v1"
+	docs.SwaggerInfo.BasePath = "/"
+	docs.SwaggerInfo.Schemes = []string{"http"}
+
 	// Healthz endpoint
-	mux.HandleFunc("GET /api/v1/healthz", func(w http.ResponseWriter, r *http.Request) {
-		status := "healthy"
-		dbStatus := "connected"
-
-		if err := db.Ping(r.Context()); err != nil {
-			logger.Error("database ping failed", "error", err)
-			status = "degraded"
-			dbStatus = "disconnected"
-		}
-
-		resp := map[string]any{
-			"status":    status,
-			"database":  dbStatus,
-			"timestamp": time.Now().UTC().Format(time.RFC3339),
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		if status == "degraded" {
-			w.WriteHeader(http.StatusServiceUnavailable)
-		} else {
-			w.WriteHeader(http.StatusOK)
-		}
-		json.NewEncoder(w).Encode(api.SuccessResponse(resp))
-	})
+	mux.HandleFunc("GET /api/v1/healthz", newHealthzHandler(db, logger))
 
 	// Chat endpoints
 	mux.HandleFunc("POST /api/v1/chat/{sessionId}/messages", chatHandler.HandleCreateMessage)
@@ -163,10 +194,6 @@ func main() {
 	mux.Handle("/swagger/", httpSwagger.Handler(
 		httpSwagger.URL("/swagger/doc.json"), //The url pointing to API definition
 	))
-	// Serve static files for swagger docs
-	mux.Handle("/swagger/doc.json", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "./docs/swagger.json")
-	}))
 
 	// 4. Start the HTTP server
 	port := getEnvOrDefault("PORT", "8080")
