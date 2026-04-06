@@ -1,0 +1,14 @@
+# Zero Trust overlay: uses config/secure/ with NKey auth
+# Run: docker compose -f docker-compose.yml -f docker-compose.secure.yml up -d
+# Requires: run `go run ./cmd/setup-zero-trust` first, then `source .env.nkeys`
+
+services:
+  nats-1:
+    volumes:
+      - ./config/secure/nats-node1.conf:/config/nats-node1.conf
+  nats-2:
+    volumes:
+      - ./config/secure/nats-node2.conf:/config/nats-node2.conf
+  nats-3:
+    volumes:
+      - ./config/secure/nats-node3.conf:/config/nats-node3.conf

@@ -1,0 +1,5 @@
+/bin/
+.env
+.env.nkeys
+*.exe
+config/certs/

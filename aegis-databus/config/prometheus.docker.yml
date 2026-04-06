@@ -1,0 +1,18 @@
+# Prometheus config when DataBus runs as a container on the same Docker network (profile: apps).
+# Replaces host.docker.internal scrape with in-network DNS name.
+
+global:
+  scrape_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  - job_name: "nats-exporter"
+    static_configs:
+      - targets:
+          - "nats-exporter:7777"
+  - job_name: "aegis-databus"
+    static_configs:
+      - targets:
+          - "aegis-databus:9091"

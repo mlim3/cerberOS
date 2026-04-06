@@ -1,0 +1,144 @@
+# Application containers (DataBus + demo stubs). MUST be merged with docker-compose.yml:
+#   docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d --build
+# This file does not define nats-1; using only docker-compose.apps.yml fails with "no such service: nats-1".
+#
+# Recreate DataBus after env changes, from aegis-databus/:
+#   docker compose -f docker-compose.yml -f docker-compose.apps.yml --profile apps up -d aegis-databus
+#
+# Integrators: set secrets via env files or orchestrator secrets; do not bake keys into images.
+
+services:
+  aegis-databus:
+    profiles: ["apps"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: aegis-databus
+    image: aegis-databus:${AEGIS_IMAGE_TAG:-local}
+    container_name: aegis-databus
+    restart: unless-stopped
+    environment:
+      AEGIS_NATS_URL: ${AEGIS_NATS_URL:-nats://nats-1:4222}
+      # /varz, /connz, /jsz proxy — must be reachable from inside the container (not 127.0.0.1:8222)
+      AEGIS_NATS_HTTP_URL: ${AEGIS_NATS_HTTP_URL:-http://nats-1:8222}
+      AEGIS_ORCHESTRATOR_URL: ${AEGIS_ORCHESTRATOR_URL:-http://orchestrator-stub:8091}
+    ports:
+      - "9091:9091"
+    networks:
+      - aegis-net
+    depends_on:
+      nats-1:
+        condition: service_healthy
+      orchestrator-stub:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9091/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 36
+      # EnsureStreams can take many minutes on a busy 3-node JetStream cluster.
+      start_period: 600s
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    user: "65532:65532"
+
+  orchestrator-stub:
+    profiles: ["apps"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: aegis-orchestrator-stub
+    image: aegis-orchestrator-stub:${AEGIS_IMAGE_TAG:-local}
+    container_name: orchestrator-stub
+    restart: unless-stopped
+    environment:
+      AEGIS_MEMORY_URL: ${AEGIS_MEMORY_URL:-http://memory-stub:8090/v1/memory}
+      ORCHESTRATOR_STUB_ADDR: ":8091"
+    ports:
+      - "8091:8091"
+    networks:
+      - aegis-net
+    depends_on:
+      memory-stub:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    user: "65532:65532"
+
+  memory-stub:
+    profiles: ["apps"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: aegis-memory-stub
+    image: aegis-memory-stub:${AEGIS_IMAGE_TAG:-local}
+    container_name: memory-stub
+    restart: unless-stopped
+    environment:
+      MEMORY_STUB_ADDR: ":8090"
+    ports:
+      - "8090:8090"
+    networks:
+      - aegis-net
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    user: "65532:65532"
+
+  aegis-demo:
+    profiles: ["apps"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: aegis-demo
+    image: aegis-demo:${AEGIS_IMAGE_TAG:-local}
+    container_name: aegis-demo
+    restart: unless-stopped
+    environment:
+      AEGIS_NATS_URL: ${AEGIS_NATS_URL:-nats://nats-1:4222}
+    networks:
+      - aegis-net
+    depends_on:
+      nats-1:
+        condition: service_healthy
+      # JetStream streams are created by aegis-databus; demo must subscribe after they exist.
+      aegis-databus:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    user: "65532:65532"
+
+  # Optional: standalone stub traffic generator (use profile stubs; omit if using aegis-demo only)
+  aegis-stubs:
+    profiles: ["stubs"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: aegis-stubs
+    image: aegis-stubs:${AEGIS_IMAGE_TAG:-local}
+    container_name: aegis-stubs
+    restart: unless-stopped
+    environment:
+      AEGIS_NATS_URL: ${AEGIS_NATS_URL:-nats://nats-1:4222}
+    networks:
+      - aegis-net
+    depends_on:
+      nats-1:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    user: "65532:65532"
