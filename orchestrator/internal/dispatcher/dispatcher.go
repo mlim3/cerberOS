@@ -45,6 +45,7 @@ import (
 
 	"github.com/mlim3/cerberOS/orchestrator/internal/config"
 	"github.com/mlim3/cerberOS/orchestrator/internal/interfaces"
+	ioclient "github.com/mlim3/cerberOS/orchestrator/internal/io"
 	"github.com/mlim3/cerberOS/orchestrator/internal/types"
 )
 
@@ -96,6 +97,7 @@ type Dispatcher struct {
 	policy   PolicyEnforcer
 	monitor  TaskMonitor
 	executor PlanExecutor
+	io       *ioclient.Client
 	logger   *log.Logger
 
 	// activeTasks maps task_id → *TaskState for all non-terminal in-flight tasks.
@@ -123,6 +125,7 @@ func New(
 	policy PolicyEnforcer,
 	monitor TaskMonitor,
 	executor PlanExecutor,
+	io *ioclient.Client,
 ) *Dispatcher {
 	return &Dispatcher{
 		cfg:      cfg,
@@ -132,6 +135,7 @@ func New(
 		policy:   policy,
 		monitor:  monitor,
 		executor: executor,
+		io:       io,
 		logger:   log.New(os.Stdout, "[dispatcher] ", log.LstdFlags|log.LUTC),
 	}
 }
@@ -234,6 +238,10 @@ func (d *Dispatcher) HandleInboundTask(task types.UserTask) error {
 	d.activeTasks.Store(task.TaskID, ts)
 	d.monitor.TrackTask(ts)
 	atomic.AddInt64(&d.queueDepth, 1)
+
+	// ── Notify IO: task received, planning underway ────────────────────────
+	expectedMins := 2
+	_ = d.io.PushStatus(task.TaskID, ioclient.StatusWorking, "Planning your task...", &expectedMins)
 
 	// ── Step 6: Publish planner task via standard task.inbound ─────────────
 	rawInput := extractRawInput(task.Payload)
@@ -353,6 +361,15 @@ func (d *Dispatcher) HandleDecompositionResponse(resp types.DecompositionRespons
 		// Non-fatal: executor holds plan in memory.
 	}
 
+	// ── Notify IO: plan validated, subtasks dispatching ───────────────────
+	subtaskCount := len(resp.Plan.Subtasks)
+	expectedMins := subtaskCount / 2
+	if expectedMins < 1 {
+		expectedMins = 1
+	}
+	_ = d.io.PushStatus(ts.TaskID, ioclient.StatusWorking,
+		fmt.Sprintf("Executing %d subtasks...", subtaskCount), &expectedMins)
+
 	// ── Hand off to Plan Executor ──────────────────────────────────────────
 	if err := d.executor.Execute(resp.Plan, ts); err != nil {
 		d.logger.Printf("plan executor failed to start: task_id=%s error=%v", resp.TaskID, err)
@@ -412,6 +429,10 @@ func (d *Dispatcher) HandlePlanComplete(ts *types.TaskState, aggregatedResults [
 		d.logger.Printf("publish task_result failed: task_id=%s error=%v", ts.TaskID, err)
 	}
 
+	// Notify IO: task complete.
+	zero := 0
+	_ = d.io.PushStatus(ts.TaskID, ioclient.StatusCompleted, "Task complete", &zero)
+
 	if err := d.policy.RevokeCredentials(ts.OrchestratorTaskRef); err != nil {
 		d.logger.Printf("credential revocation failed: orchestrator_task_ref=%s error=%v",
 			ts.OrchestratorTaskRef, err)
@@ -466,6 +487,14 @@ func (d *Dispatcher) HandlePlanFailed(ts *types.TaskState, errorCode string, par
 			UserMessage: humanReadableError(errorCode),
 		})
 	}
+
+	// Notify IO: task failed (partial or full failure).
+	zero := 0
+	lastUpdate := humanReadableError(errorCode)
+	if partial {
+		lastUpdate = "Partially completed — some subtasks failed"
+	}
+	_ = d.io.PushStatus(ts.TaskID, ioclient.StatusCompleted, lastUpdate, &zero)
 
 	if err := d.policy.RevokeCredentials(ts.OrchestratorTaskRef); err != nil {
 		d.logger.Printf("credential revocation failed: orchestrator_task_ref=%s error=%v",
@@ -553,6 +582,10 @@ func (d *Dispatcher) failTask(ts *types.TaskState, errorCode, userMessage string
 		ErrorCode:   errorCode,
 		UserMessage: userMessage,
 	})
+
+	// Notify IO: task failed during decomposition.
+	zero := 0
+	_ = d.io.PushStatus(ts.TaskID, ioclient.StatusCompleted, userMessage, &zero)
 
 	d.activeTasks.Delete(ts.TaskID)
 	d.monitor.UntrackTask(ts.TaskID)

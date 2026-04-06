@@ -29,6 +29,7 @@ import (
 	"github.com/mlim3/cerberOS/orchestrator/internal/executor"
 	"github.com/mlim3/cerberOS/orchestrator/internal/gateway"
 	"github.com/mlim3/cerberOS/orchestrator/internal/health"
+	ioclient "github.com/mlim3/cerberOS/orchestrator/internal/io"
 	memoryiface "github.com/mlim3/cerberOS/orchestrator/internal/memory"
 	"github.com/mlim3/cerberOS/orchestrator/internal/mocks"
 	"github.com/mlim3/cerberOS/orchestrator/internal/monitor"
@@ -131,11 +132,27 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 		return nil, err
 	}
 
-	taskDispatcher = dispatcher.New(cfg, memClient, vaultClient, gw, policyEnforcer, taskMonitor, planExecutor)
+	// IO Component client — optional; no-op when IO_API_BASE is not set.
+	ioClient := ioclient.New(cfg.IOAPIBase)
+	if !ioClient.Disabled() {
+		log.Printf("IO Component integration enabled: %s", cfg.IOAPIBase)
+	}
+
+	taskDispatcher = dispatcher.New(cfg, memClient, vaultClient, gw, policyEnforcer, taskMonitor, planExecutor, ioClient)
 
 	gw.RegisterTaskHandler(taskDispatcher.HandleInboundTask)
 	gw.RegisterAgentStatusHandler(taskMonitor.HandleAgentStatusUpdate)
 	gw.RegisterTaskResultHandler(taskDispatcher.HandleTaskResult)
+
+	// Forward agent user_input credential requests to the IO Component.
+	gw.RegisterCredentialRequestHandler(func(agentID, taskID, requestID, keyName, label string) error {
+		return ioClient.PushCredentialRequest(ioclient.CredentialRequestPayload{
+			TaskID:    taskID,
+			RequestID: requestID,
+			KeyName:   keyName,
+			Label:     label,
+		})
+	})
 
 	healthHandler := health.New(vaultClient, memClient, natsClient, taskMonitor, cfg.NodeID)
 

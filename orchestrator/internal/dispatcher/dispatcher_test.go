@@ -31,6 +31,7 @@ import (
 
 	"github.com/mlim3/cerberOS/orchestrator/internal/config"
 	"github.com/mlim3/cerberOS/orchestrator/internal/dispatcher"
+	ioclient "github.com/mlim3/cerberOS/orchestrator/internal/io"
 	"github.com/mlim3/cerberOS/orchestrator/internal/mocks"
 	"github.com/mlim3/cerberOS/orchestrator/internal/types"
 )
@@ -160,7 +161,7 @@ func newDispatcher(t *testing.T) (*dispatcher.Dispatcher, *gatewayMock, *policyM
 		MaxSubtasksPerPlan:          20,
 		PlanExecutorMaxParallel:     5,
 	}
-	d := dispatcher.New(cfg, mem, nil /* vault unused */, gw, pol, mon, exec)
+	d := dispatcher.New(cfg, mem, nil /* vault unused */, gw, pol, mon, exec, ioclient.New("") /* disabled */)
 	return d, gw, pol, mon, exec, mem
 }
 
@@ -865,7 +866,7 @@ func TestDispatcherDemoFlow_V3(t *testing.T) {
 		MaxSubtasksPerPlan:          20,
 		PlanExecutorMaxParallel:     5,
 	}
-	d := dispatcher.New(cfg, mem, nil, gw, pol, mon, exec)
+	d := dispatcher.New(cfg, mem, nil, gw, pol, mon, exec, ioclient.New("") /* disabled */)
 
 	t.Log("demo setup: Task Dispatcher v3.0 wired to mocks for Gateway, PolicyEnforcer, Monitor, PlanExecutor, MemoryClient")
 	t.Log("demo setup: all external components (NATS, Vault, DB, Planner Agent) replaced by in-process test doubles")

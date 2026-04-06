@@ -46,6 +46,9 @@ type OrchestratorConfig struct {
 	// Memory resilience
 	MemoryWriteBufferSeconds  int // MEMORY_WRITE_BUFFER_SECONDS — default: 30
 
+	// IO Component integration
+	IOAPIBase string // IO_API_BASE — IO component HTTP base URL (e.g. http://localhost:3001); optional
+
 	// Identity
 	NodeID string // NODE_ID — default: os.Hostname()
 }
@@ -109,6 +112,9 @@ func Load() (*OrchestratorConfig, error) {
 
 	// ── Memory resilience ────────────────────────────────────────────────────
 	cfg.MemoryWriteBufferSeconds = envInt("MEMORY_WRITE_BUFFER_SECONDS", 30)
+
+	// ── IO Component integration ─────────────────────────────────────────────
+	cfg.IOAPIBase = os.Getenv("IO_API_BASE") // Optional — empty disables IO push
 
 	// ── Identity ─────────────────────────────────────────────────────────────
 	cfg.NodeID = os.Getenv("NODE_ID")

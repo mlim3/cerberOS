@@ -53,8 +53,8 @@ func newGateway(t *testing.T) (*gateway.Gateway, *mocks.NATSMock) {
 func TestGatewayStart_SubscribesToInboundTopics(t *testing.T) {
 	_, nats := newGateway(t)
 
-	if nats.SubscribeCallCount != 6 {
-		t.Fatalf("SubscribeCallCount = %d, want 6 (tasks.inbound, agent.status, capability.response, task.accepted, task.result, task.failed)", nats.SubscribeCallCount)
+	if nats.SubscribeCallCount != 7 {
+		t.Fatalf("SubscribeCallCount = %d, want 7 (tasks.inbound, agent.status, capability.response, task.accepted, task.result, task.failed, credential.request)", nats.SubscribeCallCount)
 	}
 }
 
@@ -435,8 +435,8 @@ func TestGatewayDemoFlow(t *testing.T) {
 	if err := gw.Start(); err != nil {
 		t.Fatalf("step 1: Start() error = %v", err)
 	}
-	if nats.SubscribeCallCount != 6 {
-		t.Fatalf("step 1: SubscribeCallCount = %d, want 6", nats.SubscribeCallCount)
+	if nats.SubscribeCallCount != 7 {
+		t.Fatalf("step 1: SubscribeCallCount = %d, want 7", nats.SubscribeCallCount)
 	}
 	if !gw.IsConnected() {
 		t.Fatal("step 1: IsConnected() = false, want true")

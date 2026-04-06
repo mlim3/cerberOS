@@ -52,6 +52,7 @@ const (
 	TopicTaskAccepted            = "aegis.orchestrator.task.accepted"
 	TopicTaskResult              = "aegis.orchestrator.task.result"
 	TopicTaskFailed              = "aegis.orchestrator.task.failed"
+	TopicCredentialRequest       = "aegis.orchestrator.credential.request"
 	TopicAgentTasksInbound       = "aegis.agents.task.inbound"
 	TopicCapabilityQuery         = "aegis.agents.capability.query"
 	TopicAgentTerminate          = "aegis.agents.lifecycle.terminate"
@@ -84,6 +85,11 @@ type AgentStatusHandler func(update types.AgentStatusUpdate) error
 // TaskResultHandler is the callback the Plan Executor registers to receive task results.
 type TaskResultHandler func(result types.TaskResult) error
 
+// CredentialRequestHandler is called when an agent publishes a credential.request
+// that requires user input (operation: "user_input"). Registered by main.go to
+// forward the request to the IO Component.
+type CredentialRequestHandler func(agentID, taskID, requestID, keyName, label string) error
+
 // ── Gateway ───────────────────────────────────────────────────────────────────
 
 // Gateway is M1: Communications Gateway.
@@ -92,9 +98,10 @@ type Gateway struct {
 	nodeID string
 	logger *log.Logger
 
-	taskHandler        TaskHandler
-	agentStatusHandler AgentStatusHandler
-	taskResultHandler  TaskResultHandler
+	taskHandler               TaskHandler
+	agentStatusHandler        AgentStatusHandler
+	taskResultHandler         TaskResultHandler
+	credentialRequestHandler  CredentialRequestHandler
 
 	// pendingCapabilityQueries tracks in-flight capability query requests.
 	// key: query_id, value: chan *types.CapabilityResponse
@@ -128,6 +135,13 @@ func (g *Gateway) RegisterTaskResultHandler(h TaskResultHandler) {
 	g.taskResultHandler = h
 }
 
+// RegisterCredentialRequestHandler registers the callback for agent credential
+// requests that need user input. Optional — if not registered, these messages
+// are logged and dropped.
+func (g *Gateway) RegisterCredentialRequestHandler(h CredentialRequestHandler) {
+	g.credentialRequestHandler = h
+}
+
 // Start subscribes to all inbound NATS topics and begins message processing.
 // Must be called after all handlers are registered.
 func (g *Gateway) Start() error {
@@ -148,6 +162,9 @@ func (g *Gateway) Start() error {
 	}
 	if err := g.nats.Subscribe(TopicTaskFailed, g.handleRawTaskFailed); err != nil {
 		return fmt.Errorf("subscribe %s: %w", TopicTaskFailed, err)
+	}
+	if err := g.nats.Subscribe(TopicCredentialRequest, g.handleRawCredentialRequest); err != nil {
+		return fmt.Errorf("subscribe %s: %w", TopicCredentialRequest, err)
 	}
 	g.logger.Printf("gateway started on node %s — subscribed to inbound topics", g.nodeID)
 	return nil
@@ -340,6 +357,45 @@ func (g *Gateway) handleRawTaskFailed(subject string, data []byte) error {
 		ErrorCode:           firstNonEmpty(payload.ErrorCode, payload.ErrorMessage),
 		CompletedAt:         envelope.Timestamp,
 	})
+}
+
+/// handleRawCredentialRequest handles aegis.orchestrator.credential.request.
+// Vault pre-authorization requests (operation: "authorize"/"revoke") are routed
+// to the Vault via the orchestrator's policy flow — those are NOT forwarded to IO.
+// Requests with operation "user_input" ask the user to supply a secret via IO.
+func (g *Gateway) handleRawCredentialRequest(subject string, data []byte) error {
+	envelope, err := validateEnvelope(data)
+	if err != nil {
+		g.logger.Printf("rejected malformed credential.request envelope: %v", err)
+		return err
+	}
+
+	var payload struct {
+		RequestID   string `json:"request_id"`
+		AgentID     string `json:"agent_id"`
+		TaskID      string `json:"task_id"`
+		Operation   string `json:"operation"`
+		KeyName     string `json:"key_name"`
+		Label       string `json:"label"`
+		Description string `json:"description"`
+	}
+	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
+		return fmt.Errorf("deserialize credential.request: %w", err)
+	}
+
+	// Only forward user_input requests to IO; vault authorize/revoke are
+	// handled internally by the Policy Enforcer.
+	if payload.Operation != "user_input" {
+		return nil
+	}
+
+	if g.credentialRequestHandler == nil {
+		g.logger.Printf("credential.request (user_input) received but no handler registered: task_id=%s", payload.TaskID)
+		return nil
+	}
+	return g.credentialRequestHandler(
+		payload.AgentID, payload.TaskID, payload.RequestID, payload.KeyName, payload.Label,
+	)
 }
 
 // ── Outbound: to User I/O Component ──────────────────────────────────────────
