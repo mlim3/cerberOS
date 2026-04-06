@@ -1,0 +1,20 @@
+{
+  "message_id": "11111111-1111-4111-8111-111111111111",
+  "message_type": "user_task",
+  "source_component": "user-io",
+  "correlation_id": "550e8400-e29b-41d4-a716-446655440010",
+  "timestamp": "2026-04-05T00:00:00Z",
+  "schema_version": "1.0",
+  "payload": {
+    "task_id": "550e8400-e29b-41d4-a716-446655440010",
+    "user_id": "user-1",
+    "required_skill_domains": ["general"],
+    "priority": 5,
+    "timeout_seconds": 120,
+    "payload": {
+      "raw_input": "make a sandwich"
+    },
+    "callback_topic": "aegis.user-io.results.demo-1",
+    "user_context_id": "ctx-demo-1"
+  }
+}

@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -29,20 +30,21 @@ import (
 	"github.com/mlim3/cerberOS/orchestrator/internal/executor"
 	"github.com/mlim3/cerberOS/orchestrator/internal/gateway"
 	"github.com/mlim3/cerberOS/orchestrator/internal/health"
+	"github.com/mlim3/cerberOS/orchestrator/internal/interfaces"
 	ioclient "github.com/mlim3/cerberOS/orchestrator/internal/io"
 	memoryiface "github.com/mlim3/cerberOS/orchestrator/internal/memory"
 	"github.com/mlim3/cerberOS/orchestrator/internal/mocks"
 	"github.com/mlim3/cerberOS/orchestrator/internal/monitor"
+	natsclient "github.com/mlim3/cerberOS/orchestrator/internal/nats"
 	"github.com/mlim3/cerberOS/orchestrator/internal/policy"
 	"github.com/mlim3/cerberOS/orchestrator/internal/recovery"
 	"github.com/mlim3/cerberOS/orchestrator/internal/types"
 )
 
 func main() {
-	cfg, err := config.Load()
+	cfg, err := loadRuntimeConfig()
 	if err != nil {
-		cfg = demoConfig()
-		log.Printf("starting in demo mode with in-memory mocks: %v", err)
+		log.Fatalf("FATAL: load config failed: %v", err)
 	}
 
 	fmt.Printf("Aegis OS — Orchestrator starting | node_id=%s\n", cfg.NodeID)
@@ -81,7 +83,9 @@ func main() {
 type runtime struct {
 	memory     *memoryiface.Interface
 	vault      *mocks.VaultMock
-	nats       *mocks.NATSMock
+	nats       interfaces.NATSClient
+	mockNATS   *mocks.NATSMock
+	mockMemory *mocks.MemoryMock
 	gateway    *gateway.Gateway
 	monitor    *monitor.Monitor
 	recovery   *recovery.Manager
@@ -100,7 +104,10 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 	vaultClient := &mocks.VaultMock{}
 	policyEnforcer := policy.New(cfg, vaultClient, memClient, nil)
 
-	natsClient := mocks.NewNATSMock()
+	natsClient, mockNATS, err := buildNATSClient(cfg)
+	if err != nil {
+		return nil, err
+	}
 	gw := gateway.New(natsClient, cfg.NodeID)
 
 	recoveryBridge := &recoveryProxy{}
@@ -160,6 +167,8 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 		memory:     memClient,
 		vault:      vaultClient,
 		nats:       natsClient,
+		mockNATS:   mockNATS,
+		mockMemory: mockMemory,
 		gateway:    gw,
 		monitor:    taskMonitor,
 		recovery:   recoverMgr,
@@ -167,6 +176,58 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 		executor:   planExecutor,
 		health:     healthHandler,
 	}, nil
+}
+
+func loadRuntimeConfig() (*config.OrchestratorConfig, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		cfg = demoConfig()
+		log.Printf("config incomplete, starting from demo defaults: %v", err)
+	}
+	applyEnvOverrides(cfg)
+	return cfg, nil
+}
+
+func applyEnvOverrides(cfg *config.OrchestratorConfig) {
+	if v := os.Getenv("VAULT_ADDR"); v != "" {
+		cfg.VaultAddr = v
+	}
+	if v := os.Getenv("NATS_URL"); v != "" {
+		cfg.NATSUrl = v
+		if cfg.NATSCredsPath == "mock://creds" {
+			cfg.NATSCredsPath = ""
+		}
+	}
+	if v := os.Getenv("NATS_CREDS_PATH"); v != "" {
+		cfg.NATSCredsPath = v
+	}
+	if v := os.Getenv("MEMORY_ENDPOINT"); v != "" {
+		cfg.MemoryEndpoint = v
+	}
+	if v := os.Getenv("IO_API_BASE"); v != "" {
+		cfg.IOAPIBase = v
+	}
+	if v := os.Getenv("NODE_ID"); v != "" {
+		cfg.NodeID = v
+	}
+	if v := os.Getenv("DECOMPOSITION_TIMEOUT_SECONDS"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			cfg.DecompositionTimeoutSeconds = parsed
+		}
+	}
+}
+
+func buildNATSClient(cfg *config.OrchestratorConfig) (interfaces.NATSClient, *mocks.NATSMock, error) {
+	if cfg.NATSUrl == "" || cfg.NATSUrl == "mock://nats" {
+		mock := mocks.NewNATSMock()
+		return mock, mock, nil
+	}
+
+	client, err := natsclient.New(cfg.NATSUrl, cfg.NodeID, cfg.NATSCredsPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	return client, nil, nil
 }
 
 type recoveryProxy struct {

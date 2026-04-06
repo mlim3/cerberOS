@@ -775,9 +775,14 @@ func extractRawInput(payload []byte) string {
 }
 
 func buildDecompositionInstructions(taskID, rawInput string, scope types.PolicyScope) string {
+	allowedDomains := scope.Domains
+	if len(allowedDomains) == 0 {
+		allowedDomains = []string{"general"}
+	}
+
 	domains := "[]"
-	if len(scope.Domains) > 0 {
-		raw, _ := json.Marshal(scope.Domains)
+	if len(allowedDomains) > 0 {
+		raw, _ := json.Marshal(allowedDomains)
 		domains = string(raw)
 	}
 
@@ -789,6 +794,7 @@ func buildDecompositionInstructions(taskID, rawInput string, scope types.PolicyS
 			"Rules:\n"+
 			"- parent_task_id must equal %q\n"+
 			"- required_skill_domains for every subtask must be a subset of %s\n"+
+			"- Do not invent new skill domain names outside the allowed list\n"+
 			"- Use an empty array for depends_on when a subtask has no dependencies\n"+
 			"- Keep the plan concise and executable\n"+
 			"User task:\n%s",
