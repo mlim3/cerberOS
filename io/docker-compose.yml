@@ -53,4 +53,4 @@ services:
 
 networks:
   cerberos:
-    external: true
+    name: cerberos

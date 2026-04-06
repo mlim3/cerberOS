@@ -99,7 +99,7 @@ function ChatWindow({
         {task.messages.map(message => (
           <div key={message.id} className={`message ${message.role}${message.isRedacted ? ' redacted' : ''}`}>
             <div className="message-avatar">
-              {message.role === 'user' ? '👤' : <img src="/cerberOS_ASCII.png" alt="cerberOS" className="avatar-img" />}
+              {message.role === 'user' ? '👤' : <span className="avatar-glyph">C</span>}
             </div>
             <div className="message-content">
               <div className="message-header">
@@ -126,7 +126,7 @@ function ChatWindow({
 
         {isStreaming && (
           <div className="message agent streaming">
-            <div className="message-avatar"><img src="/cerberOS_ASCII.png" alt="cerberOS" className="avatar-img" /></div>
+            <div className="message-avatar"><span className="avatar-glyph">C</span></div>
             <div className="message-content">
               <div className="message-header">
                 <span className="message-sender">cerberOS</span>

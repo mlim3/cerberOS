@@ -98,10 +98,18 @@ export interface StatusUpdate {
 // Orchestrator → IO push stream (SSE / WebSocket)
 // ============================================
 
+/** Orchestrator → IO: chat/task result content for display in the chat window. */
+export interface ChatResponsePayload {
+  taskId: string;
+  content: string;
+  done: boolean;
+}
+
 /** One frame on the orchestrator→IO push channel (per task stream). */
 export type OrchestratorStreamEvent =
   | { type: 'status'; payload: StatusUpdate }
-  | { type: 'credential_request'; payload: CredentialRequest };
+  | { type: 'credential_request'; payload: CredentialRequest }
+  | { type: 'chat_response'; payload: ChatResponsePayload };
 
 function isRecord(x: unknown): x is Record<string, unknown> {
   return typeof x === 'object' && x !== null;
@@ -139,6 +147,21 @@ export function parseOrchestratorStreamEvent(raw: unknown): OrchestratorStreamEv
       (p.description === undefined || typeof p.description === 'string')
     ) {
       return { type: 'credential_request', payload: p as unknown as CredentialRequest };
+    }
+    return null;
+  }
+
+  if (raw.type === 'chat_response' && isRecord(raw.payload)) {
+    const p = raw.payload;
+    if (typeof p.taskId === 'string' && typeof p.content === 'string') {
+      return {
+        type: 'chat_response',
+        payload: {
+          taskId: p.taskId as string,
+          content: p.content as string,
+          done: p.done === true,
+        },
+      };
     }
     return null;
   }

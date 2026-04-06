@@ -16,7 +16,11 @@ import {
   type MemoryLogEntry,
 } from '@cerberos/io-core/memory-client'
 import { transcribe, warmupTranscription } from './transcription/runner'
-import { createNatsClient, SUBJECT_TASK_INBOUND } from './nats/client'
+import {
+  createNatsClient,
+  callbackTopicForTask,
+  SUBJECT_IO_RESULTS,
+} from './nats/client'
 
 // =============================================================================
 // Configuration
@@ -42,6 +46,71 @@ const natsClient = createNatsClient({
   credsPath: process.env.NATS_CREDS_PATH,
 })
 log('ORCH', `Transport: ${natsClient ? 'NATS' : 'HTTP bridge (POST /api/orchestrator/stream-events)'}`)
+
+// =============================================================================
+// Pending chat responses — POST /api/chat registers here, orchestrator delivers
+// =============================================================================
+
+type ChatResponseCallback = {
+  push: (content: string) => void
+  complete: () => void
+  error: (msg: string) => void
+}
+const pendingChatResponses = new Map<string, ChatResponseCallback>()
+
+function deliverChatResponse(taskId: string, content: string, done: boolean): boolean {
+  const cb = pendingChatResponses.get(taskId)
+  if (!cb) return false
+  cb.push(content)
+  if (done) {
+    cb.complete()
+    pendingChatResponses.delete(taskId)
+  }
+  return true
+}
+
+// Subscribe to NATS callback topics for orchestrator responses
+if (natsClient) {
+  natsClient.subscribe(SUBJECT_IO_RESULTS, (msg: unknown) => {
+    const m = msg as Record<string, unknown> | undefined
+    if (!m) return
+    const msgType = m.message_type as string | undefined
+
+    if (msgType === 'task_accepted') {
+      const p = m as Record<string, unknown>
+      const taskId = (p.orchestrator_task_ref ?? p.task_id ?? '') as string
+      if (taskId) {
+        deliverChatResponse(taskId, 'Task accepted — the orchestrator is working on it.\n', false)
+        log('NATS', `task_accepted for ${taskId}`)
+      }
+    } else if (msgType === 'task_result') {
+      const p = m as Record<string, unknown>
+      const taskId = (p.orchestrator_task_ref ?? p.task_id ?? '') as string
+      const result = p.result as string | Record<string, unknown> | undefined
+      const content = typeof result === 'string'
+        ? result
+        : result && typeof result === 'object'
+          ? JSON.stringify(result)
+          : 'Task completed.'
+      if (taskId) {
+        deliverChatResponse(taskId, content, true)
+        log('NATS', `task_result for ${taskId}`)
+      }
+    } else if (msgType === 'error_response') {
+      const p = m as Record<string, unknown>
+      const taskId = (p.task_id ?? '') as string
+      const userMsg = (p.user_message ?? 'An error occurred.') as string
+      if (taskId) {
+        const cb = pendingChatResponses.get(taskId)
+        if (cb) {
+          cb.error(userMsg)
+          pendingChatResponses.delete(taskId)
+        }
+        log('NATS', `error_response for ${taskId}: ${userMsg}`)
+      }
+    }
+  })
+}
 
 // =============================================================================
 // In-memory task state (separate from log persistence)
@@ -216,21 +285,6 @@ app.post('/api/tasks', async (c) => {
   tasks.set(taskId, task)
   broadcastStatus(taskId, task)
 
-  // Publish UserTask envelope to orchestrator via NATS when connected
-  if (natsClient?.connected) {
-    try {
-      await natsClient.publishUserTask({
-        task_id: taskId,
-        content,
-        user_id: userId ?? '00000000-0000-0000-0000-000000000001',
-        created_at: new Date().toISOString(),
-      })
-      log('NATS', `Published UserTask to ${SUBJECT_TASK_INBOUND} taskId=${taskId}`)
-    } catch (err) {
-      log('NATS', `Failed to publish UserTask: ${err}`)
-    }
-  }
-
   return c.json({ taskId, status: 'created' })
 });
 
@@ -257,6 +311,9 @@ app.post('/api/orchestrator/stream-events', async (c) => {
   log('ORCH', `← stream-event type=${event.type} taskId=${taskId}`, { event })
   if (event.type === 'status') {
     tasks.set(taskId, event.payload);
+  } else if (event.type === 'chat_response') {
+    const { content, done } = event.payload;
+    deliverChatResponse(taskId, content, done);
   }
   broadcastStreamEvent(taskId, event);
   return c.json({ ok: true });
@@ -291,52 +348,108 @@ app.post('/api/chat', async (c) => {
   };
   persistAndBroadcastStatus(workingStatus);
 
-  // Return SSE streaming response
+  const userId = '00000000-0000-0000-0000-000000000001'
   const encoder = new TextEncoder();
+
+  // When NATS is connected, forward the message and wait for the real orchestrator response.
+  // When not connected (and not demo), show a clear fallback.
+  // Demo mode always uses the local mock generator.
+  const useRealOrchestrator = !DEMO_MODE && natsClient?.connected
+
+  // Publish user message to orchestrator via NATS
+  if (useRealOrchestrator) {
+    try {
+      await natsClient!.publishUserTask({
+        task_id: taskId,
+        user_id: userId,
+        content,
+        payload: { raw_input: content },
+        callback_topic: callbackTopicForTask(taskId),
+      })
+      log('NATS', `Published chat message for taskId=${taskId}`)
+    } catch (err) {
+      log('NATS', `Failed to publish chat message: ${err}`)
+    }
+  }
+
   const stream = new ReadableStream({
-    async start(controller) {
-      // Orchestrator not connected fallback
+    start(controller) {
+      // Not connected, not demo → clear fallback
       if (!DEMO_MODE && !natsClient?.connected) {
         const fallbackMsg = '[IO] Orchestrator is not connected. The message was logged but cannot be processed.\n\n' +
              'To connect the orchestrator, configure NATS_URL or start the orchestrator service.\n'
         controller.enqueue(encoder.encode(`data: ${JSON.stringify({ chunk: fallbackMsg })}\n\n`));
         controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true })}\n\n`));
         controller.close();
-        await appendLogEntry({
-          sessionId,
-          userId: '00000000-0000-0000-0000-000000000001',
-          role: 'assistant',
-          content: fallbackMsg,
-          taskId,
-        })
+        appendLogEntry({ sessionId, userId, role: 'assistant', content: fallbackMsg, taskId })
         return;
       }
 
-      let accumulated = '';
-      for await (const chunk of generateMockResponse(content)) {
-        accumulated += chunk;
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ chunk: accumulated })}\n\n`));
+      if (useRealOrchestrator) {
+        // Wait for the orchestrator to deliver a response via NATS callback or HTTP bridge
+        const TIMEOUT_MS = 120_000
+        let accumulated = ''
+
+        const timeout = setTimeout(() => {
+          pendingChatResponses.delete(taskId)
+          const msg = accumulated
+            ? accumulated
+            : '[IO] The orchestrator did not respond in time. Your message was delivered — the result may arrive via the status panel.\n'
+          if (!accumulated) {
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ chunk: msg })}\n\n`))
+          }
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true })}\n\n`))
+          try { controller.close() } catch { /* already closed */ }
+          appendLogEntry({ sessionId, userId, role: 'assistant', content: msg, taskId })
+        }, TIMEOUT_MS)
+
+        pendingChatResponses.set(taskId, {
+          push(chunk: string) {
+            accumulated += chunk
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ chunk: accumulated })}\n\n`))
+          },
+          complete() {
+            clearTimeout(timeout)
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true })}\n\n`))
+            try { controller.close() } catch { /* already closed */ }
+            appendLogEntry({ sessionId, userId, role: 'assistant', content: accumulated, taskId })
+            const doneStatus: StatusUpdate = {
+              taskId,
+              status: 'awaiting_feedback',
+              lastUpdate: 'Response complete',
+              expectedNextInputMinutes: 0,
+              timestamp: Date.now(),
+            }
+            persistAndBroadcastStatus(doneStatus)
+          },
+          error(msg: string) {
+            clearTimeout(timeout)
+            const errContent = accumulated + `\n\nError: ${msg}`
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ chunk: errContent })}\n\n`))
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true })}\n\n`))
+            try { controller.close() } catch { /* already closed */ }
+            appendLogEntry({ sessionId, userId, role: 'assistant', content: errContent, taskId })
+          },
+        })
+        return
       }
-      controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true })}\n\n`));
-      controller.close();
 
-      // Log assistant response after streaming completes
-      await appendLogEntry({
-        sessionId,
-        userId: '00000000-0000-0000-0000-000000000001',
-        role: 'assistant',
-        content: accumulated,
-        taskId,
-      })
-
-      const doneStatus: StatusUpdate = {
-        taskId,
-        status: 'awaiting_feedback',
-        lastUpdate: 'Response complete',
-        expectedNextInputMinutes: 0,
-        timestamp: Date.now(),
-      };
-      persistAndBroadcastStatus(doneStatus);
+      // Demo mode: use mock generator
+      ;(async () => {
+        let accumulated = '';
+        for await (const chunk of generateMockResponse(content)) {
+          accumulated += chunk;
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ chunk: accumulated })}\n\n`));
+        }
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true })}\n\n`));
+        controller.close();
+        await appendLogEntry({ sessionId, userId, role: 'assistant', content: accumulated, taskId })
+        const doneStatus: StatusUpdate = {
+          taskId, status: 'awaiting_feedback', lastUpdate: 'Response complete',
+          expectedNextInputMinutes: 0, timestamp: Date.now(),
+        }
+        persistAndBroadcastStatus(doneStatus)
+      })()
     },
   });
 
