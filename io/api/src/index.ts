@@ -19,6 +19,7 @@ import { transcribe, warmupTranscription } from './transcription/runner'
 import {
   createNatsClient,
   callbackTopicForTask,
+  IO_RESULTS_TOPIC_PREFIX,
   SUBJECT_IO_RESULTS,
 } from './nats/client'
 import { traceMiddleware } from './trace-context'
@@ -55,35 +56,77 @@ type ChatResponseCallback = {
 }
 const pendingChatResponses = new Map<string, ChatResponseCallback>()
 
+/** Map key for pending chat — UUID string case must match (e.g. uuidgen vs NATS subject). */
+function chatPendingKey(taskId: string): string {
+  return taskId.trim().toLowerCase()
+}
+
 function deliverChatResponse(taskId: string, content: string, done: boolean): boolean {
-  const cb = pendingChatResponses.get(taskId)
+  const key = chatPendingKey(taskId)
+  const cb = pendingChatResponses.get(key)
   if (!cb) return false
   cb.push(content)
   if (done) {
     cb.complete()
-    pendingChatResponses.delete(taskId)
+    pendingChatResponses.delete(key)
   }
   return true
+}
+
+function parseEnvelopePayload(env: Record<string, unknown>): Record<string, unknown> {
+  const p = env.payload
+  if (p == null) return {}
+  if (typeof p === 'string') {
+    try {
+      return JSON.parse(p) as Record<string, unknown>
+    } catch {
+      return {}
+    }
+  }
+  if (typeof p === 'object') return p as Record<string, unknown>
+  return {}
+}
+
+/**
+ * Client task id for `pendingChatResponses` — usually `aegis.io.results.<taskId>` subject suffix.
+ * For some payloads (e.g. task_accepted) only orchestrator_task_ref is inside payload; user task id
+ * is only reliable from the subject, so we prefer subject when it matches.
+ */
+function clientTaskIdFromIOResults(subject: string, payload: Record<string, unknown>): string {
+  if (subject.startsWith(IO_RESULTS_TOPIC_PREFIX)) {
+    return chatPendingKey(subject.slice(IO_RESULTS_TOPIC_PREFIX.length))
+  }
+  const raw = (payload.task_id as string) || (payload.orchestrator_task_ref as string) || ''
+  return raw ? chatPendingKey(raw) : ''
+}
+
+/** error_response carries user TaskID in payload — prefer it over subject (subject can differ by broker). */
+function pendingKeyFromErrorPayload(payload: Record<string, unknown>, subject: string): string {
+  const tid = payload.task_id
+  if (tid !== undefined && tid !== null && String(tid).length > 0) {
+    return chatPendingKey(String(tid))
+  }
+  return clientTaskIdFromIOResults(subject, payload)
 }
 
 // Subscribe to NATS callback topics for orchestrator responses
 if (natsClient) {
   natsClient.subscribe(SUBJECT_IO_RESULTS, (msg: unknown) => {
-    const m = msg as Record<string, unknown> | undefined
-    if (!m) return
-    const msgType = m.message_type as string | undefined
+    const raw = msg as { envelope?: Record<string, unknown>; subject?: string } | undefined
+    if (!raw) return
+    const envelope = (raw.envelope ?? raw) as Record<string, unknown>
+    const subject = typeof raw.subject === 'string' ? raw.subject : ''
+    const payload = parseEnvelopePayload(envelope)
+    const msgType = envelope.message_type as string | undefined
+    const taskId = clientTaskIdFromIOResults(subject, payload)
 
     if (msgType === 'task_accepted') {
-      const p = m as Record<string, unknown>
-      const taskId = (p.orchestrator_task_ref ?? p.task_id ?? '') as string
       if (taskId) {
         deliverChatResponse(taskId, 'Task accepted — the orchestrator is working on it.\n', false)
         ioLog('info', 'nats', 'task_accepted', { task_id: taskId })
       }
     } else if (msgType === 'task_result') {
-      const p = m as Record<string, unknown>
-      const taskId = (p.orchestrator_task_ref ?? p.task_id ?? '') as string
-      const result = p.result as string | Record<string, unknown> | undefined
+      const result = payload.result as string | Record<string, unknown> | undefined
       const content = typeof result === 'string'
         ? result
         : result && typeof result === 'object'
@@ -94,16 +137,22 @@ if (natsClient) {
         ioLog('info', 'nats', 'task_result', { task_id: taskId })
       }
     } else if (msgType === 'error_response') {
-      const p = m as Record<string, unknown>
-      const taskId = (p.task_id ?? '') as string
-      const userMsg = (p.user_message ?? 'An error occurred.') as string
-      if (taskId) {
-        const cb = pendingChatResponses.get(taskId)
+      const userMsg = (payload.user_message ?? 'An error occurred.') as string
+      const errKey = pendingKeyFromErrorPayload(payload, subject)
+      if (errKey) {
+        const cb = pendingChatResponses.get(errKey)
         if (cb) {
           cb.error(userMsg)
-          pendingChatResponses.delete(taskId)
+          pendingChatResponses.delete(errKey)
+          ioLog('warn', 'nats', 'error_response', { task_id: errKey, detail: userMsg })
+        } else {
+          ioLog('warn', 'nats', 'error_response_no_pending_chat', {
+            task_id: errKey,
+            subject,
+            detail: userMsg,
+            hint: 'client disconnected before callback or task id key mismatch',
+          })
         }
-        ioLog('warn', 'nats', 'error_response', { task_id: taskId, detail: userMsg })
       }
     }
   })
@@ -368,6 +417,10 @@ app.post('/api/chat', async (c) => {
   // Demo mode always uses the local mock generator.
   const useRealOrchestrator = !DEMO_MODE && natsClient?.connected
 
+  /** True only after JetStream publish succeeds — drives SSE branch (avoids stale `connected` vs stream start race). */
+  let awaitingOrchestratorChat = false
+  let userTaskPublishError: string | null = null
+
   // Publish user message to orchestrator via NATS
   if (useRealOrchestrator) {
     try {
@@ -379,11 +432,15 @@ app.post('/api/chat', async (c) => {
         callback_topic: callbackTopicForTask(taskId),
         trace_id: c.get('traceId'),
       })
+      awaitingOrchestratorChat = true
       logFromContext(c, 'info', 'nats', 'published user_task', { task_id: taskId })
     } catch (err) {
-      logFromContext(c, 'error', 'nats', 'failed to publish user_task', { task_id: taskId, err: String(err) })
+      userTaskPublishError = String(err)
+      logFromContext(c, 'error', 'nats', 'failed to publish user_task', { task_id: taskId, err: userTaskPublishError })
     }
   }
+
+  let cleanupChatStream: (() => void) | undefined
 
   const stream = new ReadableStream({
     start(controller) {
@@ -398,33 +455,84 @@ app.post('/api/chat', async (c) => {
         return;
       }
 
-      if (useRealOrchestrator) {
+      if (userTaskPublishError) {
+        const errMsg =
+          `[IO] Could not publish task to NATS: ${userTaskPublishError}\n\n` +
+          'Check NATS_URL and that the broker is reachable from the IO container.\n'
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ chunk: errMsg })}\n\n`))
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true })}\n\n`))
+        controller.close()
+        appendLogEntry({ sessionId, userId, role: 'assistant', content: errMsg, taskId })
+        return
+      }
+
+      if (awaitingOrchestratorChat) {
         // Wait for the orchestrator to deliver a response via NATS callback or HTTP bridge
         const TIMEOUT_MS = 120_000
         let accumulated = ''
+        let streamDone = false
+
+        const safeEnqueue = (line: string) => {
+          if (streamDone) return
+          try {
+            controller.enqueue(encoder.encode(line))
+          } catch {
+            streamDone = true
+          }
+        }
+        const safeClose = () => {
+          if (streamDone) return
+          streamDone = true
+          try {
+            controller.close()
+          } catch {
+            /* already closed (e.g. client disconnected) */
+          }
+        }
+
+        const pendingKey = chatPendingKey(taskId)
+        let keepalive: ReturnType<typeof setInterval> | undefined
+        const stopKeepalive = () => {
+          if (keepalive !== undefined) {
+            clearInterval(keepalive)
+            keepalive = undefined
+          }
+        }
 
         const timeout = setTimeout(() => {
-          pendingChatResponses.delete(taskId)
+          stopKeepalive()
+          pendingChatResponses.delete(pendingKey)
+          if (streamDone) return
           const msg = accumulated
             ? accumulated
             : '[IO] The orchestrator did not respond in time. Your message was delivered — the result may arrive via the status panel.\n'
           if (!accumulated) {
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ chunk: msg })}\n\n`))
+            safeEnqueue(`data: ${JSON.stringify({ chunk: msg })}\n\n`)
           }
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true })}\n\n`))
-          try { controller.close() } catch { /* already closed */ }
+          safeEnqueue(`data: ${JSON.stringify({ done: true })}\n\n`)
+          safeClose()
           appendLogEntry({ sessionId, userId, role: 'assistant', content: msg, taskId })
         }, TIMEOUT_MS)
 
-        pendingChatResponses.set(taskId, {
+        cleanupChatStream = () => {
+          stopKeepalive()
+          clearTimeout(timeout)
+          pendingChatResponses.delete(pendingKey)
+          streamDone = true
+        }
+
+        pendingChatResponses.set(pendingKey, {
           push(chunk: string) {
+            if (streamDone) return
             accumulated += chunk
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ chunk: accumulated })}\n\n`))
+            safeEnqueue(`data: ${JSON.stringify({ chunk: accumulated })}\n\n`)
           },
           complete() {
+            stopKeepalive()
             clearTimeout(timeout)
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true })}\n\n`))
-            try { controller.close() } catch { /* already closed */ }
+            if (streamDone) return
+            safeEnqueue(`data: ${JSON.stringify({ done: true })}\n\n`)
+            safeClose()
             appendLogEntry({ sessionId, userId, role: 'assistant', content: accumulated, taskId })
             const doneStatus: StatusUpdate = {
               taskId,
@@ -436,14 +544,28 @@ app.post('/api/chat', async (c) => {
             persistAndBroadcastStatus(doneStatus)
           },
           error(msg: string) {
+            stopKeepalive()
             clearTimeout(timeout)
+            if (streamDone) return
             const errContent = accumulated + `\n\nError: ${msg}`
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ chunk: errContent })}\n\n`))
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true })}\n\n`))
-            try { controller.close() } catch { /* already closed */ }
+            safeEnqueue(`data: ${JSON.stringify({ chunk: errContent })}\n\n`)
+            safeEnqueue(`data: ${JSON.stringify({ done: true })}\n\n`)
+            safeClose()
             appendLogEntry({ sessionId, userId, role: 'assistant', content: errContent, taskId })
           },
         })
+        // Flush so clients/proxies see a non-empty body immediately; avoids 0-byte files until NATS callbacks.
+        safeEnqueue(': io-waiting\n\n')
+        // Idle long-poll streams can be closed by proxies or stacks with no bytes for ~30s; keep TCP/SSE alive until orchestrator responds.
+        // Bun default idleTimeout is 10s; keepalives must fire more often or the TCP is reset mid-SSE.
+        keepalive = setInterval(() => {
+          if (streamDone) {
+            stopKeepalive()
+            return
+          }
+          safeEnqueue(': keepalive\n\n')
+        }, 8_000)
+        ioLog('info', 'http', 'chat_stream_pending', { task_id: taskId, pending_key: pendingKey })
         return
       }
 
@@ -463,6 +585,9 @@ app.post('/api/chat', async (c) => {
         }
         persistAndBroadcastStatus(doneStatus)
       })()
+    },
+    cancel() {
+      cleanupChatStream?.()
     },
   });
 
@@ -680,5 +805,7 @@ warmupTranscription()
 
 export default {
   port: 3001,
+  // Default Bun idleTimeout is 10s; long-lived SSE would be cut between io-waiting and keepalive.
+  idleTimeout: 0,
   fetch: app.fetch,
 };

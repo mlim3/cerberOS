@@ -27,14 +27,14 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
-	"log"
-	"os"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/mlim3/cerberOS/orchestrator/internal/config"
 	"github.com/mlim3/cerberOS/orchestrator/internal/interfaces"
+	"github.com/mlim3/cerberOS/orchestrator/internal/obslog"
 	"github.com/mlim3/cerberOS/orchestrator/internal/types"
 )
 
@@ -87,7 +87,7 @@ type PlanExecutor struct {
 	memory interfaces.MemoryClient
 	gw     Gateway
 	policy PolicyEnforcer
-	logger *log.Logger
+	logger *slog.Logger
 
 	// activePlans maps plan_id → *planExecution
 	activePlans sync.Map
@@ -115,7 +115,7 @@ func New(
 		memory:         memory,
 		gw:             gw,
 		policy:         policy,
-		logger:         log.New(os.Stdout, "[executor] ", log.LstdFlags|log.LUTC),
+		logger:         obslog.NewLogger("executor"),
 		onPlanComplete: onComplete,
 		onPlanFailed:   onFailed,
 	}
@@ -166,7 +166,7 @@ func (e *PlanExecutor) HandleSubtaskResult(result types.TaskResult) error {
 	// Resolve which plan/subtask this result belongs to.
 	planIDVal, ok := e.orchRefToPlan.Load(result.OrchestratorTaskRef)
 	if !ok {
-		e.logger.Printf("task result for unknown orchRef: %s", result.OrchestratorTaskRef)
+		e.logger.Warn("task result for unknown orchRef", "orchestrator_task_ref", result.OrchestratorTaskRef)
 		return nil // stale result; ignore
 	}
 	planID := planIDVal.(string)
@@ -189,8 +189,8 @@ func (e *PlanExecutor) HandleSubtaskResult(result types.TaskResult) error {
 
 	// Revoke credentials for this subtask's agent.
 	if err := e.policy.RevokeCredentials(result.OrchestratorTaskRef); err != nil {
-		e.logger.Printf("subtask credential revocation failed: orchRef=%s error=%v",
-			result.OrchestratorTaskRef, err)
+		e.logger.Error("subtask credential revocation failed",
+			obslog.AppendTrace([]any{"orchestrator_task_ref", result.OrchestratorTaskRef, "err", err}, exec.ts.TraceID)...)
 	}
 
 	now := time.Now().UTC()
@@ -272,10 +272,11 @@ func (e *PlanExecutor) dispatchSubtask(exec *planExecution, st types.Subtask, su
 	capResp, err := e.gw.PublishCapabilityQuery(types.CapabilityQuery{
 		OrchestratorTaskRef:  orchRef,
 		RequiredSkillDomains: st.RequiredSkillDomains,
+		TraceID:              exec.ts.TraceID,
 	})
 	if err != nil {
-		e.logger.Printf("capability query failed: plan_id=%s subtask_id=%s error=%v",
-			exec.plan.PlanID, sub.SubtaskID, err)
+		e.logger.Error("capability query failed",
+			obslog.AppendTrace([]any{"plan_id", exec.plan.PlanID, "subtask_id", sub.SubtaskID, "err", err}, exec.ts.TraceID)...)
 		sub.State = types.SubtaskStateFailed
 		sub.ErrorCode = types.ErrCodeAgentsUnavailable
 		sub.CompletedAt = &now
@@ -309,11 +310,12 @@ func (e *PlanExecutor) dispatchSubtask(exec *planExecution, st types.Subtask, su
 		},
 		CallbackTopic: exec.ts.CallbackTopic,
 		UserContextID: exec.ts.UserContextID,
+		TraceID:       exec.ts.TraceID,
 	}
 
 	if err := e.gw.PublishTaskSpec(spec); err != nil {
-		e.logger.Printf("task_spec publish failed: plan_id=%s subtask_id=%s error=%v",
-			exec.plan.PlanID, sub.SubtaskID, err)
+		e.logger.Error("task_spec publish failed",
+			obslog.AppendTrace([]any{"plan_id", exec.plan.PlanID, "subtask_id", sub.SubtaskID, "err", err}, exec.ts.TraceID)...)
 		sub.State = types.SubtaskStateDeliveryFailed
 		sub.ErrorCode = types.ErrCodeAgentsUnavailable
 		sub.CompletedAt = &now
@@ -334,8 +336,8 @@ func (e *PlanExecutor) dispatchSubtask(exec *planExecution, st types.Subtask, su
 	e.persistSubtaskState(sub, exec.ts.OrchestratorTaskRef, dispatchedAt)
 	atomic.AddInt32(&exec.dispatchedCount, 1)
 
-	e.logger.Printf("subtask dispatched: plan_id=%s subtask_id=%s orchRef=%s agent_id=%s",
-		exec.plan.PlanID, sub.SubtaskID, orchRef, capResp.AgentID)
+	e.logger.Info("subtask dispatched",
+		obslog.AppendTrace([]any{"plan_id", exec.plan.PlanID, "subtask_id", sub.SubtaskID, "orchestrator_task_ref", orchRef, "agent_id", capResp.AgentID}, exec.ts.TraceID)...)
 }
 
 // blockDependents marks all subtasks that (transitively) depend on a failed subtask as BLOCKED.
@@ -396,7 +398,8 @@ func (e *PlanExecutor) checkPlanCompletion(exec *planExecution) {
 
 	if !anyFailed && !anyBlocked {
 		// All subtasks completed successfully.
-		e.logger.Printf("plan completed: plan_id=%s subtasks=%d", exec.plan.PlanID, len(exec.subtasks))
+		e.logger.Info("plan completed",
+			obslog.AppendTrace([]any{"plan_id", exec.plan.PlanID, "subtasks", len(exec.subtasks)}, exec.ts.TraceID)...)
 		if e.onPlanComplete != nil {
 			e.onPlanComplete(exec.ts, completedResults)
 		}
@@ -410,7 +413,8 @@ func (e *PlanExecutor) checkPlanCompletion(exec *planExecution) {
 		errorCode = types.ErrCodeInvalidPlan // all failures are blocked deps
 	}
 
-	e.logger.Printf("plan failed: plan_id=%s partial=%v error_code=%s", exec.plan.PlanID, partial, errorCode)
+	e.logger.Warn("plan failed",
+		obslog.AppendTrace([]any{"plan_id", exec.plan.PlanID, "partial", partial, "error_code", errorCode}, exec.ts.TraceID)...)
 	if e.onPlanFailed != nil {
 		e.onPlanFailed(exec.ts, errorCode, partial, completedResults)
 	}
@@ -448,7 +452,7 @@ func (e *PlanExecutor) collectPriorResults(exec *planExecution, deps []string) [
 func (e *PlanExecutor) persistSubtaskState(sub *types.SubtaskState, orchRef string, timestamp time.Time) {
 	payload, err := json.Marshal(sub)
 	if err != nil {
-		e.logger.Printf("marshal subtask state failed: subtask_id=%s error=%v", sub.SubtaskID, err)
+		e.logger.Error("marshal subtask state failed", "subtask_id", sub.SubtaskID, "err", err)
 		return
 	}
 
@@ -461,7 +465,7 @@ func (e *PlanExecutor) persistSubtaskState(sub *types.SubtaskState, orchRef stri
 		Timestamp:           timestamp,
 		Payload:             payload,
 	}); err != nil {
-		e.logger.Printf("subtask state persist failed: subtask_id=%s error=%v", sub.SubtaskID, err)
+		e.logger.Error("subtask state persist failed", "subtask_id", sub.SubtaskID, "err", err)
 	}
 }
 

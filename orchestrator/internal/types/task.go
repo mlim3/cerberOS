@@ -121,6 +121,8 @@ type TaskState struct {
 	CallbackTopic        string          `json:"callback_topic"`
 	UserContextID        string          `json:"user_context_id,omitempty"`
 	IdempotencyWindow    int             `json:"idempotency_window_seconds"`
+	// TraceID is W3C trace_id (32 hex) for logs and agent wire propagation; optional for legacy state.
+	TraceID string `json:"trace_id,omitempty"`
 }
 
 // ─── UserTask ─────────────────────────────────────────────────────────────────
@@ -136,6 +138,8 @@ type UserTask struct {
 	CallbackTopic        string          `json:"callback_topic"`                       // Valid NATS topic
 	UserContextID        string          `json:"user_context_id,omitempty"`
 	IdempotencyWindow    int             `json:"idempotency_window_seconds,omitempty"` // Default 300
+	// TraceID is W3C trace_id (32 hex) from I/O; also accepted on the inbound MessageEnvelope.trace_id.
+	TraceID string `json:"trace_id,omitempty"`
 }
 
 // ─── Execution Plan & Subtask Types (NEW in v3.0) ─────────────────────────────

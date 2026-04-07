@@ -214,6 +214,10 @@ func (g *Gateway) handleRawInboundTask(subject string, data []byte) error {
 		return fmt.Errorf("deserialize user_task: %w", err)
 	}
 
+	if task.TraceID == "" {
+		task.TraceID = envelope.TraceID
+	}
+
 	if g.taskHandler == nil {
 		return fmt.Errorf("no task handler registered")
 	}
@@ -223,8 +227,8 @@ func (g *Gateway) handleRawInboundTask(subject string, data []byte) error {
 		"node_id", g.nodeID,
 		"task_id", task.TaskID,
 	}
-	if envelope.TraceID != "" {
-		recvAttrs = append(recvAttrs, "trace_id", envelope.TraceID)
+	if task.TraceID != "" {
+		recvAttrs = append(recvAttrs, "trace_id", task.TraceID)
 	}
 	g.logger.Info("inbound user_task received", recvAttrs...)
 	return g.taskHandler(task)
@@ -460,6 +464,10 @@ func (g *Gateway) PublishTaskResult(callbackTopic string, result types.TaskResul
 // PublishTaskSpec dispatches a validated task.inbound request to the Agents
 // Component. The internal TaskSpec is adapted to the agents-component schema.
 func (g *Gateway) PublishTaskSpec(spec types.TaskSpec) error {
+	tid := spec.TraceID
+	if tid == "" {
+		tid = spec.OrchestratorTaskRef
+	}
 	wire := struct {
 		TaskID         string            `json:"task_id"`
 		RequiredSkills []string          `json:"required_skills"`
@@ -472,7 +480,7 @@ func (g *Gateway) PublishTaskSpec(spec types.TaskSpec) error {
 		RequiredSkills: spec.RequiredSkillDomains,
 		Instructions:   buildAgentInstructions(spec),
 		Metadata:       buildAgentMetadata(spec),
-		TraceID:        spec.OrchestratorTaskRef,
+		TraceID:        tid,
 		UserContextID:  spec.UserContextID,
 	}
 	return g.publishEnvelope(TopicAgentTasksInbound, "task.inbound", spec.OrchestratorTaskRef, wire)
@@ -486,6 +494,10 @@ func (g *Gateway) PublishCapabilityQuery(query types.CapabilityQuery) (*types.Ca
 	g.pendingCapabilityQueries.Store(queryID, responseCh)
 	defer g.pendingCapabilityQueries.Delete(queryID)
 
+	qtid := query.TraceID
+	if qtid == "" {
+		qtid = query.OrchestratorTaskRef
+	}
 	wire := struct {
 		QueryID string   `json:"query_id"`
 		Domains []string `json:"domains"`
@@ -493,7 +505,7 @@ func (g *Gateway) PublishCapabilityQuery(query types.CapabilityQuery) (*types.Ca
 	}{
 		QueryID: queryID,
 		Domains: query.RequiredSkillDomains,
-		TraceID: query.OrchestratorTaskRef,
+		TraceID: qtid,
 	}
 
 	if err := g.publishEnvelope(TopicCapabilityQuery, "capability.query", queryID, wire); err != nil {

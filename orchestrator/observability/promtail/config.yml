@@ -1,0 +1,45 @@
+# Promtail: ship Docker container logs → Loki.
+# Expects compose-managed containers (label com.docker.compose.service).
+# JSON fields (service, trace_id, component) stay in the log line — query with Grafana: | json
+
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+    batchwait: 1s
+    batchsize: 1048576
+
+scrape_configs:
+  - job_name: docker
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+    relabel_configs:
+      # Only Docker Compose services (skip random docker run containers)
+      - source_labels: [__meta_docker_container_label_com_docker_compose_service]
+        regex: ^$
+        action: drop
+      # Do not ingest observability stack (feedback loop / noise)
+      - source_labels: [__meta_docker_container_label_com_docker_compose_service]
+        regex: (loki|grafana|promtail)
+        action: drop
+      - source_labels: [__meta_docker_container_label_com_docker_compose_service]
+        regex: (.+)
+        target_label: compose_service
+      - source_labels: [__meta_docker_container_label_com_docker_compose_project]
+        regex: (.+)
+        target_label: compose_project
+      - source_labels: [__meta_docker_container_name]
+        regex: /(.*)
+        target_label: container_name
+      - replacement: docker
+        target_label: job
+
+    # Unwrap Docker json-file log lines ({"log":"...","stream":"stdout",...}) into plain text for Loki.
+    pipeline_stages:
+      - docker: {}

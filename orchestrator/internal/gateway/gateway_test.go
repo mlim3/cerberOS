@@ -147,6 +147,51 @@ func TestHandleInboundTask_ValidEnvelope_CallsTaskHandler(t *testing.T) {
 	}
 }
 
+func TestHandleInboundTask_EnvelopeTraceID_MergedIntoUserTask(t *testing.T) {
+	gw, nats := newGateway(t)
+
+	var received types.UserTask
+	gw.RegisterTaskHandler(func(task types.UserTask) error {
+		received = task
+		return nil
+	})
+
+	task := types.UserTask{
+		TaskID:               "task-abc",
+		UserID:               "user-1",
+		RequiredSkillDomains: []string{"web"},
+		Priority:             5,
+		TimeoutSeconds:       60,
+		CallbackTopic:        "aegis.user-io.results",
+	}
+	raw, err := json.Marshal(task)
+	if err != nil {
+		t.Fatalf("json.Marshal(task): %v", err)
+	}
+	env := types.MessageEnvelope{
+		MessageID:       "test-msg-id-trace",
+		MessageType:     "user_task",
+		SourceComponent: "user-io",
+		CorrelationID:   "task-abc",
+		TraceID:         "aabbccddeeff00112233445566778899",
+		Timestamp:       time.Now().UTC(),
+		SchemaVersion:   "1.0",
+		Payload:         raw,
+	}
+	data, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("json.Marshal(envelope): %v", err)
+	}
+
+	if err := nats.Deliver(gateway.TopicTasksInbound, data); err != nil {
+		t.Fatalf("Deliver() error = %v", err)
+	}
+
+	if received.TraceID != "aabbccddeeff00112233445566778899" {
+		t.Fatalf("received.TraceID = %q, want W3C trace from envelope", received.TraceID)
+	}
+}
+
 func TestHandleInboundTask_NoHandlerRegistered_ReturnsError(t *testing.T) {
 	_, nats := newGateway(t)
 
@@ -274,6 +319,43 @@ func TestPublishTaskSpec_PublishesToAgentsTopic(t *testing.T) {
 	}
 	if decodedSpec.Metadata["orchestrator_task_ref"] != "orch-1" {
 		t.Fatalf("decodedSpec.Metadata[orchestrator_task_ref] = %q, want orch-1", decodedSpec.Metadata["orchestrator_task_ref"])
+	}
+}
+
+func TestPublishTaskSpec_WirePrefersW3CTraceID(t *testing.T) {
+	gw, nats := newGateway(t)
+
+	spec := types.TaskSpec{
+		OrchestratorTaskRef:  "orch-internal",
+		TaskID:               "task-1",
+		UserID:               "user-1",
+		RequiredSkillDomains: []string{"web"},
+		PolicyScope:          types.PolicyScope{Domains: []string{"web"}, TokenRef: "tok-1"},
+		TimeoutSeconds:       60,
+		CallbackTopic:        "aegis.user-io.results.task-1",
+		TraceID:              "0123456789abcdef0123456789abcdef",
+	}
+
+	if err := gw.PublishTaskSpec(spec); err != nil {
+		t.Fatalf("PublishTaskSpec() error = %v", err)
+	}
+
+	msgs := nats.Published[gateway.TopicAgentTasksInbound]
+	if len(msgs) != 1 {
+		t.Fatalf("published = %d, want 1", len(msgs))
+	}
+	var envelope types.MessageEnvelope
+	if err := json.Unmarshal(msgs[0], &envelope); err != nil {
+		t.Fatalf("invalid envelope: %v", err)
+	}
+	var decoded struct {
+		TraceID string `json:"trace_id"`
+	}
+	if err := json.Unmarshal(envelope.Payload, &decoded); err != nil {
+		t.Fatalf("decode task.inbound payload: %v", err)
+	}
+	if decoded.TraceID != "0123456789abcdef0123456789abcdef" {
+		t.Fatalf("wire trace_id = %q, want TaskSpec.TraceID", decoded.TraceID)
 	}
 }
 

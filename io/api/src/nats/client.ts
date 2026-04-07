@@ -89,9 +89,12 @@ function buildEnvelope(
   return env
 }
 
+/** Prefix for per-task IO callback subjects (`aegis.io.results.<client_task_id>`). */
+export const IO_RESULTS_TOPIC_PREFIX = 'aegis.io.results.'
+
 /** Build a callback topic for a given task. */
 export function callbackTopicForTask(taskId: string): string {
-  return `aegis.io.results.${taskId}`
+  return `${IO_RESULTS_TOPIC_PREFIX}${taskId}`
 }
 
 /**
@@ -106,6 +109,38 @@ export function createNatsClient(config: NatsConfig): IONatsClient | null {
   let js: JetStreamClient | null = null
   const subscriptions: Subscription[] = []
   let isConnected = false
+
+  type PendingSub = { channel: string; handler: (msg: unknown) => void }
+  const pendingSubscriptions: PendingSub[] = []
+
+  function attachSubscription(channel: string, handler: (msg: unknown) => void): () => void {
+    if (!nc) return () => {}
+    const sub = nc.subscribe(channel)
+    subscriptions.push(sub)
+    ;(async () => {
+      for await (const msg of sub) {
+        try {
+          const text = new TextDecoder().decode(msg.data)
+          const parsed = JSON.parse(text) as Record<string, unknown>
+          handler({ envelope: parsed, subject: msg.subject })
+        } catch {
+          // skip unparseable messages
+        }
+      }
+    })()
+    return () => {
+      sub.unsubscribe()
+    }
+  }
+
+  function flushPendingSubscriptions() {
+    if (!nc) return
+    const queued = pendingSubscriptions.splice(0, pendingSubscriptions.length)
+    for (const { channel, handler } of queued) {
+      attachSubscription(channel, handler)
+      console.log(`[IO:NATS] Subscribed (deferred): ${channel}`)
+    }
+  }
 
   // Connect asynchronously — the client exposes `connected` as a live flag.
   ;(async () => {
@@ -138,6 +173,7 @@ export function createNatsClient(config: NatsConfig): IONatsClient | null {
 
       isConnected = true
       console.log(`[IO:NATS] Connected to ${config.url}`)
+      flushPendingSubscriptions()
 
       // Monitor connection status
       ;(async () => {
@@ -185,29 +221,15 @@ export function createNatsClient(config: NatsConfig): IONatsClient | null {
 
     subscribe(channel: string, handler: (msg: unknown) => void): () => void {
       if (!nc) {
-        console.warn('[IO:NATS] Cannot subscribe — not connected')
-        return () => {}
-      }
-      const sub = nc.subscribe(channel)
-      subscriptions.push(sub)
-
-      // Consume messages in the background
-      ;(async () => {
-        for await (const msg of sub) {
-          try {
-            const text = new TextDecoder().decode(msg.data)
-            const parsed = JSON.parse(text)
-            // Unwrap envelope if present
-            handler(parsed.payload ?? parsed)
-          } catch {
-            // skip unparseable messages
-          }
+        const entry: PendingSub = { channel, handler }
+        pendingSubscriptions.push(entry)
+        console.log(`[IO:NATS] Subscription queued until connect: ${channel}`)
+        return () => {
+          const ix = pendingSubscriptions.indexOf(entry)
+          if (ix >= 0) pendingSubscriptions.splice(ix, 1)
         }
-      })()
-
-      return () => {
-        sub.unsubscribe()
       }
+      return attachSubscription(channel, handler)
     },
 
     close() {
