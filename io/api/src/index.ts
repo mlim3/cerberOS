@@ -21,21 +21,14 @@ import {
   callbackTopicForTask,
   SUBJECT_IO_RESULTS,
 } from './nats/client'
+import { traceMiddleware } from './trace-context'
+import { ioLog, logFromContext } from './logger'
 
 // =============================================================================
 // Configuration
 // =============================================================================
 
 const DEMO_MODE = process.env.DEMO_MODE === 'true'
-const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info'
-
-function log(prefix: string, msg: string, extra?: object) {
-  if (LOG_LEVEL === 'debug') {
-    console.log(`[IO:${prefix}] ${msg}`, extra ? JSON.stringify(extra) : '')
-  } else {
-    console.log(`[IO:${prefix}] ${msg}`)
-  }
-}
 
 // =============================================================================
 // NATS client (stub)
@@ -45,7 +38,11 @@ const natsClient = createNatsClient({
   url: process.env.NATS_URL ?? '',
   credsPath: process.env.NATS_CREDS_PATH,
 })
-log('ORCH', `Transport: ${natsClient ? 'NATS' : 'HTTP bridge (POST /api/orchestrator/stream-events)'}`)
+ioLog(
+  'info',
+  'transport',
+  natsClient ? 'using NATS' : 'using HTTP bridge (POST /api/orchestrator/stream-events)',
+)
 
 // =============================================================================
 // Pending chat responses — POST /api/chat registers here, orchestrator delivers
@@ -81,7 +78,7 @@ if (natsClient) {
       const taskId = (p.orchestrator_task_ref ?? p.task_id ?? '') as string
       if (taskId) {
         deliverChatResponse(taskId, 'Task accepted — the orchestrator is working on it.\n', false)
-        log('NATS', `task_accepted for ${taskId}`)
+        ioLog('info', 'nats', 'task_accepted', { task_id: taskId })
       }
     } else if (msgType === 'task_result') {
       const p = m as Record<string, unknown>
@@ -94,7 +91,7 @@ if (natsClient) {
           : 'Task completed.'
       if (taskId) {
         deliverChatResponse(taskId, content, true)
-        log('NATS', `task_result for ${taskId}`)
+        ioLog('info', 'nats', 'task_result', { task_id: taskId })
       }
     } else if (msgType === 'error_response') {
       const p = m as Record<string, unknown>
@@ -106,7 +103,7 @@ if (natsClient) {
           cb.error(userMsg)
           pendingChatResponses.delete(taskId)
         }
-        log('NATS', `error_response for ${taskId}: ${userMsg}`)
+        ioLog('warn', 'nats', 'error_response', { task_id: taskId, detail: userMsg })
       }
     }
   })
@@ -206,25 +203,33 @@ async function* generateMockResponse(content: string): AsyncGenerator<string> {
   yield '\nFeel free to ask more questions!';
 }
 
-const app = new Hono();
+type AppEnv = {
+  Variables: {
+    traceId: string
+    traceparent: string
+  }
+}
+
+const app = new Hono<AppEnv>();
 
 // =============================================================================
 // Middleware
 // =============================================================================
 
 app.use('/*', cors());
+app.use('/*', traceMiddleware);
 
 // =============================================================================
 // Health checks
 // =============================================================================
 
 app.get('/health', (c) => {
-  log('GET', '/health')
+  logFromContext(c, 'info', 'http', 'GET /health')
   return c.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
 app.get('/api/health', (c) => {
-  log('GET', '/api/health')
+  logFromContext(c, 'info', 'http', 'GET /api/health')
   return c.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
@@ -233,7 +238,7 @@ app.get('/api/health', (c) => {
 // =============================================================================
 
 app.get('/api/status', (c) => {
-  log('GET', '/api/status')
+  logFromContext(c, 'info', 'http', 'GET /api/status')
   const stt = (process.env.STT_PROVIDER ?? 'local').toLowerCase()
   return c.json({
     io_api: 'ok',
@@ -252,7 +257,7 @@ app.get('/api/status', (c) => {
 
 // Get all tasks
 app.get('/api/tasks', (c) => {
-  log('GET', '/api/tasks')
+  logFromContext(c, 'info', 'http', 'GET /api/tasks')
   const taskList = Array.from(tasks.values());
   return c.json({ tasks: taskList });
 });
@@ -260,7 +265,7 @@ app.get('/api/tasks', (c) => {
 // Get status for a specific task
 app.get('/api/tasks/:taskId', (c) => {
   const taskId = c.req.param('taskId');
-  log('GET', `/api/tasks/${taskId}`)
+  logFromContext(c, 'info', 'http', 'GET /api/tasks/:taskId', { task_id: taskId })
   const task = tasks.get(taskId);
   if (!task) {
     return c.json({ error: 'Task not found' }, 404);
@@ -273,7 +278,7 @@ app.post('/api/tasks', async (c) => {
   const { content, userId } = await c.req.json()
   const taskId = crypto.randomUUID()
 
-  log('REQ', `POST /api/tasks ← ${JSON.stringify({ content, userId, taskId })}`)
+  logFromContext(c, 'info', 'http', 'POST /api/tasks', { task_id: taskId, user_id: userId })
 
   const task: StatusUpdate = {
     taskId,
@@ -308,7 +313,10 @@ app.post('/api/orchestrator/stream-events', async (c) => {
     return c.json({ error: 'invalid orchestrator stream event' }, 400);
   }
   const taskId = event.payload.taskId;
-  log('ORCH', `← stream-event type=${event.type} taskId=${taskId}`, { event })
+  logFromContext(c, 'info', 'orchestrator', 'POST /api/orchestrator/stream-events', {
+    event_type: event.type,
+    task_id: taskId,
+  })
   if (event.type === 'status') {
     tasks.set(taskId, event.payload);
   } else if (event.type === 'chat_response') {
@@ -327,7 +335,11 @@ app.post('/api/orchestrator/stream-events', async (c) => {
 app.post('/api/chat', async (c) => {
   const body = (await c.req.json()) as SendMessageRequest;
   const { taskId, content, conversationHistory } = body;
-  log('POST', `/api/chat ← ${JSON.stringify({ taskId, contentLen: content.length, historyLen: conversationHistory?.length })}`)
+  logFromContext(c, 'info', 'http', 'POST /api/chat', {
+    task_id: taskId,
+    content_len: content.length,
+    history_len: conversationHistory?.length,
+  })
 
   // Log user message via memory client (uses in-memory when MEMORY_API_BASE is unset)
   const sessionId = getOrCreateSessionId(taskId, '00000000-0000-0000-0000-000000000001')
@@ -365,10 +377,11 @@ app.post('/api/chat', async (c) => {
         content,
         payload: { raw_input: content },
         callback_topic: callbackTopicForTask(taskId),
+        trace_id: c.get('traceId'),
       })
-      log('NATS', `Published chat message for taskId=${taskId}`)
+      logFromContext(c, 'info', 'nats', 'published user_task', { task_id: taskId })
     } catch (err) {
-      log('NATS', `Failed to publish chat message: ${err}`)
+      logFromContext(c, 'error', 'nats', 'failed to publish user_task', { task_id: taskId, err: String(err) })
     }
   }
 
@@ -470,7 +483,7 @@ app.post('/api/chat', async (c) => {
 // Get logs for a task
 app.get('/api/logs/:taskId', async (c) => {
   const taskId = c.req.param('taskId');
-  log('GET', `/api/logs/${taskId}`)
+  logFromContext(c, 'info', 'http', 'GET /api/logs/:taskId', { task_id: taskId })
   const sessionId = getOrCreateSessionId(taskId, '00000000-0000-0000-0000-000000000001')
   const memoryLogs = await getSessionLogs(sessionId, { taskId })
   const logs = memoryLogs.map(memoryToLogEntry)
@@ -479,7 +492,7 @@ app.get('/api/logs/:taskId', async (c) => {
 
 // Get all logs — session-scoped queries via /api/logs/:taskId are the intended API
 app.get('/api/logs', (c) => {
-  log('GET', '/api/logs')
+  logFromContext(c, 'info', 'http', 'GET /api/logs')
   return c.json({ logs: [] });
 });
 
@@ -498,7 +511,12 @@ app.post('/api/credential', async (c) => {
     value: string;
   };
   const { taskId, requestId, userId, keyName } = body;
-  log('POST', `/api/credential ← ${JSON.stringify({ taskId, requestId, userId, keyName })}`)
+  logFromContext(c, 'info', 'http', 'POST /api/credential', {
+    task_id: taskId,
+    request_id: requestId,
+    user_id: userId,
+    key_name: keyName,
+  })
 
   const memoryVaultUrl = process.env.MEMORY_VAULT_URL || 'http://localhost:8080/api/v1/vault';
   const memoryApiKey = process.env.MEMORY_VAULT_API_KEY || '';
@@ -509,7 +527,8 @@ app.post('/api/credential', async (c) => {
       headers: {
         'Content-Type': 'application/json',
         'X-API-KEY': memoryApiKey,
-        'X-Trace-ID': c.req.header('X-Trace-ID') || crypto.randomUUID(),
+        'traceparent': c.get('traceparent'),
+        'X-Trace-ID': c.get('traceId'),
       },
       body: JSON.stringify({
         key_name: keyName,
@@ -541,7 +560,7 @@ app.post('/api/credential', async (c) => {
       201,
     );
   } catch {
-    log('credential', 'Memory service unavailable, simulating credential storage')
+    logFromContext(c, 'warn', 'credential', 'memory vault unavailable; simulating credential storage')
     return c.json(
       {
         taskId,
@@ -560,7 +579,7 @@ app.post('/api/credential', async (c) => {
 
 app.get('/api/events/:taskId', (c) => {
   const taskId = c.req.param('taskId');
-  log('GET', `/api/events/${taskId}`)
+  logFromContext(c, 'info', 'http', 'GET /api/events/:taskId', { task_id: taskId })
 
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
@@ -625,7 +644,7 @@ app.get('/api/events/:taskId', (c) => {
 
 /** POST /api/voice/transcribe — transcribe audio using faster-whisper */
 app.post('/api/voice/transcribe', async (c) => {
-  log('POST', '/api/voice/transcribe')
+  logFromContext(c, 'info', 'http', 'POST /api/voice/transcribe')
   const body = await c.req.json<{
     audioData: string
     format: string
@@ -639,7 +658,7 @@ app.post('/api/voice/transcribe', async (c) => {
     })
     return c.json(result)
   } catch (err) {
-    console.error('[IO:Voice] Transcription failed:', err)
+    logFromContext(c, 'error', 'voice', 'transcription failed', { err: String(err) })
     return c.json({ error: String(err) }, 500)
   }
 })

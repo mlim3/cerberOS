@@ -14,6 +14,7 @@ type MessageEnvelope struct {
 	MessageType     string          `json:"message_type"`     // e.g. "task_spec", "capability_query"
 	SourceComponent string          `json:"source_component"` // always "orchestrator"
 	CorrelationID   string          `json:"correlation_id"`   // task UUID
+	TraceID         string          `json:"trace_id,omitempty"` // W3C trace_id (32 hex), optional inbound from I/O
 	Timestamp       time.Time       `json:"timestamp"`
 	SchemaVersion   string          `json:"schema_version"` // "1.0"
 	Payload         json.RawMessage `json:"payload"`

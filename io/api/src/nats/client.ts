@@ -47,6 +47,8 @@ export interface UserTaskPayload {
   callback_topic?: string
   required_skill_domains?: string[]
   user_context_id?: string
+  /** W3C trace_id (32 hex) — forwarded on the wire envelope for orchestrator logs */
+  trace_id?: string
 }
 
 export interface IONatsClient {
@@ -62,13 +64,19 @@ interface OutboundEnvelope {
   message_type: string
   source_component: string
   correlation_id: string
+  trace_id?: string
   timestamp: string
   schema_version: string
   payload: unknown
 }
 
-function buildEnvelope(messageType: string, correlationId: string, payload: unknown): OutboundEnvelope {
-  return {
+function buildEnvelope(
+  messageType: string,
+  correlationId: string,
+  payload: unknown,
+  traceId?: string,
+): OutboundEnvelope {
+  const env: OutboundEnvelope = {
     message_id: crypto.randomUUID(),
     message_type: messageType,
     source_component: 'io',
@@ -77,6 +85,8 @@ function buildEnvelope(messageType: string, correlationId: string, payload: unkn
     schema_version: '1.0',
     payload,
   }
+  if (traceId) env.trace_id = traceId
+  return env
 }
 
 /** Build a callback topic for a given task. */
@@ -168,7 +178,7 @@ export function createNatsClient(config: NatsConfig): IONatsClient | null {
         callback_topic: task.callback_topic ?? callbackTopicForTask(task.task_id),
         user_context_id: task.user_context_id,
       }
-      const envelope = buildEnvelope('user_task', task.task_id, natsPayload)
+      const envelope = buildEnvelope('user_task', task.task_id, natsPayload, task.trace_id)
       const data = new TextEncoder().encode(JSON.stringify(envelope))
       await js.publish(SUBJECT_TASK_INBOUND, data)
     },
