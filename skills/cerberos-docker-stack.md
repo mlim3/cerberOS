@@ -1,9 +1,11 @@
 # cerberOS Docker Stack
 
 ## When to use
+
 When starting, stopping, or troubleshooting the cerberOS development stack.
 
 ## Prerequisites
+
 - Docker Desktop (or Docker Engine + Compose v2)
 - Copy `.env.example` to `.env` and fill in required values
 
@@ -14,13 +16,10 @@ When starting, stopping, or troubleshooting the cerberOS development stack.
 docker compose up --build
 
 # Core only (no memory/vault)
-docker compose up --build nats-1 nats-2 nats-3 orchestrator io
+docker compose up --build nats orchestrator io
 
 # With agents
 docker compose --profile agents up --build
-
-# With observability (Prometheus + Grafana + NATS exporter)
-docker compose --profile observability up --build
 
 # Detached
 docker compose up -d --build
@@ -34,7 +33,7 @@ docker compose down -v
 
 ## Service startup order
 
-1. **nats-1, nats-2, nats-3** — 3-node JetStream cluster; everything depends on nats-1
+1. **nats** — JetStream broker; everything depends on this
 2. **memory-db** — Postgres (pgvector); needed by memory-api and openbao
 3. **memory-api** — waits for memory-db healthcheck
 4. **openbao** — waits for memory-db healthcheck (storage backend)
@@ -58,24 +57,38 @@ docker compose restart vault
 ## Common issues
 
 ### NATS not ready
+
 Orchestrator or IO crash-loops with "connection refused". Wait for NATS healthcheck
 or check: `curl http://localhost:8222/healthz`
 
 ### memory-api exits immediately
+
 Missing `VAULT_MASTER_KEY` or `INTERNAL_VAULT_API_KEY` in `.env`.
 Generate with: `openssl rand -hex 32`
 
 ### OpenBao sealed after restart
+
 OpenBao does not auto-unseal in dev mode. Re-run `cd vault && ./bootstrap-up.sh`
 or manually unseal with the key from `vault/.openbao-init.json`.
 
 ### Port conflicts
+
 Check `docker compose ps` for port bindings. See `cerberos-service-ports.md` for the full map.
 
 ## Profiles
 
-| Profile | Services added | Use case |
-|---------|---------------|----------|
-| _(default)_ | nats-1/2/3, orchestrator, io, memory-db, memory-api, openbao, vault, swagger, aegis-databus | Full-stack dev |
-| `agents` | simulator, aegis-agents | Agent lifecycle testing |
-| `observability` | nats-exporter, prometheus, grafana | Monitoring dashboards |
+| Profile     | Services added                                                         | Use case                |
+| ----------- | ---------------------------------------------------------------------- | ----------------------- |
+| _(default)_ | nats, orchestrator, io, memory-db, memory-api, openbao, vault, swagger | Full-stack dev          |
+| `agents`    | simulator, aegis-agents                                                | Agent lifecycle testing |
+
+## DataBus (separate stack)
+
+The aegis-databus component uses a 3-node NATS cluster and is not included in the root compose.
+Run it standalone:
+
+```bash
+cd aegis-databus
+docker compose up -d
+docker compose -f docker-compose.apps.yml --profile apps up -d
+```
