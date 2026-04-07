@@ -133,7 +133,7 @@ services:
       DB_PASSWORD: ${POSTGRES_PASSWORD:-password}
       DB_NAME: ${POSTGRES_DB:-memory_db}
       PORT: "8081"
-      VAULT_MASTER_KEY: ${VAULT_MASTER_KEY:?Set VAULT_MASTER_KEY in .env (32-byte hex)}
+      VAULT_MASTER_KEY: ${VAULT_MASTER_KEY:?Set VAULT_MASTER_KEY in .env (exactly 32 ASCII chars)}
       INTERNAL_VAULT_API_KEY: ${INTERNAL_VAULT_API_KEY:?Set INTERNAL_VAULT_API_KEY in .env}
     ports:
       - "8081:8081"
