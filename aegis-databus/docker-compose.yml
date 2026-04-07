@@ -1,0 +1,102 @@
+services:
+  nats-1:
+    image: nats:2.9-alpine
+    # No container_name: fixed names are global and clash across COMPOSE_PROJECT_NAME values.
+    # Service hostname on aegis-net remains "nats-1".
+    command: ["-c", "/config/nats-node1.conf"]
+    volumes:
+      - ./config/nats-node1.conf:/config/nats-node1.conf
+      - nats1-data:/data
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    networks:
+      - aegis-net
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  nats-2:
+    image: nats:2.9-alpine
+    command: ["-c", "/config/nats-node2.conf"]
+    volumes:
+      - ./config/nats-node2.conf:/config/nats-node2.conf
+      - nats2-data:/data
+    ports:
+      - "4223:4222"
+      - "8223:8222"
+    networks:
+      - aegis-net
+    depends_on:
+      - nats-1
+
+  nats-3:
+    image: nats:2.9-alpine
+    command: ["-c", "/config/nats-node3.conf"]
+    volumes:
+      - ./config/nats-node3.conf:/config/nats-node3.conf
+      - nats3-data:/data
+    ports:
+      - "4224:4222"
+      - "8224:8222"
+    networks:
+      - aegis-net
+    depends_on:
+      - nats-1
+
+  nats-exporter:
+    image: natsio/prometheus-nats-exporter:latest
+    command:
+      - "-varz"
+      - "-connz"
+      - "-connz_detailed"
+      - "-subz"
+      - "-routez"
+      - "http://nats-1:8222"
+    ports:
+      - "7777:7777"
+    networks:
+      - aegis-net
+    depends_on:
+      - nats-1
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./config/prometheus/alerts.yml:/etc/prometheus/alerts.yml
+    ports:
+      - "9090:9090"
+    networks:
+      - aegis-net
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    depends_on:
+      - nats-exporter
+
+  grafana:
+    image: grafana/grafana:latest
+    volumes:
+      - ./config/grafana/provisioning:/etc/grafana/provisioning
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel
+    networks:
+      - aegis-net
+    depends_on:
+      - prometheus
+
+volumes:
+  nats1-data:
+  nats2-data:
+  nats3-data:
+
+networks:
+  aegis-net:
+    driver: bridge
