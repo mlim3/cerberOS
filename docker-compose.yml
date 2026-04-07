@@ -3,39 +3,76 @@
 # =============================================================================
 #
 # Start the full stack:   docker compose up --build
-# Start core only:        docker compose up --build nats orchestrator io
+# Start core only:        docker compose up --build nats-1 nats-2 nats-3 orchestrator io
 # Start with agents:      docker compose --profile agents up --build
+# Start with observability: docker compose --profile observability up --build
 #
 # Port map (host → container):
+#   3000 → Grafana                (profile: observability)
 #   3001 → io API/UI
-#   4222 → NATS client
+#   4222 → NATS client (nats-1)
+#   4223 → NATS client (nats-2)
+#   4224 → NATS client (nats-3)
+#   7777 → NATS exporter          (profile: observability)
 #   8000 → vault engine API
 #   8080 → orchestrator health
 #   8081 → memory API
 #   8082 → vault swagger UI
 #   8200 → OpenBao
-#   8222 → NATS monitoring
-#   9090 → agents metrics       (profile: agents)
+#   8222 → NATS monitoring (nats-1)
+#   9090 → Prometheus              (profile: observability)
+#   9091 → DataBus health/metrics
+#   9190 → agents metrics          (profile: agents)
 #
 # =============================================================================
 
 # ---------------------------------------------------------------------------
-# 1. MESSAGING
+# 1. MESSAGING — 3-node NATS JetStream cluster
 # ---------------------------------------------------------------------------
 services:
-  nats:
+  nats-1:
     image: nats:2.10-alpine
-    command: ["--jetstream", "--store_dir=/data", "-m", "8222"]
+    command: ["-c", "/config/nats-node1.conf"]
+    volumes:
+      - ./aegis-databus/config/nats-node1.conf:/config/nats-node1.conf:ro
+      - nats1-data:/data
     ports:
       - "4222:4222"
       - "8222:8222"
-    volumes:
-      - nats-data:/data
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
       interval: 5s
       timeout: 3s
       retries: 5
+    networks:
+      cerberos:
+        # Alias "nats" so services using NATS_URL=nats://nats:4222 still resolve.
+        aliases:
+          - nats
+
+  nats-2:
+    image: nats:2.10-alpine
+    command: ["-c", "/config/nats-node2.conf"]
+    volumes:
+      - ./aegis-databus/config/nats-node2.conf:/config/nats-node2.conf:ro
+      - nats2-data:/data
+    ports:
+      - "4223:4222"
+    depends_on:
+      - nats-1
+    networks:
+      - cerberos
+
+  nats-3:
+    image: nats:2.10-alpine
+    command: ["-c", "/config/nats-node3.conf"]
+    volumes:
+      - ./aegis-databus/config/nats-node3.conf:/config/nats-node3.conf:ro
+      - nats3-data:/data
+    ports:
+      - "4224:4222"
+    depends_on:
+      - nats-1
     networks:
       - cerberos
 
@@ -46,7 +83,7 @@ services:
     build:
       context: ./orchestrator
     depends_on:
-      nats:
+      nats-1:
         condition: service_healthy
     environment:
       NATS_URL: nats://nats:4222
@@ -71,7 +108,7 @@ services:
     ports:
       - "3001:3001"
     depends_on:
-      nats:
+      nats-1:
         condition: service_healthy
     environment:
       NODE_ENV: production
@@ -180,7 +217,97 @@ services:
       - cerberos
 
   # ---------------------------------------------------------------------------
-  # 6. AGENTS (optional — docker compose --profile agents up)
+  # 6. DATABUS
+  # ---------------------------------------------------------------------------
+  aegis-databus:
+    build:
+      context: ./aegis-databus
+      target: aegis-databus
+    depends_on:
+      nats-1:
+        condition: service_healthy
+      orchestrator:
+        condition: service_started
+    environment:
+      AEGIS_NATS_URL: nats://nats-1:4222
+      AEGIS_NATS_HTTP_URL: http://nats-1:8222
+      AEGIS_ORCHESTRATOR_URL: http://orchestrator:8080
+      AEGIS_MEMORY_URL: http://memory-api:8081/v1/memory
+    ports:
+      - "9091:9091"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9091/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 36
+      start_period: 600s
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    user: "65532:65532"
+    networks:
+      - cerberos
+
+  # ---------------------------------------------------------------------------
+  # 7. OBSERVABILITY (optional — docker compose --profile observability up)
+  # ---------------------------------------------------------------------------
+  nats-exporter:
+    image: natsio/prometheus-nats-exporter:latest
+    profiles:
+      - observability
+    command:
+      - "-varz"
+      - "-connz"
+      - "-connz_detailed"
+      - "-subz"
+      - "-routez"
+      - "http://nats-1:8222"
+    ports:
+      - "7777:7777"
+    depends_on:
+      - nats-1
+    networks:
+      - cerberos
+
+  prometheus:
+    image: prom/prometheus:latest
+    profiles:
+      - observability
+    volumes:
+      - ./aegis-databus/config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./aegis-databus/config/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+    ports:
+      - "9090:9090"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    depends_on:
+      - nats-exporter
+    networks:
+      - cerberos
+
+  grafana:
+    image: grafana/grafana:latest
+    profiles:
+      - observability
+    volumes:
+      - ./aegis-databus/config/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_INSTALL_PLUGINS: grafana-piechart-panel
+    depends_on:
+      - prometheus
+    networks:
+      - cerberos
+
+  # ---------------------------------------------------------------------------
+  # 8. AGENTS (optional — docker compose --profile agents up)
   # ---------------------------------------------------------------------------
   simulator:
     build:
@@ -189,7 +316,7 @@ services:
     profiles:
       - agents
     depends_on:
-      nats:
+      nats-1:
         condition: service_healthy
     environment:
       AEGIS_NATS_URL: nats://nats:4222
@@ -203,7 +330,7 @@ services:
     profiles:
       - agents
     depends_on:
-      nats:
+      nats-1:
         condition: service_healthy
       simulator:
         condition: service_started
@@ -212,7 +339,7 @@ services:
       AEGIS_AGENT_PROCESS_PATH: /app/agent-process
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     ports:
-      - "9090:9090"
+      - "9190:9090"
     restart: unless-stopped
     networks:
       - cerberos
@@ -228,7 +355,9 @@ networks:
 # VOLUMES
 # =============================================================================
 volumes:
-  nats-data:
+  nats1-data:
+  nats2-data:
+  nats3-data:
   postgres-data:
   # Reserved for future mTLS (see CA_PLAN.md):
   # certs:
