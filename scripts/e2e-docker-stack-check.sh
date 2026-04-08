@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # End-to-end smoke: health → IO status → POST /api/chat (NATS → orchestrator).
-# Defaults match docker-compose.full.yml (orchestrator on host port 18080).
+# Defaults match root docker-compose.yml (orchestrator on host port 8080).
 #
 # Usage:
 #   ./scripts/e2e-docker-stack-check.sh
@@ -8,14 +8,7 @@
 
 set -euo pipefail
 
-fail() { echo "FAIL: $*" >&2; exit 1; }
-ok() { echo "OK: $*"; }
-
-if ! command -v python3 >/dev/null 2>&1; then
-  fail "python3 required (JSON request body; uuidgen is optional for task id)"
-fi
-
-ORCHESTRATOR_URL="${ORCHESTRATOR_URL:-http://127.0.0.1:18080}"
+ORCHESTRATOR_URL="${ORCHESTRATOR_URL:-http://127.0.0.1:8080}"
 IO_URL="${IO_URL:-http://127.0.0.1:3001}"
 GRAFANA_URL="${GRAFANA_URL:-http://127.0.0.1:3003}"
 
@@ -69,5 +62,5 @@ fi
 
 echo ""
 echo "Done. If chat hung or Loki shows decomposition timeout, start agents on the same NATS:"
-echo "  export ANTHROPIC_API_KEY=... && docker compose -f docker-compose.full.yml -f docker-compose.agents.yml up -d --build"
+echo "  export ANTHROPIC_API_KEY=... && docker compose --profile agents up -d --build"
 echo "Trace in logs: send traceparent on requests or read JSON trace_id from IO lines in Loki."
