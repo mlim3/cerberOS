@@ -19,7 +19,6 @@ RUN apk --no-cache add ca-certificates
 WORKDIR /app
 
 COPY --from=builder /app/memory-api .
-COPY --from=builder /app/docs ./docs
 
 EXPOSE 8080
 
