@@ -6,30 +6,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 cerberOS Vault is a **credential broker** for agents. Agents send shell scripts containing `{{PLACEHOLDER}}` markers; the service resolves secrets and returns the **injected script** over HTTP for the agent to run locally. Resolution is **atomic**: if any referenced secret is missing or denied, the whole request fails with no partial substitution.
 
-The HTTP service listens in `engine/main.go` and implements routes under `engine/handlers/` (`main.go` composes `inject/`, `secrets/`, `common/`). **OpenBao** is included in Docker Compose for persistent secrets storage and can be wired to replace the mock (see `setup-openbao.sh`, `openbao.hcl`).
+The HTTP service listens in `engine/main.go` and implements routes under `engine/handlers/` (`main.go` composes `inject/`, `secrets/`, `common/`). **OpenBao** is included in the root `docker-compose.yml` for persistent secrets storage and can be wired to replace the mock (see `openbao.hcl`).
 
 ## Commands
 
-### Build & run (from `vault/`)
+### Build & run
 
-`compose.yaml` attaches services to the external Docker network `memory_default`. Create it first if needed (for example by starting the [`memory`](../memory) stack, which defines that network), then:
-
-```bash
-docker compose build
-docker compose up
-```
-
-**Services:** `vault` (:8000, Go HTTP API), `ui` (:80, static UI + nginx proxy to vault), `openbao` (:8200).
-
-### OpenBao bootstrap (optional)
-
-From `vault/`, after memory’s Postgres is available:
+All services are defined in the root `docker-compose.yml`. From the repo root:
 
 ```bash
-./setup-openbao.sh
+docker compose up --build           # full stack
+./bootstrap.sh                      # first run: full stack + OpenBao init/unseal
+./bootstrap.sh down                 # tear down
 ```
 
-This initializes OpenBao against Postgres, unseals, and mounts a KV v2 engine. Details: `setup-openbao.sh`.
+**Services:** `vault` (:8000, Go HTTP API), `openbao` (:8200).
 
 ### Tests
 
@@ -40,7 +31,7 @@ cd engine && go test ./cmd/vault/
 cd engine && go test -v ./cmd/vault/
 ```
 
-Integration tests (build tag `integration`; brings up `vault/compose.yaml` via Docker):
+Integration tests (build tag `integration`; brings up the root `docker-compose.yml` via Docker):
 
 ```bash
 cd engine && go test -tags integration -timeout 5m ./cmd/vault/
@@ -111,4 +102,4 @@ The running server does not require extra env vars for the mock path. When wirin
 ## Testing approach
 
 - **Unit tests** (`engine/cmd/vault/main_test.go`) mock `/inject` with `httptest` — fast, no Docker.
-- **Integration tests** (`engine/cmd/vault/integration_test.go`, `integration` tag) run `docker compose` against `vault/compose.yaml` and exercise the real `vault inject` CLI against the container.
+- **Integration tests** (`engine/cmd/vault/integration_test.go`, `integration` tag) run `docker compose` against the root `docker-compose.yml` and exercise the real `vault inject` CLI against the container.

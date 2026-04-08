@@ -5,7 +5,7 @@ import (
 	"github.com/openbao/openbao/api/v2"
 )
 
-// KvMount is the KV v2 mount path (see vault/setup-openbao.sh: sys/mounts/kv).
+// KvMount is the KV v2 mount path (see bootstrap.sh: sys/mounts/kv).
 const KvMount = "kv"
 
 // OpenBaoSecretManager stores secrets in OpenBao KV v2.

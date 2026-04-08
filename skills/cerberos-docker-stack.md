@@ -44,17 +44,15 @@ docker compose down -v
 6. **orchestrator** — waits for nats healthcheck
 7. **io** — waits for nats healthcheck
 
-## OpenBao bootstrap (first run)
+## Bootstrap (first run)
 
-OpenBao requires manual init + unseal. After the stack is running:
+A single script handles everything — prerequisites, secrets, stack startup, and OpenBao init + unseal:
 
 ```bash
-# From repo root — the script creates the openbao DB, initializes, unseals,
-# and writes BAO_TOKEN to vault/.env
-cd vault && ./bootstrap-up.sh
-
-# Copy the generated BAO_TOKEN into your root .env, then restart vault:
-docker compose restart vault
+./bootstrap.sh          # build, start, init + unseal OpenBao
+./bootstrap.sh down     # stop stack, drop openbao database
+./bootstrap.sh down --keep-db        # stop but keep openbao database
+./bootstrap.sh down --delete-volumes # stop and remove Docker volumes
 ```
 
 ## Common issues
@@ -71,7 +69,7 @@ Generate with: `openssl rand -hex 32`
 
 ### OpenBao sealed after restart
 
-OpenBao does not auto-unseal in dev mode. Re-run `cd vault && ./bootstrap-up.sh`
+OpenBao does not auto-unseal in dev mode. Re-run `./bootstrap.sh`
 or manually unseal with the key from `vault/.openbao-init.json`.
 
 ### Port conflicts
@@ -80,8 +78,8 @@ Check `docker compose ps` for port bindings. See `cerberos-service-ports.md` for
 
 ## Profiles
 
-| Profile         | Services added                                                                          | Use case                             |
-| --------------- | --------------------------------------------------------------------------------------- | ------------------------------------ |
-| _(default)_     | nats-1, orchestrator, io, memory-db, memory-api, openbao, vault, swagger, aegis-databus | Full-stack dev                       |
-| `agents`        | simulator, aegis-agents                                                                 | Agent lifecycle testing              |
-| `observability` | nats-exporter, prometheus, grafana, loki, promtail                                      | Monitoring dashboards + log pipeline |
+| Profile         | Services added                                                                 | Use case                             |
+| --------------- | ------------------------------------------------------------------------------ | ------------------------------------ |
+| _(default)_     | nats-1, orchestrator, io, memory-db, memory-api, openbao, vault, aegis-databus | Full-stack dev                       |
+| `agents`        | simulator, aegis-agents                                                        | Agent lifecycle testing              |
+| `observability` | nats-exporter, prometheus, grafana, loki, promtail                             | Monitoring dashboards + log pipeline |

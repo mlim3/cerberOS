@@ -13,10 +13,10 @@ import (
 	"time"
 )
 
-// composeFile is the path to vault/compose.yaml relative to the package directory.
-// Go sets the test working directory to the package being tested (engine/cmd/vault/),
-// so three levels up reaches the vault root.
-const composeFile = "../../../compose.yaml"
+// composeFile is the path to the root docker-compose.yml relative to the package
+// directory. Go sets the test working directory to the package being tested
+// (engine/cmd/vault/), so four levels up reaches the repo root.
+const composeFile = "../../../../docker-compose.yml"
 
 // vaultURL is the vault service's base URL used by all integration tests.
 const vaultURL = "http://localhost:8000"
