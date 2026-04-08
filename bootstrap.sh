@@ -55,6 +55,10 @@ cmd_down() {
   # Drop the openbao database before stopping Postgres
   if [[ "$keep_db" == false ]]; then
     if docker compose ps memory-db --status running -q 2>/dev/null | grep -q .; then
+      log "Terminating openbao database connections..."
+      docker compose exec memory-db \
+        psql -U "${POSTGRES_USER:-user}" -d "${POSTGRES_DB:-memory_db}" \
+        -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'openbao' AND pid <> pg_backend_pid();" 2>/dev/null || true
       log "Dropping openbao database..."
       docker compose exec memory-db \
         psql -U "${POSTGRES_USER:-user}" -d "${POSTGRES_DB:-memory_db}" \
