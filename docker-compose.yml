@@ -5,7 +5,6 @@
 # Start the full stack:   docker compose up --build
 # Start core only:        docker compose up --build nats-1 orchestrator io
 # Start with agents:      docker compose --profile agents up --build
-# Start with observability: docker compose --profile observability up --build
 #
 # Port map (host → container):
 #   3000 → Grafana                (profile: observability)
@@ -192,6 +191,7 @@ services:
     environment:
       AEGIS_NATS_URL: nats://nats-1:4222
       AEGIS_NATS_HTTP_URL: http://nats-1:8222
+      AEGIS_NATS_REPLICAS: "1"
       AEGIS_ORCHESTRATOR_URL: http://orchestrator:8080
       AEGIS_MEMORY_URL: http://memory-api:8081/v1/memory
     ports:
@@ -213,12 +213,10 @@ services:
       - cerberos
 
   # ---------------------------------------------------------------------------
-  # 7. OBSERVABILITY (optional — docker compose --profile observability up)
+  # 7. OBSERVABILITY (always on — Grafana, Prometheus, Loki, Promtail, NATS exporter)
   # ---------------------------------------------------------------------------
   nats-exporter:
     image: natsio/prometheus-nats-exporter:latest
-    profiles:
-      - observability
     command:
       - "-varz"
       - "-connz"
@@ -235,8 +233,6 @@ services:
 
   prometheus:
     image: prom/prometheus:latest
-    profiles:
-      - observability
     volumes:
       - ./aegis-databus/config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./aegis-databus/config/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
@@ -252,12 +248,9 @@ services:
 
   grafana:
     image: grafana/grafana:latest
-    profiles:
-      - observability
     volumes:
       - ./aegis-databus/config/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./orchestrator/observability/grafana/dashboards:/etc/grafana/dashboards:ro
-      - ./orchestrator/observability/grafana/provisioning/datasources/loki.yaml:/etc/grafana/provisioning/datasources/loki.yaml:ro
     ports:
       - "3000:3000"
     environment:
@@ -272,8 +265,6 @@ services:
 
   loki:
     image: grafana/loki:2.9.5
-    profiles:
-      - observability
     command: -config.file=/etc/loki/local-config.yaml
     ports:
       - "3100:3100"
@@ -282,8 +273,6 @@ services:
 
   promtail:
     image: grafana/promtail:2.9.5
-    profiles:
-      - observability
     command: -config.file=/etc/promtail/config.yml
     volumes:
       - ./orchestrator/observability/promtail/config.yml:/etc/promtail/config.yml:ro
