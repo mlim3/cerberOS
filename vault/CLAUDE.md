@@ -19,7 +19,7 @@ docker compose build
 docker compose up
 ```
 
-**Services:** `vault` (:8000, Go HTTP API), `ui` (:80, static UI + nginx proxy to vault), `openbao` (:8200), `swagger` (:8080, serves `openapi.yaml`).
+**Services:** `vault` (:8000, Go HTTP API), `ui` (:80, static UI + nginx proxy to vault), `openbao` (:8200).
 
 ### OpenBao bootstrap (optional)
 

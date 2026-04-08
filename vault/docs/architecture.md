@@ -18,8 +18,6 @@ compose.yaml
   └─ ui (:80) — static UI; nginx proxies /inject → vault
 
   └─ openbao (:8200) — optional; Postgres-backed via memory stack (see setup-openbao.sh)
-
-  └─ swagger (:8080) — OpenAPI UI for openapi.yaml
 ```
 
 `compose.yaml` uses the external Docker network `memory_default` so OpenBao can reach Postgres as `db` when the memory stack is up.

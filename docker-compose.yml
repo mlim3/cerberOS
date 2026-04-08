@@ -15,9 +15,9 @@
 #   8000 → vault engine API
 #   8080 → orchestrator health
 #   8081 → memory API
-#   8082 → vault swagger UI
 #   8200 → OpenBao
 #   8222 → NATS monitoring
+#   3100 → Loki                    (profile: observability)
 #   9090 → Prometheus              (profile: observability)
 #   9091 → DataBus health/metrics
 #   9190 → agents metrics          (profile: agents)
@@ -63,6 +63,7 @@ services:
       VAULT_ADDR: http://openbao:8200
       MEMORY_ENDPOINT: http://memory-api:8081
       IO_API_BASE: http://io:3001
+      DECOMPOSITION_TIMEOUT_SECONDS: "120"
     ports:
       - "8080:8080"
     restart: unless-stopped
@@ -176,18 +177,6 @@ services:
     networks:
       - cerberos
 
-  swagger:
-    image: swaggerapi/swagger-ui
-    ports:
-      - "8082:8080"
-    environment:
-      SWAGGER_JSON: /spec/openapi.yaml
-    volumes:
-      - ./vault/openapi.yaml:/spec/openapi.yaml:ro
-    restart: "no"
-    networks:
-      - cerberos
-
   # ---------------------------------------------------------------------------
   # 6. DATABUS
   # ---------------------------------------------------------------------------
@@ -267,6 +256,8 @@ services:
       - observability
     volumes:
       - ./aegis-databus/config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./orchestrator/observability/grafana/dashboards:/etc/grafana/dashboards:ro
+      - ./orchestrator/observability/grafana/provisioning/datasources/loki.yaml:/etc/grafana/provisioning/datasources/loki.yaml:ro
     ports:
       - "3000:3000"
     environment:
@@ -275,6 +266,31 @@ services:
       GF_INSTALL_PLUGINS: grafana-piechart-panel
     depends_on:
       - prometheus
+      - loki
+    networks:
+      - cerberos
+
+  loki:
+    image: grafana/loki:2.9.5
+    profiles:
+      - observability
+    command: -config.file=/etc/loki/local-config.yaml
+    ports:
+      - "3100:3100"
+    networks:
+      - cerberos
+
+  promtail:
+    image: grafana/promtail:2.9.5
+    profiles:
+      - observability
+    command: -config.file=/etc/promtail/config.yml
+    volumes:
+      - ./orchestrator/observability/promtail/config.yml:/etc/promtail/config.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - promtail-positions:/tmp
+    depends_on:
+      - loki
     networks:
       - cerberos
 
@@ -329,5 +345,6 @@ networks:
 volumes:
   nats1-data:
   postgres-data:
+  promtail-positions:
   # Reserved for future mTLS (see CA_PLAN.md):
   # certs:
