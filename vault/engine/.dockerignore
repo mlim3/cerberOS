@@ -1,0 +1,28 @@
+# Version control / IDE
+.git
+.gitignore
+.cursor
+
+# Documentation (not needed at runtime)
+docs/
+*.md
+*.pdf
+*.pptx
+
+# Local env & secrets (never bake into images)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Test artifacts
+**/testdata/
+**/*_test.go
+test/
+
+# Local OpenBao bootstrap artifacts
+.openbao-init.json
+
+# OS junk
+.DS_Store
