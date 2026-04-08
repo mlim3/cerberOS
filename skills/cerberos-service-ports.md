@@ -9,10 +9,9 @@ When configuring service-to-service communication, debugging connectivity, or ch
 | Service                  | Container port | Host port | URL                                               |
 | ------------------------ | -------------- | --------- | ------------------------------------------------- |
 | Grafana                  | 3000           | 3000      | http://localhost:3000 (profile: observability)    |
+| Loki                     | 3100           | 3100      | http://localhost:3100 (profile: observability)    |
 | io (API/UI)              | 3001           | 3001      | http://localhost:3001                             |
 | NATS client (nats-1)     | 4222           | 4222      | nats://localhost:4222                             |
-| NATS client (nats-2)     | 4222           | 4223      | nats://localhost:4223                             |
-| NATS client (nats-3)     | 4222           | 4224      | nats://localhost:4224                             |
 | NATS exporter            | 7777           | 7777      | http://localhost:7777 (profile: observability)    |
 | vault engine             | 8000           | 8000      | http://localhost:8000                             |
 | orchestrator health      | 8080           | 8080      | http://localhost:8080                             |
@@ -29,9 +28,7 @@ When configuring service-to-service communication, debugging connectivity, or ch
 
 | Hostname                  | Service           | Typical env var                                                  |
 | ------------------------- | ----------------- | ---------------------------------------------------------------- |
-| `nats-1` (alias: `nats`)  | NATS node 1       | `NATS_URL=nats://nats:4222` or `nats://nats-1:4222`              |
-| `nats-2`                  | NATS node 2       | —                                                                |
-| `nats-3`                  | NATS node 3       | —                                                                |
+| `nats-1` (alias: `nats`)  | NATS JetStream    | `NATS_URL=nats://nats:4222` or `nats://nats-1:4222`              |
 | `orchestrator`            | Orchestrator      | —                                                                |
 | `io`                      | IO component      | `IO_API_BASE=http://io:3001`                                     |
 | `memory-db` (alias: `db`) | Postgres          | `DB_HOST=memory-db`                                              |

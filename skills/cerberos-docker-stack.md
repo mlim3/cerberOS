@@ -16,12 +16,12 @@ When starting, stopping, or troubleshooting the cerberOS development stack.
 docker compose up --build
 
 # Core only (no memory/vault)
-docker compose up --build nats-1 nats-2 nats-3 orchestrator io
+docker compose up --build nats-1 orchestrator io
 
 # With agents
 docker compose --profile agents up --build
 
-# With observability (Prometheus + Grafana + NATS exporter)
+# With observability (Prometheus + Grafana + Loki + Promtail + NATS exporter)
 docker compose --profile observability up --build
 
 # Detached
@@ -36,7 +36,7 @@ docker compose down -v
 
 ## Service startup order
 
-1. **nats-1, nats-2, nats-3** — 3-node JetStream cluster; everything depends on nats-1
+1. **nats-1** — single-node JetStream; everything depends on nats-1
 2. **memory-db** — Postgres (pgvector); needed by memory-api and openbao
 3. **memory-api** — waits for memory-db healthcheck
 4. **openbao** — waits for memory-db healthcheck (storage backend)
@@ -80,8 +80,8 @@ Check `docker compose ps` for port bindings. See `cerberos-service-ports.md` for
 
 ## Profiles
 
-| Profile         | Services added                                                                              | Use case                |
-| --------------- | ------------------------------------------------------------------------------------------- | ----------------------- |
-| _(default)_     | nats-1/2/3, orchestrator, io, memory-db, memory-api, openbao, vault, swagger, aegis-databus | Full-stack dev          |
-| `agents`        | simulator, aegis-agents                                                                     | Agent lifecycle testing |
-| `observability` | nats-exporter, prometheus, grafana                                                          | Monitoring dashboards   |
+| Profile         | Services added                                                                          | Use case                             |
+| --------------- | --------------------------------------------------------------------------------------- | ------------------------------------ |
+| _(default)_     | nats-1, orchestrator, io, memory-db, memory-api, openbao, vault, swagger, aegis-databus | Full-stack dev                       |
+| `agents`        | simulator, aegis-agents                                                                 | Agent lifecycle testing              |
+| `observability` | nats-exporter, prometheus, grafana, loki, promtail                                      | Monitoring dashboards + log pipeline |
