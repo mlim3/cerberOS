@@ -3,23 +3,21 @@
 # =============================================================================
 #
 # Start the full stack:   docker compose up --build
-# Start core only:        docker compose up --build nats-1 orchestrator io
-# Start with agents:      docker compose --profile agents up --build
 #
 # Port map (host → container):
-#   3000 → Grafana                (profile: observability)
+#   3000 → Grafana
 #   3001 → io API/UI
 #   4222 → NATS client
-#   7777 → NATS exporter          (profile: observability)
+#   7777 → NATS exporter
 #   8000 → vault engine API
 #   8080 → orchestrator health
 #   8081 → memory API
 #   8200 → OpenBao
 #   8222 → NATS monitoring
-#   3100 → Loki                    (profile: observability)
-#   9090 → Prometheus              (profile: observability)
+#   3100 → Loki
+#   9090 → Prometheus
 #   9091 → DataBus health/metrics
-#   9190 → agents metrics          (profile: agents)
+#   9190 → agents metrics
 #
 # =============================================================================
 
@@ -284,28 +282,24 @@ services:
       - cerberos
 
   # ---------------------------------------------------------------------------
-  # 8. AGENTS (optional — docker compose --profile agents up)
+  # 8. AGENTS
   # ---------------------------------------------------------------------------
-  simulator:
-    build:
-      context: ./agents-component
-    entrypoint: ["/app/simulator"]
-    profiles:
-      - agents
-    depends_on:
-      nats-1:
-        condition: service_healthy
-    environment:
-      AEGIS_NATS_URL: nats://nats:4222
-    restart: unless-stopped
-    networks:
-      - cerberos
+  # simulator:
+  #   build:
+  #     context: ./agents-component
+  #   entrypoint: ["/app/simulator"]
+  #   depends_on:
+  #     nats-1:
+  #       condition: service_healthy
+  #   environment:
+  #     AEGIS_NATS_URL: nats://nats:4222
+  #   restart: unless-stopped
+  #   networks:
+  #     - cerberos
 
   aegis-agents:
     build:
       context: ./agents-component
-    profiles:
-      - agents
     depends_on:
       nats-1:
         condition: service_healthy
