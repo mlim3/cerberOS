@@ -2,8 +2,6 @@ services:
 
   orchestrator:
     build: .
-    depends_on:
-      - nats
     environment:
       # Required — override with real values in production
       NATS_URL: nats://nats:4222
