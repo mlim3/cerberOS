@@ -25,6 +25,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mlim3/cerberOS/orchestrator/internal/api"
 	"github.com/mlim3/cerberOS/orchestrator/internal/config"
 	"github.com/mlim3/cerberOS/orchestrator/internal/dispatcher"
 	"github.com/mlim3/cerberOS/orchestrator/internal/executor"
@@ -192,8 +193,10 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 
 	healthHandler := health.New(vaultClient, memClient, natsClient, taskMonitor, cfg.NodeID)
 
+	debugHandler := &api.DebugHandler{LokiURL: cfg.LokiURL}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler.ServeHTTP)
+	mux.HandleFunc("GET /debug/trace/{trace_id}", debugHandler.GetTrace)
 
 	return &runtime{
 		memory:     memClient,
