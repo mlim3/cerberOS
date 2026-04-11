@@ -1,0 +1,117 @@
+# Full stack: one NATS + orchestrator + IO + Loki + Promtail + Grafana (no duplicate services).
+#
+# Planner / decomposition: this file does NOT include agents-component. The orchestrator publishes
+# planner work to NATS and waits for a response; without agents you will see "decomposition timeout"
+# after DECOMPOSITION_TIMEOUT_SECONDS (default 30). For the full IO→NATS→orchestrator→agents flow:
+#   docker compose -f docker-compose.full.yml -f docker-compose.agents.yml up -d --build
+# (requires ANTHROPIC_API_KEY — see docker-compose.agents.yml)
+#
+# Run from the REPOSITORY ROOT (this file lives next to orchestrator/ and io/):
+#   cd /path/to/cerberOS
+#   docker network create cerberos 2>/dev/null || true
+#   docker compose -f docker-compose.full.yml up -d --build
+#
+# (Do NOT run from orchestrator/ — use the path above or: -f ../docker-compose.full.yml)
+#
+# URLs: Grafana http://localhost:3003 · IO http://localhost:3001 · Orchestrator health http://localhost:18080
+#
+# Host port 18080 → container 8080 (avoids conflict with another process on 8080). Override:
+#   ORCHESTRATOR_HOST_PORT=8080 docker compose -f docker-compose.full.yml up -d
+#
+# Free 4222/8222 if NATS fails to bind. Build issues: docker compose ... build --no-cache
+
+name: cerberos
+
+services:
+  nats:
+    image: nats:2.10-alpine
+    command: ["--jetstream", "--store_dir=/data", "-m", "8222"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    volumes:
+      - nats-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - cerberos
+
+  orchestrator:
+    build:
+      context: ./orchestrator
+      dockerfile: Dockerfile
+    depends_on:
+      - nats
+    environment:
+      NATS_URL: nats://nats:4222
+      NATS_CREDS_PATH: ""
+    ports:
+      - "${ORCHESTRATOR_HOST_PORT:-18080}:8080"
+    restart: unless-stopped
+    networks:
+      - cerberos
+
+  io:
+    build:
+      context: ./io
+      dockerfile: Dockerfile
+      args:
+        ENABLE_VOICE: "false"
+    depends_on:
+      - nats
+    ports:
+      - "3001:3001"
+    environment:
+      NODE_ENV: production
+      DEMO_MODE: "false"
+      NATS_URL: nats://nats:4222
+      LOG_LEVEL: debug
+      STT_PROVIDER: disabled
+    networks:
+      - cerberos
+
+  loki:
+    image: grafana/loki:2.9.5
+    command: -config.file=/etc/loki/local-config.yaml
+    ports:
+      - "3100:3100"
+    networks:
+      - cerberos
+
+  promtail:
+    image: grafana/promtail:2.9.5
+    command: -config.file=/etc/promtail/config.yml
+    volumes:
+      - ./orchestrator/observability/promtail/config.yml:/etc/promtail/config.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - promtail-positions:/tmp
+    depends_on:
+      - loki
+    networks:
+      - cerberos
+
+  grafana:
+    image: grafana/grafana:10.2.3
+    ports:
+      - "3003:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./orchestrator/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./orchestrator/observability/grafana/dashboards:/etc/grafana/dashboards:ro
+    depends_on:
+      - loki
+    networks:
+      - cerberos
+
+volumes:
+  nats-data:
+  promtail-positions:
+
+networks:
+  cerberos:
+    external: true

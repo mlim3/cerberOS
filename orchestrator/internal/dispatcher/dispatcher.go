@@ -36,8 +36,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
-	"log"
-	"os"
+	"log/slog"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -46,6 +45,7 @@ import (
 	"github.com/mlim3/cerberOS/orchestrator/internal/config"
 	"github.com/mlim3/cerberOS/orchestrator/internal/interfaces"
 	ioclient "github.com/mlim3/cerberOS/orchestrator/internal/io"
+	"github.com/mlim3/cerberOS/orchestrator/internal/obslog"
 	"github.com/mlim3/cerberOS/orchestrator/internal/types"
 )
 
@@ -98,7 +98,7 @@ type Dispatcher struct {
 	monitor  TaskMonitor
 	executor PlanExecutor
 	io       *ioclient.Client
-	logger   *log.Logger
+	logger   *slog.Logger
 
 	// activeTasks maps task_id → *TaskState for all non-terminal in-flight tasks.
 	activeTasks sync.Map
@@ -136,7 +136,7 @@ func New(
 		monitor:  monitor,
 		executor: executor,
 		io:       io,
-		logger:   log.New(os.Stdout, "[dispatcher] ", log.LstdFlags|log.LUTC),
+		logger:   obslog.NewLogger("dispatcher"),
 	}
 }
 
@@ -158,7 +158,7 @@ func (d *Dispatcher) HandleInboundTask(task types.UserTask) error {
 
 	// ── Step 1: Schema validation ──────────────────────────────────────────
 	if err := validateSchema(task); err != nil {
-		d.logger.Printf("schema validation failed: task_id=%s error=%v", task.TaskID, err)
+		d.logger.Error("schema validation failed", obslog.AppendTrace([]any{"task_id", task.TaskID, "err", err}, task.TraceID)...)
 		_ = d.gateway.PublishError(task.CallbackTopic, types.ErrorResponse{
 			TaskID:      task.TaskID,
 			ErrorCode:   types.ErrCodeInvalidTaskSpec,
@@ -174,7 +174,7 @@ func (d *Dispatcher) HandleInboundTask(task types.UserTask) error {
 	}
 
 	if existing := d.dedupCheck(task.TaskID, idempotencyWindow); existing != nil {
-		d.logger.Printf("duplicate task rejected: task_id=%s current_state=%s", task.TaskID, existing.State)
+		d.logger.Warn("duplicate task rejected", obslog.AppendTrace([]any{"task_id", task.TaskID, "current_state", existing.State}, task.TraceID)...)
 		_ = d.gateway.PublishError(task.CallbackTopic, types.ErrorResponse{
 			TaskID:      task.TaskID,
 			ErrorCode:   types.ErrCodeDuplicateTask,
@@ -192,7 +192,7 @@ func (d *Dispatcher) HandleInboundTask(task types.UserTask) error {
 	)
 	if err != nil {
 		atomic.AddInt64(&d.policyViolations, 1)
-		d.logger.Printf("policy denied: task_id=%s orchestrator_task_ref=%s error=%v", task.TaskID, orchRef, err)
+		d.logger.Warn("policy denied", obslog.AppendTrace([]any{"task_id", task.TaskID, "orchestrator_task_ref", orchRef, "err", err}, task.TraceID)...)
 		_ = d.gateway.PublishError(task.CallbackTopic, types.ErrorResponse{
 			TaskID:      task.TaskID,
 			ErrorCode:   types.ErrCodePolicyViolation,
@@ -216,6 +216,7 @@ func (d *Dispatcher) HandleInboundTask(task types.UserTask) error {
 		CallbackTopic:        task.CallbackTopic,
 		UserContextID:        task.UserContextID,
 		IdempotencyWindow:    idempotencyWindow,
+		TraceID:              task.TraceID,
 		Payload:              task.Payload,
 		StateHistory: []types.StateEvent{
 			{State: types.StateReceived, Timestamp: now, NodeID: d.cfg.NodeID},
@@ -225,7 +226,7 @@ func (d *Dispatcher) HandleInboundTask(task types.UserTask) error {
 
 	// ── Step 5: Persist DECOMPOSING BEFORE sending planner dispatch ────────
 	if err := d.persistTaskState(ts, now); err != nil {
-		d.logger.Printf("memory write failed before decomposition: task_id=%s error=%v", task.TaskID, err)
+		d.logger.Error("memory write failed before decomposition", obslog.AppendTrace([]any{"task_id", task.TaskID, "err", err}, ts.TraceID)...)
 		_ = d.gateway.PublishError(task.CallbackTopic, types.ErrorResponse{
 			TaskID:      task.TaskID,
 			ErrorCode:   types.ErrCodeStorageUnavailable,
@@ -261,10 +262,11 @@ func (d *Dispatcher) HandleInboundTask(task types.UserTask) error {
 		CallbackTopic:   task.CallbackTopic,
 		UserContextID:   task.UserContextID,
 		ProgressSummary: "Generating execution plan",
+		TraceID:         task.TraceID,
 	}
 
 	if err := d.gateway.PublishTaskSpec(spec); err != nil {
-		d.logger.Printf("planner task publish failed: task_id=%s error=%v", task.TaskID, err)
+		d.logger.Error("planner task publish failed", obslog.AppendTrace([]any{"task_id", task.TaskID, "err", err}, task.TraceID)...)
 		d.failTask(ts, types.ErrCodeAgentsUnavailable, "Could not reach Planner Agent. Please retry.")
 		return fmt.Errorf("publish planner task: %w", err)
 	}
@@ -273,7 +275,7 @@ func (d *Dispatcher) HandleInboundTask(task types.UserTask) error {
 	// ── Step 7: Start decomposition timeout goroutine ──────────────────────
 	go d.watchDecompositionTimeout(ts)
 
-	d.logger.Printf("task sent to planner agent: task_id=%s orchestrator_task_ref=%s", task.TaskID, orchRef)
+	d.logger.Info("task sent to planner agent", obslog.AppendTrace([]any{"task_id", task.TaskID, "orchestrator_task_ref", orchRef}, task.TraceID)...)
 	return nil
 }
 
@@ -318,21 +320,21 @@ func (d *Dispatcher) HandleDecompositionResponse(resp types.DecompositionRespons
 	tsVal, ok := d.activeTasks.Load(resp.TaskID)
 	if !ok {
 		// Task may have timed out already — ignore stale response.
-		d.logger.Printf("decomposition response for unknown/timed-out task: task_id=%s", resp.TaskID)
+		d.logger.Warn("decomposition response for unknown/timed-out task", "task_id", resp.TaskID)
 		return nil
 	}
 	ts := tsVal.(*types.TaskState)
 
 	// Guard: only act if task is still DECOMPOSING.
 	if ts.State != types.StateDecomposing {
-		d.logger.Printf("decomposition response ignored — task not in DECOMPOSING state: task_id=%s state=%s",
-			resp.TaskID, ts.State)
+		d.logger.Warn("decomposition response ignored — task not in DECOMPOSING state",
+			obslog.AppendTrace([]any{"task_id", resp.TaskID, "state", ts.State}, ts.TraceID)...)
 		return nil
 	}
 
 	// ── Validate plan ──────────────────────────────────────────────────────
 	if err := d.validatePlan(resp.Plan, ts); err != nil {
-		d.logger.Printf("plan validation failed: task_id=%s error=%v", resp.TaskID, err)
+		d.logger.Error("plan validation failed", obslog.AppendTrace([]any{"task_id", resp.TaskID, "err", err}, ts.TraceID)...)
 		errorCode := classifyPlanError(err)
 		d.failTask(ts, errorCode, fmt.Sprintf("Execution plan is invalid: %s", err.Error()))
 		return fmt.Errorf("plan validation: %w", err)
@@ -350,14 +352,14 @@ func (d *Dispatcher) HandleDecompositionResponse(resp types.DecompositionRespons
 	})
 
 	if err := d.persistTaskState(ts, now); err != nil {
-		d.logger.Printf("memory write failed on PLAN_ACTIVE: task_id=%s error=%v", resp.TaskID, err)
+		d.logger.Error("memory write failed on PLAN_ACTIVE", obslog.AppendTrace([]any{"task_id", resp.TaskID, "err", err}, ts.TraceID)...)
 		// Non-fatal: plan will still proceed. Reconciliation handles it later.
 	}
 
 	// Persist the plan itself.
 	if err := d.persistPlanState(resp.Plan, ts.TaskID, ts.OrchestratorTaskRef, now); err != nil {
-		d.logger.Printf("plan state persist failed: task_id=%s plan_id=%s error=%v",
-			resp.TaskID, resp.Plan.PlanID, err)
+		d.logger.Error("plan state persist failed",
+			obslog.AppendTrace([]any{"task_id", resp.TaskID, "plan_id", resp.Plan.PlanID, "err", err}, ts.TraceID)...)
 		// Non-fatal: executor holds plan in memory.
 	}
 
@@ -372,7 +374,7 @@ func (d *Dispatcher) HandleDecompositionResponse(resp types.DecompositionRespons
 
 	// ── Hand off to Plan Executor ──────────────────────────────────────────
 	if err := d.executor.Execute(resp.Plan, ts); err != nil {
-		d.logger.Printf("plan executor failed to start: task_id=%s error=%v", resp.TaskID, err)
+		d.logger.Error("plan executor failed to start", obslog.AppendTrace([]any{"task_id", resp.TaskID, "err", err}, ts.TraceID)...)
 		d.failTask(ts, types.ErrCodeAgentsUnavailable, "Failed to start plan execution.")
 		return fmt.Errorf("plan executor execute: %w", err)
 	}
@@ -391,12 +393,12 @@ func (d *Dispatcher) HandleDecompositionResponse(resp types.DecompositionRespons
 		EstimatedCompletion: estimatedCompletion,
 	}
 	if err := d.gateway.PublishTaskAccepted(ts.CallbackTopic, accepted); err != nil {
-		d.logger.Printf("publish task_accepted failed: task_id=%s error=%v", resp.TaskID, err)
+		d.logger.Error("publish task_accepted failed", obslog.AppendTrace([]any{"task_id", resp.TaskID, "err", err}, ts.TraceID)...)
 		// Non-fatal: plan is running; user may poll for status.
 	}
 
-	d.logger.Printf("plan execution started: task_id=%s plan_id=%s subtasks=%d",
-		resp.TaskID, resp.Plan.PlanID, len(resp.Plan.Subtasks))
+	d.logger.Info("plan execution started",
+		obslog.AppendTrace([]any{"task_id", resp.TaskID, "plan_id", resp.Plan.PlanID, "subtasks", len(resp.Plan.Subtasks)}, ts.TraceID)...)
 	return nil
 }
 
@@ -414,7 +416,7 @@ func (d *Dispatcher) HandlePlanComplete(ts *types.TaskState, aggregatedResults [
 	})
 
 	if err := d.persistTaskState(ts, now); err != nil {
-		d.logger.Printf("memory write failed on task completion: task_id=%s error=%v", ts.TaskID, err)
+		d.logger.Error("memory write failed on task completion", obslog.AppendTrace([]any{"task_id", ts.TaskID, "err", err}, ts.TraceID)...)
 	}
 
 	// Build and deliver final task result.
@@ -426,7 +428,7 @@ func (d *Dispatcher) HandlePlanComplete(ts *types.TaskState, aggregatedResults [
 		CompletedAt:         now,
 	}
 	if err := d.gateway.PublishTaskResult(ts.CallbackTopic, result); err != nil {
-		d.logger.Printf("publish task_result failed: task_id=%s error=%v", ts.TaskID, err)
+		d.logger.Error("publish task_result failed", obslog.AppendTrace([]any{"task_id", ts.TaskID, "err", err}, ts.TraceID)...)
 	}
 
 	// Notify IO: task complete.
@@ -434,8 +436,8 @@ func (d *Dispatcher) HandlePlanComplete(ts *types.TaskState, aggregatedResults [
 	_ = d.io.PushStatus(ts.TaskID, ioclient.StatusCompleted, "Task complete", &zero)
 
 	if err := d.policy.RevokeCredentials(ts.OrchestratorTaskRef); err != nil {
-		d.logger.Printf("credential revocation failed: orchestrator_task_ref=%s error=%v",
-			ts.OrchestratorTaskRef, err)
+		d.logger.Error("credential revocation failed",
+			obslog.AppendTrace([]any{"orchestrator_task_ref", ts.OrchestratorTaskRef, "err", err}, ts.TraceID)...)
 	}
 
 	d.activeTasks.Delete(ts.TaskID)
@@ -443,7 +445,7 @@ func (d *Dispatcher) HandlePlanComplete(ts *types.TaskState, aggregatedResults [
 	atomic.AddInt64(&d.queueDepth, -1)
 	atomic.AddInt64(&d.tasksCompleted, 1)
 
-	d.logger.Printf("task completed: task_id=%s plan_id=%s", ts.TaskID, ts.PlanID)
+	d.logger.Info("task completed", obslog.AppendTrace([]any{"task_id", ts.TaskID, "plan_id", ts.PlanID}, ts.TraceID)...)
 }
 
 // HandlePlanFailed is called by the Plan Executor when the plan cannot complete.
@@ -467,7 +469,7 @@ func (d *Dispatcher) HandlePlanFailed(ts *types.TaskState, errorCode string, par
 	})
 
 	if err := d.persistTaskState(ts, now); err != nil {
-		d.logger.Printf("memory write failed on task failure: task_id=%s error=%v", ts.TaskID, err)
+		d.logger.Error("memory write failed on task failure", obslog.AppendTrace([]any{"task_id", ts.TaskID, "err", err}, ts.TraceID)...)
 	}
 
 	if partial && len(partialResults) > 0 {
@@ -497,8 +499,8 @@ func (d *Dispatcher) HandlePlanFailed(ts *types.TaskState, errorCode string, par
 	_ = d.io.PushStatus(ts.TaskID, ioclient.StatusCompleted, lastUpdate, &zero)
 
 	if err := d.policy.RevokeCredentials(ts.OrchestratorTaskRef); err != nil {
-		d.logger.Printf("credential revocation failed: orchestrator_task_ref=%s error=%v",
-			ts.OrchestratorTaskRef, err)
+		d.logger.Error("credential revocation failed",
+			obslog.AppendTrace([]any{"orchestrator_task_ref", ts.OrchestratorTaskRef, "err", err}, ts.TraceID)...)
 	}
 
 	d.activeTasks.Delete(ts.TaskID)
@@ -506,7 +508,8 @@ func (d *Dispatcher) HandlePlanFailed(ts *types.TaskState, errorCode string, par
 	atomic.AddInt64(&d.queueDepth, -1)
 	atomic.AddInt64(&d.tasksFailed, 1)
 
-	d.logger.Printf("task %s: task_id=%s plan_id=%s error_code=%s", finalState, ts.TaskID, ts.PlanID, errorCode)
+	d.logger.Info("task terminal failure",
+		obslog.AppendTrace([]any{"final_state", finalState, "task_id", ts.TaskID, "plan_id", ts.PlanID, "error_code", errorCode}, ts.TraceID)...)
 }
 
 // ── Read-only Accessors ───────────────────────────────────────────────────────
@@ -552,8 +555,8 @@ func (d *Dispatcher) watchDecompositionTimeout(ts *types.TaskState) {
 	}
 
 	atomic.AddInt64(&d.decompositionFailed, 1)
-	d.logger.Printf("decomposition timeout: task_id=%s orchestrator_task_ref=%s timeout=%s",
-		ts.TaskID, ts.OrchestratorTaskRef, timeout)
+	d.logger.Error("decomposition timeout",
+		obslog.AppendTrace([]any{"task_id", ts.TaskID, "orchestrator_task_ref", ts.OrchestratorTaskRef, "timeout", timeout.String()}, ts.TraceID)...)
 	d.failTask(current, types.ErrCodeDecompositionTimeout,
 		fmt.Sprintf("Planner Agent did not respond within %d seconds.", d.cfg.DecompositionTimeoutSeconds))
 }
@@ -574,7 +577,7 @@ func (d *Dispatcher) failTask(ts *types.TaskState, errorCode, userMessage string
 	})
 
 	if err := d.persistTaskState(ts, now); err != nil {
-		d.logger.Printf("memory write failed on task failure: task_id=%s error=%v", ts.TaskID, err)
+		d.logger.Error("memory write failed on task failure", obslog.AppendTrace([]any{"task_id", ts.TaskID, "err", err}, ts.TraceID)...)
 	}
 
 	_ = d.gateway.PublishError(ts.CallbackTopic, types.ErrorResponse{

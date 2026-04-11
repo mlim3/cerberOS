@@ -1,0 +1,61 @@
+# Overlay: Agents Component (planner) + partner simulator on the SAME NATS as docker-compose.full.yml.
+# Without this, the orchestrator reaches "task sent to planner agent" then hits DECOMPOSITION_TIMEOUT (default 30s).
+#
+# Prerequisites:
+#   - Same network as full stack: docker network create cerberos 2>/dev/null || true
+#   - Repo-root .env with ANTHROPIC_API_KEY (see env_file on aegis-agents — avoids shell
+#     overriding ${ANTHROPIC_API_KEY} during compose interpolation)
+#
+# From repository root:
+#   export ANTHROPIC_API_KEY=sk-ant-...
+#   docker compose -f docker-compose.full.yml -f docker-compose.agents.yml up -d --build
+#
+# Then POST /api/chat again; Loki trace should show decomposition + executor lines past the timeout.
+#
+# The orchestrator block below raises DECOMPOSITION_TIMEOUT_SECONDS: the default 30s is too short
+# for a cold agent-process spawn plus an Anthropic planner call.
+
+services:
+  orchestrator:
+    environment:
+      DECOMPOSITION_TIMEOUT_SECONDS: "120"
+
+  simulator:
+    build:
+      context: ./agents-component
+      dockerfile: Dockerfile
+    entrypoint: ["/app/simulator"]
+    depends_on:
+      nats:
+        condition: service_healthy
+    environment:
+      AEGIS_NATS_URL: nats://nats:4222
+    restart: unless-stopped
+    networks:
+      - cerberos
+
+  aegis-agents:
+    build:
+      context: ./agents-component
+      dockerfile: Dockerfile
+    depends_on:
+      nats:
+        condition: service_healthy
+      simulator:
+        condition: service_started
+    # Pass the key from the file into the container without ${ANTHROPIC_API_KEY} interpolation
+    # (a short ANTHROPIC_API_KEY in your shell would otherwise override repo-root .env).
+    env_file:
+      - .env
+    environment:
+      AEGIS_NATS_URL: nats://nats:4222
+      AEGIS_AGENT_PROCESS_PATH: /app/agent-process
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+    networks:
+      - cerberos
+
+networks:
+  cerberos:
+    external: true

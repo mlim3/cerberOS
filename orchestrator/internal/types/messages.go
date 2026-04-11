@@ -14,6 +14,7 @@ type MessageEnvelope struct {
 	MessageType     string          `json:"message_type"`     // e.g. "task_spec", "capability_query"
 	SourceComponent string          `json:"source_component"` // always "orchestrator"
 	CorrelationID   string          `json:"correlation_id"`   // task UUID
+	TraceID         string          `json:"trace_id,omitempty"` // W3C trace_id (32 hex), optional inbound from I/O
 	Timestamp       time.Time       `json:"timestamp"`
 	SchemaVersion   string          `json:"schema_version"` // "1.0"
 	Payload         json.RawMessage `json:"payload"`
@@ -26,6 +27,8 @@ type MessageEnvelope struct {
 type CapabilityQuery struct {
 	OrchestratorTaskRef  string   `json:"orchestrator_task_ref"`
 	RequiredSkillDomains []string `json:"required_skill_domains"`
+	// TraceID is W3C trace_id (32 hex); empty uses orchestrator_task_ref on the wire.
+	TraceID string `json:"trace_id,omitempty"`
 }
 
 type CapabilityMatch string
@@ -69,6 +72,8 @@ type TaskSpec struct {
 	CallbackTopic        string            `json:"callback_topic"`
 	UserContextID        string            `json:"user_context_id,omitempty"`
 	ProgressSummary      string            `json:"progress_summary,omitempty"` // Set on recovery re-dispatch
+	// TraceID is W3C trace_id (32 hex); empty uses orchestrator_task_ref on the agent wire payload.
+	TraceID string `json:"trace_id,omitempty"`
 }
 
 // ─── Task Accepted / Result ───────────────────────────────────────────────────

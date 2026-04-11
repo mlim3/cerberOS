@@ -11,6 +11,7 @@
  */
 
 import { connect, type NatsConnection, type JetStreamClient, type Subscription } from 'nats'
+import { ioLog } from './logger'
 
 // ── NATS subjects (aligned with agents-component/internal/comms/subjects.go) ──
 
@@ -47,6 +48,8 @@ export interface UserTaskPayload {
   callback_topic?: string
   required_skill_domains?: string[]
   user_context_id?: string
+  /** W3C trace_id (32 hex) — forwarded on the wire envelope for orchestrator logs */
+  trace_id?: string
 }
 
 export interface IONatsClient {
@@ -62,13 +65,19 @@ interface OutboundEnvelope {
   message_type: string
   source_component: string
   correlation_id: string
+  trace_id?: string
   timestamp: string
   schema_version: string
   payload: unknown
 }
 
-function buildEnvelope(messageType: string, correlationId: string, payload: unknown): OutboundEnvelope {
-  return {
+function buildEnvelope(
+  messageType: string,
+  correlationId: string,
+  payload: unknown,
+  traceId?: string,
+): OutboundEnvelope {
+  const env: OutboundEnvelope = {
     message_id: crypto.randomUUID(),
     message_type: messageType,
     source_component: 'io',
@@ -77,11 +86,16 @@ function buildEnvelope(messageType: string, correlationId: string, payload: unkn
     schema_version: '1.0',
     payload,
   }
+  if (traceId) env.trace_id = traceId
+  return env
 }
+
+/** Prefix for per-task IO callback subjects (`aegis.io.results.<client_task_id>`). */
+export const IO_RESULTS_TOPIC_PREFIX = 'aegis.io.results.'
 
 /** Build a callback topic for a given task. */
 export function callbackTopicForTask(taskId: string): string {
-  return `aegis.io.results.${taskId}`
+  return `${IO_RESULTS_TOPIC_PREFIX}${taskId}`
 }
 
 /**
@@ -96,6 +110,38 @@ export function createNatsClient(config: NatsConfig): IONatsClient | null {
   let js: JetStreamClient | null = null
   const subscriptions: Subscription[] = []
   let isConnected = false
+
+  type PendingSub = { channel: string; handler: (msg: unknown) => void; unsub?: () => void }
+  const pendingSubscriptions: PendingSub[] = []
+
+  function attachSubscription(channel: string, handler: (msg: unknown) => void): () => void {
+    if (!nc) return () => {}
+    const sub = nc.subscribe(channel)
+    subscriptions.push(sub)
+    ;(async () => {
+      for await (const msg of sub) {
+        try {
+          const text = new TextDecoder().decode(msg.data)
+          const parsed = JSON.parse(text) as Record<string, unknown>
+          handler({ envelope: parsed, subject: msg.subject })
+        } catch {
+          // skip unparseable messages
+        }
+      }
+    })()
+    return () => {
+      sub.unsubscribe()
+    }
+  }
+
+  function flushPendingSubscriptions() {
+    if (!nc) return
+    const queued = pendingSubscriptions.splice(0, pendingSubscriptions.length)
+    for (const entry of queued) {
+      entry.unsub = attachSubscription(entry.channel, entry.handler)
+      ioLog('info', 'nats', 'Subscribed (deferred)', { channel: entry.channel })
+    }
+  }
 
   // Connect asynchronously — the client exposes `connected` as a live flag.
   ;(async () => {
@@ -123,11 +169,12 @@ export function createNatsClient(config: NatsConfig): IONatsClient | null {
           storage: 'file',
           retention: 'limits',
         })
-        console.log('[IO:NATS] Created AEGIS_ORCHESTRATOR stream')
+        ioLog('info', 'nats', 'Created AEGIS_ORCHESTRATOR stream', {})
       }
 
       isConnected = true
-      console.log(`[IO:NATS] Connected to ${config.url}`)
+      ioLog('info', 'nats', 'Connected to NATS', { url: config.url })
+      flushPendingSubscriptions()
 
       // Monitor connection status
       ;(async () => {
@@ -136,17 +183,17 @@ export function createNatsClient(config: NatsConfig): IONatsClient | null {
           switch (s.type) {
             case 'disconnect':
               isConnected = false
-              console.log('[IO:NATS] Disconnected')
+              ioLog('info', 'nats', 'NATS disconnected', {})
               break
             case 'reconnect':
               isConnected = true
-              console.log('[IO:NATS] Reconnected')
+              ioLog('info', 'nats', 'NATS reconnected', {})
               break
           }
         }
       })()
     } catch (err) {
-      console.error('[IO:NATS] Connection failed:', err)
+      ioLog('error', 'nats', 'Connection failed', { err: String(err) })
       isConnected = false
     }
   })()
@@ -168,39 +215,30 @@ export function createNatsClient(config: NatsConfig): IONatsClient | null {
         callback_topic: task.callback_topic ?? callbackTopicForTask(task.task_id),
         user_context_id: task.user_context_id,
       }
-      const envelope = buildEnvelope('user_task', task.task_id, natsPayload)
+      const envelope = buildEnvelope('user_task', task.task_id, natsPayload, task.trace_id)
       const data = new TextEncoder().encode(JSON.stringify(envelope))
       await js.publish(SUBJECT_TASK_INBOUND, data)
     },
 
     subscribe(channel: string, handler: (msg: unknown) => void): () => void {
       if (!nc) {
-        console.warn('[IO:NATS] Cannot subscribe — not connected')
-        return () => {}
-      }
-      const sub = nc.subscribe(channel)
-      subscriptions.push(sub)
-
-      // Consume messages in the background
-      ;(async () => {
-        for await (const msg of sub) {
-          try {
-            const text = new TextDecoder().decode(msg.data)
-            const parsed = JSON.parse(text)
-            // Unwrap envelope if present
-            handler(parsed.payload ?? parsed)
-          } catch {
-            // skip unparseable messages
+        const entry: PendingSub = { channel, handler }
+        pendingSubscriptions.push(entry)
+        ioLog('info', 'nats', 'Subscription queued until connect', { channel })
+        return () => {
+          if (entry.unsub) {
+            entry.unsub()
+          } else {
+            const ix = pendingSubscriptions.indexOf(entry)
+            if (ix >= 0) pendingSubscriptions.splice(ix, 1)
           }
         }
-      })()
-
-      return () => {
-        sub.unsubscribe()
       }
+      return attachSubscription(channel, handler)
     },
 
     close() {
+      pendingSubscriptions.length = 0
       for (const sub of subscriptions) {
         sub.unsubscribe()
       }

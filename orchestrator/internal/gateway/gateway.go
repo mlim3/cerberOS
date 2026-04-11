@@ -34,13 +34,13 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
-	"log"
-	"os"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/mlim3/cerberOS/orchestrator/internal/interfaces"
+	"github.com/mlim3/cerberOS/orchestrator/internal/obslog"
 	"github.com/mlim3/cerberOS/orchestrator/internal/types"
 )
 
@@ -96,7 +96,7 @@ type CredentialRequestHandler func(agentID, taskID, requestID, keyName, label st
 type Gateway struct {
 	nats   interfaces.NATSClient
 	nodeID string
-	logger *log.Logger
+	logger *slog.Logger
 
 	taskHandler               TaskHandler
 	agentStatusHandler        AgentStatusHandler
@@ -113,7 +113,7 @@ func New(nats interfaces.NATSClient, nodeID string) *Gateway {
 	return &Gateway{
 		nats:   nats,
 		nodeID: nodeID,
-		logger: log.New(os.Stdout, "[gateway] ", log.LstdFlags|log.LUTC),
+		logger: obslog.NewLogger("gateway").With("node_id", nodeID),
 	}
 }
 
@@ -166,7 +166,7 @@ func (g *Gateway) Start() error {
 	if err := g.nats.Subscribe(TopicCredentialRequest, g.handleRawCredentialRequest); err != nil {
 		return fmt.Errorf("subscribe %s: %w", TopicCredentialRequest, err)
 	}
-	g.logger.Printf("gateway started on node %s — subscribed to inbound topics", g.nodeID)
+	g.logger.Info("gateway started")
 	return nil
 }
 
@@ -183,21 +183,27 @@ func (g *Gateway) IsConnected() bool {
 func (g *Gateway) handleRawInboundTask(subject string, data []byte) error {
 	envelope, err := validateEnvelope(data)
 	if err != nil {
-		g.logger.Printf("rejected malformed inbound task envelope: %v", err)
+		g.logger.Error("rejected malformed inbound task envelope", "err", err)
 		_ = g.publishDeadLetter(data, err.Error())
 		return err
 	}
 
 	var task types.UserTask
 	if err := json.Unmarshal(envelope.Payload, &task); err != nil {
-		g.logger.Printf("failed to deserialize user_task payload: %v", err)
+		attrs := obslog.AppendTrace([]any{"err", err}, envelope.TraceID)
+		g.logger.Error("failed to deserialize user_task payload", attrs...)
 		_ = g.publishDeadLetter(data, fmt.Sprintf("payload deserialize error: %v", err))
 		return fmt.Errorf("deserialize user_task: %w", err)
+	}
+
+	if task.TraceID == "" {
+		task.TraceID = envelope.TraceID
 	}
 
 	if g.taskHandler == nil {
 		return fmt.Errorf("no task handler registered")
 	}
+	g.logger.Info("inbound user_task received", obslog.AppendTrace([]any{"task_id", task.TaskID}, task.TraceID)...)
 	return g.taskHandler(task)
 }
 
@@ -205,7 +211,7 @@ func (g *Gateway) handleRawInboundTask(subject string, data []byte) error {
 func (g *Gateway) handleRawAgentStatus(subject string, data []byte) error {
 	envelope, err := validateEnvelope(data)
 	if err != nil {
-		g.logger.Printf("rejected malformed agent status envelope: %v", err)
+		g.logger.Error("rejected malformed agent status envelope", "err", err)
 		return err
 	}
 
@@ -270,7 +276,7 @@ func (g *Gateway) handleCapabilityResponse(subject string, data []byte) error {
 func (g *Gateway) handleRawTaskAccepted(subject string, data []byte) error {
 	envelope, err := validateEnvelope(data)
 	if err != nil {
-		g.logger.Printf("rejected malformed task accepted envelope: %v", err)
+		g.logger.Error("rejected malformed task accepted envelope", "err", err)
 		return err
 	}
 
@@ -291,7 +297,7 @@ func (g *Gateway) handleRawTaskAccepted(subject string, data []byte) error {
 func (g *Gateway) handleRawTaskResult(subject string, data []byte) error {
 	envelope, err := validateEnvelope(data)
 	if err != nil {
-		g.logger.Printf("rejected malformed task result envelope: %v", err)
+		g.logger.Error("rejected malformed task result envelope", "err", err)
 		return err
 	}
 
@@ -332,7 +338,7 @@ func (g *Gateway) handleRawTaskResult(subject string, data []byte) error {
 func (g *Gateway) handleRawTaskFailed(subject string, data []byte) error {
 	envelope, err := validateEnvelope(data)
 	if err != nil {
-		g.logger.Printf("rejected malformed task failed envelope: %v", err)
+		g.logger.Error("rejected malformed task failed envelope", "err", err)
 		return err
 	}
 
@@ -366,7 +372,7 @@ func (g *Gateway) handleRawTaskFailed(subject string, data []byte) error {
 func (g *Gateway) handleRawCredentialRequest(subject string, data []byte) error {
 	envelope, err := validateEnvelope(data)
 	if err != nil {
-		g.logger.Printf("rejected malformed credential.request envelope: %v", err)
+		g.logger.Error("rejected malformed credential.request envelope", "err", err)
 		return err
 	}
 
@@ -390,7 +396,8 @@ func (g *Gateway) handleRawCredentialRequest(subject string, data []byte) error 
 	}
 
 	if g.credentialRequestHandler == nil {
-		g.logger.Printf("credential.request (user_input) received but no handler registered: task_id=%s", payload.TaskID)
+		g.logger.Warn("credential.request (user_input) received but no handler registered",
+			obslog.AppendTrace([]any{"task_id", payload.TaskID}, envelope.TraceID)...)
 		return nil
 	}
 	return g.credentialRequestHandler(
@@ -425,6 +432,10 @@ func (g *Gateway) PublishTaskResult(callbackTopic string, result types.TaskResul
 // PublishTaskSpec dispatches a validated task.inbound request to the Agents
 // Component. The internal TaskSpec is adapted to the agents-component schema.
 func (g *Gateway) PublishTaskSpec(spec types.TaskSpec) error {
+	tid := spec.TraceID
+	if tid == "" {
+		tid = spec.OrchestratorTaskRef
+	}
 	wire := struct {
 		TaskID         string            `json:"task_id"`
 		RequiredSkills []string          `json:"required_skills"`
@@ -437,10 +448,10 @@ func (g *Gateway) PublishTaskSpec(spec types.TaskSpec) error {
 		RequiredSkills: spec.RequiredSkillDomains,
 		Instructions:   buildAgentInstructions(spec),
 		Metadata:       buildAgentMetadata(spec),
-		TraceID:        spec.OrchestratorTaskRef,
+		TraceID:        tid,
 		UserContextID:  spec.UserContextID,
 	}
-	return g.publishEnvelope(TopicAgentTasksInbound, "task.inbound", spec.OrchestratorTaskRef, wire)
+	return g.publishEnvelopeWithTrace(TopicAgentTasksInbound, "task.inbound", spec.OrchestratorTaskRef, tid, wire)
 }
 
 // PublishCapabilityQuery sends a capability query and waits for the response.
@@ -451,6 +462,10 @@ func (g *Gateway) PublishCapabilityQuery(query types.CapabilityQuery) (*types.Ca
 	g.pendingCapabilityQueries.Store(queryID, responseCh)
 	defer g.pendingCapabilityQueries.Delete(queryID)
 
+	qtid := query.TraceID
+	if qtid == "" {
+		qtid = query.OrchestratorTaskRef
+	}
 	wire := struct {
 		QueryID string   `json:"query_id"`
 		Domains []string `json:"domains"`
@@ -458,10 +473,10 @@ func (g *Gateway) PublishCapabilityQuery(query types.CapabilityQuery) (*types.Ca
 	}{
 		QueryID: queryID,
 		Domains: query.RequiredSkillDomains,
-		TraceID: query.OrchestratorTaskRef,
+		TraceID: qtid,
 	}
 
-	if err := g.publishEnvelope(TopicCapabilityQuery, "capability.query", queryID, wire); err != nil {
+	if err := g.publishEnvelopeWithTrace(TopicCapabilityQuery, "capability.query", queryID, qtid, wire); err != nil {
 		return nil, fmt.Errorf("publish capability_query: %w", err)
 	}
 
@@ -542,6 +557,12 @@ func (g *Gateway) PublishAuditEvent(event types.AuditEvent) error {
 
 // publishEnvelope wraps any payload in a signed MessageEnvelope and publishes it (§13.5).
 func (g *Gateway) publishEnvelope(topic, messageType, correlationID string, payload any) error {
+	return g.publishEnvelopeWithTrace(topic, messageType, correlationID, "", payload)
+}
+
+// publishEnvelopeWithTrace sets MessageEnvelope.trace_id when traceID is non-empty so NATS
+// subscribers and log pipelines can correlate without parsing inner payload JSON.
+func (g *Gateway) publishEnvelopeWithTrace(topic, messageType, correlationID, traceID string, payload any) error {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal payload for %s: %w", messageType, err)
@@ -555,6 +576,9 @@ func (g *Gateway) publishEnvelope(topic, messageType, correlationID string, payl
 		Timestamp:       time.Now().UTC(),
 		SchemaVersion:   SchemaVersion,
 		Payload:         raw,
+	}
+	if traceID != "" {
+		envelope.TraceID = traceID
 	}
 
 	envelopeBytes, err := json.Marshal(envelope)

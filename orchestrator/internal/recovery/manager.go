@@ -21,12 +21,12 @@ package recovery
 import (
 	"encoding/json"
 	"fmt"
-	"log"
-	"os"
+	"log/slog"
 	"time"
 
 	"github.com/mlim3/cerberOS/orchestrator/internal/config"
 	"github.com/mlim3/cerberOS/orchestrator/internal/interfaces"
+	"github.com/mlim3/cerberOS/orchestrator/internal/obslog"
 	"github.com/mlim3/cerberOS/orchestrator/internal/types"
 )
 
@@ -68,7 +68,7 @@ type Manager struct {
 	policy  PolicyEnforcer
 	monitor TaskMonitor
 	nodeID  string
-	logger  *log.Logger
+	logger  *slog.Logger
 }
 
 // New creates a new Recovery Manager.
@@ -86,7 +86,7 @@ func New(
 		policy:  policy,
 		monitor: monitor,
 		nodeID:  cfg.NodeID,
-		logger:  log.New(os.Stdout, "[recovery] ", log.LstdFlags|log.LUTC),
+		logger:  obslog.NewLogger("recovery"),
 	}
 }
 
@@ -99,14 +99,17 @@ func New(
 //   - Task timeout fires            → RecoveryReasonTimeout
 func (m *Manager) HandleRecovery(ts *types.TaskState, reason types.RecoveryReason) {
 	if ts == nil {
-		m.logger.Printf("HandleRecovery called with nil TaskState — ignoring")
+		m.logger.Warn("HandleRecovery called with nil TaskState — ignoring")
 		return
 	}
 
-	m.logger.Printf(
-		"recovery triggered: task_id=%s orchestrator_task_ref=%s reason=%s retry_count=%d",
-		ts.TaskID, ts.OrchestratorTaskRef, reason, ts.RetryCount,
-	)
+	m.logger.Info("recovery triggered",
+		obslog.AppendTrace([]any{
+			"task_id", ts.TaskID,
+			"orchestrator_task_ref", ts.OrchestratorTaskRef,
+			"reason", reason,
+			"retry_count", ts.RetryCount,
+		}, ts.TraceID)...)
 
 	switch reason {
 	case types.RecoveryReasonTimeout:
@@ -121,17 +124,16 @@ func (m *Manager) HandleRecovery(ts *types.TaskState, reason types.RecoveryReaso
 		//   - If the agent gives up → it reports TERMINATED → M5 re-dispatches via AgentTerminated below
 		//   - If the agent hangs forever → timeout fires → M5 terminates (TIMED_OUT, no retry)
 		// Re-dispatching here would spin up a duplicate agent while the original is still alive.
-		m.logger.Printf(
-			"agent self-recovering: task_id=%s orchestrator_task_ref=%s — monitoring without intervening",
-			ts.TaskID, ts.OrchestratorTaskRef,
-		)
+		m.logger.Info("agent self-recovering — monitoring without intervening",
+			obslog.AppendTrace([]any{"task_id", ts.TaskID, "orchestrator_task_ref", ts.OrchestratorTaskRef}, ts.TraceID)...)
 
 	case types.RecoveryReasonAgentTerminated:
 		// Agent is dead — act immediately. Check retry budget and re-dispatch.
 		m.attemptRecovery(ts, reason)
 
 	default:
-		m.logger.Printf("unknown recovery reason %q for task_id=%s — terminating", reason, ts.TaskID)
+		m.logger.Error("unknown recovery reason — terminating",
+			obslog.AppendTrace([]any{"reason", reason, "task_id", ts.TaskID}, ts.TraceID)...)
 		m.terminateTask(ts, types.ErrCodeMaxRetriesExceeded, types.StateFailed,
 			fmt.Sprintf("unknown recovery reason: %s", reason))
 	}
@@ -140,9 +142,10 @@ func (m *Manager) HandleRecovery(ts *types.TaskState, reason types.RecoveryReaso
 // HandleComponentFailure is called by Memory Interface when all write retries are exhausted.
 // Terminates the affected task if it can be identified (§4.1 M5).
 func (m *Manager) HandleComponentFailure(payload types.OrchestratorMemoryWritePayload, writeErr error) {
-	m.logger.Printf(
-		"CRITICAL: memory write failed after all retries: task_id=%s orchestrator_task_ref=%s error=%v",
-		payload.TaskID, payload.OrchestratorTaskRef, writeErr,
+	m.logger.Error("CRITICAL: memory write failed after all retries",
+		"task_id", payload.TaskID,
+		"orchestrator_task_ref", payload.OrchestratorTaskRef,
+		"err", writeErr,
 	)
 	// Best-effort: attempt credential revocation even without a full TaskState.
 	if payload.OrchestratorTaskRef != "" {
@@ -161,10 +164,8 @@ func (m *Manager) attemptRecovery(ts *types.TaskState, reason types.RecoveryReas
 
 	// ── Check retry budget (§FR-SH-03) ────────────────────────────────────
 	if ts.RetryCount >= maxRetries {
-		m.logger.Printf(
-			"retry budget exhausted: task_id=%s retry_count=%d max_retries=%d",
-			ts.TaskID, ts.RetryCount, maxRetries,
-		)
+		m.logger.Warn("retry budget exhausted",
+			obslog.AppendTrace([]any{"task_id", ts.TaskID, "retry_count", ts.RetryCount, "max_retries", maxRetries}, ts.TraceID)...)
 		m.terminateTask(ts, types.ErrCodeMaxRetriesExceeded, types.StateFailed,
 			fmt.Sprintf("max retries (%d) exceeded", maxRetries))
 		return
@@ -173,10 +174,8 @@ func (m *Manager) attemptRecovery(ts *types.TaskState, reason types.RecoveryReas
 	// ── Read last task state from Memory (§FR-SH-02) ──────────────────────
 	latestState, err := m.memory.ReadLatest(ts.TaskID, types.DataTypeTaskState)
 	if err != nil {
-		m.logger.Printf(
-			"failed to read task state for recovery: task_id=%s error=%v — terminating",
-			ts.TaskID, err,
-		)
+		m.logger.Error("failed to read task state for recovery — terminating",
+			obslog.AppendTrace([]any{"task_id", ts.TaskID, "err", err}, ts.TraceID)...)
 		m.terminateTask(ts, types.ErrCodeStateRecoveryFailed, types.StateFailed,
 			fmt.Sprintf("cannot read task state for recovery: %v", err))
 		return
@@ -184,10 +183,8 @@ func (m *Manager) attemptRecovery(ts *types.TaskState, reason types.RecoveryReas
 
 	var recoveredState types.TaskState
 	if err := json.Unmarshal(latestState.Payload, &recoveredState); err != nil {
-		m.logger.Printf(
-			"failed to decode task state for recovery: task_id=%s error=%v — terminating",
-			ts.TaskID, err,
-		)
+		m.logger.Error("failed to decode task state for recovery — terminating",
+			obslog.AppendTrace([]any{"task_id", ts.TaskID, "err", err}, ts.TraceID)...)
 		m.terminateTask(ts, types.ErrCodeStateRecoveryFailed, types.StateFailed,
 			fmt.Sprintf("cannot decode task state for recovery: %v", err))
 		return
@@ -196,10 +193,8 @@ func (m *Manager) attemptRecovery(ts *types.TaskState, reason types.RecoveryReas
 	// ── Re-validate policy scope (§FR-SH-06, §13.2) ───────────────────────
 	// Scope CANNOT expand. If Vault says it has changed, escalate to SCOPE_EXPIRED.
 	if err := m.policy.VerifyScopeStillValid(recoveredState.PolicyScope); err != nil {
-		m.logger.Printf(
-			"policy scope expired during recovery: task_id=%s error=%v — terminating",
-			ts.TaskID, err,
-		)
+		m.logger.Error("policy scope expired during recovery — terminating",
+			obslog.AppendTrace([]any{"task_id", ts.TaskID, "err", err}, recoveredState.TraceID)...)
 		m.terminateTask(ts, types.ErrCodeScopeExpired, types.StateFailed,
 			fmt.Sprintf("policy scope expired during recovery: %v", err))
 		return
@@ -226,10 +221,8 @@ func (m *Manager) attemptRecovery(ts *types.TaskState, reason types.RecoveryReas
 			Timestamp:           now,
 			Payload:             eventPayload,
 		}); writeErr != nil {
-			m.logger.Printf(
-				"failed to write recovery_event: task_id=%s attempt=%d error=%v",
-				recoveredState.TaskID, recoveredState.RetryCount, writeErr,
-			)
+			m.logger.Error("failed to write recovery_event",
+				obslog.AppendTrace([]any{"task_id", recoveredState.TaskID, "attempt", recoveredState.RetryCount, "err", writeErr}, recoveredState.TraceID)...)
 			// Non-fatal: continue with re-dispatch.
 		}
 	}
@@ -237,10 +230,8 @@ func (m *Manager) attemptRecovery(ts *types.TaskState, reason types.RecoveryReas
 	// ── Transition state to RECOVERING ────────────────────────────────────
 	if err := m.monitor.StateTransition(ts.TaskID, types.StateRecovering,
 		fmt.Sprintf("recovery attempt %d: %s", recoveredState.RetryCount, reason)); err != nil {
-		m.logger.Printf(
-			"failed to transition to RECOVERING: task_id=%s error=%v",
-			ts.TaskID, err,
-		)
+		m.logger.Warn("failed to transition to RECOVERING",
+			obslog.AppendTrace([]any{"task_id", ts.TaskID, "err", err}, ts.TraceID)...)
 		// Continue — state may already be RECOVERING from monitor's earlier call.
 	}
 
@@ -256,22 +247,23 @@ func (m *Manager) attemptRecovery(ts *types.TaskState, reason types.RecoveryReas
 		CallbackTopic:        recoveredState.CallbackTopic,
 		UserContextID:        recoveredState.UserContextID,
 		ProgressSummary:      fmt.Sprintf("Recovery attempt %d", recoveredState.RetryCount),
+		TraceID:              recoveredState.TraceID,
 	}
 
 	if err := m.gateway.PublishTaskSpec(spec); err != nil {
-		m.logger.Printf(
-			"re-dispatch failed: task_id=%s attempt=%d error=%v — terminating",
-			ts.TaskID, recoveredState.RetryCount, err,
-		)
+		m.logger.Error("re-dispatch failed — terminating",
+			obslog.AppendTrace([]any{"task_id", ts.TaskID, "attempt", recoveredState.RetryCount, "err", err}, recoveredState.TraceID)...)
 		m.terminateTask(ts, types.ErrCodeAgentsUnavailable, types.StateFailed,
 			fmt.Sprintf("re-dispatch failed on attempt %d: %v", recoveredState.RetryCount, err))
 		return
 	}
 
-	m.logger.Printf(
-		"task re-dispatched: task_id=%s orchestrator_task_ref=%s attempt=%d",
-		recoveredState.TaskID, recoveredState.OrchestratorTaskRef, recoveredState.RetryCount,
-	)
+	m.logger.Info("task re-dispatched",
+		obslog.AppendTrace([]any{
+			"task_id", recoveredState.TaskID,
+			"orchestrator_task_ref", recoveredState.OrchestratorTaskRef,
+			"attempt", recoveredState.RetryCount,
+		}, recoveredState.TraceID)...)
 }
 
 // terminateTask performs the full terminal cleanup sequence (§17.3 terminateTask):
@@ -281,17 +273,18 @@ func (m *Manager) attemptRecovery(ts *types.TaskState, reason types.RecoveryReas
 //  4. Notify User I/O Component with error via Gateway
 //  5. Untrack task in Task Monitor
 func (m *Manager) terminateTask(ts *types.TaskState, errorCode, terminalState, reason string) {
-	m.logger.Printf(
-		"terminating task: task_id=%s orchestrator_task_ref=%s state=%s error_code=%s",
-		ts.TaskID, ts.OrchestratorTaskRef, terminalState, errorCode,
-	)
+	m.logger.Info("terminating task",
+		obslog.AppendTrace([]any{
+			"task_id", ts.TaskID,
+			"orchestrator_task_ref", ts.OrchestratorTaskRef,
+			"state", terminalState,
+			"error_code", errorCode,
+		}, ts.TraceID)...)
 
 	// ── Step 1: Revoke credentials (NON-OPTIONAL, §FR-SH-04, §13.3) ───────
 	if err := m.policy.RevokeCredentials(ts.OrchestratorTaskRef); err != nil {
-		m.logger.Printf(
-			"REVOCATION_FAILED: orchestrator_task_ref=%s error=%v — scheduling retry",
-			ts.OrchestratorTaskRef, err,
-		)
+		m.logger.Error("REVOCATION_FAILED — scheduling retry",
+			obslog.AppendTrace([]any{"orchestrator_task_ref", ts.OrchestratorTaskRef, "err", err}, ts.TraceID)...)
 		go m.scheduleRevocationRetry(ts.OrchestratorTaskRef)
 		// DO NOT block termination — continue regardless.
 	}
@@ -302,19 +295,15 @@ func (m *Manager) terminateTask(ts *types.TaskState, errorCode, terminalState, r
 		OrchestratorTaskRef: ts.OrchestratorTaskRef,
 		Reason:              errorCode,
 	}); err != nil {
-		m.logger.Printf(
-			"failed to publish agent_terminate: task_id=%s error=%v",
-			ts.TaskID, err,
-		)
+		m.logger.Error("failed to publish agent_terminate",
+			obslog.AppendTrace([]any{"task_id", ts.TaskID, "err", err}, ts.TraceID)...)
 		// Non-fatal: agent may already be gone; continue cleanup.
 	}
 
 	// ── Step 3: Transition state via Monitor (persists to Memory) ─────────
 	if err := m.monitor.StateTransition(ts.TaskID, terminalState, reason); err != nil {
-		m.logger.Printf(
-			"state transition to %s failed: task_id=%s error=%v",
-			terminalState, ts.TaskID, err,
-		)
+		m.logger.Error("state transition failed",
+			obslog.AppendTrace([]any{"terminal_state", terminalState, "task_id", ts.TaskID, "err", err}, ts.TraceID)...)
 		// Non-fatal: best-effort state write.
 	}
 
@@ -325,19 +314,15 @@ func (m *Manager) terminateTask(ts *types.TaskState, errorCode, terminalState, r
 		ErrorCode:   errorCode,
 		UserMessage: userMessage,
 	}); err != nil {
-		m.logger.Printf(
-			"failed to publish error to User I/O: task_id=%s callback_topic=%s error=%v",
-			ts.TaskID, ts.CallbackTopic, err,
-		)
+		m.logger.Error("failed to publish error to User I/O",
+			obslog.AppendTrace([]any{"task_id", ts.TaskID, "callback_topic", ts.CallbackTopic, "err", err}, ts.TraceID)...)
 	}
 
 	// ── Step 5: Untrack from Monitor ──────────────────────────────────────
 	m.monitor.UntrackTask(ts.TaskID)
 
-	m.logger.Printf(
-		"task terminated: task_id=%s orchestrator_task_ref=%s final_state=%s",
-		ts.TaskID, ts.OrchestratorTaskRef, terminalState,
-	)
+	m.logger.Info("task terminated",
+		obslog.AppendTrace([]any{"task_id", ts.TaskID, "orchestrator_task_ref", ts.OrchestratorTaskRef, "final_state", terminalState}, ts.TraceID)...)
 }
 
 // scheduleRevocationRetry retries credential revocation with exponential backoff.
@@ -348,21 +333,20 @@ func (m *Manager) scheduleRevocationRetry(orchestratorTaskRef string) {
 	for attempt := 1; attempt <= revocationMaxAttempts; attempt++ {
 		time.Sleep(backoff)
 		if err := m.policy.RevokeCredentials(orchestratorTaskRef); err == nil {
-			m.logger.Printf(
-				"revocation retry succeeded: orchestrator_task_ref=%s attempt=%d",
-				orchestratorTaskRef, attempt,
-			)
+			m.logger.Info("revocation retry succeeded", "orchestrator_task_ref", orchestratorTaskRef, "attempt", attempt)
 			return
 		}
-		m.logger.Printf(
-			"REVOCATION_FAILED: orchestrator_task_ref=%s attempt=%d/%d — retrying in %s",
-			orchestratorTaskRef, attempt, revocationMaxAttempts, backoff*2,
+		m.logger.Error("REVOCATION_FAILED — retrying",
+			"orchestrator_task_ref", orchestratorTaskRef,
+			"attempt", attempt,
+			"max_attempts", revocationMaxAttempts,
+			"next_backoff", (backoff * 2).String(),
 		)
 		backoff *= 2
 	}
-	m.logger.Printf(
-		"REVOCATION_FAILED_PERMANENT: orchestrator_task_ref=%s all %d retry attempts exhausted",
-		orchestratorTaskRef, revocationMaxAttempts,
+	m.logger.Error("REVOCATION_FAILED_PERMANENT: all retry attempts exhausted",
+		"orchestrator_task_ref", orchestratorTaskRef,
+		"attempts", revocationMaxAttempts,
 	)
 }
 

@@ -1,0 +1,57 @@
+# Loki + Grafana + Promtail — full log pipeline (Docker → Promtail → Loki → Grafana).
+# Requires external network `cerberos` (same as docker-compose.yml).
+#
+# From this directory:
+#   docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
+#
+# With IO stack (from repo root, adjust paths):
+#   docker compose -f orchestrator/docker-compose.yml -f io/docker-compose.yml -f orchestrator/docker-compose.observability.yml up -d
+#
+# Grafana: http://localhost:3003 — Explore → Loki
+# Example: {compose_service="orchestrator"} | json | line_format "{{.msg}}"
+# Trace:   {compose_service="io"} |= "<trace_id_hex>"  or  | json | trace_id="<hex>"
+#
+# Promtail reads /var/run/docker.sock (Linux, Docker Desktop on macOS).
+
+services:
+  loki:
+    image: grafana/loki:2.9.5
+    command: -config.file=/etc/loki/local-config.yaml
+    ports:
+      - "3100:3100"
+    networks:
+      - cerberos
+
+  promtail:
+    image: grafana/promtail:2.9.5
+    command: -config.file=/etc/promtail/config.yml
+    volumes:
+      - ./observability/promtail/config.yml:/etc/promtail/config.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - promtail-positions:/tmp
+    depends_on:
+      - loki
+    networks:
+      - cerberos
+
+  grafana:
+    image: grafana/grafana:10.2.3
+    ports:
+      - "3003:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/etc/grafana/dashboards:ro
+    depends_on:
+      - loki
+    networks:
+      - cerberos
+
+volumes:
+  promtail-positions:
+
+networks:
+  cerberos:
+    external: true

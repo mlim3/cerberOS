@@ -31,6 +31,7 @@ type CloudEvent struct {
 	Type            string      `json:"type"`
 	Time            string      `json:"time"`
 	CorrelationID   string      `json:"correlationid"`
+	TraceID         string      `json:"traceid,omitempty"` // W3C trace_id (32 hex), aligned with HTTP / IO
 	DataContentType string      `json:"datacontenttype"`
 	Data            interface{} `json:"data"`
 }
@@ -121,6 +122,7 @@ func runTaskRouter(ctx context.Context, logger *log.Logger, js nats.JetStreamCon
 				Type:            "aegis.tasks.routed",
 				Time:            time.Now().UTC().Format(time.RFC3339Nano),
 				CorrelationID:   newUUID(),
+				TraceID:         traceID32Hex(),
 				DataContentType: "application/json",
 				Data: map[string]string{
 					"taskId": newUUID(),
@@ -146,7 +148,11 @@ func runTaskRouter(ctx context.Context, logger *log.Logger, js nats.JetStreamCon
 func runOrchestrator(ctx context.Context, logger *log.Logger, js nats.JetStreamContext) {
 	sub, err := bus.SubscribeWithACL(js, stubComponentName, bus.SubjectTasksRouted, func(msg *nats.Msg) {
 		correlation := extractCorrelationID(msg.Data)
-		logger.Printf("orchestrator received subject=%s size=%d correlation=%s", msg.Subject, len(msg.Data), correlation)
+		traceID := extractTraceID(msg.Data)
+		if traceID == "" {
+			traceID = correlation
+		}
+		logger.Printf("orchestrator received subject=%s size=%d correlation=%s traceid=%s", msg.Subject, len(msg.Data), correlation, traceID)
 		msg.Ack()
 
 		payload := CloudEvent{
@@ -156,6 +162,7 @@ func runOrchestrator(ctx context.Context, logger *log.Logger, js nats.JetStreamC
 			Type:            "aegis.agents.created",
 			Time:            time.Now().UTC().Format(time.RFC3339Nano),
 			CorrelationID:   correlation,
+			TraceID:         traceID,
 			DataContentType: "application/json",
 			Data: map[string]string{
 				"agentId": newUUID(),
@@ -185,7 +192,11 @@ func runOrchestrator(ctx context.Context, logger *log.Logger, js nats.JetStreamC
 func runAgentFactory(ctx context.Context, logger *log.Logger, js nats.JetStreamContext) {
 	sub, err := bus.SubscribeWithACL(js, stubComponentName, bus.SubjectAgentsCreated, func(msg *nats.Msg) {
 		correlation := extractCorrelationID(msg.Data)
-		logger.Printf("agent-factory received subject=%s size=%d correlation=%s", msg.Subject, len(msg.Data), correlation)
+		traceID := extractTraceID(msg.Data)
+		if traceID == "" {
+			traceID = correlation
+		}
+		logger.Printf("agent-factory received subject=%s size=%d correlation=%s traceid=%s", msg.Subject, len(msg.Data), correlation, traceID)
 		msg.Ack()
 
 		payload := CloudEvent{
@@ -195,6 +206,7 @@ func runAgentFactory(ctx context.Context, logger *log.Logger, js nats.JetStreamC
 			Type:            "aegis.runtime.completed",
 			Time:            time.Now().UTC().Format(time.RFC3339Nano),
 			CorrelationID:   correlation,
+			TraceID:         traceID,
 			DataContentType: "application/json",
 			Data: map[string]string{
 				"runtimeId": newUUID(),
@@ -224,7 +236,11 @@ func runAgentFactory(ctx context.Context, logger *log.Logger, js nats.JetStreamC
 func runVault(ctx context.Context, logger *log.Logger, js nats.JetStreamContext) {
 	sub, err := bus.SubscribeWithACL(js, stubComponentName, bus.SubjectVault, func(msg *nats.Msg) {
 		correlation := extractCorrelationID(msg.Data)
-		logger.Printf("vault received subject=%s size=%d correlation=%s", msg.Subject, len(msg.Data), correlation)
+		traceID := extractTraceID(msg.Data)
+		if traceID == "" {
+			traceID = correlation
+		}
+		logger.Printf("vault received subject=%s size=%d correlation=%s traceid=%s", msg.Subject, len(msg.Data), correlation, traceID)
 		msg.Ack()
 	}, nats.Durable("vault"), nats.ManualAck())
 	if err != nil {
@@ -274,6 +290,22 @@ func extractCorrelationID(payload []byte) string {
 	}
 	raw, _ := msg["correlationid"].(string)
 	return raw
+}
+
+func extractTraceID(payload []byte) string {
+	var msg map[string]interface{}
+	if err := json.Unmarshal(payload, &msg); err != nil {
+		return ""
+	}
+	raw, _ := msg["traceid"].(string)
+	return raw
+}
+
+// traceID32Hex returns 32 lowercase hex chars (W3C trace_id length).
+func traceID32Hex() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 func newUUID() string {
