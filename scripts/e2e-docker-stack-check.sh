@@ -62,7 +62,7 @@ rm -f "${CHAT_OUT}"
 echo ""
 echo "=== [4/4] Grafana (optional) ==="
 if curl -sfS -o /dev/null -w "%{http_code}" "${GRAFANA_URL}/login" | grep -q 200; then
-  ok "Grafana reachable at ${GRAFANA_URL} — Explore → Loki → {compose_service=\"io\"} or \"orchestrator\"}"
+  ok "Grafana reachable at ${GRAFANA_URL} — Explore → Loki → {compose_service=~\"io|orchestrator\"}"
 else
   echo "SKIP: Grafana not reachable at ${GRAFANA_URL}"
 fi
