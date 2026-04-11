@@ -15,13 +15,17 @@ GRAFANA_URL="${GRAFANA_URL:-http://127.0.0.1:3003}"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { echo "OK: $*"; }
 
-echo "=== [1/4] Orchestrator health ==="
-H="$(curl -sfS "${ORCHESTRATOR_URL}/" -o /dev/null -w "%{http_code}" 2>/dev/null || true)"
-if [[ "$H" != "200" ]]; then
-  H="$(curl -sfS "${ORCHESTRATOR_URL}/health" -o /dev/null -w "%{http_code}" 2>/dev/null || echo "000")"
+if ! command -v uuidgen >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; then
+  fail "need uuidgen or python3 to generate task ids for /api/chat smoke"
 fi
-[[ "$H" == "200" ]] || fail "orchestrator not reachable at ${ORCHESTRATOR_URL} (HTTP ${H}) — try / and /health"
-curl -sfS "${ORCHESTRATOR_URL}/" 2>/dev/null | head -c 400 || curl -sfS "${ORCHESTRATOR_URL}/health" | head -c 400
+
+echo "=== [1/4] Orchestrator health ==="
+H="$(curl -sS "${ORCHESTRATOR_URL}/health" -o /dev/null -w "%{http_code}" 2>/dev/null || echo "000")"
+if [[ "$H" != "200" ]]; then
+  H="$(curl -sS "${ORCHESTRATOR_URL}/" -o /dev/null -w "%{http_code}" 2>/dev/null || echo "000")"
+fi
+[[ "$H" == "200" ]] || fail "orchestrator not reachable at ${ORCHESTRATOR_URL} (HTTP ${H}) — try /health or /"
+curl -sS "${ORCHESTRATOR_URL}/health" 2>/dev/null | head -c 400 || curl -sS "${ORCHESTRATOR_URL}/" 2>/dev/null | head -c 400
 echo ""
 ok "orchestrator responded"
 

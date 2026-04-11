@@ -35,12 +35,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/mlim3/cerberOS/orchestrator/internal/interfaces"
+	"github.com/mlim3/cerberOS/orchestrator/internal/obslog"
 	"github.com/mlim3/cerberOS/orchestrator/internal/types"
 )
 
@@ -98,10 +98,10 @@ type Gateway struct {
 	nodeID string
 	logger *slog.Logger
 
-	taskHandler               TaskHandler
-	agentStatusHandler        AgentStatusHandler
-	taskResultHandler         TaskResultHandler
-	credentialRequestHandler  CredentialRequestHandler
+	taskHandler              TaskHandler
+	agentStatusHandler       AgentStatusHandler
+	taskResultHandler        TaskResultHandler
+	credentialRequestHandler CredentialRequestHandler
 
 	// pendingCapabilityQueries tracks in-flight capability query requests.
 	// key: query_id, value: chan *types.CapabilityResponse
@@ -110,11 +110,10 @@ type Gateway struct {
 
 // New creates a new Gateway. Call RegisterHandlers then Start() before use.
 func New(nats interfaces.NATSClient, nodeID string) *Gateway {
-	h := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})
 	return &Gateway{
 		nats:   nats,
 		nodeID: nodeID,
-		logger: slog.New(h),
+		logger: obslog.NewLogger("gateway").With("node_id", nodeID),
 	}
 }
 
@@ -167,11 +166,7 @@ func (g *Gateway) Start() error {
 	if err := g.nats.Subscribe(TopicCredentialRequest, g.handleRawCredentialRequest); err != nil {
 		return fmt.Errorf("subscribe %s: %w", TopicCredentialRequest, err)
 	}
-	g.logger.Info("gateway started",
-		"service", "orchestrator",
-		"component", "gateway",
-		"node_id", g.nodeID,
-	)
+	g.logger.Info("gateway started")
 	return nil
 }
 
@@ -188,27 +183,15 @@ func (g *Gateway) IsConnected() bool {
 func (g *Gateway) handleRawInboundTask(subject string, data []byte) error {
 	envelope, err := validateEnvelope(data)
 	if err != nil {
-		g.logger.Error("rejected malformed inbound task envelope",
-			"service", "orchestrator",
-			"component", "gateway",
-			"node_id", g.nodeID,
-			"err", err,
-		)
+		g.logger.Error("rejected malformed inbound task envelope", "err", err)
 		_ = g.publishDeadLetter(data, err.Error())
 		return err
 	}
 
 	var task types.UserTask
 	if err := json.Unmarshal(envelope.Payload, &task); err != nil {
-		attrs := []any{
-			"service", "orchestrator",
-			"component", "gateway",
-			"node_id", g.nodeID,
-			"err", err,
-		}
-		if envelope.TraceID != "" {
-			attrs = append(attrs, "trace_id", envelope.TraceID)
-		}
+		attrs := []any{"err", err}
+		attrs = obslog.AppendTrace(attrs, envelope.TraceID)
 		g.logger.Error("failed to deserialize user_task payload", attrs...)
 		_ = g.publishDeadLetter(data, fmt.Sprintf("payload deserialize error: %v", err))
 		return fmt.Errorf("deserialize user_task: %w", err)
@@ -221,15 +204,8 @@ func (g *Gateway) handleRawInboundTask(subject string, data []byte) error {
 	if g.taskHandler == nil {
 		return fmt.Errorf("no task handler registered")
 	}
-	recvAttrs := []any{
-		"service", "orchestrator",
-		"component", "gateway",
-		"node_id", g.nodeID,
-		"task_id", task.TaskID,
-	}
-	if task.TraceID != "" {
-		recvAttrs = append(recvAttrs, "trace_id", task.TraceID)
-	}
+	recvAttrs := []any{"task_id", task.TaskID}
+	recvAttrs = obslog.AppendTrace(recvAttrs, task.TraceID)
 	g.logger.Info("inbound user_task received", recvAttrs...)
 	return g.taskHandler(task)
 }
@@ -238,8 +214,7 @@ func (g *Gateway) handleRawInboundTask(subject string, data []byte) error {
 func (g *Gateway) handleRawAgentStatus(subject string, data []byte) error {
 	envelope, err := validateEnvelope(data)
 	if err != nil {
-		g.logger.Error("rejected malformed agent status envelope",
-			"service", "orchestrator", "component", "gateway", "node_id", g.nodeID, "err", err)
+		g.logger.Error("rejected malformed agent status envelope", "err", err)
 		return err
 	}
 
@@ -304,8 +279,7 @@ func (g *Gateway) handleCapabilityResponse(subject string, data []byte) error {
 func (g *Gateway) handleRawTaskAccepted(subject string, data []byte) error {
 	envelope, err := validateEnvelope(data)
 	if err != nil {
-		g.logger.Error("rejected malformed task accepted envelope",
-			"service", "orchestrator", "component", "gateway", "node_id", g.nodeID, "err", err)
+		g.logger.Error("rejected malformed task accepted envelope", "err", err)
 		return err
 	}
 
@@ -326,8 +300,7 @@ func (g *Gateway) handleRawTaskAccepted(subject string, data []byte) error {
 func (g *Gateway) handleRawTaskResult(subject string, data []byte) error {
 	envelope, err := validateEnvelope(data)
 	if err != nil {
-		g.logger.Error("rejected malformed task result envelope",
-			"service", "orchestrator", "component", "gateway", "node_id", g.nodeID, "err", err)
+		g.logger.Error("rejected malformed task result envelope", "err", err)
 		return err
 	}
 
@@ -368,8 +341,7 @@ func (g *Gateway) handleRawTaskResult(subject string, data []byte) error {
 func (g *Gateway) handleRawTaskFailed(subject string, data []byte) error {
 	envelope, err := validateEnvelope(data)
 	if err != nil {
-		g.logger.Error("rejected malformed task failed envelope",
-			"service", "orchestrator", "component", "gateway", "node_id", g.nodeID, "err", err)
+		g.logger.Error("rejected malformed task failed envelope", "err", err)
 		return err
 	}
 
@@ -396,15 +368,14 @@ func (g *Gateway) handleRawTaskFailed(subject string, data []byte) error {
 	})
 }
 
-/// handleRawCredentialRequest handles aegis.orchestrator.credential.request.
+// / handleRawCredentialRequest handles aegis.orchestrator.credential.request.
 // Vault pre-authorization requests (operation: "authorize"/"revoke") are routed
 // to the Vault via the orchestrator's policy flow — those are NOT forwarded to IO.
 // Requests with operation "user_input" ask the user to supply a secret via IO.
 func (g *Gateway) handleRawCredentialRequest(subject string, data []byte) error {
 	envelope, err := validateEnvelope(data)
 	if err != nil {
-		g.logger.Error("rejected malformed credential.request envelope",
-			"service", "orchestrator", "component", "gateway", "node_id", g.nodeID, "err", err)
+		g.logger.Error("rejected malformed credential.request envelope", "err", err)
 		return err
 	}
 
@@ -429,7 +400,7 @@ func (g *Gateway) handleRawCredentialRequest(subject string, data []byte) error 
 
 	if g.credentialRequestHandler == nil {
 		g.logger.Warn("credential.request (user_input) received but no handler registered",
-			"service", "orchestrator", "component", "gateway", "node_id", g.nodeID, "task_id", payload.TaskID)
+			"task_id", payload.TaskID)
 		return nil
 	}
 	return g.credentialRequestHandler(

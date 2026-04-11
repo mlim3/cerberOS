@@ -16,8 +16,20 @@ const levelRank: Record<LogLevel, number> = {
   error: 3,
 }
 
+function effectiveLogLevel(): LogLevel {
+  if (
+    LOG_LEVEL === 'debug' ||
+    LOG_LEVEL === 'info' ||
+    LOG_LEVEL === 'warn' ||
+    LOG_LEVEL === 'error'
+  ) {
+    return LOG_LEVEL
+  }
+  return 'info'
+}
+
 function minLevel(): number {
-  return LOG_LEVEL === 'debug' ? 0 : 1
+  return levelRank[effectiveLogLevel()]
 }
 
 function shouldEmit(level: LogLevel): boolean {

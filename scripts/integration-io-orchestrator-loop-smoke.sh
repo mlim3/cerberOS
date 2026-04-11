@@ -55,17 +55,18 @@ if BODY="$(CONTENT="${CONTENT}" USER_ID="${USER_ID}" python3 -c 'import json,os;
   echo "OK: IO accepted POST /api/tasks (published UserTask to aegis.orchestrator.tasks.inbound when NATS connected)"
 else
   echo "WARN: IO not reachable at ${IO_URL} — publishing same UserTask via nats pub (core)"
-  PAYLOAD="$(python3 <<PY
-import json, uuid
+  PAYLOAD="$(TASK_ID="${TASK_ID}" USER_ID="${USER_ID}" CONTENT="${CONTENT}" python3 <<'PY'
+import json, os, uuid
 from datetime import datetime, timezone
-tid = "${TASK_ID}"
-uid = "${USER_ID}"
+tid = os.environ["TASK_ID"]
+uid = os.environ["USER_ID"]
+content = os.environ["CONTENT"]
 user_task = {
   "task_id": tid,
   "user_id": uid,
   "priority": 5,
   "timeout_seconds": 300,
-  "payload": {"raw_input": """${CONTENT}"""},
+  "payload": {"raw_input": content},
   "callback_topic": "aegis.user-io.status." + tid,
 }
 env = {

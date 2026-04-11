@@ -53,7 +53,8 @@ export function createTraceparent(): { traceparent: string; traceId: string } {
 }
 
 /**
- * Use incoming traceparent if valid; otherwise create a new trace.
+ * Resolve trace for this request: valid incoming traceparent keeps the same
+ * trace_id but uses a new parent_id (this hop's span). Invalid/missing → new root trace.
  */
 export function resolveTraceparent(incoming: string | undefined): {
   traceparent: string
@@ -61,8 +62,9 @@ export function resolveTraceparent(incoming: string | undefined): {
 } {
   const parsed = parseTraceparent(incoming)
   if (parsed) {
+    const newParentId = randomHex(8)
     return {
-      traceparent: `${VERSION}-${parsed.traceId}-${parsed.parentId}-${parsed.flags}`,
+      traceparent: `${VERSION}-${parsed.traceId}-${newParentId}-${parsed.flags}`,
       traceId: parsed.traceId,
     }
   }
