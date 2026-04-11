@@ -98,10 +98,10 @@ type Gateway struct {
 	nodeID string
 	logger *slog.Logger
 
-	taskHandler              TaskHandler
-	agentStatusHandler       AgentStatusHandler
-	taskResultHandler        TaskResultHandler
-	credentialRequestHandler CredentialRequestHandler
+	taskHandler               TaskHandler
+	agentStatusHandler        AgentStatusHandler
+	taskResultHandler         TaskResultHandler
+	credentialRequestHandler  CredentialRequestHandler
 
 	// pendingCapabilityQueries tracks in-flight capability query requests.
 	// key: query_id, value: chan *types.CapabilityResponse
@@ -190,8 +190,7 @@ func (g *Gateway) handleRawInboundTask(subject string, data []byte) error {
 
 	var task types.UserTask
 	if err := json.Unmarshal(envelope.Payload, &task); err != nil {
-		attrs := []any{"err", err}
-		attrs = obslog.AppendTrace(attrs, envelope.TraceID)
+		attrs := obslog.AppendTrace([]any{"err", err}, envelope.TraceID)
 		g.logger.Error("failed to deserialize user_task payload", attrs...)
 		_ = g.publishDeadLetter(data, fmt.Sprintf("payload deserialize error: %v", err))
 		return fmt.Errorf("deserialize user_task: %w", err)
@@ -204,9 +203,7 @@ func (g *Gateway) handleRawInboundTask(subject string, data []byte) error {
 	if g.taskHandler == nil {
 		return fmt.Errorf("no task handler registered")
 	}
-	recvAttrs := []any{"task_id", task.TaskID}
-	recvAttrs = obslog.AppendTrace(recvAttrs, task.TraceID)
-	g.logger.Info("inbound user_task received", recvAttrs...)
+	g.logger.Info("inbound user_task received", obslog.AppendTrace([]any{"task_id", task.TaskID}, task.TraceID)...)
 	return g.taskHandler(task)
 }
 
@@ -368,7 +365,7 @@ func (g *Gateway) handleRawTaskFailed(subject string, data []byte) error {
 	})
 }
 
-// / handleRawCredentialRequest handles aegis.orchestrator.credential.request.
+/// handleRawCredentialRequest handles aegis.orchestrator.credential.request.
 // Vault pre-authorization requests (operation: "authorize"/"revoke") are routed
 // to the Vault via the orchestrator's policy flow — those are NOT forwarded to IO.
 // Requests with operation "user_input" ask the user to supply a secret via IO.
@@ -400,7 +397,7 @@ func (g *Gateway) handleRawCredentialRequest(subject string, data []byte) error 
 
 	if g.credentialRequestHandler == nil {
 		g.logger.Warn("credential.request (user_input) received but no handler registered",
-			"task_id", payload.TaskID)
+			obslog.AppendTrace([]any{"task_id", payload.TaskID}, envelope.TraceID)...)
 		return nil
 	}
 	return g.credentialRequestHandler(

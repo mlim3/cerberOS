@@ -1,23 +1,41 @@
 import { describe, expect, test } from 'bun:test'
-import { parseTraceparent, resolveTraceparent } from './trace-context'
+import { createTraceparent, parseTraceparent, resolveTraceparent } from './trace-context'
 
-describe('resolveTraceparent', () => {
-  test('incoming valid header keeps trace_id but uses new parent span id', () => {
-    const incoming =
-      '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01'
-    const resolved = resolveTraceparent(incoming)
-    expect(resolved.traceId).toBe('4bf92f3577b34da6a3ce929d0e0e4736')
-
-    const roundTrip = parseTraceparent(resolved.traceparent)
-    expect(roundTrip).not.toBeNull()
-    expect(roundTrip!.traceId).toBe(resolved.traceId)
-    expect(roundTrip!.parentId).not.toBe('00f067aa0ba902b7')
+describe('trace-context', () => {
+  test('parseTraceparent accepts W3C sample', () => {
+    const h = '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01'
+    const p = parseTraceparent(h)
+    expect(p).not.toBeNull()
+    expect(p!.traceId).toBe('4bf92f3577b34da6a3ce929d0e0e4736')
+    expect(p!.parentId).toBe('00f067aa0ba902b7')
+    expect(p!.flags).toBe('01')
   })
 
-  test('missing header creates new trace', () => {
-    const a = resolveTraceparent(undefined)
-    const b = parseTraceparent(a.traceparent)
-    expect(b).not.toBeNull()
-    expect(b!.traceId).toBe(a.traceId)
+  test('createTraceparent returns version 00 and 4 hyphen parts', () => {
+    const { traceparent, traceId } = createTraceparent()
+    expect(traceId).toHaveLength(32)
+    const parts = traceparent.split('-')
+    expect(parts[0]).toBe('00')
+    expect(parts).toHaveLength(4)
+    expect(parts[2]).toHaveLength(16)
+  })
+
+  test('resolveTraceparent on valid incoming keeps trace_id, issues new span id', () => {
+    const incoming = '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01'
+    const r = resolveTraceparent(incoming)
+    expect(r.traceId).toBe('4bf92f3577b34da6a3ce929d0e0e4736')
+    const out = parseTraceparent(r.traceparent)
+    expect(out).not.toBeNull()
+    expect(out!.traceId).toBe(r.traceId)
+    expect(out!.flags).toBe('01')
+    // This hop must not reuse the incoming parent id as the new span id.
+    expect(out!.parentId).not.toBe('00f067aa0ba902b7')
+    expect(out!.parentId).toHaveLength(16)
+  })
+
+  test('resolveTraceparent on missing header creates root trace', () => {
+    const r = resolveTraceparent(undefined)
+    expect(r.traceId).toHaveLength(32)
+    expect(parseTraceparent(r.traceparent)).not.toBeNull()
   })
 })

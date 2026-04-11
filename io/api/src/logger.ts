@@ -7,7 +7,6 @@ import type { Context } from 'hono'
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 
 const SERVICE = 'io-api'
-const LOG_LEVEL = (process.env.LOG_LEVEL ?? 'info').toLowerCase()
 
 const levelRank: Record<LogLevel, number> = {
   debug: 0,
@@ -16,20 +15,18 @@ const levelRank: Record<LogLevel, number> = {
   error: 3,
 }
 
-function effectiveLogLevel(): LogLevel {
-  if (
-    LOG_LEVEL === 'debug' ||
-    LOG_LEVEL === 'info' ||
-    LOG_LEVEL === 'warn' ||
-    LOG_LEVEL === 'error'
-  ) {
-    return LOG_LEVEL
+function normalizeLogLevel(raw: string | undefined): LogLevel {
+  const v = (raw ?? 'info').toLowerCase()
+  if (v === 'debug' || v === 'info' || v === 'warn' || v === 'error') {
+    return v
   }
   return 'info'
 }
 
+const LOG_LEVEL = normalizeLogLevel(process.env.LOG_LEVEL)
+
 function minLevel(): number {
-  return levelRank[effectiveLogLevel()]
+  return levelRank[LOG_LEVEL]
 }
 
 function shouldEmit(level: LogLevel): boolean {
