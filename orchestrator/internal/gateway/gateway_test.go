@@ -1,6 +1,7 @@
 package gateway_test
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -120,7 +121,7 @@ func TestHandleInboundTask_ValidEnvelope_CallsTaskHandler(t *testing.T) {
 	gw, nats := newGateway(t)
 
 	var received types.UserTask
-	gw.RegisterTaskHandler(func(task types.UserTask) error {
+	gw.RegisterTaskHandler(func(_ context.Context, task types.UserTask) error {
 		received = task
 		return nil
 	})
@@ -452,7 +453,7 @@ func TestGatewayDemoFlow(t *testing.T) {
 	t.Log("step 2: inbound task — delivering a valid user_task envelope")
 
 	var receivedTask types.UserTask
-	gw.RegisterTaskHandler(func(task types.UserTask) error {
+	gw.RegisterTaskHandler(func(_ context.Context, task types.UserTask) error {
 		receivedTask = task
 		return nil
 	})

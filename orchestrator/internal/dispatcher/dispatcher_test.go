@@ -22,6 +22,7 @@
 package dispatcher_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -257,7 +258,7 @@ func TestHandleInboundTask_HappyPath_Decomposing(t *testing.T) {
 	d, gw, pol, mon, exec, mem := newDispatcher(t)
 
 	task := validTask("550e8400-e29b-41d4-a716-446655440000")
-	if err := d.HandleInboundTask(task); err != nil {
+	if err := d.HandleInboundTask(context.Background(), task); err != nil {
 		t.Fatalf("HandleInboundTask() error = %v, want nil", err)
 	}
 
@@ -320,7 +321,7 @@ func TestHandleDecompositionResponse_ValidPlan_ActivatesPlanAndSendsAccepted(t *
 	d, gw, _, _, exec, mem := newDispatcher(t)
 
 	task := validTask("550e8400-e29b-41d4-a716-446655440001")
-	if err := d.HandleInboundTask(task); err != nil {
+	if err := d.HandleInboundTask(context.Background(), task); err != nil {
 		t.Fatalf("setup HandleInboundTask() error = %v", err)
 	}
 
@@ -393,7 +394,7 @@ func TestHandleDecompositionResponse_EmptyPlan_DecompositionFailed(t *testing.T)
 	d, gw, _, _, _, mem := newDispatcher(t)
 
 	task := validTask("550e8400-e29b-41d4-a716-446655440010")
-	_ = d.HandleInboundTask(task)
+	_ = d.HandleInboundTask(context.Background(), task)
 
 	resp := types.DecompositionResponse{
 		TaskID: task.TaskID,
@@ -418,7 +419,7 @@ func TestHandleDecompositionResponse_CircularDependency_DecompositionFailed(t *t
 	d, gw, _, _, _, _ := newDispatcher(t)
 
 	task := validTask("550e8400-e29b-41d4-a716-446655440011")
-	_ = d.HandleInboundTask(task)
+	_ = d.HandleInboundTask(context.Background(), task)
 
 	// s1 depends on s2, s2 depends on s1 → cycle.
 	cyclicPlan := types.ExecutionPlan{
@@ -443,7 +444,7 @@ func TestHandleDecompositionResponse_CircularDependency_DecompositionFailed(t *t
 func TestHandleDecompositionResponse_PlanTooLarge_DecompositionFailed(t *testing.T) {
 	d, gw, _, _, _, _ := newDispatcher(t)
 	task := validTask("550e8400-e29b-41d4-a716-446655440012")
-	_ = d.HandleInboundTask(task)
+	_ = d.HandleInboundTask(context.Background(), task)
 
 	// Build a plan with 21 subtasks (MaxSubtasksPerPlan=20).
 	subtasks := make([]types.Subtask, 21)
@@ -476,7 +477,7 @@ func TestHandlePlanComplete_WritesCompletedAndDeliversResult(t *testing.T) {
 	d, gw, pol, mon, _, mem := newDispatcher(t)
 
 	task := validTask("550e8400-e29b-41d4-a716-446655440020")
-	_ = d.HandleInboundTask(task)
+	_ = d.HandleInboundTask(context.Background(), task)
 	plan := validPlan(task.TaskID)
 	_ = d.HandleDecompositionResponse(decompositionResponse(task.TaskID, plan))
 
@@ -529,7 +530,7 @@ func TestHandlePlanFailed_WritesFailedAndPublishesError(t *testing.T) {
 	d, gw, pol, _, _, mem := newDispatcher(t)
 
 	task := validTask("550e8400-e29b-41d4-a716-446655440021")
-	_ = d.HandleInboundTask(task)
+	_ = d.HandleInboundTask(context.Background(), task)
 	plan := validPlan(task.TaskID)
 	_ = d.HandleDecompositionResponse(decompositionResponse(task.TaskID, plan))
 
@@ -566,7 +567,7 @@ func TestHandlePlanFailed_Partial_WritesPartialCompleteAndDeliversResult(t *test
 	d, gw, _, _, _, mem := newDispatcher(t)
 
 	task := validTask("550e8400-e29b-41d4-a716-446655440022")
-	_ = d.HandleInboundTask(task)
+	_ = d.HandleInboundTask(context.Background(), task)
 	plan := validPlan(task.TaskID)
 	_ = d.HandleDecompositionResponse(decompositionResponse(task.TaskID, plan))
 
@@ -598,7 +599,7 @@ func TestHandleInboundTask_PolicyViolation_NoDecompositionRequest(t *testing.T) 
 	pol.DenyReason = "required domain 'financial' not in user policy"
 
 	task := validTask("550e8400-e29b-41d4-a716-446655440030")
-	err := d.HandleInboundTask(task)
+	err := d.HandleInboundTask(context.Background(), task)
 	if err == nil {
 		t.Fatal("HandleInboundTask() error = nil, want policy denied error")
 	}
@@ -624,7 +625,7 @@ func TestHandleInboundTask_OptionalSkillDomains_ValidInV3(t *testing.T) {
 	task := validTask("550e8400-e29b-41d4-a716-446655440040")
 	task.RequiredSkillDomains = nil // explicitly empty
 
-	err := d.HandleInboundTask(task)
+	err := d.HandleInboundTask(context.Background(), task)
 	if err != nil {
 		t.Fatalf("HandleInboundTask() error = %v, want nil — empty skill domains must be valid in v3.0", err)
 	}
@@ -644,7 +645,7 @@ func TestHandleInboundTask_MissingTaskID_InvalidTaskSpec(t *testing.T) {
 	task := validTask("550e8400-e29b-41d4-a716-446655440041")
 	task.TaskID = ""
 
-	if err := d.HandleInboundTask(task); err == nil {
+	if err := d.HandleInboundTask(context.Background(), task); err == nil {
 		t.Fatal("HandleInboundTask() error = nil, want INVALID_TASK_SPEC")
 	}
 	if pol.ValidatedCalls != 0 {
@@ -667,7 +668,7 @@ func TestHandleInboundTask_PriorityOutOfRange_InvalidTaskSpec(t *testing.T) {
 	task := validTask("550e8400-e29b-41d4-a716-446655440042")
 	task.Priority = 0
 
-	if err := d.HandleInboundTask(task); err == nil {
+	if err := d.HandleInboundTask(context.Background(), task); err == nil {
 		t.Fatal("HandleInboundTask() error = nil, want INVALID_TASK_SPEC for priority=0")
 	}
 	if gw.ErrorCalls[0].ErrorCode != types.ErrCodeInvalidTaskSpec {
@@ -681,7 +682,7 @@ func TestHandleInboundTask_TimeoutTooShort_InvalidTaskSpec(t *testing.T) {
 	task := validTask("550e8400-e29b-41d4-a716-446655440043")
 	task.TimeoutSeconds = 10
 
-	if err := d.HandleInboundTask(task); err == nil {
+	if err := d.HandleInboundTask(context.Background(), task); err == nil {
 		t.Fatal("HandleInboundTask() error = nil, want INVALID_TASK_SPEC for timeout=10")
 	}
 	if gw.ErrorCalls[0].ErrorCode != types.ErrCodeInvalidTaskSpec {
@@ -696,7 +697,7 @@ func TestHandleInboundTask_MemoryFailBeforeDecomposition_NoOrphanedRequest(t *te
 	mem.ShouldFailWrites = true
 
 	task := validTask("550e8400-e29b-41d4-a716-446655440050")
-	err := d.HandleInboundTask(task)
+	err := d.HandleInboundTask(context.Background(), task)
 	if err == nil {
 		t.Fatal("HandleInboundTask() error = nil, want memory error")
 	}
@@ -719,7 +720,7 @@ func TestHandleInboundTask_DecompositionPublishFails_TaskFails(t *testing.T) {
 	gw.PublishTaskSpecError = errors.New("NATS publish failed")
 
 	task := validTask("550e8400-e29b-41d4-a716-446655440051")
-	err := d.HandleInboundTask(task)
+	err := d.HandleInboundTask(context.Background(), task)
 	if err == nil {
 		t.Fatal("HandleInboundTask() error = nil, want publish error")
 	}
@@ -744,10 +745,10 @@ func TestHandleInboundTask_DuplicateTaskID_ReturnsCurrentStatus(t *testing.T) {
 
 	task := validTask("550e8400-e29b-41d4-a716-446655440060")
 
-	if err := d.HandleInboundTask(task); err != nil {
+	if err := d.HandleInboundTask(context.Background(), task); err != nil {
 		t.Fatalf("first HandleInboundTask() error = %v, want nil", err)
 	}
-	if err := d.HandleInboundTask(task); err != nil {
+	if err := d.HandleInboundTask(context.Background(), task); err != nil {
 		t.Fatalf("second HandleInboundTask() error = %v, want nil (idempotent)", err)
 	}
 
@@ -769,12 +770,12 @@ func TestGetMetrics_CountersTrackPipeline(t *testing.T) {
 
 	// Task 1: happy path.
 	task1 := validTask("550e8400-e29b-41d4-a716-446655440070")
-	_ = d.HandleInboundTask(task1)
+	_ = d.HandleInboundTask(context.Background(), task1)
 
 	// Task 2: policy violation.
 	pol.ShouldDeny = true
 	task2 := validTask("550e8400-e29b-41d4-a716-446655440071")
-	_ = d.HandleInboundTask(task2)
+	_ = d.HandleInboundTask(context.Background(), task2)
 	pol.ShouldDeny = false
 
 	received, completed, failed, violations, decompositionFailed, queueDepth := d.GetMetrics()
@@ -823,8 +824,8 @@ func TestGetActiveTasks_ReflectsInFlightTasks(t *testing.T) {
 
 	task1 := validTask("550e8400-e29b-41d4-a716-446655440080")
 	task2 := validTask("550e8400-e29b-41d4-a716-446655440081")
-	_ = d.HandleInboundTask(task1)
-	_ = d.HandleInboundTask(task2)
+	_ = d.HandleInboundTask(context.Background(), task1)
+	_ = d.HandleInboundTask(context.Background(), task2)
 
 	if len(d.GetActiveTasks()) != 2 {
 		t.Fatalf("active tasks = %d, want 2", len(d.GetActiveTasks()))
@@ -883,7 +884,7 @@ func TestDispatcherDemoFlow_V3(t *testing.T) {
 		CallbackTopic:  "aegis.user-io.results.task-1",
 	}
 
-	if err := d.HandleInboundTask(task1); err != nil {
+	if err := d.HandleInboundTask(context.Background(), task1); err != nil {
 		t.Fatalf("step 1: HandleInboundTask() error = %v, want nil", err)
 	}
 
@@ -962,7 +963,7 @@ func TestDispatcherDemoFlow_V3(t *testing.T) {
 	t.Log("step 3: duplicate task — same task_id submitted again")
 
 	gw.ErrorCalls = nil
-	if err := d.HandleInboundTask(task1); err != nil {
+	if err := d.HandleInboundTask(context.Background(), task1); err != nil {
 		t.Fatalf("step 3: HandleInboundTask() error = %v, want nil (idempotent no-op)", err)
 	}
 
@@ -994,7 +995,7 @@ func TestDispatcherDemoFlow_V3(t *testing.T) {
 	}
 
 	decompBefore := len(gw.TaskSpecCalls)
-	if err := d.HandleInboundTask(task2); err == nil {
+	if err := d.HandleInboundTask(context.Background(), task2); err == nil {
 		t.Fatal("step 4: HandleInboundTask() error = nil, want policy denied error")
 	}
 
@@ -1050,7 +1051,7 @@ func TestDispatcherDemoFlow_V3(t *testing.T) {
 		Payload:        json.RawMessage(`{"raw_input":"do impossible circular task"}`),
 		CallbackTopic:  "aegis.user-io.results.task-3",
 	}
-	_ = d.HandleInboundTask(task3)
+	_ = d.HandleInboundTask(context.Background(), task3)
 
 	cyclicPlan := types.ExecutionPlan{
 		PlanID:       "plan-cyclic",

@@ -31,6 +31,7 @@
 package gateway
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -41,6 +42,7 @@ import (
 	"time"
 
 	"github.com/mlim3/cerberOS/orchestrator/internal/interfaces"
+	"github.com/mlim3/cerberOS/orchestrator/internal/observability"
 	"github.com/mlim3/cerberOS/orchestrator/internal/types"
 )
 
@@ -77,7 +79,8 @@ const CapabilityQueryTimeout = 3 * time.Second
 // ── Handler Types ─────────────────────────────────────────────────────────────
 
 // TaskHandler is the callback the Task Dispatcher registers to receive parsed inbound tasks.
-type TaskHandler func(task types.UserTask) error
+// ctx carries the trace_id and task_id extracted/generated at the gateway entry point.
+type TaskHandler func(ctx context.Context, task types.UserTask) error
 
 // AgentStatusHandler is the callback the Task Monitor registers to receive agent status updates.
 type AgentStatusHandler func(update types.AgentStatusUpdate) error
@@ -178,7 +181,8 @@ func (g *Gateway) IsConnected() bool {
 // ── Inbound Handlers ─────────────────────────────────────────────────────────
 
 // handleRawInboundTask handles aegis.orchestrator.tasks.inbound.
-// Validates envelope, deserializes UserTask, routes to taskHandler.
+// Validates envelope, generates/extracts a trace_id, deserializes UserTask,
+// builds the root context, logs receipt, then routes to taskHandler.
 // Invalid envelopes are dead-lettered and not forwarded (§11.1).
 func (g *Gateway) handleRawInboundTask(subject string, data []byte) error {
 	envelope, err := validateEnvelope(data)
@@ -188,6 +192,12 @@ func (g *Gateway) handleRawInboundTask(subject string, data []byte) error {
 		return err
 	}
 
+	// ── Step 3: Generate or extract trace_id ──────────────────────────────
+	traceID := envelope.TraceID
+	if traceID == "" {
+		traceID = newUUID()
+	}
+
 	var task types.UserTask
 	if err := json.Unmarshal(envelope.Payload, &task); err != nil {
 		g.logger.Printf("failed to deserialize user_task payload: %v", err)
@@ -195,10 +205,20 @@ func (g *Gateway) handleRawInboundTask(subject string, data []byte) error {
 		return fmt.Errorf("deserialize user_task: %w", err)
 	}
 
+	// Build root context with trace/task IDs and the source module.
+	ctx := context.Background()
+	ctx = observability.WithTraceID(ctx, traceID)
+	ctx = observability.WithTaskID(ctx, task.TaskID)
+	ctx = observability.WithModule(ctx, "comms_gateway")
+
+	observability.LogFromContext(ctx).Info("user task received",
+		"user_id", task.UserID,
+		"priority", task.Priority)
+
 	if g.taskHandler == nil {
 		return fmt.Errorf("no task handler registered")
 	}
-	return g.taskHandler(task)
+	return g.taskHandler(ctx, task)
 }
 
 // handleRawAgentStatus handles aegis.agents.status.events.

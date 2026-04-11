@@ -33,6 +33,7 @@
 package dispatcher
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -46,6 +47,7 @@ import (
 	"github.com/mlim3/cerberOS/orchestrator/internal/config"
 	"github.com/mlim3/cerberOS/orchestrator/internal/interfaces"
 	ioclient "github.com/mlim3/cerberOS/orchestrator/internal/io"
+	"github.com/mlim3/cerberOS/orchestrator/internal/observability"
 	"github.com/mlim3/cerberOS/orchestrator/internal/types"
 )
 
@@ -143,6 +145,7 @@ func New(
 // ── Inbound Task Pipeline ─────────────────────────────────────────────────────
 
 // HandleInboundTask is the entry point for all user_task messages from the Gateway.
+// ctx carries the trace_id and task_id established at the gateway entry point.
 // Implements the full validation → dedup → policy → decomposition pipeline (§7, §17.3).
 //
 // Pipeline (§7):
@@ -153,8 +156,12 @@ func New(
 //  5. Persist DECOMPOSING state to Memory BEFORE sending planner dispatch (§14.1)
 //  6. Publish a standard task.inbound request to a general planner agent
 //  7. Start decomposition timeout goroutine
-func (d *Dispatcher) HandleInboundTask(task types.UserTask) error {
+func (d *Dispatcher) HandleInboundTask(ctx context.Context, task types.UserTask) error {
+	ctx = observability.WithModule(ctx, "task_dispatcher")
+	log := observability.LogFromContext(ctx)
+
 	atomic.AddInt64(&d.tasksReceived, 1)
+	log.Info("task dispatch pipeline started", "task_id", task.TaskID)
 
 	// ── Step 1: Schema validation ──────────────────────────────────────────
 	if err := validateSchema(task); err != nil {
