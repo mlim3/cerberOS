@@ -28,8 +28,6 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
-	"log"
-	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -89,7 +87,6 @@ type PlanExecutor struct {
 	memory interfaces.MemoryClient
 	gw     Gateway
 	policy PolicyEnforcer
-	logger *log.Logger
 
 	// activePlans maps plan_id → *planExecution
 	activePlans sync.Map
@@ -117,7 +114,6 @@ func New(
 		memory:         memory,
 		gw:             gw,
 		policy:         policy,
-		logger:         log.New(os.Stdout, "[executor] ", log.LstdFlags|log.LUTC),
 		onPlanComplete: onComplete,
 		onPlanFailed:   onFailed,
 	}
@@ -130,6 +126,10 @@ func New(
 // ctx carries the trace_id, task_id, and plan_id from the dispatcher.
 func (e *PlanExecutor) Execute(ctx context.Context, plan types.ExecutionPlan, ts *types.TaskState) error {
 	ctx = observability.WithModule(ctx, "plan_executor")
+	ctx = observability.WithPlanID(ctx, plan.PlanID)
+	ctx, planSpan := observability.StartSpan(ctx, "plan_execution")
+	observability.SpanSetTaskAttributes(planSpan, ts.TaskID, ts.UserID)
+	defer planSpan.End()
 	log := observability.LogFromContext(ctx)
 
 	exec := &planExecution{
@@ -175,7 +175,8 @@ func (e *PlanExecutor) HandleSubtaskResult(ctx context.Context, result types.Tas
 	// Resolve which plan/subtask this result belongs to.
 	planIDVal, ok := e.orchRefToPlan.Load(result.OrchestratorTaskRef)
 	if !ok {
-		e.logger.Printf("task result for unknown orchRef: %s", result.OrchestratorTaskRef)
+		observability.LogFromContext(ctx).Debug("task result for unknown orchRef — stale or already completed",
+			"orchestrator_task_ref", result.OrchestratorTaskRef)
 		return nil // stale result; ignore
 	}
 	planID := planIDVal.(string)
@@ -276,6 +277,8 @@ func (e *PlanExecutor) dispatchSubtask(ctx context.Context, exec *planExecution,
 	subCtx := observability.WithPlanID(ctx, exec.plan.PlanID)
 	subCtx = observability.WithSubtaskID(subCtx, sub.SubtaskID)
 	subCtx = observability.WithModule(subCtx, "plan_executor")
+	subCtx, subtaskSpan := observability.StartSpan(subCtx, "subtask_dispatch")
+	defer subtaskSpan.End()
 	log := observability.LogFromContext(subCtx)
 
 	// Transition to DISPATCH_PENDING and persist before publishing.
@@ -477,9 +480,10 @@ func (e *PlanExecutor) collectPriorResults(exec *planExecution, deps []string) [
 // ── Memory Persistence ────────────────────────────────────────────────────────
 
 func (e *PlanExecutor) persistSubtaskState(sub *types.SubtaskState, orchRef string, timestamp time.Time) {
+	log := observability.LogFromContext(context.Background())
 	payload, err := json.Marshal(sub)
 	if err != nil {
-		e.logger.Printf("marshal subtask state failed: subtask_id=%s error=%v", sub.SubtaskID, err)
+		log.Error("marshal subtask state failed", "subtask_id", sub.SubtaskID, "error", err)
 		return
 	}
 
@@ -492,7 +496,7 @@ func (e *PlanExecutor) persistSubtaskState(sub *types.SubtaskState, orchRef stri
 		Timestamp:           timestamp,
 		Payload:             payload,
 	}); err != nil {
-		e.logger.Printf("subtask state persist failed: subtask_id=%s error=%v", sub.SubtaskID, err)
+		log.Error("subtask state persist failed", "subtask_id", sub.SubtaskID, "error", err)
 	}
 }
 

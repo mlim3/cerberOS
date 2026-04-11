@@ -202,6 +202,10 @@ func (g *Gateway) handleRawInboundTask(subject string, data []byte) error {
 	ctx := extractOrCreateCtx(envelope, "comms_gateway")
 	ctx = observability.WithTaskID(ctx, task.TaskID)
 
+	ctx, span := observability.StartSpan(ctx, "task_received")
+	defer span.End()
+	observability.SpanSetTaskAttributes(span, task.TaskID, task.UserID)
+
 	observability.LogFromContext(ctx).Info("user task received",
 		"user_id", task.UserID,
 		"priority", task.Priority)

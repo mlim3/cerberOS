@@ -159,6 +159,8 @@ func (m *Manager) HandleComponentFailure(ctx context.Context, payload types.Orch
 
 // attemptRecovery checks the retry budget and either re-dispatches or terminates.
 func (m *Manager) attemptRecovery(ctx context.Context, ts *types.TaskState, reason types.RecoveryReason) {
+	ctx, recoverySpan := observability.StartSpan(ctx, "recovery_attempt")
+	defer recoverySpan.End()
 	logger := observability.LogFromContext(ctx)
 	maxRetries := m.cfg.MaxTaskRetries
 	if maxRetries == 0 {

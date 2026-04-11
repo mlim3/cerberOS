@@ -180,32 +180,46 @@ func (d *Dispatcher) HandleInboundTask(ctx context.Context, task types.UserTask)
 		idempotencyWindow = defaultIdempotencyWindow
 	}
 
-	if existing := d.dedupCheck(task.TaskID, idempotencyWindow); existing != nil {
-		log.Info("duplicate task rejected", "current_state", existing.State)
-		_ = d.gateway.PublishError(ctx, task.CallbackTopic, types.ErrorResponse{
-			TaskID:      task.TaskID,
-			ErrorCode:   types.ErrCodeDuplicateTask,
-			UserMessage: fmt.Sprintf("task already submitted — current state: %s", existing.State),
-		})
-		return nil
+	{
+		dedupCtx, dedupSpan := observability.StartSpan(ctx, "dedup_check")
+		existing := d.dedupCheck(task.TaskID, idempotencyWindow)
+		dedupSpan.End()
+		_ = dedupCtx
+		if existing != nil {
+			log.Info("duplicate task rejected", "current_state", existing.State)
+			_ = d.gateway.PublishError(ctx, task.CallbackTopic, types.ErrorResponse{
+				TaskID:      task.TaskID,
+				ErrorCode:   types.ErrCodeDuplicateTask,
+				UserMessage: fmt.Sprintf("task already submitted — current state: %s", existing.State),
+			})
+			return nil
+		}
 	}
 
 	// ── Step 3: Generate orchestrator_task_ref ─────────────────────────────
 	orchRef := newUUID()
 
 	// ── Step 4: Policy validation ──────────────────────────────────────────
-	scope, err := d.policy.ValidateAndScope(
-		ctx, task.TaskID, orchRef, task.UserID, task.RequiredSkillDomains, task.TimeoutSeconds,
-	)
-	if err != nil {
-		atomic.AddInt64(&d.policyViolations, 1)
-		log.Warn("policy validation denied", "orchestrator_task_ref", orchRef)
-		_ = d.gateway.PublishError(ctx, task.CallbackTopic, types.ErrorResponse{
-			TaskID:      task.TaskID,
-			ErrorCode:   types.ErrCodePolicyViolation,
-			UserMessage: "Task requires resources outside your configured permissions.",
-		})
-		return fmt.Errorf("policy validation denied: %w", err)
+	var scope types.PolicyScope
+	{
+		policyCtx, policySpan := observability.StartSpan(ctx, "policy_validation")
+		observability.SpanSetTaskAttributes(policySpan, task.TaskID, task.UserID)
+		var err error
+		scope, err = d.policy.ValidateAndScope(
+			policyCtx, task.TaskID, orchRef, task.UserID, task.RequiredSkillDomains, task.TimeoutSeconds,
+		)
+		observability.SpanRecordError(policySpan, err)
+		policySpan.End()
+		if err != nil {
+			atomic.AddInt64(&d.policyViolations, 1)
+			log.Warn("policy validation denied", "orchestrator_task_ref", orchRef)
+			_ = d.gateway.PublishError(ctx, task.CallbackTopic, types.ErrorResponse{
+				TaskID:      task.TaskID,
+				ErrorCode:   types.ErrCodePolicyViolation,
+				UserMessage: "Task requires resources outside your configured permissions.",
+			})
+			return fmt.Errorf("policy validation denied: %w", err)
+		}
 	}
 
 	// ── Build initial task state as DECOMPOSING ────────────────────────────
@@ -271,10 +285,17 @@ func (d *Dispatcher) HandleInboundTask(ctx context.Context, task types.UserTask)
 		ProgressSummary: "Generating execution plan",
 	}
 
-	if err := d.gateway.PublishTaskSpec(ctx, spec); err != nil {
-		log.Error("planner task publish failed", "error", err)
-		d.failTask(ctx, ts, types.ErrCodeAgentsUnavailable, "Could not reach Planner Agent. Please retry.")
-		return fmt.Errorf("publish planner task: %w", err)
+	{
+		decompCtx, decompSpan := observability.StartSpan(ctx, "decomposition")
+		observability.SpanSetTaskAttributes(decompSpan, task.TaskID, task.UserID)
+		err := d.gateway.PublishTaskSpec(decompCtx, spec)
+		observability.SpanRecordError(decompSpan, err)
+		decompSpan.End()
+		if err != nil {
+			log.Error("planner task publish failed", "error", err)
+			d.failTask(ctx, ts, types.ErrCodeAgentsUnavailable, "Could not reach Planner Agent. Please retry.")
+			return fmt.Errorf("publish planner task: %w", err)
+		}
 	}
 	d.pendingDecompositions.Store(orchRef, task.TaskID)
 
@@ -438,8 +459,15 @@ func (d *Dispatcher) HandlePlanComplete(ts *types.TaskState, aggregatedResults [
 		Result:              resultsJSON,
 		CompletedAt:         now,
 	}
-	if err := d.gateway.PublishTaskResult(ctx, ts.CallbackTopic, result); err != nil {
-		log.Error("publish task_result failed", "error", err)
+	{
+		deliveryCtx, deliverySpan := observability.StartSpan(ctx, "result_delivery")
+		observability.SpanSetTaskAttributes(deliverySpan, ts.TaskID, ts.UserID)
+		err := d.gateway.PublishTaskResult(deliveryCtx, ts.CallbackTopic, result)
+		observability.SpanRecordError(deliverySpan, err)
+		deliverySpan.End()
+		if err != nil {
+			log.Error("publish task_result failed", "error", err)
+		}
 	}
 
 	// Notify IO: task complete.
