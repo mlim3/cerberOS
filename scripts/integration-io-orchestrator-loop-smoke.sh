@@ -71,7 +71,7 @@ user_task = {
 }
 env = {
   "message_id": str(uuid.uuid4()),
-  "message_type": "task.inbound",
+  "message_type": "user_task",
   "source_component": "io",
   "correlation_id": tid,
   "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
