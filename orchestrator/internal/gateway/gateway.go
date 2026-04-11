@@ -451,7 +451,7 @@ func (g *Gateway) PublishTaskSpec(spec types.TaskSpec) error {
 		TraceID:        tid,
 		UserContextID:  spec.UserContextID,
 	}
-	return g.publishEnvelope(TopicAgentTasksInbound, "task.inbound", spec.OrchestratorTaskRef, wire)
+	return g.publishEnvelopeWithTrace(TopicAgentTasksInbound, "task.inbound", spec.OrchestratorTaskRef, tid, wire)
 }
 
 // PublishCapabilityQuery sends a capability query and waits for the response.
@@ -476,7 +476,7 @@ func (g *Gateway) PublishCapabilityQuery(query types.CapabilityQuery) (*types.Ca
 		TraceID: qtid,
 	}
 
-	if err := g.publishEnvelope(TopicCapabilityQuery, "capability.query", queryID, wire); err != nil {
+	if err := g.publishEnvelopeWithTrace(TopicCapabilityQuery, "capability.query", queryID, qtid, wire); err != nil {
 		return nil, fmt.Errorf("publish capability_query: %w", err)
 	}
 
@@ -557,6 +557,12 @@ func (g *Gateway) PublishAuditEvent(event types.AuditEvent) error {
 
 // publishEnvelope wraps any payload in a signed MessageEnvelope and publishes it (§13.5).
 func (g *Gateway) publishEnvelope(topic, messageType, correlationID string, payload any) error {
+	return g.publishEnvelopeWithTrace(topic, messageType, correlationID, "", payload)
+}
+
+// publishEnvelopeWithTrace sets MessageEnvelope.trace_id when traceID is non-empty so NATS
+// subscribers and log pipelines can correlate without parsing inner payload JSON.
+func (g *Gateway) publishEnvelopeWithTrace(topic, messageType, correlationID, traceID string, payload any) error {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal payload for %s: %w", messageType, err)
@@ -570,6 +576,9 @@ func (g *Gateway) publishEnvelope(topic, messageType, correlationID string, payl
 		Timestamp:       time.Now().UTC(),
 		SchemaVersion:   SchemaVersion,
 		Payload:         raw,
+	}
+	if traceID != "" {
+		envelope.TraceID = traceID
 	}
 
 	envelopeBytes, err := json.Marshal(envelope)

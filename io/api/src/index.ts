@@ -803,9 +803,16 @@ if (process.env.NODE_ENV === 'production') {
 
 warmupTranscription()
 
+// Bun default idle timeout is ~10s; SSE needs keepalives. Disabling globally (0) risks idle
+// connection buildup — use a bounded timeout; override with BUN_IDLE_TIMEOUT_SECONDS (e.g. 300 for slow streams).
+const configuredIdleTimeoutSeconds = Number(process.env.BUN_IDLE_TIMEOUT_SECONDS)
+const serverIdleTimeoutSeconds =
+  Number.isFinite(configuredIdleTimeoutSeconds) && configuredIdleTimeoutSeconds > 0
+    ? configuredIdleTimeoutSeconds
+    : 120
+
 export default {
   port: 3001,
-  // Default Bun idleTimeout is 10s; long-lived SSE would be cut between io-waiting and keepalive.
-  idleTimeout: 0,
+  idleTimeout: serverIdleTimeoutSeconds,
   fetch: app.fetch,
 };

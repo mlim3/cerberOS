@@ -299,6 +299,10 @@ func TestPublishTaskSpec_PublishesToAgentsTopic(t *testing.T) {
 	if envelope.MessageType != "task.inbound" {
 		t.Fatalf("envelope.MessageType = %q, want task.inbound", envelope.MessageType)
 	}
+	// Outer envelope carries trace_id for NATS subscribers (same as resolved tid when TraceID empty).
+	if envelope.TraceID != "orch-1" {
+		t.Fatalf("envelope.TraceID = %q, want orch-1 on outer MessageEnvelope", envelope.TraceID)
+	}
 
 	// Verify the payload is translated into the agents-component wire schema.
 	var decodedSpec struct {
@@ -356,6 +360,46 @@ func TestPublishTaskSpec_WirePrefersW3CTraceID(t *testing.T) {
 	}
 	if decoded.TraceID != "0123456789abcdef0123456789abcdef" {
 		t.Fatalf("wire trace_id = %q, want TaskSpec.TraceID", decoded.TraceID)
+	}
+	if envelope.TraceID != "0123456789abcdef0123456789abcdef" {
+		t.Fatalf("envelope.TraceID = %q, want W3C trace on outer MessageEnvelope", envelope.TraceID)
+	}
+}
+
+func TestPublishCapabilityQuery_MessageEnvelopeTraceID(t *testing.T) {
+	gw, nats := newGateway(t)
+	traceID := "0123456789abcdef0123456789abcdef"
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		resp := map[string]any{
+			"query_id":  "orch-1",
+			"domains":   []string{"web"},
+			"has_match": true,
+		}
+		data := newEnvelopedMessage(t, "capability.response", "orch-1", resp)
+		_ = nats.Deliver(gateway.TopicCapabilityQueryResponse, data)
+	}()
+
+	query := types.CapabilityQuery{
+		OrchestratorTaskRef:  "orch-1",
+		RequiredSkillDomains: []string{"web"},
+		TraceID:              traceID,
+	}
+	if _, err := gw.PublishCapabilityQuery(query); err != nil {
+		t.Fatalf("PublishCapabilityQuery() error = %v", err)
+	}
+
+	msgs := nats.Published[gateway.TopicCapabilityQuery]
+	if len(msgs) != 1 {
+		t.Fatalf("published capability.query = %d, want 1", len(msgs))
+	}
+	var env types.MessageEnvelope
+	if err := json.Unmarshal(msgs[0], &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.TraceID != traceID {
+		t.Fatalf("envelope.TraceID = %q, want %q on outer MessageEnvelope", env.TraceID, traceID)
 	}
 }
 

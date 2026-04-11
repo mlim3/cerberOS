@@ -11,6 +11,7 @@
  */
 
 import { connect, type NatsConnection, type JetStreamClient, type Subscription } from 'nats'
+import { ioLog } from './logger'
 
 // ── NATS subjects (aligned with agents-component/internal/comms/subjects.go) ──
 
@@ -110,7 +111,7 @@ export function createNatsClient(config: NatsConfig): IONatsClient | null {
   const subscriptions: Subscription[] = []
   let isConnected = false
 
-  type PendingSub = { channel: string; handler: (msg: unknown) => void }
+  type PendingSub = { channel: string; handler: (msg: unknown) => void; unsub?: () => void }
   const pendingSubscriptions: PendingSub[] = []
 
   function attachSubscription(channel: string, handler: (msg: unknown) => void): () => void {
@@ -136,9 +137,9 @@ export function createNatsClient(config: NatsConfig): IONatsClient | null {
   function flushPendingSubscriptions() {
     if (!nc) return
     const queued = pendingSubscriptions.splice(0, pendingSubscriptions.length)
-    for (const { channel, handler } of queued) {
-      attachSubscription(channel, handler)
-      console.log(`[IO:NATS] Subscribed (deferred): ${channel}`)
+    for (const entry of queued) {
+      entry.unsub = attachSubscription(entry.channel, entry.handler)
+      ioLog('info', 'nats', 'Subscribed (deferred)', { channel: entry.channel })
     }
   }
 
@@ -168,11 +169,11 @@ export function createNatsClient(config: NatsConfig): IONatsClient | null {
           storage: 'file',
           retention: 'limits',
         })
-        console.log('[IO:NATS] Created AEGIS_ORCHESTRATOR stream')
+        ioLog('info', 'nats', 'Created AEGIS_ORCHESTRATOR stream', {})
       }
 
       isConnected = true
-      console.log(`[IO:NATS] Connected to ${config.url}`)
+      ioLog('info', 'nats', 'Connected to NATS', { url: config.url })
       flushPendingSubscriptions()
 
       // Monitor connection status
@@ -182,17 +183,17 @@ export function createNatsClient(config: NatsConfig): IONatsClient | null {
           switch (s.type) {
             case 'disconnect':
               isConnected = false
-              console.log('[IO:NATS] Disconnected')
+              ioLog('info', 'nats', 'NATS disconnected', {})
               break
             case 'reconnect':
               isConnected = true
-              console.log('[IO:NATS] Reconnected')
+              ioLog('info', 'nats', 'NATS reconnected', {})
               break
           }
         }
       })()
     } catch (err) {
-      console.error('[IO:NATS] Connection failed:', err)
+      ioLog('error', 'nats', 'Connection failed', { err: String(err) })
       isConnected = false
     }
   })()
@@ -223,16 +224,21 @@ export function createNatsClient(config: NatsConfig): IONatsClient | null {
       if (!nc) {
         const entry: PendingSub = { channel, handler }
         pendingSubscriptions.push(entry)
-        console.log(`[IO:NATS] Subscription queued until connect: ${channel}`)
+        ioLog('info', 'nats', 'Subscription queued until connect', { channel })
         return () => {
-          const ix = pendingSubscriptions.indexOf(entry)
-          if (ix >= 0) pendingSubscriptions.splice(ix, 1)
+          if (entry.unsub) {
+            entry.unsub()
+          } else {
+            const ix = pendingSubscriptions.indexOf(entry)
+            if (ix >= 0) pendingSubscriptions.splice(ix, 1)
+          }
         }
       }
       return attachSubscription(channel, handler)
     },
 
     close() {
+      pendingSubscriptions.length = 0
       for (const sub of subscriptions) {
         sub.unsubscribe()
       }
