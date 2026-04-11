@@ -24,6 +24,7 @@
 package executor
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -35,6 +36,7 @@ import (
 
 	"github.com/mlim3/cerberOS/orchestrator/internal/config"
 	"github.com/mlim3/cerberOS/orchestrator/internal/interfaces"
+	"github.com/mlim3/cerberOS/orchestrator/internal/observability"
 	"github.com/mlim3/cerberOS/orchestrator/internal/types"
 )
 
@@ -49,7 +51,7 @@ type Gateway interface {
 
 // PolicyEnforcer defines the credential revocation the Plan Executor needs from M3.
 type PolicyEnforcer interface {
-	RevokeCredentials(orchestratorTaskRef string) error
+	RevokeCredentials(ctx context.Context, orchestratorTaskRef string) error
 }
 
 // ── Plan Completion Callbacks ──────────────────────────────────────────────────
@@ -125,7 +127,11 @@ func New(
 
 // Execute initializes all subtasks as PENDING and dispatches those with no dependencies.
 // Called by Task Dispatcher after plan validation succeeds (§17.3).
-func (e *PlanExecutor) Execute(plan types.ExecutionPlan, ts *types.TaskState) error {
+// ctx carries the trace_id, task_id, and plan_id from the dispatcher.
+func (e *PlanExecutor) Execute(ctx context.Context, plan types.ExecutionPlan, ts *types.TaskState) error {
+	ctx = observability.WithModule(ctx, "plan_executor")
+	log := observability.LogFromContext(ctx)
+
 	exec := &planExecution{
 		plan:         plan,
 		ts:           ts,
@@ -153,8 +159,10 @@ func (e *PlanExecutor) Execute(plan types.ExecutionPlan, ts *types.TaskState) er
 
 	e.activePlans.Store(plan.PlanID, exec)
 
+	log.Info("plan execution initialized", "plan_id", plan.PlanID, "subtask_count", len(plan.Subtasks))
+
 	// Dispatch subtasks that have no dependencies.
-	e.dispatchReadySubtasks(exec)
+	e.dispatchReadySubtasks(ctx, exec)
 
 	return nil
 }
@@ -162,7 +170,8 @@ func (e *PlanExecutor) Execute(plan types.ExecutionPlan, ts *types.TaskState) er
 // HandleSubtaskResult processes an inbound task_result for a subtask.
 // Routes by OrchestratorTaskRef → planID → subtask, marks COMPLETED,
 // pipes result to dependents, checks plan completion (§17.3).
-func (e *PlanExecutor) HandleSubtaskResult(result types.TaskResult) error {
+// ctx is rebuilt from the envelope's trace_id in the inbound handler.
+func (e *PlanExecutor) HandleSubtaskResult(ctx context.Context, result types.TaskResult) error {
 	// Resolve which plan/subtask this result belongs to.
 	planIDVal, ok := e.orchRefToPlan.Load(result.OrchestratorTaskRef)
 	if !ok {
@@ -187,10 +196,15 @@ func (e *PlanExecutor) HandleSubtaskResult(result types.TaskResult) error {
 	}
 	sub := exec.subtasks[subtaskID]
 
+	// Enrich context with subtask/plan IDs for logging.
+	subCtx := observability.WithPlanID(ctx, planID)
+	subCtx = observability.WithSubtaskID(subCtx, subtaskID)
+	subCtx = observability.WithModule(subCtx, "plan_executor")
+	log := observability.LogFromContext(subCtx)
+
 	// Revoke credentials for this subtask's agent.
-	if err := e.policy.RevokeCredentials(result.OrchestratorTaskRef); err != nil {
-		e.logger.Printf("subtask credential revocation failed: orchRef=%s error=%v",
-			result.OrchestratorTaskRef, err)
+	if err := e.policy.RevokeCredentials(subCtx, result.OrchestratorTaskRef); err != nil {
+		log.Error("subtask credential revocation failed", "error", err)
 	}
 
 	now := time.Now().UTC()
@@ -200,10 +214,12 @@ func (e *PlanExecutor) HandleSubtaskResult(result types.TaskResult) error {
 		sub.Result = result.Result
 		sub.AgentID = result.AgentID
 		sub.CompletedAt = &now
+		log.Info("subtask completed")
 	} else {
 		sub.State = types.SubtaskStateFailed
 		sub.ErrorCode = result.ErrorCode
 		sub.CompletedAt = &now
+		log.Warn("subtask failed", "error_code", result.ErrorCode)
 	}
 	e.persistSubtaskState(sub, exec.ts.OrchestratorTaskRef, now)
 	atomic.AddInt32(&exec.dispatchedCount, -1)
@@ -212,7 +228,7 @@ func (e *PlanExecutor) HandleSubtaskResult(result types.TaskResult) error {
 
 	if result.Success {
 		// Dispatch any subtasks that are now unblocked.
-		e.dispatchReadySubtasks(exec)
+		e.dispatchReadySubtasks(ctx, exec)
 	} else {
 		// Block all subtasks that depend on the failed subtask.
 		e.blockDependents(exec, subtaskID, now)
@@ -228,7 +244,7 @@ func (e *PlanExecutor) HandleSubtaskResult(result types.TaskResult) error {
 
 // dispatchReadySubtasks finds all PENDING subtasks whose dependencies are all COMPLETED
 // and dispatches them (subject to PLAN_EXECUTOR_MAX_PARALLEL limit).
-func (e *PlanExecutor) dispatchReadySubtasks(exec *planExecution) {
+func (e *PlanExecutor) dispatchReadySubtasks(ctx context.Context, exec *planExecution) {
 	for _, st := range exec.plan.Subtasks {
 		sub := exec.subtasks[st.SubtaskID]
 		if sub.State != types.SubtaskStatePending {
@@ -248,13 +264,19 @@ func (e *PlanExecutor) dispatchReadySubtasks(exec *planExecution) {
 		// Collect prior_results from completed dependencies.
 		sub.PriorResults = e.collectPriorResults(exec, sub.DependsOn)
 
-		e.dispatchSubtask(exec, st, sub)
+		e.dispatchSubtask(ctx, exec, st, sub)
 	}
 }
 
 // dispatchSubtask sends a capability_query then publishes a task_spec for one subtask.
-func (e *PlanExecutor) dispatchSubtask(exec *planExecution, st types.Subtask, sub *types.SubtaskState) {
+func (e *PlanExecutor) dispatchSubtask(ctx context.Context, exec *planExecution, st types.Subtask, sub *types.SubtaskState) {
 	now := time.Now().UTC()
+
+	// Build a child context for this subtask.
+	subCtx := observability.WithPlanID(ctx, exec.plan.PlanID)
+	subCtx = observability.WithSubtaskID(subCtx, sub.SubtaskID)
+	subCtx = observability.WithModule(subCtx, "plan_executor")
+	log := observability.LogFromContext(subCtx)
 
 	// Transition to DISPATCH_PENDING and persist before publishing.
 	sub.State = types.SubtaskStateDispatchPending
@@ -268,14 +290,15 @@ func (e *PlanExecutor) dispatchSubtask(exec *planExecution, st types.Subtask, su
 	exec.orchRefIndex[orchRef] = sub.SubtaskID
 	e.orchRefToPlan.Store(orchRef, exec.plan.PlanID)
 
+	log.Info("dispatching subtask", "depends_on", sub.DependsOn, "orchRef", orchRef)
+
 	// Query capability before dispatching (§FR-ALC-01).
 	capResp, err := e.gw.PublishCapabilityQuery(types.CapabilityQuery{
 		OrchestratorTaskRef:  orchRef,
 		RequiredSkillDomains: st.RequiredSkillDomains,
 	})
 	if err != nil {
-		e.logger.Printf("capability query failed: plan_id=%s subtask_id=%s error=%v",
-			exec.plan.PlanID, sub.SubtaskID, err)
+		log.Error("capability query failed", "error", err)
 		sub.State = types.SubtaskStateFailed
 		sub.ErrorCode = types.ErrCodeAgentsUnavailable
 		sub.CompletedAt = &now
@@ -312,13 +335,12 @@ func (e *PlanExecutor) dispatchSubtask(exec *planExecution, st types.Subtask, su
 	}
 
 	if err := e.gw.PublishTaskSpec(spec); err != nil {
-		e.logger.Printf("task_spec publish failed: plan_id=%s subtask_id=%s error=%v",
-			exec.plan.PlanID, sub.SubtaskID, err)
+		log.Error("task_spec publish failed", "error", err)
 		sub.State = types.SubtaskStateDeliveryFailed
 		sub.ErrorCode = types.ErrCodeAgentsUnavailable
 		sub.CompletedAt = &now
 		e.persistSubtaskState(sub, exec.ts.OrchestratorTaskRef, now)
-		_ = e.policy.RevokeCredentials(orchRef)
+		_ = e.policy.RevokeCredentials(ctx, orchRef)
 		e.orchRefToPlan.Delete(orchRef)
 		delete(exec.orchRefIndex, orchRef)
 		e.blockDependents(exec, sub.SubtaskID, now)
@@ -334,8 +356,7 @@ func (e *PlanExecutor) dispatchSubtask(exec *planExecution, st types.Subtask, su
 	e.persistSubtaskState(sub, exec.ts.OrchestratorTaskRef, dispatchedAt)
 	atomic.AddInt32(&exec.dispatchedCount, 1)
 
-	e.logger.Printf("subtask dispatched: plan_id=%s subtask_id=%s orchRef=%s agent_id=%s",
-		exec.plan.PlanID, sub.SubtaskID, orchRef, capResp.AgentID)
+	log.Info("subtask dispatched", "orchRef", orchRef, "agent_id", capResp.AgentID)
 }
 
 // blockDependents marks all subtasks that (transitively) depend on a failed subtask as BLOCKED.
@@ -394,9 +415,19 @@ func (e *PlanExecutor) checkPlanCompletion(exec *planExecution) {
 	// Remove from active maps before calling callbacks (prevents double-fire).
 	e.activePlans.Delete(exec.plan.PlanID)
 
+	// Rebuild a context from the task state for logging.
+	planCtx := context.Background()
+	if exec.ts.TraceID != "" {
+		planCtx = observability.WithTraceID(planCtx, exec.ts.TraceID)
+	}
+	planCtx = observability.WithTaskID(planCtx, exec.ts.TaskID)
+	planCtx = observability.WithPlanID(planCtx, exec.plan.PlanID)
+	planCtx = observability.WithModule(planCtx, "plan_executor")
+	log := observability.LogFromContext(planCtx)
+
 	if !anyFailed && !anyBlocked {
 		// All subtasks completed successfully.
-		e.logger.Printf("plan completed: plan_id=%s subtasks=%d", exec.plan.PlanID, len(exec.subtasks))
+		log.Info("plan completed", "subtask_count", len(exec.subtasks))
 		if e.onPlanComplete != nil {
 			e.onPlanComplete(exec.ts, completedResults)
 		}
@@ -410,7 +441,7 @@ func (e *PlanExecutor) checkPlanCompletion(exec *planExecution) {
 		errorCode = types.ErrCodeInvalidPlan // all failures are blocked deps
 	}
 
-	e.logger.Printf("plan failed: plan_id=%s partial=%v error_code=%s", exec.plan.PlanID, partial, errorCode)
+	log.Warn("plan failed", "partial", partial, "error_code", errorCode)
 	if e.onPlanFailed != nil {
 		e.onPlanFailed(exec.ts, errorCode, partial, completedResults)
 	}

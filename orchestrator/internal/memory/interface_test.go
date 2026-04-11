@@ -1,6 +1,7 @@
 package memory_test
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -80,7 +81,7 @@ func TestWriteAllRetriesExhaustedCallsWriteFailureHandler(t *testing.T) {
 	iface := memoryiface.New(mem, &config.OrchestratorConfig{})
 
 	var called bool
-	iface.SetWriteFailureHandler(func(payload types.OrchestratorMemoryWritePayload, err error) {
+	iface.SetWriteFailureHandler(func(_ context.Context, payload types.OrchestratorMemoryWritePayload, err error) {
 		called = true
 		if payload.TaskID != "task-1" {
 			t.Fatalf("payload.TaskID = %q, want task-1", payload.TaskID)

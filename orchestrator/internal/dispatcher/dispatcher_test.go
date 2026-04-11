@@ -86,7 +86,7 @@ type policyMock struct {
 	ValidatedCalls int
 }
 
-func (p *policyMock) ValidateAndScope(taskID, orchRef, userID string, domains []string, timeout int) (types.PolicyScope, error) {
+func (p *policyMock) ValidateAndScope(_ context.Context, taskID, orchRef, userID string, domains []string, timeout int) (types.PolicyScope, error) {
 	p.ValidatedCalls++
 	if p.ShouldDeny {
 		reason := p.DenyReason
@@ -108,7 +108,7 @@ func (p *policyMock) ValidateAndScope(taskID, orchRef, userID string, domains []
 	}, nil
 }
 
-func (p *policyMock) RevokeCredentials(orchRef string) error {
+func (p *policyMock) RevokeCredentials(_ context.Context, orchRef string) error {
 	p.RevokedRefs = append(p.RevokedRefs, orchRef)
 	return p.RevokeError
 }
@@ -132,7 +132,7 @@ type executorMock struct {
 	ExecuteError error
 }
 
-func (e *executorMock) Execute(plan types.ExecutionPlan, ts *types.TaskState) error {
+func (e *executorMock) Execute(_ context.Context, plan types.ExecutionPlan, ts *types.TaskState) error {
 	e.ExecuteCalls = append(e.ExecuteCalls, struct {
 		Plan types.ExecutionPlan
 		TS   *types.TaskState
@@ -140,7 +140,7 @@ func (e *executorMock) Execute(plan types.ExecutionPlan, ts *types.TaskState) er
 	return e.ExecuteError
 }
 
-func (e *executorMock) HandleSubtaskResult(result types.TaskResult) error {
+func (e *executorMock) HandleSubtaskResult(_ context.Context, result types.TaskResult) error {
 	e.ResultCalls = append(e.ResultCalls, result)
 	return nil
 }
@@ -328,7 +328,7 @@ func TestHandleDecompositionResponse_ValidPlan_ActivatesPlanAndSendsAccepted(t *
 	plan := validPlan(task.TaskID)
 	resp := decompositionResponse(task.TaskID, plan)
 
-	if err := d.HandleDecompositionResponse(resp); err != nil {
+	if err := d.HandleDecompositionResponse(context.Background(), resp); err != nil {
 		t.Fatalf("HandleDecompositionResponse() error = %v, want nil", err)
 	}
 
@@ -377,7 +377,7 @@ func TestHandleDecompositionResponse_IgnoredIfNotDecomposing(t *testing.T) {
 
 	// Do not submit a task — respond for unknown task_id.
 	resp := decompositionResponse("550e8400-e29b-41d4-a716-446655440099", validPlan("550e8400-e29b-41d4-a716-446655440099"))
-	if err := d.HandleDecompositionResponse(resp); err != nil {
+	if err := d.HandleDecompositionResponse(context.Background(), resp); err != nil {
 		t.Fatalf("HandleDecompositionResponse() error = %v, want nil (unknown task silently ignored)", err)
 	}
 	if len(exec.ExecuteCalls) != 0 {
@@ -400,7 +400,7 @@ func TestHandleDecompositionResponse_EmptyPlan_DecompositionFailed(t *testing.T)
 		TaskID: task.TaskID,
 		Plan:   types.ExecutionPlan{PlanID: "plan-empty", ParentTaskID: task.TaskID, Subtasks: []types.Subtask{}},
 	}
-	_ = d.HandleDecompositionResponse(resp)
+	_ = d.HandleDecompositionResponse(context.Background(), resp)
 
 	if len(gw.ErrorCalls) != 1 {
 		t.Fatalf("error calls = %d, want 1", len(gw.ErrorCalls))
@@ -431,7 +431,7 @@ func TestHandleDecompositionResponse_CircularDependency_DecompositionFailed(t *t
 		},
 	}
 	resp := decompositionResponse(task.TaskID, cyclicPlan)
-	_ = d.HandleDecompositionResponse(resp)
+	_ = d.HandleDecompositionResponse(context.Background(), resp)
 
 	if len(gw.ErrorCalls) == 0 {
 		t.Fatal("expected error for cyclic plan, got none")
@@ -461,7 +461,7 @@ func TestHandleDecompositionResponse_PlanTooLarge_DecompositionFailed(t *testing
 		TaskID: task.TaskID,
 		Plan:   types.ExecutionPlan{PlanID: "plan-huge", ParentTaskID: task.TaskID, Subtasks: subtasks},
 	}
-	_ = d.HandleDecompositionResponse(resp)
+	_ = d.HandleDecompositionResponse(context.Background(), resp)
 
 	if len(gw.ErrorCalls) == 0 {
 		t.Fatal("expected error for oversized plan")
@@ -479,7 +479,7 @@ func TestHandlePlanComplete_WritesCompletedAndDeliversResult(t *testing.T) {
 	task := validTask("550e8400-e29b-41d4-a716-446655440020")
 	_ = d.HandleInboundTask(context.Background(), task)
 	plan := validPlan(task.TaskID)
-	_ = d.HandleDecompositionResponse(decompositionResponse(task.TaskID, plan))
+	_ = d.HandleDecompositionResponse(context.Background(), decompositionResponse(task.TaskID, plan))
 
 	// Retrieve the TaskState reference from the dispatcher.
 	activeTasks := d.GetActiveTasks()
@@ -532,7 +532,7 @@ func TestHandlePlanFailed_WritesFailedAndPublishesError(t *testing.T) {
 	task := validTask("550e8400-e29b-41d4-a716-446655440021")
 	_ = d.HandleInboundTask(context.Background(), task)
 	plan := validPlan(task.TaskID)
-	_ = d.HandleDecompositionResponse(decompositionResponse(task.TaskID, plan))
+	_ = d.HandleDecompositionResponse(context.Background(), decompositionResponse(task.TaskID, plan))
 
 	activeTasks := d.GetActiveTasks()
 	ts := activeTasks[0]
@@ -569,7 +569,7 @@ func TestHandlePlanFailed_Partial_WritesPartialCompleteAndDeliversResult(t *test
 	task := validTask("550e8400-e29b-41d4-a716-446655440022")
 	_ = d.HandleInboundTask(context.Background(), task)
 	plan := validPlan(task.TaskID)
-	_ = d.HandleDecompositionResponse(decompositionResponse(task.TaskID, plan))
+	_ = d.HandleDecompositionResponse(context.Background(), decompositionResponse(task.TaskID, plan))
 
 	activeTasks := d.GetActiveTasks()
 	ts := activeTasks[0]
@@ -795,7 +795,7 @@ func TestGetMetrics_CountersTrackPipeline(t *testing.T) {
 	ts1 := activeTasks[0]
 
 	plan := validPlan(task1.TaskID)
-	_ = d.HandleDecompositionResponse(decompositionResponse(task1.TaskID, plan))
+	_ = d.HandleDecompositionResponse(context.Background(), decompositionResponse(task1.TaskID, plan))
 	d.HandlePlanComplete(ts1, []types.PriorResult{{SubtaskID: "s1", Result: json.RawMessage(`{}`)}})
 
 	received, completed, failed, violations, decompositionFailed, queueDepth = d.GetMetrics()
@@ -845,7 +845,7 @@ func TestGetActiveTasks_ReflectsInFlightTasks(t *testing.T) {
 	}
 
 	plan1 := validPlan(task1.TaskID)
-	_ = d.HandleDecompositionResponse(decompositionResponse(task1.TaskID, plan1))
+	_ = d.HandleDecompositionResponse(context.Background(), decompositionResponse(task1.TaskID, plan1))
 	d.HandlePlanComplete(ts1, nil)
 
 	if len(d.GetActiveTasks()) != 1 {
@@ -934,7 +934,7 @@ func TestDispatcherDemoFlow_V3(t *testing.T) {
 	}
 
 	resp1 := decompositionResponse(task1.TaskID, plan1)
-	if err := d.HandleDecompositionResponse(resp1); err != nil {
+	if err := d.HandleDecompositionResponse(context.Background(), resp1); err != nil {
 		t.Fatalf("step 2: HandleDecompositionResponse() error = %v", err)
 	}
 
@@ -1061,7 +1061,7 @@ func TestDispatcherDemoFlow_V3(t *testing.T) {
 			{SubtaskID: "s2", Action: "b", RequiredSkillDomains: []string{"web"}, DependsOn: []string{"s1"}, TimeoutSeconds: 30},
 		},
 	}
-	_ = d.HandleDecompositionResponse(decompositionResponse(task3.TaskID, cyclicPlan))
+	_ = d.HandleDecompositionResponse(context.Background(), decompositionResponse(task3.TaskID, cyclicPlan))
 
 	rec3 := latestTaskStateRecord(t, mem, task3.TaskID)
 	if rec3.State != types.StateDecompositionFailed {

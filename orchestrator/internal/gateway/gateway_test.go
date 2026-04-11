@@ -166,7 +166,7 @@ func TestHandleAgentStatus_ValidEnvelope_CallsStatusHandler(t *testing.T) {
 	gw, nats := newGateway(t)
 
 	var received types.AgentStatusUpdate
-	gw.RegisterAgentStatusHandler(func(update types.AgentStatusUpdate) error {
+	gw.RegisterAgentStatusHandler(func(_ context.Context, update types.AgentStatusUpdate) error {
 		received = update
 		return nil
 	})
@@ -515,7 +515,7 @@ func TestGatewayDemoFlow(t *testing.T) {
 	t.Log("step 4: agent status — delivering an agent_status_update envelope")
 
 	var receivedStatus types.AgentStatusUpdate
-	gw.RegisterAgentStatusHandler(func(update types.AgentStatusUpdate) error {
+	gw.RegisterAgentStatusHandler(func(_ context.Context, update types.AgentStatusUpdate) error {
 		receivedStatus = update
 		return nil
 	})

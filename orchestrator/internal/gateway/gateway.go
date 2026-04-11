@@ -83,10 +83,11 @@ const CapabilityQueryTimeout = 3 * time.Second
 type TaskHandler func(ctx context.Context, task types.UserTask) error
 
 // AgentStatusHandler is the callback the Task Monitor registers to receive agent status updates.
-type AgentStatusHandler func(update types.AgentStatusUpdate) error
+type AgentStatusHandler func(ctx context.Context, update types.AgentStatusUpdate) error
 
 // TaskResultHandler is the callback the Plan Executor registers to receive task results.
-type TaskResultHandler func(result types.TaskResult) error
+// ctx carries the trace_id extracted from the inbound message envelope.
+type TaskResultHandler func(ctx context.Context, result types.TaskResult) error
 
 // CredentialRequestHandler is called when an agent publishes a credential.request
 // that requires user input (operation: "user_input"). Registered by main.go to
@@ -243,7 +244,8 @@ func (g *Gateway) handleRawAgentStatus(subject string, data []byte) error {
 	if g.agentStatusHandler == nil {
 		return fmt.Errorf("no agent status handler registered")
 	}
-	return g.agentStatusHandler(types.AgentStatusUpdate{
+	ctx := extractOrCreateCtx(envelope, "task_monitor")
+	return g.agentStatusHandler(ctx, types.AgentStatusUpdate{
 		AgentID:             payload.AgentID,
 		OrchestratorTaskRef: envelope.CorrelationID,
 		TaskID:              payload.TaskID,
@@ -315,6 +317,13 @@ func (g *Gateway) handleRawTaskResult(subject string, data []byte) error {
 		return err
 	}
 
+	// Extract trace_id from envelope and hydrate context.
+	ctx := context.Background()
+	if envelope.TraceID != "" {
+		ctx = observability.WithTraceID(ctx, envelope.TraceID)
+	}
+	ctx = observability.WithModule(ctx, "comms_gateway")
+
 	var payload struct {
 		TaskID      string          `json:"task_id"`
 		AgentID     string          `json:"agent_id"`
@@ -328,6 +337,11 @@ func (g *Gateway) handleRawTaskResult(subject string, data []byte) error {
 	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
 		return fmt.Errorf("deserialize task.result: %w", err)
 	}
+
+	if payload.TaskID != "" {
+		ctx = observability.WithTaskID(ctx, payload.TaskID)
+	}
+	observability.LogFromContext(ctx).Info("received task result from agents")
 
 	if g.taskResultHandler == nil {
 		return fmt.Errorf("no task result handler registered")
@@ -344,7 +358,7 @@ func (g *Gateway) handleRawTaskResult(subject string, data []byte) error {
 	if !result.Success && result.ErrorCode == "" && payload.Error != "" {
 		result.ErrorCode = payload.Error
 	}
-	return g.taskResultHandler(result)
+	return g.taskResultHandler(ctx, result)
 }
 
 // handleRawTaskFailed normalizes task.failed into the same internal TaskResult
@@ -356,6 +370,12 @@ func (g *Gateway) handleRawTaskFailed(subject string, data []byte) error {
 		return err
 	}
 
+	ctx := context.Background()
+	if envelope.TraceID != "" {
+		ctx = observability.WithTraceID(ctx, envelope.TraceID)
+	}
+	ctx = observability.WithModule(ctx, "comms_gateway")
+
 	var payload struct {
 		TaskID       string `json:"task_id"`
 		AgentID      string `json:"agent_id"`
@@ -365,11 +385,16 @@ func (g *Gateway) handleRawTaskFailed(subject string, data []byte) error {
 	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
 		return fmt.Errorf("deserialize task.failed: %w", err)
 	}
+	if payload.TaskID != "" {
+		ctx = observability.WithTaskID(ctx, payload.TaskID)
+	}
+	observability.LogFromContext(ctx).Info("received task failed from agents", "error_code", payload.ErrorCode)
+
 	if g.taskResultHandler == nil {
 		return fmt.Errorf("no task result handler registered")
 	}
 
-	return g.taskResultHandler(types.TaskResult{
+	return g.taskResultHandler(ctx, types.TaskResult{
 		OrchestratorTaskRef: envelope.CorrelationID,
 		TaskID:              payload.TaskID,
 		AgentID:             payload.AgentID,
@@ -626,6 +651,19 @@ func validateEnvelope(data []byte) (*types.MessageEnvelope, error) {
 		return nil, fmt.Errorf("envelope missing payload")
 	}
 	return &envelope, nil
+}
+
+// extractOrCreateCtx builds a context from the envelope's trace_id (or creates a new one)
+// and attaches the given module name. Used by inbound NATS message handlers.
+func extractOrCreateCtx(envelope *types.MessageEnvelope, module string) context.Context {
+	traceID := envelope.TraceID
+	if traceID == "" {
+		traceID = newUUID()
+	}
+	ctx := context.Background()
+	ctx = observability.WithTraceID(ctx, traceID)
+	ctx = observability.WithModule(ctx, module)
+	return ctx
 }
 
 // newUUID generates a random UUID v4 using crypto/rand.

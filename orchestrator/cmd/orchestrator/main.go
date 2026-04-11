@@ -16,6 +16,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
@@ -102,7 +103,7 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 	}
 
 	vaultClient := &mocks.VaultMock{}
-	policyEnforcer := policy.New(cfg, vaultClient, memClient, nil)
+	policyEnforcer := policy.New(cfg, vaultClient, memClient)
 
 	natsClient, mockNATS, err := buildNATSClient(cfg)
 	if err != nil {
@@ -234,9 +235,9 @@ type recoveryProxy struct {
 	target *recovery.Manager
 }
 
-func (p *recoveryProxy) HandleRecovery(ts *types.TaskState, reason types.RecoveryReason) {
+func (p *recoveryProxy) HandleRecovery(ctx context.Context, ts *types.TaskState, reason types.RecoveryReason) {
 	if p.target != nil {
-		p.target.HandleRecovery(ts, reason)
+		p.target.HandleRecovery(ctx, ts, reason)
 	}
 }
 

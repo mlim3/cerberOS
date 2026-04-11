@@ -24,6 +24,7 @@
 package memory
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -34,7 +35,7 @@ import (
 
 // WriteFailureHandler is called when all write retries are exhausted.
 // Typically wired to Recovery Manager.HandleComponentFailure().
-type WriteFailureHandler func(payload types.OrchestratorMemoryWritePayload, err error)
+type WriteFailureHandler func(ctx context.Context, payload types.OrchestratorMemoryWritePayload, err error)
 
 // Interface is M6: Memory Interface.
 // It wraps the raw MemoryClient (real libSQL or mock) and adds:
@@ -91,7 +92,7 @@ func (i *Interface) Write(payload types.OrchestratorMemoryWritePayload) error {
 
 	err := fmt.Errorf("memory write failed after %d attempts: %w", writeMaxAttempts, lastErr)
 	if i.onWriteFailure != nil {
-		i.onWriteFailure(payload, err)
+		i.onWriteFailure(context.Background(), payload, err)
 	}
 	return err
 }
