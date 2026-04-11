@@ -49,19 +49,19 @@ type gatewayMock struct {
 	PublishSpecError      error
 }
 
-func (g *gatewayMock) PublishAgentTerminate(t types.AgentTerminate) error {
+func (g *gatewayMock) PublishAgentTerminate(_ context.Context, t types.AgentTerminate) error {
 	g.TerminateCalls = append(g.TerminateCalls, t)
 	return g.PublishTerminateError
 }
-func (g *gatewayMock) PublishTaskCancel(c types.TaskCancel) error {
+func (g *gatewayMock) PublishTaskCancel(_ context.Context, c types.TaskCancel) error {
 	g.CancelCalls = append(g.CancelCalls, c)
 	return nil
 }
-func (g *gatewayMock) PublishError(_ string, e types.ErrorResponse) error {
+func (g *gatewayMock) PublishError(_ context.Context, _ string, e types.ErrorResponse) error {
 	g.ErrorCalls = append(g.ErrorCalls, e)
 	return nil
 }
-func (g *gatewayMock) PublishTaskSpec(s types.TaskSpec) error {
+func (g *gatewayMock) PublishTaskSpec(_ context.Context, s types.TaskSpec) error {
 	g.TaskSpecCalls = append(g.TaskSpecCalls, s)
 	return g.PublishSpecError
 }

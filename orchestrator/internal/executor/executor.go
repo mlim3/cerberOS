@@ -44,9 +44,9 @@ import (
 
 // Gateway defines the outbound operations the Plan Executor needs from M1.
 type Gateway interface {
-	PublishTaskSpec(spec types.TaskSpec) error
-	PublishCapabilityQuery(query types.CapabilityQuery) (*types.CapabilityResponse, error)
-	PublishStatusUpdate(userContextID string, status types.StatusResponse) error
+	PublishTaskSpec(ctx context.Context, spec types.TaskSpec) error
+	PublishCapabilityQuery(ctx context.Context, query types.CapabilityQuery) (*types.CapabilityResponse, error)
+	PublishStatusUpdate(ctx context.Context, userContextID string, status types.StatusResponse) error
 }
 
 // PolicyEnforcer defines the credential revocation the Plan Executor needs from M3.
@@ -293,7 +293,7 @@ func (e *PlanExecutor) dispatchSubtask(ctx context.Context, exec *planExecution,
 	log.Info("dispatching subtask", "depends_on", sub.DependsOn, "orchRef", orchRef)
 
 	// Query capability before dispatching (§FR-ALC-01).
-	capResp, err := e.gw.PublishCapabilityQuery(types.CapabilityQuery{
+	capResp, err := e.gw.PublishCapabilityQuery(ctx, types.CapabilityQuery{
 		OrchestratorTaskRef:  orchRef,
 		RequiredSkillDomains: st.RequiredSkillDomains,
 	})
@@ -334,7 +334,7 @@ func (e *PlanExecutor) dispatchSubtask(ctx context.Context, exec *planExecution,
 		UserContextID: exec.ts.UserContextID,
 	}
 
-	if err := e.gw.PublishTaskSpec(spec); err != nil {
+	if err := e.gw.PublishTaskSpec(ctx, spec); err != nil {
 		log.Error("task_spec publish failed", "error", err)
 		sub.State = types.SubtaskStateDeliveryFailed
 		sub.ErrorCode = types.ErrCodeAgentsUnavailable

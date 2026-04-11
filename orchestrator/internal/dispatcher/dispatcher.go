@@ -62,11 +62,11 @@ const defaultIdempotencyWindow = 300 // seconds
 // Gateway defines the outbound operations the Dispatcher needs from M1.
 // Avoids a direct import cycle with the gateway package.
 type Gateway interface {
-	PublishTaskAccepted(callbackTopic string, accepted types.TaskAccepted) error
-	PublishError(callbackTopic string, resp types.ErrorResponse) error
-	PublishTaskResult(callbackTopic string, result types.TaskResult) error
-	PublishTaskSpec(spec types.TaskSpec) error
-	PublishStatusUpdate(userContextID string, status types.StatusResponse) error
+	PublishTaskAccepted(ctx context.Context, callbackTopic string, accepted types.TaskAccepted) error
+	PublishError(ctx context.Context, callbackTopic string, resp types.ErrorResponse) error
+	PublishTaskResult(ctx context.Context, callbackTopic string, result types.TaskResult) error
+	PublishTaskSpec(ctx context.Context, spec types.TaskSpec) error
+	PublishStatusUpdate(ctx context.Context, userContextID string, status types.StatusResponse) error
 }
 
 // PolicyEnforcer defines the policy operations the Dispatcher needs from M3.
@@ -166,7 +166,7 @@ func (d *Dispatcher) HandleInboundTask(ctx context.Context, task types.UserTask)
 	// ── Step 1: Schema validation ──────────────────────────────────────────
 	if err := validateSchema(task); err != nil {
 		log.Warn("schema validation failed", "error", err)
-		_ = d.gateway.PublishError(task.CallbackTopic, types.ErrorResponse{
+		_ = d.gateway.PublishError(ctx, task.CallbackTopic, types.ErrorResponse{
 			TaskID:      task.TaskID,
 			ErrorCode:   types.ErrCodeInvalidTaskSpec,
 			UserMessage: err.Error(),
@@ -182,7 +182,7 @@ func (d *Dispatcher) HandleInboundTask(ctx context.Context, task types.UserTask)
 
 	if existing := d.dedupCheck(task.TaskID, idempotencyWindow); existing != nil {
 		log.Info("duplicate task rejected", "current_state", existing.State)
-		_ = d.gateway.PublishError(task.CallbackTopic, types.ErrorResponse{
+		_ = d.gateway.PublishError(ctx, task.CallbackTopic, types.ErrorResponse{
 			TaskID:      task.TaskID,
 			ErrorCode:   types.ErrCodeDuplicateTask,
 			UserMessage: fmt.Sprintf("task already submitted — current state: %s", existing.State),
@@ -200,7 +200,7 @@ func (d *Dispatcher) HandleInboundTask(ctx context.Context, task types.UserTask)
 	if err != nil {
 		atomic.AddInt64(&d.policyViolations, 1)
 		log.Warn("policy validation denied", "orchestrator_task_ref", orchRef)
-		_ = d.gateway.PublishError(task.CallbackTopic, types.ErrorResponse{
+		_ = d.gateway.PublishError(ctx, task.CallbackTopic, types.ErrorResponse{
 			TaskID:      task.TaskID,
 			ErrorCode:   types.ErrCodePolicyViolation,
 			UserMessage: "Task requires resources outside your configured permissions.",
@@ -234,7 +234,7 @@ func (d *Dispatcher) HandleInboundTask(ctx context.Context, task types.UserTask)
 	// ── Step 5: Persist DECOMPOSING BEFORE sending planner dispatch ────────
 	if err := d.persistTaskState(ts, now); err != nil {
 		log.Error("memory write failed before decomposition", "error", err)
-		_ = d.gateway.PublishError(task.CallbackTopic, types.ErrorResponse{
+		_ = d.gateway.PublishError(ctx, task.CallbackTopic, types.ErrorResponse{
 			TaskID:      task.TaskID,
 			ErrorCode:   types.ErrCodeStorageUnavailable,
 			UserMessage: "Unable to persist task state. Task not dispatched.",
@@ -271,7 +271,7 @@ func (d *Dispatcher) HandleInboundTask(ctx context.Context, task types.UserTask)
 		ProgressSummary: "Generating execution plan",
 	}
 
-	if err := d.gateway.PublishTaskSpec(spec); err != nil {
+	if err := d.gateway.PublishTaskSpec(ctx, spec); err != nil {
 		log.Error("planner task publish failed", "error", err)
 		d.failTask(ctx, ts, types.ErrCodeAgentsUnavailable, "Could not reach Planner Agent. Please retry.")
 		return fmt.Errorf("publish planner task: %w", err)
@@ -401,7 +401,7 @@ func (d *Dispatcher) HandleDecompositionResponse(ctx context.Context, resp types
 		OrchestratorTaskRef: ts.OrchestratorTaskRef,
 		EstimatedCompletion: estimatedCompletion,
 	}
-	if err := d.gateway.PublishTaskAccepted(ts.CallbackTopic, accepted); err != nil {
+	if err := d.gateway.PublishTaskAccepted(ctx, ts.CallbackTopic, accepted); err != nil {
 		log.Warn("publish task_accepted failed", "error", err)
 		// Non-fatal: plan is running; user may poll for status.
 	}
@@ -438,7 +438,7 @@ func (d *Dispatcher) HandlePlanComplete(ts *types.TaskState, aggregatedResults [
 		Result:              resultsJSON,
 		CompletedAt:         now,
 	}
-	if err := d.gateway.PublishTaskResult(ts.CallbackTopic, result); err != nil {
+	if err := d.gateway.PublishTaskResult(ctx, ts.CallbackTopic, result); err != nil {
 		log.Error("publish task_result failed", "error", err)
 	}
 
@@ -494,9 +494,9 @@ func (d *Dispatcher) HandlePlanFailed(ts *types.TaskState, errorCode string, par
 			ErrorCode:           errorCode,
 			CompletedAt:         now,
 		}
-		_ = d.gateway.PublishTaskResult(ts.CallbackTopic, result)
+		_ = d.gateway.PublishTaskResult(ctx, ts.CallbackTopic, result)
 	} else {
-		_ = d.gateway.PublishError(ts.CallbackTopic, types.ErrorResponse{
+		_ = d.gateway.PublishError(ctx, ts.CallbackTopic, types.ErrorResponse{
 			TaskID:      ts.TaskID,
 			ErrorCode:   errorCode,
 			UserMessage: humanReadableError(errorCode),
@@ -592,7 +592,7 @@ func (d *Dispatcher) failTask(ctx context.Context, ts *types.TaskState, errorCod
 		log.Error("memory write failed on task failure", "error", err)
 	}
 
-	_ = d.gateway.PublishError(ts.CallbackTopic, types.ErrorResponse{
+	_ = d.gateway.PublishError(ctx, ts.CallbackTopic, types.ErrorResponse{
 		TaskID:      ts.TaskID,
 		ErrorCode:   errorCode,
 		UserMessage: userMessage,

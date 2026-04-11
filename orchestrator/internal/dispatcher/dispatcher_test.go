@@ -52,27 +52,27 @@ type gatewayMock struct {
 	PublishResultError   error
 }
 
-func (g *gatewayMock) PublishTaskAccepted(_ string, a types.TaskAccepted) error {
+func (g *gatewayMock) PublishTaskAccepted(_ context.Context, _ string, a types.TaskAccepted) error {
 	g.AcceptedCalls = append(g.AcceptedCalls, a)
 	return g.PublishAcceptedError
 }
 
-func (g *gatewayMock) PublishError(_ string, e types.ErrorResponse) error {
+func (g *gatewayMock) PublishError(_ context.Context, _ string, e types.ErrorResponse) error {
 	g.ErrorCalls = append(g.ErrorCalls, e)
 	return nil
 }
 
-func (g *gatewayMock) PublishTaskResult(_ string, r types.TaskResult) error {
+func (g *gatewayMock) PublishTaskResult(_ context.Context, _ string, r types.TaskResult) error {
 	g.TaskResultCalls = append(g.TaskResultCalls, r)
 	return g.PublishResultError
 }
 
-func (g *gatewayMock) PublishTaskSpec(spec types.TaskSpec) error {
+func (g *gatewayMock) PublishTaskSpec(_ context.Context, spec types.TaskSpec) error {
 	g.TaskSpecCalls = append(g.TaskSpecCalls, spec)
 	return g.PublishTaskSpecError
 }
 
-func (g *gatewayMock) PublishStatusUpdate(_ string, s types.StatusResponse) error {
+func (g *gatewayMock) PublishStatusUpdate(_ context.Context, _ string, s types.StatusResponse) error {
 	g.StatusUpdateCalls = append(g.StatusUpdateCalls, s)
 	return nil
 }

@@ -9,6 +9,7 @@ import (
 
 	"github.com/mlim3/cerberOS/orchestrator/internal/gateway"
 	"github.com/mlim3/cerberOS/orchestrator/internal/mocks"
+	"github.com/mlim3/cerberOS/orchestrator/internal/observability"
 	"github.com/mlim3/cerberOS/orchestrator/internal/types"
 )
 
@@ -196,7 +197,7 @@ func TestHandleAgentStatus_ValidEnvelope_CallsStatusHandler(t *testing.T) {
 func TestPublishError_WritesToCorrectTopic(t *testing.T) {
 	gw, nats := newGateway(t)
 
-	err := gw.PublishError("aegis.user-io.results.task-1", types.ErrorResponse{
+	err := gw.PublishError(context.Background(), "aegis.user-io.results.task-1", types.ErrorResponse{
 		TaskID:      "task-1",
 		ErrorCode:   types.ErrCodePolicyViolation,
 		UserMessage: "Task requires resources outside your configured permissions.",
@@ -239,7 +240,8 @@ func TestPublishTaskSpec_PublishesToAgentsTopic(t *testing.T) {
 		CallbackTopic:        "aegis.user-io.results.task-1",
 	}
 
-	if err := gw.PublishTaskSpec(spec); err != nil {
+	specCtx := observability.WithTraceID(context.Background(), spec.OrchestratorTaskRef)
+	if err := gw.PublishTaskSpec(specCtx, spec); err != nil {
 		t.Fatalf("PublishTaskSpec() error = %v", err)
 	}
 
@@ -287,7 +289,7 @@ func TestPublishAgentTerminate_PublishesToTerminateTopic(t *testing.T) {
 		Reason:              types.ErrCodeTimedOut,
 	}
 
-	if err := gw.PublishAgentTerminate(term); err != nil {
+	if err := gw.PublishAgentTerminate(context.Background(), term); err != nil {
 		t.Fatalf("PublishAgentTerminate() error = %v", err)
 	}
 
@@ -337,7 +339,7 @@ func TestPublishCapabilityQuery_ReceivesResponse(t *testing.T) {
 		RequiredSkillDomains: []string{"web"},
 	}
 
-	result, err := gw.PublishCapabilityQuery(query)
+	result, err := gw.PublishCapabilityQuery(context.Background(), query)
 	if err != nil {
 		t.Fatalf("PublishCapabilityQuery() error = %v", err)
 	}
@@ -356,7 +358,7 @@ func TestPublishCapabilityQuery_Timeout_ReturnsError(t *testing.T) {
 			OrchestratorTaskRef:  "orch-timeout",
 			RequiredSkillDomains: []string{"web"},
 		}
-		_, err := gw.PublishCapabilityQuery(query)
+		_, err := gw.PublishCapabilityQuery(context.Background(), query)
 		done <- err
 	}()
 
@@ -379,7 +381,7 @@ func TestPublishError_NATSDisconnected_ReturnsError(t *testing.T) {
 	gw, nats := newGateway(t)
 	nats.ShouldBeDisconnected = true
 
-	err := gw.PublishError("some.topic", types.ErrorResponse{TaskID: "t1", ErrorCode: "ERR"})
+	err := gw.PublishError(context.Background(), "some.topic", types.ErrorResponse{TaskID: "t1", ErrorCode: "ERR"})
 	if err == nil {
 		t.Fatal("PublishError() error = nil, want nats disconnected error")
 	}
@@ -550,7 +552,7 @@ func TestGatewayDemoFlow(t *testing.T) {
 		ErrorCode:   types.ErrCodePolicyViolation,
 		UserMessage: "Task requires resources outside your configured permissions.",
 	}
-	if err := gw.PublishError(callbackTopic, errResp); err != nil {
+	if err := gw.PublishError(context.Background(), callbackTopic, errResp); err != nil {
 		t.Fatalf("step 5: PublishError() error = %v", err)
 	}
 
@@ -590,7 +592,8 @@ func TestGatewayDemoFlow(t *testing.T) {
 		TimeoutSeconds: inboundTask.TimeoutSeconds,
 		CallbackTopic:  callbackTopic,
 	}
-	if err := gw.PublishTaskSpec(spec); err != nil {
+	specCtx := observability.WithTraceID(context.Background(), spec.OrchestratorTaskRef)
+	if err := gw.PublishTaskSpec(specCtx, spec); err != nil {
 		t.Fatalf("step 6: PublishTaskSpec() error = %v", err)
 	}
 
@@ -629,7 +632,7 @@ func TestGatewayDemoFlow(t *testing.T) {
 		OrchestratorTaskRef: "orch-demo-1",
 		Reason:              types.ErrCodeTimedOut,
 	}
-	if err := gw.PublishAgentTerminate(terminate); err != nil {
+	if err := gw.PublishAgentTerminate(context.Background(), terminate); err != nil {
 		t.Fatalf("step 7: PublishAgentTerminate() error = %v", err)
 	}
 	if len(nats.Published[gateway.TopicAgentTerminate]) != 1 {
@@ -657,7 +660,7 @@ func TestGatewayDemoFlow(t *testing.T) {
 		_ = nats.Deliver(gateway.TopicCapabilityQueryResponse, respData)
 	}()
 
-	capResult, err := gw.PublishCapabilityQuery(types.CapabilityQuery{
+	capResult, err := gw.PublishCapabilityQuery(context.Background(), types.CapabilityQuery{
 		OrchestratorTaskRef:  "orch-demo-cap",
 		RequiredSkillDomains: []string{"web"},
 	})
@@ -681,7 +684,7 @@ func TestGatewayDemoFlow(t *testing.T) {
 	if gw.IsConnected() {
 		t.Fatal("step 9: IsConnected() = true, want false after simulated disconnect")
 	}
-	publishErr := gw.PublishError("some.topic", types.ErrorResponse{TaskID: "t1", ErrorCode: "ERR"})
+	publishErr := gw.PublishError(context.Background(), "some.topic", types.ErrorResponse{TaskID: "t1", ErrorCode: "ERR"})
 	if publishErr == nil {
 		t.Fatal("step 9: PublishError() error = nil, want NATS disconnected error")
 	}

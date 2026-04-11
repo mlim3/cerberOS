@@ -446,30 +446,30 @@ func (g *Gateway) handleRawCredentialRequest(subject string, data []byte) error 
 // ── Outbound: to User I/O Component ──────────────────────────────────────────
 
 // PublishTaskAccepted notifies User I/O that a task was accepted (§FR-ALC-03).
-func (g *Gateway) PublishTaskAccepted(callbackTopic string, accepted types.TaskAccepted) error {
-	return g.publishEnvelope(callbackTopic, "task_accepted", accepted.OrchestratorTaskRef, accepted)
+func (g *Gateway) PublishTaskAccepted(ctx context.Context, callbackTopic string, accepted types.TaskAccepted) error {
+	return g.publishEnvelope(ctx, callbackTopic, "task_accepted", accepted.OrchestratorTaskRef, accepted)
 }
 
 // PublishError sends a structured error response to the User I/O Component (§11.1).
-func (g *Gateway) PublishError(callbackTopic string, resp types.ErrorResponse) error {
-	return g.publishEnvelope(callbackTopic, "error_response", resp.TaskID, resp)
+func (g *Gateway) PublishError(ctx context.Context, callbackTopic string, resp types.ErrorResponse) error {
+	return g.publishEnvelope(ctx, callbackTopic, "error_response", resp.TaskID, resp)
 }
 
 // PublishStatusUpdate forwards an intermediate task progress update to User I/O (§FR-ALC-05).
-func (g *Gateway) PublishStatusUpdate(userContextID string, status types.StatusResponse) error {
-	return g.publishEnvelope(TopicStatusEvents, "task_status_update", status.TaskID, status)
+func (g *Gateway) PublishStatusUpdate(ctx context.Context, userContextID string, status types.StatusResponse) error {
+	return g.publishEnvelope(ctx, TopicStatusEvents, "task_status_update", status.TaskID, status)
 }
 
 // PublishTaskResult delivers the final task result to the task's callback_topic (§11.5).
-func (g *Gateway) PublishTaskResult(callbackTopic string, result types.TaskResult) error {
-	return g.publishEnvelope(callbackTopic, "task_result", result.OrchestratorTaskRef, result)
+func (g *Gateway) PublishTaskResult(ctx context.Context, callbackTopic string, result types.TaskResult) error {
+	return g.publishEnvelope(ctx, callbackTopic, "task_result", result.OrchestratorTaskRef, result)
 }
 
 // ── Outbound: to Agents Component ────────────────────────────────────────────
 
 // PublishTaskSpec dispatches a validated task.inbound request to the Agents
 // Component. The internal TaskSpec is adapted to the agents-component schema.
-func (g *Gateway) PublishTaskSpec(spec types.TaskSpec) error {
+func (g *Gateway) PublishTaskSpec(ctx context.Context, spec types.TaskSpec) error {
 	wire := struct {
 		TaskID         string            `json:"task_id"`
 		RequiredSkills []string          `json:"required_skills"`
@@ -482,15 +482,15 @@ func (g *Gateway) PublishTaskSpec(spec types.TaskSpec) error {
 		RequiredSkills: spec.RequiredSkillDomains,
 		Instructions:   buildAgentInstructions(spec),
 		Metadata:       buildAgentMetadata(spec),
-		TraceID:        spec.OrchestratorTaskRef,
+		TraceID:        observability.TraceIDFrom(ctx),
 		UserContextID:  spec.UserContextID,
 	}
-	return g.publishEnvelope(TopicAgentTasksInbound, "task.inbound", spec.OrchestratorTaskRef, wire)
+	return g.publishEnvelope(ctx, TopicAgentTasksInbound, "task.inbound", spec.OrchestratorTaskRef, wire)
 }
 
 // PublishCapabilityQuery sends a capability query and waits for the response.
 // Blocks up to CapabilityQueryTimeout. Returns error on timeout (§FR-ALC-01).
-func (g *Gateway) PublishCapabilityQuery(query types.CapabilityQuery) (*types.CapabilityResponse, error) {
+func (g *Gateway) PublishCapabilityQuery(ctx context.Context, query types.CapabilityQuery) (*types.CapabilityResponse, error) {
 	responseCh := make(chan *types.CapabilityResponse, 1)
 	queryID := query.OrchestratorTaskRef
 	g.pendingCapabilityQueries.Store(queryID, responseCh)
@@ -503,10 +503,10 @@ func (g *Gateway) PublishCapabilityQuery(query types.CapabilityQuery) (*types.Ca
 	}{
 		QueryID: queryID,
 		Domains: query.RequiredSkillDomains,
-		TraceID: query.OrchestratorTaskRef,
+		TraceID: observability.TraceIDFrom(ctx),
 	}
 
-	if err := g.publishEnvelope(TopicCapabilityQuery, "capability.query", queryID, wire); err != nil {
+	if err := g.publishEnvelope(ctx, TopicCapabilityQuery, "capability.query", queryID, wire); err != nil {
 		return nil, fmt.Errorf("publish capability_query: %w", err)
 	}
 
@@ -562,31 +562,32 @@ func buildAgentInstructions(spec types.TaskSpec) string {
 }
 
 // PublishAgentTerminate instructs the Agents Component to terminate an agent (§11.2).
-func (g *Gateway) PublishAgentTerminate(terminate types.AgentTerminate) error {
-	return g.publishEnvelope(TopicAgentTerminate, "agent_terminate", terminate.OrchestratorTaskRef, terminate)
+func (g *Gateway) PublishAgentTerminate(ctx context.Context, terminate types.AgentTerminate) error {
+	return g.publishEnvelope(ctx, TopicAgentTerminate, "agent_terminate", terminate.OrchestratorTaskRef, terminate)
 }
 
 // PublishTaskCancel notifies the Agents Component to cancel a task (§11.2).
-func (g *Gateway) PublishTaskCancel(cancel types.TaskCancel) error {
-	return g.publishEnvelope(TopicTaskCancel, "task_cancel", cancel.OrchestratorTaskRef, cancel)
+func (g *Gateway) PublishTaskCancel(ctx context.Context, cancel types.TaskCancel) error {
+	return g.publishEnvelope(ctx, TopicTaskCancel, "task_cancel", cancel.OrchestratorTaskRef, cancel)
 }
 
 // ── Outbound: Observability ───────────────────────────────────────────────────
 
 // PublishMetrics emits structured metrics to aegis.orchestrator.metrics (§15.2).
 func (g *Gateway) PublishMetrics(metrics types.MetricsPayload) error {
-	return g.publishEnvelope(TopicMetrics, "metrics", g.nodeID, metrics)
+	return g.publishEnvelope(context.Background(), TopicMetrics, "metrics", g.nodeID, metrics)
 }
 
 // PublishAuditEvent emits an audit event to aegis.orchestrator.audit.events (§11.5).
-func (g *Gateway) PublishAuditEvent(event types.AuditEvent) error {
-	return g.publishEnvelope(TopicAuditEvents, "audit_event", event.OrchestratorTaskRef, event)
+func (g *Gateway) PublishAuditEvent(ctx context.Context, event types.AuditEvent) error {
+	return g.publishEnvelope(ctx, TopicAuditEvents, "audit_event", event.OrchestratorTaskRef, event)
 }
 
 // ── Envelope Helpers ──────────────────────────────────────────────────────────
 
 // publishEnvelope wraps any payload in a signed MessageEnvelope and publishes it (§13.5).
-func (g *Gateway) publishEnvelope(topic, messageType, correlationID string, payload any) error {
+// The trace_id from ctx is stamped into every outbound envelope (Step 5).
+func (g *Gateway) publishEnvelope(ctx context.Context, topic, messageType, correlationID string, payload any) error {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal payload for %s: %w", messageType, err)
@@ -597,6 +598,7 @@ func (g *Gateway) publishEnvelope(topic, messageType, correlationID string, payl
 		MessageType:     messageType,
 		SourceComponent: SourceComponent,
 		CorrelationID:   correlationID,
+		TraceID:         observability.TraceIDFrom(ctx),
 		Timestamp:       time.Now().UTC(),
 		SchemaVersion:   SchemaVersion,
 		Payload:         raw,

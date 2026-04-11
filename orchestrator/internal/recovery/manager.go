@@ -40,10 +40,10 @@ const revocationInitialBackoff = 500 * time.Millisecond
 
 // Gateway defines the outbound operations Recovery Manager needs from M1.
 type Gateway interface {
-	PublishAgentTerminate(terminate types.AgentTerminate) error
-	PublishTaskCancel(cancel types.TaskCancel) error
-	PublishError(callbackTopic string, resp types.ErrorResponse) error
-	PublishTaskSpec(spec types.TaskSpec) error
+	PublishAgentTerminate(ctx context.Context, terminate types.AgentTerminate) error
+	PublishTaskCancel(ctx context.Context, cancel types.TaskCancel) error
+	PublishError(ctx context.Context, callbackTopic string, resp types.ErrorResponse) error
+	PublishTaskSpec(ctx context.Context, spec types.TaskSpec) error
 }
 
 // PolicyEnforcer defines the policy operations Recovery Manager needs from M3.
@@ -266,7 +266,7 @@ func (m *Manager) attemptRecovery(ctx context.Context, ts *types.TaskState, reas
 		ProgressSummary:      fmt.Sprintf("Recovery attempt %d", recoveredState.RetryCount),
 	}
 
-	if err := m.gateway.PublishTaskSpec(spec); err != nil {
+	if err := m.gateway.PublishTaskSpec(ctx, spec); err != nil {
 		logger.Error("re-dispatch failed — terminating",
 			"task_id", ts.TaskID,
 			"attempt", recoveredState.RetryCount,
@@ -310,7 +310,7 @@ func (m *Manager) terminateTask(ctx context.Context, ts *types.TaskState, errorC
 	}
 
 	// ── Step 2: Publish agent_terminate ───────────────────────────────────
-	if err := m.gateway.PublishAgentTerminate(types.AgentTerminate{
+	if err := m.gateway.PublishAgentTerminate(ctx, types.AgentTerminate{
 		AgentID:             ts.AgentID,
 		OrchestratorTaskRef: ts.OrchestratorTaskRef,
 		Reason:              errorCode,
@@ -334,7 +334,7 @@ func (m *Manager) terminateTask(ctx context.Context, ts *types.TaskState, errorC
 
 	// ── Step 4: Notify User I/O via Gateway ───────────────────────────────
 	userMessage := userMessageForErrorCode(errorCode)
-	if err := m.gateway.PublishError(ts.CallbackTopic, types.ErrorResponse{
+	if err := m.gateway.PublishError(ctx, ts.CallbackTopic, types.ErrorResponse{
 		TaskID:      ts.TaskID,
 		ErrorCode:   errorCode,
 		UserMessage: userMessage,
