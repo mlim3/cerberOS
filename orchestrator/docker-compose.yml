@@ -4,6 +4,7 @@ services:
     build: .
     depends_on:
       - nats
+      - tempo
     environment:
       # Required — override with real values in production
       NATS_URL: nats://nats:4222
@@ -21,8 +22,14 @@ services:
       # DECOMPOSITION_TIMEOUT_SECONDS: 30
       # MAX_SUBTASKS_PER_PLAN: 20
       # PLAN_EXECUTOR_MAX_PARALLEL: 5
+
+      # Observability (Step 9 env vars)
+      LOG_LEVEL: info
+      LOG_FORMAT: json
+      OTEL_EXPORTER_OTLP_ENDPOINT: tempo:4317
+      LOKI_URL: http://loki:3100
     ports:
-      - "8080:8080"   # health endpoint
+      - "8080:8080"   # health + debug endpoints
     restart: unless-stopped
     networks:
       - cerberos
@@ -45,8 +52,68 @@ services:
     networks:
       - cerberos
 
+  loki:
+    image: grafana/loki:2.9.0
+    container_name: aegis-loki
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./observability/loki-config.yml:/etc/loki/local-config.yaml
+      - loki-data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    networks:
+      - cerberos
+
+  promtail:
+    image: grafana/promtail:2.9.0
+    container_name: aegis-promtail
+    volumes:
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./observability/promtail-config.yml:/etc/promtail/config.yml
+    command: -config.file=/etc/promtail/config.yml
+    depends_on:
+      - loki
+    networks:
+      - cerberos
+
+  tempo:
+    image: grafana/tempo:2.3.0
+    container_name: aegis-tempo
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "3200:3200"   # Tempo HTTP
+    volumes:
+      - ./observability/tempo-config.yml:/etc/tempo.yml
+      - tempo-data:/tmp/tempo
+    command: -config.file=/etc/tempo.yml
+    networks:
+      - cerberos
+
+  grafana:
+    image: grafana/grafana:10.2.0
+    container_name: aegis-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
+      - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor
+    volumes:
+      - ./observability/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - loki
+      - tempo
+    networks:
+      - cerberos
+
 volumes:
   nats-data:
+  loki-data:
+  tempo-data:
+  grafana-data:
 
 networks:
   cerberos:
