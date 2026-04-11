@@ -35,8 +35,6 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
-	"log"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -100,7 +98,6 @@ type CredentialRequestHandler func(agentID, taskID, requestID, keyName, label st
 type Gateway struct {
 	nats   interfaces.NATSClient
 	nodeID string
-	logger *log.Logger
 
 	taskHandler               TaskHandler
 	agentStatusHandler        AgentStatusHandler
@@ -117,7 +114,6 @@ func New(nats interfaces.NATSClient, nodeID string) *Gateway {
 	return &Gateway{
 		nats:   nats,
 		nodeID: nodeID,
-		logger: log.New(os.Stdout, "[gateway] ", log.LstdFlags|log.LUTC),
 	}
 }
 
@@ -170,7 +166,8 @@ func (g *Gateway) Start() error {
 	if err := g.nats.Subscribe(TopicCredentialRequest, g.handleRawCredentialRequest); err != nil {
 		return fmt.Errorf("subscribe %s: %w", TopicCredentialRequest, err)
 	}
-	g.logger.Printf("gateway started on node %s — subscribed to inbound topics", g.nodeID)
+	observability.LogFromContext(observability.WithModule(context.Background(), "comms_gateway")).
+		Info("gateway started — subscribed to inbound topics", "node_id", g.nodeID)
 	return nil
 }
 
@@ -188,29 +185,22 @@ func (g *Gateway) IsConnected() bool {
 func (g *Gateway) handleRawInboundTask(subject string, data []byte) error {
 	envelope, err := validateEnvelope(data)
 	if err != nil {
-		g.logger.Printf("rejected malformed inbound task envelope: %v", err)
+		ctx := observability.WithModule(context.Background(), "comms_gateway")
+		observability.LogFromContext(ctx).Warn("rejected malformed inbound task envelope", "error", err)
 		_ = g.publishDeadLetter(data, err.Error())
 		return err
 	}
 
-	// ── Step 3: Generate or extract trace_id ──────────────────────────────
-	traceID := envelope.TraceID
-	if traceID == "" {
-		traceID = newUUID()
-	}
-
 	var task types.UserTask
 	if err := json.Unmarshal(envelope.Payload, &task); err != nil {
-		g.logger.Printf("failed to deserialize user_task payload: %v", err)
+		ctx := observability.WithModule(context.Background(), "comms_gateway")
+		observability.LogFromContext(ctx).Warn("failed to deserialize user_task payload", "error", err)
 		_ = g.publishDeadLetter(data, fmt.Sprintf("payload deserialize error: %v", err))
 		return fmt.Errorf("deserialize user_task: %w", err)
 	}
 
-	// Build root context with trace/task IDs and the source module.
-	ctx := context.Background()
-	ctx = observability.WithTraceID(ctx, traceID)
+	ctx := extractOrCreateCtx(envelope, "comms_gateway")
 	ctx = observability.WithTaskID(ctx, task.TaskID)
-	ctx = observability.WithModule(ctx, "comms_gateway")
 
 	observability.LogFromContext(ctx).Info("user task received",
 		"user_id", task.UserID,
@@ -226,7 +216,8 @@ func (g *Gateway) handleRawInboundTask(subject string, data []byte) error {
 func (g *Gateway) handleRawAgentStatus(subject string, data []byte) error {
 	envelope, err := validateEnvelope(data)
 	if err != nil {
-		g.logger.Printf("rejected malformed agent status envelope: %v", err)
+		observability.LogFromContext(observability.WithModule(context.Background(), "comms_gateway")).
+			Warn("rejected malformed agent status envelope", "error", err)
 		return err
 	}
 
@@ -245,6 +236,9 @@ func (g *Gateway) handleRawAgentStatus(subject string, data []byte) error {
 		return fmt.Errorf("no agent status handler registered")
 	}
 	ctx := extractOrCreateCtx(envelope, "task_monitor")
+	if payload.TaskID != "" {
+		ctx = observability.WithTaskID(ctx, payload.TaskID)
+	}
 	return g.agentStatusHandler(ctx, types.AgentStatusUpdate{
 		AgentID:             payload.AgentID,
 		OrchestratorTaskRef: envelope.CorrelationID,
@@ -292,7 +286,8 @@ func (g *Gateway) handleCapabilityResponse(subject string, data []byte) error {
 func (g *Gateway) handleRawTaskAccepted(subject string, data []byte) error {
 	envelope, err := validateEnvelope(data)
 	if err != nil {
-		g.logger.Printf("rejected malformed task accepted envelope: %v", err)
+		observability.LogFromContext(observability.WithModule(context.Background(), "comms_gateway")).
+			Warn("rejected malformed task accepted envelope", "error", err)
 		return err
 	}
 
@@ -313,16 +308,12 @@ func (g *Gateway) handleRawTaskAccepted(subject string, data []byte) error {
 func (g *Gateway) handleRawTaskResult(subject string, data []byte) error {
 	envelope, err := validateEnvelope(data)
 	if err != nil {
-		g.logger.Printf("rejected malformed task result envelope: %v", err)
+		observability.LogFromContext(observability.WithModule(context.Background(), "comms_gateway")).
+			Warn("rejected malformed task result envelope", "error", err)
 		return err
 	}
 
-	// Extract trace_id from envelope and hydrate context.
-	ctx := context.Background()
-	if envelope.TraceID != "" {
-		ctx = observability.WithTraceID(ctx, envelope.TraceID)
-	}
-	ctx = observability.WithModule(ctx, "comms_gateway")
+	ctx := extractOrCreateCtx(envelope, "comms_gateway")
 
 	var payload struct {
 		TaskID      string          `json:"task_id"`
@@ -366,15 +357,12 @@ func (g *Gateway) handleRawTaskResult(subject string, data []byte) error {
 func (g *Gateway) handleRawTaskFailed(subject string, data []byte) error {
 	envelope, err := validateEnvelope(data)
 	if err != nil {
-		g.logger.Printf("rejected malformed task failed envelope: %v", err)
+		observability.LogFromContext(observability.WithModule(context.Background(), "comms_gateway")).
+			Warn("rejected malformed task failed envelope", "error", err)
 		return err
 	}
 
-	ctx := context.Background()
-	if envelope.TraceID != "" {
-		ctx = observability.WithTraceID(ctx, envelope.TraceID)
-	}
-	ctx = observability.WithModule(ctx, "comms_gateway")
+	ctx := extractOrCreateCtx(envelope, "comms_gateway")
 
 	var payload struct {
 		TaskID       string `json:"task_id"`
@@ -411,7 +399,8 @@ func (g *Gateway) handleRawTaskFailed(subject string, data []byte) error {
 func (g *Gateway) handleRawCredentialRequest(subject string, data []byte) error {
 	envelope, err := validateEnvelope(data)
 	if err != nil {
-		g.logger.Printf("rejected malformed credential.request envelope: %v", err)
+		observability.LogFromContext(observability.WithModule(context.Background(), "comms_gateway")).
+			Warn("rejected malformed credential.request envelope", "error", err)
 		return err
 	}
 
@@ -435,7 +424,9 @@ func (g *Gateway) handleRawCredentialRequest(subject string, data []byte) error 
 	}
 
 	if g.credentialRequestHandler == nil {
-		g.logger.Printf("credential.request (user_input) received but no handler registered: task_id=%s", payload.TaskID)
+		ctx := extractOrCreateCtx(envelope, "comms_gateway")
+		observability.LogFromContext(ctx).Warn("credential.request (user_input) received but no handler registered",
+			"task_id", payload.TaskID)
 		return nil
 	}
 	return g.credentialRequestHandler(
