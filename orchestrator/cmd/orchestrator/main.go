@@ -22,10 +22,12 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/mlim3/cerberOS/orchestrator/internal/config"
+	"github.com/mlim3/cerberOS/orchestrator/internal/databusproxy"
 	"github.com/mlim3/cerberOS/orchestrator/internal/dispatcher"
 	"github.com/mlim3/cerberOS/orchestrator/internal/executor"
 	"github.com/mlim3/cerberOS/orchestrator/internal/gateway"
@@ -57,9 +59,21 @@ func main() {
 	rt.health.StartMonitorLoop(cfg.HealthCheckIntervalSeconds, cfg.HealthCheckIntervalSeconds)
 	go func() {
 		addr := ":8080"
-		log.Printf("health endpoint listening on %s", addr)
-		if err := http.ListenAndServe(addr, http.HandlerFunc(rt.health.ServeHTTP)); err != nil {
-			log.Printf("health server stopped: %v", err)
+		mux := http.NewServeMux()
+		mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			rt.health.ServeHTTP(w, r)
+		})
+		if isHTTPMemoryEndpoint(cfg.MemoryEndpoint) {
+			mux.Handle("/v1/databus/", databusproxy.New(cfg.MemoryEndpoint))
+			log.Printf("databus proxy enabled: /v1/databus/* -> %s/*", strings.TrimSuffix(cfg.MemoryEndpoint, "/"))
+		}
+		log.Printf("HTTP listening on %s", addr)
+		if err := http.ListenAndServe(addr, mux); err != nil {
+			log.Printf("HTTP server stopped: %v", err)
 		}
 	}()
 
@@ -273,6 +287,11 @@ func boolToInt(v bool) int {
 		return 1
 	}
 	return 0
+}
+
+func isHTTPMemoryEndpoint(s string) bool {
+	s = strings.TrimSpace(s)
+	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
 }
 
 func demoConfig() *config.OrchestratorConfig {
