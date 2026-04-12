@@ -1,0 +1,333 @@
+# =============================================================================
+# cerberOS — Root Docker Compose
+# =============================================================================
+#
+# Start the full stack:   docker compose up --build
+#
+# Port map (host → container):
+#   3000 → Grafana
+#   3001 → io API/UI
+#   4222 → NATS client
+#   7777 → NATS exporter
+#   8000 → vault engine API
+#   8080 → orchestrator health
+#   8081 → memory API
+#   8200 → OpenBao
+#   8222 → NATS monitoring
+#   3100 → Loki
+#   9090 → Prometheus
+#   9091 → DataBus health/metrics
+#   9190 → agents metrics
+#
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# 1. MESSAGING — single-node NATS JetStream
+#    Named "nats-1" so aegis-databus default env (nats://nats-1:4222) works.
+#    Alias "nats" keeps NATS_URL=nats://nats:4222 working for everything else.
+# ---------------------------------------------------------------------------
+services:
+  nats-1:
+    image: nats:2.10-alpine
+    command: ["--jetstream", "--store_dir=/data", "-m", "8222"]
+    volumes:
+      - nats1-data:/data
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      cerberos:
+        aliases:
+          - nats
+
+  # ---------------------------------------------------------------------------
+  # 2. CONTROL PLANE
+  # ---------------------------------------------------------------------------
+  orchestrator:
+    build:
+      context: ./orchestrator
+    depends_on:
+      nats-1:
+        condition: service_healthy
+    environment:
+      NATS_URL: nats://nats:4222
+      NATS_CREDS_PATH: ""
+      VAULT_ADDR: http://openbao:8200
+      MEMORY_ENDPOINT: http://memory-api:8081
+      IO_API_BASE: http://io:3001
+      DECOMPOSITION_TIMEOUT_SECONDS: "120"
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    networks:
+      - cerberos
+
+  # ---------------------------------------------------------------------------
+  # 3. USER / IO
+  # ---------------------------------------------------------------------------
+  io:
+    build:
+      context: ./io
+      args:
+        ENABLE_VOICE: "false"
+    ports:
+      - "3001:3001"
+    depends_on:
+      nats-1:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DEMO_MODE: "false"
+      NATS_URL: nats://nats:4222
+      LOG_LEVEL: debug
+      STT_PROVIDER: disabled
+      MEMORY_API_BASE: http://memory-api:8081
+    restart: unless-stopped
+    networks:
+      - cerberos
+
+  # ---------------------------------------------------------------------------
+  # 4. MEMORY
+  # ---------------------------------------------------------------------------
+  memory-db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRES_DB: ${POSTGRES_DB:-memory_db}
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./memory/scripts/init-db.sql:/docker-entrypoint-initdb.d/01-init-db.sql:ro
+      - ./scripts/init-openbao-db.sql:/docker-entrypoint-initdb.d/02-init-openbao-db.sql:ro
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-user} -d ${POSTGRES_DB:-memory_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      cerberos:
+        # Alias "db" so vault/openbao.hcl connection_url (postgres://...@db:5432/...)
+        # resolves without a custom HCL override.
+        aliases:
+          - db
+
+  memory-api:
+    build:
+      context: ./memory
+    depends_on:
+      memory-db:
+        condition: service_healthy
+    environment:
+      DB_HOST: memory-db
+      DB_PORT: "5432"
+      DB_USER: ${POSTGRES_USER:-user}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      DB_NAME: ${POSTGRES_DB:-memory_db}
+      PORT: "8081"
+      VAULT_MASTER_KEY: ${VAULT_MASTER_KEY:?Set VAULT_MASTER_KEY in .env (exactly 32 ASCII chars)}
+      INTERNAL_VAULT_API_KEY: ${INTERNAL_VAULT_API_KEY:?Set INTERNAL_VAULT_API_KEY in .env}
+    ports:
+      - "8081:8081"
+    restart: unless-stopped
+    networks:
+      - cerberos
+
+  # ---------------------------------------------------------------------------
+  # 5. CREDENTIAL VAULT
+  # ---------------------------------------------------------------------------
+  openbao:
+    image: openbao/openbao:latest
+    command: server -config=/openbao/local/openbao.hcl
+    ports:
+      - "8200:8200"
+    environment:
+      BAO_ADDR: http://127.0.0.1:8200
+    volumes:
+      - ./vault/openbao.hcl:/openbao/local/openbao.hcl:ro
+    cap_add:
+      - IPC_LOCK
+    depends_on:
+      memory-db:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - cerberos
+
+  vault:
+    build:
+      context: ./vault/engine
+    ports:
+      - "8000:8000"
+    environment:
+      BAO_ADDR: http://openbao:8200
+      BAO_TOKEN: ${BAO_TOKEN:-}
+    depends_on:
+      - openbao
+    restart: "no"
+    networks:
+      - cerberos
+
+  # ---------------------------------------------------------------------------
+  # 6. DATABUS
+  # ---------------------------------------------------------------------------
+  aegis-databus:
+    build:
+      context: ./aegis-databus
+      target: aegis-databus
+    depends_on:
+      nats-1:
+        condition: service_healthy
+      orchestrator:
+        condition: service_started
+    environment:
+      AEGIS_NATS_URL: nats://nats-1:4222
+      AEGIS_NATS_HTTP_URL: http://nats-1:8222
+      AEGIS_NATS_REPLICAS: "1"
+      AEGIS_ORCHESTRATOR_URL: http://orchestrator:8080
+      AEGIS_MEMORY_URL: http://memory-api:8081/v1/memory
+    ports:
+      - "9091:9091"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9091/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 36
+      start_period: 600s
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    user: "65532:65532"
+    networks:
+      - cerberos
+
+  # ---------------------------------------------------------------------------
+  # 7. OBSERVABILITY (always on — Grafana, Prometheus, Loki, Promtail, NATS exporter)
+  # ---------------------------------------------------------------------------
+  nats-exporter:
+    image: natsio/prometheus-nats-exporter:latest
+    command:
+      - "-varz"
+      - "-connz"
+      - "-connz_detailed"
+      - "-subz"
+      - "-routez"
+      - "http://nats-1:8222"
+    ports:
+      - "7777:7777"
+    depends_on:
+      - nats-1
+    networks:
+      - cerberos
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./aegis-databus/config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./aegis-databus/config/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+    ports:
+      - "9090:9090"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    depends_on:
+      - nats-exporter
+    networks:
+      - cerberos
+
+  grafana:
+    image: grafana/grafana:latest
+    volumes:
+      - ./aegis-databus/config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./orchestrator/observability/grafana/dashboards:/etc/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_INSTALL_PLUGINS: grafana-piechart-panel
+    depends_on:
+      - prometheus
+      - loki
+    networks:
+      - cerberos
+
+  loki:
+    image: grafana/loki:2.9.5
+    command: -config.file=/etc/loki/local-config.yaml
+    ports:
+      - "3100:3100"
+    networks:
+      - cerberos
+
+  promtail:
+    image: grafana/promtail:2.9.5
+    command: -config.file=/etc/promtail/config.yml
+    volumes:
+      - ./orchestrator/observability/promtail/config.yml:/etc/promtail/config.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - promtail-positions:/tmp
+    depends_on:
+      - loki
+    networks:
+      - cerberos
+
+  # ---------------------------------------------------------------------------
+  # 8. AGENTS
+  # ---------------------------------------------------------------------------
+  simulator:
+    build:
+      context: ./agents-component
+    entrypoint: ["/app/simulator"]
+    depends_on:
+      nats-1:
+        condition: service_healthy
+    environment:
+      AEGIS_NATS_URL: nats://nats:4222
+    restart: unless-stopped
+    networks:
+      - cerberos
+
+  aegis-agents:
+    build:
+      context: ./agents-component
+    depends_on:
+      nats-1:
+        condition: service_healthy
+      simulator:
+        condition: service_started
+    environment:
+      AEGIS_NATS_URL: nats://nats:4222
+      AEGIS_AGENT_PROCESS_PATH: /app/agent-process
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    ports:
+      - "9190:9090"
+    restart: unless-stopped
+    networks:
+      - cerberos
+
+# =============================================================================
+# NETWORKS
+# =============================================================================
+networks:
+  cerberos:
+    name: cerberos
+
+# =============================================================================
+# VOLUMES
+# =============================================================================
+volumes:
+  nats1-data:
+  postgres-data:
+  promtail-positions:
+  # Reserved for future mTLS (see CA_PLAN.md):
+  # certs:

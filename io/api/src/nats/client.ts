@@ -11,7 +11,7 @@
  */
 
 import { connect, type NatsConnection, type JetStreamClient, type Subscription } from 'nats'
-import { ioLog } from './logger'
+import { ioLog } from '../logger'
 
 // ── NATS subjects (aligned with agents-component/internal/comms/subjects.go) ──
 

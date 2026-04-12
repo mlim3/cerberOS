@@ -13,13 +13,23 @@ clients:
   - url: http://loki:3100/loki/api/v1/push
     batchwait: 1s
     batchsize: 1048576
+    external_labels:
+      cluster: cerberos
 
 scrape_configs:
   - job_name: docker
     docker_sd_configs:
       - host: unix:///var/run/docker.sock
         refresh_interval: 5s
+        filters:
+          - name: status
+            values: [running]
     relabel_configs:
+      # Set job unconditionally — guarantees at least one label reaches Loki.
+      # Uses container_id as source so replacement is always applied.
+      - source_labels: ['__meta_docker_container_id']
+        replacement: docker
+        target_label: job
       # Only Docker Compose services (skip random docker run containers)
       - source_labels: [__meta_docker_container_label_com_docker_compose_service]
         regex: ^$
@@ -37,8 +47,6 @@ scrape_configs:
       - source_labels: [__meta_docker_container_name]
         regex: /(.*)
         target_label: container_name
-      - replacement: docker
-        target_label: job
 
     # Unwrap Docker json-file log lines ({"log":"...","stream":"stdout",...}) into plain text for Loki.
     pipeline_stages:

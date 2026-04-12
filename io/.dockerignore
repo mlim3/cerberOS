@@ -1,0 +1,29 @@
+# Version control / IDE
+.git
+.gitignore
+.cursor
+
+# Documentation (not needed at runtime)
+docs/
+*.md
+*.pdf
+*.pptx
+
+# Local env & secrets (never bake into images)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Test artifacts
+**/testdata/
+**/*_test.go
+test/
+
+# Build artifacts (rebuilt in container)
+node_modules/
+dist/
+
+# OS junk
+.DS_Store

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -170,9 +171,16 @@ func main() {
 	logger.Println("HTTP listening on :9091 (healthz=503 until JetStream streams ready)")
 
 	// Retry EnsureStreams — cluster may need time to form; JetStream Raft requires quorum.
+	// AEGIS_NATS_REPLICAS defaults to 1 (single-node); set to 3 for a NATS cluster.
+	natsReplicas := 1
+	if v := os.Getenv("AEGIS_NATS_REPLICAS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			natsReplicas = n
+		}
+	}
 	const ensureMaxAttempts = 25
 	for attempt := 1; attempt <= ensureMaxAttempts; attempt++ {
-		if err := streams.EnsureStreams(nc); err != nil {
+		if err := streams.EnsureStreamsWithReplicas(nc, natsReplicas); err != nil {
 			logger.Printf("ensure streams (attempt %d/%d): %v", attempt, ensureMaxAttempts, err)
 			if attempt < ensureMaxAttempts {
 				time.Sleep(3 * time.Second)

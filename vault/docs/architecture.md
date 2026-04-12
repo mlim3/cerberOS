@@ -9,29 +9,25 @@ This document merges the former `DOCS.md` (operational notes) and `DESIGN_PATTER
 Vault is a **credential broker**. Agents submit scripts with `{{PLACEHOLDER}}` markers; the service resolves secrets, substitutes values, and returns the **completed script**. The agent runs that script in its own environment.
 
 ```
-compose.yaml
+docker-compose.yml (repo root)
   └─ vault (Go binary, :8000)
        ├─ SecretManager  (pluggable — mock by default)
        ├─ Preprocessor   (placeholder scan + atomic resolution + substitution)
        └─ Audit Logger   (structured events — key names, never values)
 
-  └─ ui (:80) — static UI; nginx proxies /inject → vault
-
-  └─ openbao (:8200) — optional; Postgres-backed via memory stack (see setup-openbao.sh)
-
-  └─ swagger (:8080) — OpenAPI UI for openapi.yaml
+  └─ openbao (:8200) — Postgres-backed via memory-db (see bootstrap.sh)
 ```
 
-`compose.yaml` uses the external Docker network `memory_default` so OpenBao can reach Postgres as `db` when the memory stack is up.
+All services share the `cerberos` Docker network defined in the root `docker-compose.yml`.
 
 ---
 
 ## Running locally
 
 ```bash
-cd vault
-docker compose build
-docker compose up
+# From repo root
+docker compose up --build       # full stack
+./bootstrap.sh                  # first run: full stack + OpenBao init/unseal
 ```
 
 The vault service listens on `:8000`. Use the CLI or `POST /inject`:
@@ -160,4 +156,4 @@ These were collected while maintaining the QEMU-based engine:
 - `engine/README.md` — API, CLI, Docker build
 - `CLAUDE.md` — agent guidance for this component
 - `openapi.yaml` — HTTP contract
-- `setup-openbao.sh` — OpenBao + Postgres bootstrap
+- `../../bootstrap.sh` — full stack + OpenBao bootstrap
