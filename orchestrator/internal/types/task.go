@@ -122,8 +122,6 @@ type TaskState struct {
 	CallbackTopic        string          `json:"callback_topic"`
 	UserContextID        string          `json:"user_context_id,omitempty"`
 	IdempotencyWindow    int             `json:"idempotency_window_seconds"`
-	// TraceID is W3C trace_id (32 hex) for logs and agent wire propagation; optional for legacy state.
-	TraceID string `json:"trace_id,omitempty"`
 }
 
 // ─── UserTask ─────────────────────────────────────────────────────────────────
