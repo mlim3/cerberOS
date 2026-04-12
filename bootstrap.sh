@@ -145,9 +145,12 @@ cmd_up() {
     die "VAULT_MASTER_KEY must be exactly 32 characters (see README)"
   fi
 
-  # --- Start stack ---
-  log "Starting Docker stack..."
-  docker compose up --build --detach
+  # --- Postgres before the rest of the stack ---
+  # After `bootstrap.sh down`, DROP DATABASE openbao runs but the Postgres volume often
+  # persists, so docker-entrypoint init scripts do not recreate `openbao`. OpenBao must
+  # not start until that database exists again.
+  log "Starting Postgres (memory-db)..."
+  docker compose up --build --detach memory-db
 
   log "Waiting for Postgres (memory-db)..."
   for _ in $(seq 1 60); do
@@ -159,7 +162,6 @@ cmd_up() {
   docker compose exec memory-db pg_isready -U "${POSTGRES_USER:-user}" -d "${POSTGRES_DB:-memory_db}" >/dev/null 2>&1 \
     || die "Postgres (memory-db) did not become ready"
 
-  # --- OpenBao bootstrap ---
   log "Ensuring openbao database exists..."
   docker compose exec memory-db \
     psql -U "${POSTGRES_USER:-user}" -d "${POSTGRES_DB:-memory_db}" \
@@ -167,6 +169,9 @@ cmd_up() {
     docker compose exec memory-db \
     psql -U "${POSTGRES_USER:-user}" -d "${POSTGRES_DB:-memory_db}" \
     -c "CREATE DATABASE openbao OWNER \"${POSTGRES_USER:-user}\""
+
+  log "Starting remaining Docker services..."
+  docker compose up --build --detach
 
   log "Waiting for OpenBao (localhost:8200)..."
   for _ in $(seq 1 60); do
