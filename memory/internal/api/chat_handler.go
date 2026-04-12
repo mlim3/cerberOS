@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -71,10 +72,44 @@ func (h *ChatHandler) HandleCreateMessage(w http.ResponseWriter, r *http.Request
 	}
 
 	// Validate required fields
-	if req.Role == "" || req.Content == "" {
+	if req.UserID == uuid.Nil || req.Role == "" || req.Content == "" {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "role and content are required", nil))
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "userId, role and content are required", nil))
+		return
+	}
+
+	if req.Role != "user" && req.Role != "assistant" && req.Role != "system" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "role must be user, assistant, or system", nil))
+		return
+	}
+
+	userExists, err := h.repo.UserExists(ctx, pgtype.UUID{Bytes: req.UserID, Valid: true})
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(ErrorResponse("internal", "failed to validate user", err.Error()))
+		return
+	}
+	if !userExists {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(ErrorResponse("not_found", "user not found", nil))
+		return
+	}
+
+	if err := h.repo.ValidateSessionOwnership(ctx, pgtype.UUID{Bytes: sessionID, Valid: true}, pgtype.UUID{Bytes: req.UserID, Valid: true}); err != nil {
+		if errors.Is(err, storage.ErrSessionOwnership) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(ErrorResponse("not_found", "session not found", nil))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(ErrorResponse("internal", "failed to validate session ownership", err.Error()))
 		return
 	}
 
@@ -105,6 +140,12 @@ func (h *ChatHandler) HandleCreateMessage(w http.ResponseWriter, r *http.Request
 
 	msg, err := h.repo.CreateMessage(ctx, params)
 	if err != nil {
+		if errors.Is(err, storage.ErrIdempotencyConflict) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(ErrorResponse("conflict", "idempotency key conflicts with different payload", nil))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(ErrorResponse("internal", "failed to create message", err.Error()))

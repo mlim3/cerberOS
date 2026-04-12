@@ -4,6 +4,54 @@ Version: v1
 Implementation Language: Go  
 Database: PostgreSQL with pgvector
 
+## CLI Tool
+
+The memory service includes a hybrid CLI tool that allows other services or scripts to interact with the memory database directly (avoiding HTTP network latency) or fallback to the HTTP API.
+
+### Build the CLI
+
+```bash
+cd /Users/aniketthakker/Downloads/cerberOS/memory
+go build -o memory-cli ./cmd/cli
+```
+
+### Usage
+
+By default, the CLI will attempt to connect to the HTTP API at `http://localhost:8080`.
+
+```bash
+# Query facts using HTTP API
+./memory-cli chat history --session <session-uuid> --limit 10
+./memory-cli facts query --user <user-uuid> "what is my favorite color?"
+```
+
+#### Direct Database Connection (Zero Latency)
+
+To bypass the HTTP API and connect directly to the database, provide the `-db` flag or set the standard DB environment variables (`DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`).
+
+```bash
+# Connect directly to the DB to avoid network hops
+./memory-cli -db="postgres://user:pass@localhost:5432/memory_db" facts query --user <user-uuid> "tell me about myself"
+```
+
+## Swagger Generation
+
+Swagger is generated from handler annotations with `swaggo/swag`.
+
+From `/Users/colbydobson/cs/cerberOS/memory`, run:
+
+```bash
+go generate ./cmd/server
+```
+
+That regenerates:
+
+- `docs/docs.go`
+- `docs/swagger.json`
+- `docs/swagger.yaml`
+
+The server imports the generated docs package and serves Swagger UI at `http://localhost:8080/swagger/index.html`.
+
 ## 1. Architectural Overview
 
 The Memory Service acts as the central memory layer for the AI OS. It follows a logically distributed architecture on a single PostgreSQL instance, with strict sharding keys that allow physical distribution in the future. Externally, it exposes domain-specific, versioned REST endpoints. Internally, it routes these requests to isolated PostgreSQL schemas, ensuring clear service boundaries, security, and optimized querying.

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -12,11 +13,13 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
 	"github.com/mlim3/cerberOS/memory/internal/api"
 	"github.com/mlim3/cerberOS/memory/internal/logic"
 	"github.com/mlim3/cerberOS/memory/internal/storage"
+	"github.com/pgvector/pgvector-go"
 )
 
 var (
@@ -25,9 +28,30 @@ var (
 	vaultKey   string
 )
 
+type deterministicTestEmbedder struct{}
+
+func (d *deterministicTestEmbedder) Embed(ctx context.Context, text string) (pgvector.Vector, error) {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(text))
+	seed := h.Sum64()
+
+	v := make([]float32, 1536)
+	for i := range v {
+		// Stable pseudo-vector for deterministic test behavior.
+		v[i] = float32((seed+uint64(i*97))%1000) / 1000.0
+	}
+	return pgvector.NewVector(v), nil
+}
+
 func TestMain(m *testing.M) {
 	// Load environment variables for the test
 	_ = godotenv.Load("../.env")
+	if os.Getenv("VAULT_MASTER_KEY") == "" {
+		os.Setenv("VAULT_MASTER_KEY", "0123456789abcdef0123456789abcdef")
+	}
+	if os.Getenv("INTERNAL_VAULT_API_KEY") == "" {
+		os.Setenv("INTERNAL_VAULT_API_KEY", "test-vault-key")
+	}
 
 	// Set up dependencies
 	ctx := context.Background()
@@ -36,9 +60,9 @@ func TestMain(m *testing.M) {
 	dbConfig := storage.Config{
 		Host:     getEnvOrDefault("DB_HOST", "localhost"),
 		Port:     getEnvOrDefault("DB_PORT", "5432"),
-		User:     getEnvOrDefault("DB_USER", "postgres"),
-		Password: getEnvOrDefault("DB_PASSWORD", "postgres"),
-		Database: getEnvOrDefault("DB_NAME", "memory_os"),
+		User:     getEnvOrDefault("DB_USER", "user"),
+		Password: getEnvOrDefault("DB_PASSWORD", "password"),
+		Database: getEnvOrDefault("DB_NAME", "memory_db"),
 	}
 
 	db, err := storage.NewPostgresDB(ctx, dbConfig)
@@ -63,8 +87,8 @@ func TestMain(m *testing.M) {
 	}
 
 	piRepo := &storage.BaseRepository{Pool: dbPool}
-	mockEmbedder := &logic.MockEmbedder{}
-	piProcessor := logic.NewProcessor(piRepo, mockEmbedder)
+	testEmbedder := &deterministicTestEmbedder{}
+	piProcessor := logic.NewProcessor(piRepo, testEmbedder)
 
 	// Initialize handlers
 	chatHandler := api.NewChatHandler(chatRepo)
@@ -83,6 +107,7 @@ func TestMain(m *testing.M) {
 	mux.HandleFunc("POST /api/v1/personal_info/{userId}/query", piHandler.Query)
 	mux.HandleFunc("GET /api/v1/personal_info/{userId}/all", piHandler.GetAll)
 	mux.HandleFunc("PUT /api/v1/personal_info/{userId}/facts/{factId}", piHandler.UpdateFact)
+	mux.HandleFunc("DELETE /api/v1/personal_info/{userId}/facts/{factId}", piHandler.DeleteFact)
 
 	mux.HandleFunc("POST /api/v1/system/events", logHandler.HandleCreateSystemEvent)
 	mux.HandleFunc("GET /api/v1/system/events", logHandler.HandleListSystemEvents)
@@ -94,6 +119,8 @@ func TestMain(m *testing.M) {
 	vaultMux.HandleFunc("DELETE /api/v1/vault/{userId}/secrets/{keyName}", vaultHandler.HandleDeleteSecret)
 	mux.Handle("/api/v1/vault/", http.StripPrefix("", api.RequireVaultKey(vaultMux)))
 
+	mux.HandleFunc("POST /api/v1/agent/{taskId}/executions", agentHandler.HandleCreateTaskExecution)
+	mux.HandleFunc("GET /api/v1/agent/{taskId}/executions", agentHandler.HandleGetExecutions)
 	mux.HandleFunc("POST /api/v1/agents/tasks/{taskId}/executions", agentHandler.HandleCreateTaskExecution)
 	mux.HandleFunc("GET /api/v1/agents/tasks/{taskId}/executions", agentHandler.HandleGetExecutions)
 
@@ -163,6 +190,23 @@ func parseResponse(t *testing.T, resp *http.Response, target interface{}) {
 	}
 }
 
+func seedUser(t *testing.T, userID string) {
+	t.Helper()
+	u, err := uuid.Parse(userID)
+	if err != nil {
+		t.Fatalf("invalid user id: %v", err)
+	}
+	email := fmt.Sprintf("test-%s@example.com", u.String())
+	_, err = dbPool.Exec(context.Background(),
+		`INSERT INTO identity_schema.users (id, email) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING`,
+		pgtype.UUID{Bytes: u, Valid: true},
+		email,
+	)
+	if err != nil {
+		t.Fatalf("failed to seed user: %v", err)
+	}
+}
+
 // ==========================================
 // SCENARIO 2: CHAT & IDEMPOTENCY
 // ==========================================
@@ -170,6 +214,7 @@ func TestChatAndIdempotency(t *testing.T) {
 	sessionID := uuid.New().String()
 	userID := uuid.New().String()
 	idempotencyKey := uuid.New().String()
+	seedUser(t, userID)
 
 	t.Run("Happy Path - Save a message", func(t *testing.T) {
 		reqBody := map[string]interface{}{
@@ -253,13 +298,25 @@ func TestChatAndIdempotency(t *testing.T) {
 		}
 	})
 
-	t.Run("Cross-User Security", func(t *testing.T) {
-		// Attempt to get chat history for sessionID but the API might check UserID if we passed it in some way
-		// Note: The current chat API structure uses /api/v1/chat/{sessionId}/messages and doesn't explicitly authenticate the user for GET
-		// Based on requirements, we should verify cross-user security returns 404 or 401.
-		// If the API isn't built to restrict session to user, this test will document the current behavior.
-		t.Log("Note: Currently the chat handler doesn't enforce user ownership of sessions on GET")
-		// We'll just verify the GET still works for now, but to fully pass the strict requirement we may need to modify the server code later
+	t.Run("Idempotency Conflict On Different Payload", func(t *testing.T) {
+		reqBody := map[string]interface{}{
+			"userId":         userID,
+			"role":           "assistant",
+			"content":        "Changed content",
+			"idempotencyKey": idempotencyKey,
+		}
+
+		resp := doRequest(t, "POST", fmt.Sprintf("/api/v1/chat/%s/messages", sessionID), reqBody, nil)
+		if resp.StatusCode != http.StatusConflict {
+			t.Fatalf("Expected status 409, got %d", resp.StatusCode)
+		}
+
+		var result map[string]interface{}
+		parseResponse(t, resp, &result)
+		errObj := result["error"].(map[string]interface{})
+		if errObj["code"] != "conflict" {
+			t.Fatalf("Expected conflict error code, got %v", errObj["code"])
+		}
 	})
 }
 
@@ -268,6 +325,7 @@ func TestChatAndIdempotency(t *testing.T) {
 // ==========================================
 func TestPersonalInfoAndConcurrency(t *testing.T) {
 	userID := uuid.New().String()
+	seedUser(t, userID)
 
 	t.Run("Semantic Search", func(t *testing.T) {
 		// Save 3 different chunks
@@ -280,7 +338,7 @@ func TestPersonalInfoAndConcurrency(t *testing.T) {
 		for _, chunk := range chunks {
 			reqBody := map[string]interface{}{
 				"content":      chunk,
-				"sourceType":   "test",
+				"sourceType":   "chat",
 				"sourceId":     uuid.New().String(),
 				"extractFacts": true,
 			}
@@ -327,7 +385,7 @@ func TestPersonalInfoAndConcurrency(t *testing.T) {
 		// 1. Create a fact first via Save
 		saveReq := map[string]interface{}{
 			"content":      "My phone number is 555-1234",
-			"sourceType":   "test",
+			"sourceType":   "chat",
 			"sourceId":     uuid.New().String(),
 			"extractFacts": true,
 		}
@@ -394,6 +452,39 @@ func TestPersonalInfoAndConcurrency(t *testing.T) {
 			t.Errorf("Expected 409 Conflict for stale update, got %d", updateRespB.StatusCode)
 		}
 	})
+
+	t.Run("Delete Fact", func(t *testing.T) {
+		saveReq := map[string]interface{}{
+			"content":      "I prefer keyboard shortcuts.",
+			"sourceType":   "chat",
+			"sourceId":     uuid.New().String(),
+			"extractFacts": true,
+		}
+		saveResp := doRequest(t, "POST", fmt.Sprintf("/api/v1/personal_info/%s/save", userID), saveReq, nil)
+		if saveResp.StatusCode != http.StatusOK {
+			t.Fatalf("Failed to save fact for delete test: got %d", saveResp.StatusCode)
+		}
+
+		getResp := doRequest(t, "GET", fmt.Sprintf("/api/v1/personal_info/%s/all", userID), nil, nil)
+		var getResult map[string]interface{}
+		parseResponse(t, getResp, &getResult)
+		facts := getResult["data"].(map[string]interface{})["facts"].([]interface{})
+		if len(facts) == 0 {
+			t.Fatalf("No facts found for delete test")
+		}
+		factID := facts[len(facts)-1].(map[string]interface{})["factId"].(string)
+
+		delResp := doRequest(t, "DELETE", fmt.Sprintf("/api/v1/personal_info/%s/facts/%s", userID, factID), nil, nil)
+		if delResp.StatusCode != http.StatusOK {
+			t.Fatalf("Expected 200 on delete, got %d", delResp.StatusCode)
+		}
+		var delResult map[string]interface{}
+		parseResponse(t, delResp, &delResult)
+		data := delResult["data"].(map[string]interface{})
+		if data["deleted"] != true {
+			t.Fatalf("Expected deleted=true, got %v", data["deleted"])
+		}
+	})
 }
 
 // ==========================================
@@ -401,6 +492,7 @@ func TestPersonalInfoAndConcurrency(t *testing.T) {
 // ==========================================
 func TestVaultSecurity(t *testing.T) {
 	userID := uuid.New().String()
+	seedUser(t, userID)
 
 	t.Run("Unauthorized Access", func(t *testing.T) {
 		reqBody := map[string]interface{}{
@@ -422,8 +514,8 @@ func TestVaultSecurity(t *testing.T) {
 			t.Errorf("Expected error envelope in response")
 		} else {
 			errData := errResp["error"].(map[string]interface{})
-			if errData["code"] != "UNAUTHORIZED" {
-				t.Errorf("Expected error code UNAUTHORIZED, got %v", errData["code"])
+			if errData["code"] != "invalid_argument" {
+				t.Errorf("Expected error code invalid_argument, got %v", errData["code"])
 			}
 		}
 	})
@@ -549,50 +641,57 @@ func TestTaskExecutionLogs(t *testing.T) {
 			ActionType string
 			Status     string
 		}{
-			{"analysis", "completed"},
-			{"execution", "in_progress"},
-			{"execution", "completed"},
+			{"reasoning_step", "pending"},
+			{"tool_call", "success"},
+			{"final_answer", "failed"},
 		}
 
 		for _, step := range steps {
 			reqBody := map[string]interface{}{
-				"id":          uuid.New().String(),
-				"agent_id":    agentID,
-				"action_type": step.ActionType,
-				"payload":     []byte(`{"key":"value"}`),
-				"status":      step.Status,
+				"agentId":    agentID,
+				"actionType": step.ActionType,
+				"payload":    map[string]interface{}{"key": "value"},
+				"status":     step.Status,
 			}
 
-			resp := doRequest(t, "POST", fmt.Sprintf("/api/v1/agents/tasks/%s/executions", taskID), reqBody, nil)
+			resp := doRequest(t, "POST", fmt.Sprintf("/api/v1/agent/%s/executions", taskID), reqBody, nil)
 			if resp.StatusCode != http.StatusCreated {
 				t.Fatalf("Failed to create task execution: expected 201, got %d", resp.StatusCode)
+			}
+
+			var createResp map[string]interface{}
+			parseResponse(t, resp, &createResp)
+			data := createResp["data"].(map[string]interface{})
+			if data["executionId"] == nil || data["createdAt"] == nil {
+				t.Fatalf("Expected executionId and createdAt in response")
 			}
 		}
 
 		// 2. Call GET endpoint
-		resp := doRequest(t, "GET", fmt.Sprintf("/api/v1/agents/tasks/%s/executions", taskID), nil, nil)
+		resp := doRequest(t, "GET", fmt.Sprintf("/api/v1/agent/%s/executions?limit=2", taskID), nil, nil)
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("Failed to get task executions: expected 200, got %d", resp.StatusCode)
 		}
 
-		var executions []map[string]interface{}
-		parseResponse(t, resp, &executions)
+		var result map[string]interface{}
+		parseResponse(t, resp, &result)
+		data := result["data"].(map[string]interface{})
+		executions := data["executions"].([]interface{})
 
-		// 3. Verify that 3 steps are returned
-		if len(executions) != 3 {
-			t.Fatalf("Expected 3 task executions, got %d", len(executions))
+		// 3. Verify limit is respected
+		if len(executions) != 2 {
+			t.Fatalf("Expected 2 task executions due to limit, got %d", len(executions))
 		}
 
-		// 4. Verify chronological order (and that they match the inserted steps)
-		for i, step := range steps {
-			exec := executions[i]
-			if exec["action_type"] != step.ActionType {
-				t.Errorf("Step %d: expected action_type %s, got %v", i, step.ActionType, exec["action_type"])
+		// 4. Verify chronological order and shape
+		for i, execAny := range executions {
+			exec := execAny.(map[string]interface{})
+			if exec["actionType"] != steps[i].ActionType {
+				t.Errorf("Step %d: expected actionType %s, got %v", i, steps[i].ActionType, exec["actionType"])
 			}
-			if exec["status"] != step.Status {
-				t.Errorf("Step %d: expected status %s, got %v", i, step.Status, exec["status"])
+			if exec["status"] != steps[i].Status {
+				t.Errorf("Step %d: expected status %s, got %v", i, steps[i].Status, exec["status"])
 			}
 		}
 	})
 }
-

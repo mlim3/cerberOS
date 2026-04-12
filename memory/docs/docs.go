@@ -15,6 +15,86 @@ const docTemplate = `{
     "host": "{{.Host}}",
     "basePath": "{{.BasePath}}",
     "paths": {
+        "/api/v1/agent/{taskId}/executions": {
+            "get": {
+                "description": "Fetches and returns the chronological log of an agent's work for a specific taskId",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "agents"
+                ],
+                "summary": "Get task executions",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Task ID",
+                        "name": "taskId",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "List of task executions",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/github_com_mlim3_cerberOS_memory_internal_storage.AgentLogsSchemaTaskExecution"
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request"
+                    },
+                    "500": {
+                        "description": "Internal Server Error"
+                    }
+                }
+            },
+            "post": {
+                "description": "Creates a new task execution log for an agent",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "agents"
+                ],
+                "summary": "Create task execution log",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Task ID",
+                        "name": "taskId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Task Execution Payload",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "type": "object"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created"
+                    },
+                    "400": {
+                        "description": "Bad Request"
+                    },
+                    "500": {
+                        "description": "Internal Server Error"
+                    }
+                }
+            }
+        },
         "/api/v1/agents/tasks/{taskId}/executions": {
             "get": {
                 "description": "Fetches and returns the chronological log of an agent's work for a specific taskId",
@@ -203,6 +283,34 @@ const docTemplate = `{
                 }
             }
         },
+        "/api/v1/healthz": {
+            "get": {
+                "description": "Returns service health and database connectivity status",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "system"
+                ],
+                "summary": "Health check",
+                "responses": {
+                    "200": {
+                        "description": "Healthy",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "503": {
+                        "description": "Degraded",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
         "/api/v1/personal_info/{userId}/all": {
             "get": {
                 "description": "Retrieves all stored facts and chunks for a user",
@@ -248,6 +356,62 @@ const docTemplate = `{
             }
         },
         "/api/v1/personal_info/{userId}/facts/{factId}": {
+            "delete": {
+                "description": "Deletes a fact for a user",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "personal_info"
+                ],
+                "summary": "Delete a fact",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "User ID",
+                        "name": "userId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Fact ID",
+                        "name": "factId",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            },
             "put": {
                 "description": "Updates a fact for a user with optimistic concurrency control",
                 "consumes": [

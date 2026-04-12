@@ -3,11 +3,12 @@ package logic
 import (
 	"context"
 	"encoding/json"
-	"math/rand"
+	"fmt"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/pgvector/pgvector-go"
+	"github.com/sashabaranov/go-openai"
 
 	"github.com/mlim3/cerberOS/memory/internal/storage"
 )
@@ -17,15 +18,33 @@ type Embedder interface {
 	Embed(ctx context.Context, text string) (pgvector.Vector, error)
 }
 
-// MockEmbedder implements a fake Embedder returning random 1536-dim vectors
-type MockEmbedder struct{}
+// OpenAIEmbedder implements Embedder using the OpenAI API
+type OpenAIEmbedder struct {
+	client *openai.Client
+}
 
-func (m *MockEmbedder) Embed(ctx context.Context, text string) (pgvector.Vector, error) {
-	v := make([]float32, 1536)
-	for i := range v {
-		v[i] = rand.Float32()
+func NewOpenAIEmbedder(apiKey string) *OpenAIEmbedder {
+	return &OpenAIEmbedder{
+		client: openai.NewClient(apiKey),
 	}
-	return pgvector.NewVector(v), nil
+}
+
+func (o *OpenAIEmbedder) Embed(ctx context.Context, text string) (pgvector.Vector, error) {
+	req := openai.EmbeddingRequest{
+		Input: []string{text},
+		Model: openai.SmallEmbedding3,
+	}
+
+	resp, err := o.client.CreateEmbeddings(ctx, req)
+	if err != nil {
+		return pgvector.Vector{}, fmt.Errorf("failed to create embeddings: %w", err)
+	}
+
+	if len(resp.Data) == 0 {
+		return pgvector.Vector{}, fmt.Errorf("no embeddings returned")
+	}
+
+	return pgvector.NewVector(resp.Data[0].Embedding), nil
 }
 
 // Processor coordinates the logic for personal info storage and retrieval
@@ -105,7 +124,8 @@ func (p *Processor) SavePersonalInfo(ctx context.Context, req SaveRequest) (*Sav
 	err := p.repo.WithTx(ctx, func(q *storage.Queries) error {
 		// 1. Process Chunks
 		for _, text := range chunks {
-			embedding, err := p.embedder.Embed(ctx, text)
+			embedText := fmt.Sprintf("Type: %s | Content: %s", req.SourceType, text)
+			embedding, err := p.embedder.Embed(ctx, embedText)
 			if err != nil {
 				return err
 			}
@@ -119,7 +139,7 @@ func (p *Processor) SavePersonalInfo(ctx context.Context, req SaveRequest) (*Sav
 				UserID:       userUUID,
 				RawText:      text,
 				Embedding:    embedding,
-				ModelVersion: "mock-model-v1",
+				ModelVersion: "text-embedding-3-small",
 			})
 			if err != nil {
 				return err
@@ -222,12 +242,8 @@ func (p *Processor) SemanticQuery(ctx context.Context, userID, query string, top
 		return nil, err
 	}
 
-	// 2. Search
-	chunks, err := p.repo.Querier().QueryChunks(ctx, storage.QueryChunksParams{
-		UserID:    userUUID,
-		Embedding: embedding,
-		Limit:     int32(topK),
-	})
+	// 2. Search (ordered by distance ASC, then created_at DESC)
+	chunks, err := p.repo.QueryChunksBySimilarity(ctx, userUUID, embedding, int32(topK))
 	if err != nil {
 		return nil, err
 	}
@@ -235,21 +251,25 @@ func (p *Processor) SemanticQuery(ctx context.Context, userID, query string, top
 	// 3. Populate Results
 	var results []QueryResult
 	for _, c := range chunks {
-		// Calculate similarity (mocked as random since distance from <=> isn't returned by pgx natively without extra select fields)
-		// Real impl would select the distance and convert to similarity: 1 - distance
-		sim := rand.Float64()
+		sim := 1.0 - c.Distance
+		if sim < 0 {
+			sim = 0
+		}
+		if sim > 1 {
+			sim = 1
+		}
 
 		refs, err := p.repo.Querier().GetSourceReferencesByTarget(ctx, storage.GetSourceReferencesByTargetParams{
 			UserID:   userUUID,
-			TargetID: c.ID,
+			TargetID: c.Chunk.ID,
 		})
 		if err != nil {
 			return nil, err
 		}
 
 		results = append(results, QueryResult{
-			ChunkID:          formatUUID(c.ID),
-			Text:             c.RawText,
+			ChunkID:          formatUUID(c.Chunk.ID),
+			Text:             c.Chunk.RawText,
 			SimilarityScore:  sim,
 			SourceReferences: refs,
 		})
