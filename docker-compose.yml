@@ -284,18 +284,18 @@ services:
   # ---------------------------------------------------------------------------
   # 8. AGENTS
   # ---------------------------------------------------------------------------
-  # simulator:
-  #   build:
-  #     context: ./agents-component
-  #   entrypoint: ["/app/simulator"]
-  #   depends_on:
-  #     nats-1:
-  #       condition: service_healthy
-  #   environment:
-  #     AEGIS_NATS_URL: nats://nats:4222
-  #   restart: unless-stopped
-  #   networks:
-  #     - cerberos
+  simulator:
+    build:
+      context: ./agents-component
+    entrypoint: ["/app/simulator"]
+    depends_on:
+      nats-1:
+        condition: service_healthy
+    environment:
+      AEGIS_NATS_URL: nats://nats:4222
+    restart: unless-stopped
+    networks:
+      - cerberos
 
   aegis-agents:
     build:
