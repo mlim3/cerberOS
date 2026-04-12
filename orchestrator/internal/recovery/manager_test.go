@@ -24,6 +24,7 @@
 package recovery_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -48,19 +49,19 @@ type gatewayMock struct {
 	PublishSpecError      error
 }
 
-func (g *gatewayMock) PublishAgentTerminate(t types.AgentTerminate) error {
+func (g *gatewayMock) PublishAgentTerminate(_ context.Context, t types.AgentTerminate) error {
 	g.TerminateCalls = append(g.TerminateCalls, t)
 	return g.PublishTerminateError
 }
-func (g *gatewayMock) PublishTaskCancel(c types.TaskCancel) error {
+func (g *gatewayMock) PublishTaskCancel(_ context.Context, c types.TaskCancel) error {
 	g.CancelCalls = append(g.CancelCalls, c)
 	return nil
 }
-func (g *gatewayMock) PublishError(_ string, e types.ErrorResponse) error {
+func (g *gatewayMock) PublishError(_ context.Context, _ string, e types.ErrorResponse) error {
 	g.ErrorCalls = append(g.ErrorCalls, e)
 	return nil
 }
-func (g *gatewayMock) PublishTaskSpec(s types.TaskSpec) error {
+func (g *gatewayMock) PublishTaskSpec(_ context.Context, s types.TaskSpec) error {
 	g.TaskSpecCalls = append(g.TaskSpecCalls, s)
 	return g.PublishSpecError
 }
@@ -73,13 +74,13 @@ type policyMock struct {
 	RevokedRefs     []string
 }
 
-func (p *policyMock) VerifyScopeStillValid(_ types.PolicyScope) error {
+func (p *policyMock) VerifyScopeStillValid(_ context.Context, _ types.PolicyScope) error {
 	if p.ScopeExpired {
 		return errors.New("policy scope expired")
 	}
 	return nil
 }
-func (p *policyMock) RevokeCredentials(orchRef string) error {
+func (p *policyMock) RevokeCredentials(_ context.Context, orchRef string) error {
 	p.RevokeCallCount++
 	p.RevokedRefs = append(p.RevokedRefs, orchRef)
 	if p.RevokeFails {
@@ -101,7 +102,7 @@ type stateTransition struct {
 	Reason   string
 }
 
-func (m *monitorMock) StateTransition(taskID, newState, reason string) error {
+func (m *monitorMock) StateTransition(_ context.Context, taskID, newState, reason string) error {
 	m.Transitions = append(m.Transitions, stateTransition{taskID, newState, reason})
 	return m.TransitionError
 }
@@ -183,7 +184,7 @@ func TestHandleRecovery_Timeout_TerminatesWithTimedOut(t *testing.T) {
 	m, gw, pol, mon, _ := newManager(t)
 	ts := activeTask("task-1", "orch-1", 0)
 
-	m.HandleRecovery(ts, types.RecoveryReasonTimeout)
+	m.HandleRecovery(context.Background(), ts, types.RecoveryReasonTimeout)
 
 	// Terminal state must be TIMED_OUT.
 	tr := lastTransition(mon)
@@ -220,7 +221,7 @@ func TestHandleRecovery_AgentRecovering_DoesNotRedispatch(t *testing.T) {
 	m, gw, _, _, _ := newManager(t)
 	ts := activeTask("task-2", "orch-2", 0)
 
-	m.HandleRecovery(ts, types.RecoveryReasonAgentRecovering)
+	m.HandleRecovery(context.Background(), ts, types.RecoveryReasonAgentRecovering)
 
 	// Must NOT re-dispatch — agent is still alive.
 	if len(gw.TaskSpecCalls) != 0 {
@@ -241,7 +242,7 @@ func TestHandleRecovery_AgentTerminated_WithinBudget_ReDispatches(t *testing.T) 
 	ts := activeTask("task-3", "orch-3", 0)
 	seedMemory(t, mem, ts)
 
-	m.HandleRecovery(ts, types.RecoveryReasonAgentTerminated)
+	m.HandleRecovery(context.Background(), ts, types.RecoveryReasonAgentTerminated)
 
 	// task_spec must be re-dispatched.
 	if len(gw.TaskSpecCalls) != 1 {
@@ -279,7 +280,7 @@ func TestHandleRecovery_AgentTerminated_SecondAttempt_ReDispatches(t *testing.T)
 	ts := activeTask("task-4", "orch-4", 1)
 	seedMemory(t, mem, ts)
 
-	m.HandleRecovery(ts, types.RecoveryReasonAgentTerminated)
+	m.HandleRecovery(context.Background(), ts, types.RecoveryReasonAgentTerminated)
 
 	if len(gw.TaskSpecCalls) != 1 {
 		t.Fatalf("TaskSpecCalls = %d, want 1", len(gw.TaskSpecCalls))
@@ -294,7 +295,7 @@ func TestHandleRecovery_MaxRetriesExceeded_TerminatesWithFailed(t *testing.T) {
 	m, gw, pol, mon, _ := newManager(t)
 	ts := activeTask("task-5", "orch-5", 3) // retry_count=3 == max_retries=3
 
-	m.HandleRecovery(ts, types.RecoveryReasonAgentTerminated)
+	m.HandleRecovery(context.Background(), ts, types.RecoveryReasonAgentTerminated)
 
 	// Must NOT re-dispatch.
 	if len(gw.TaskSpecCalls) != 0 {
@@ -325,7 +326,7 @@ func TestHandleRecovery_ScopeExpired_TerminatesWithScopeExpired(t *testing.T) {
 	ts := activeTask("task-6", "orch-6", 0)
 	seedMemory(t, mem, ts)
 
-	m.HandleRecovery(ts, types.RecoveryReasonAgentTerminated)
+	m.HandleRecovery(context.Background(), ts, types.RecoveryReasonAgentTerminated)
 
 	if len(gw.TaskSpecCalls) != 0 {
 		t.Fatal("task_spec published despite scope expired — scope must not expand during recovery")
@@ -351,7 +352,7 @@ func TestHandleRecovery_MemoryReadFails_TerminatesWithStateRecoveryFailed(t *tes
 	mem.ShouldFailReads = true
 	ts := activeTask("task-7", "orch-7", 0)
 
-	m.HandleRecovery(ts, types.RecoveryReasonAgentTerminated)
+	m.HandleRecovery(context.Background(), ts, types.RecoveryReasonAgentTerminated)
 
 	if len(gw.TaskSpecCalls) != 0 {
 		t.Fatal("task_spec published despite memory read failure")
@@ -375,7 +376,7 @@ func TestHandleRecovery_ReDispatchFails_TerminatesWithAgentsUnavailable(t *testi
 	ts := activeTask("task-8", "orch-8", 0)
 	seedMemory(t, mem, ts)
 
-	m.HandleRecovery(ts, types.RecoveryReasonAgentTerminated)
+	m.HandleRecovery(context.Background(), ts, types.RecoveryReasonAgentTerminated)
 
 	tr := lastTransition(mon)
 	if tr.NewState != types.StateFailed {
@@ -393,7 +394,7 @@ func TestTerminateTask_RevokesCredentials_Always(t *testing.T) {
 	m, _, pol, _, _ := newManager(t)
 	ts := activeTask("task-8", "orch-8", 0)
 
-	m.HandleRecovery(ts, types.RecoveryReasonTimeout)
+	m.HandleRecovery(context.Background(), ts, types.RecoveryReasonTimeout)
 
 	if pol.RevokeCallCount == 0 {
 		t.Fatal("RevokeCredentials not called — revocation is non-optional on terminal outcome")
@@ -412,7 +413,7 @@ func TestTerminateTask_VaultDown_ContinuesTermination(t *testing.T) {
 	// Should complete without hanging.
 	done := make(chan struct{})
 	go func() {
-		m.HandleRecovery(ts, types.RecoveryReasonTimeout)
+		m.HandleRecovery(context.Background(), ts, types.RecoveryReasonTimeout)
 		close(done)
 	}()
 
@@ -481,7 +482,7 @@ func TestRecoveryManagerDemoFlow(t *testing.T) {
 	t.Log("step 1: timeout — task-1 exceeds its deadline (retry_count=0, but timeout never retries)")
 
 	tsTimeout := activeTask("task-timeout-1", "orch-timeout-1", 0)
-	m.HandleRecovery(tsTimeout, types.RecoveryReasonTimeout)
+	m.HandleRecovery(context.Background(), tsTimeout, types.RecoveryReasonTimeout)
 
 	if lastTransition(mon).NewState != types.StateTimedOut {
 		t.Fatalf("step 1: state = %q, want TIMED_OUT", lastTransition(mon).NewState)
@@ -519,7 +520,7 @@ func TestRecoveryManagerDemoFlow(t *testing.T) {
 
 	tsSelfRecov := activeTask("task-self-recov-1", "orch-self-recov-1", 0)
 
-	m.HandleRecovery(tsSelfRecov, types.RecoveryReasonAgentRecovering)
+	m.HandleRecovery(context.Background(), tsSelfRecov, types.RecoveryReasonAgentRecovering)
 
 	// Must NOT re-dispatch — agent is still alive.
 	if len(gw.TaskSpecCalls) != 0 {
@@ -544,7 +545,7 @@ func TestRecoveryManagerDemoFlow(t *testing.T) {
 	tsTerminated1 := activeTask("task-terminated-1", "orch-terminated-1", 0)
 	seedMemory(t, mem, tsTerminated1)
 
-	m.HandleRecovery(tsTerminated1, types.RecoveryReasonAgentTerminated)
+	m.HandleRecovery(context.Background(), tsTerminated1, types.RecoveryReasonAgentTerminated)
 
 	if len(gw.TaskSpecCalls) != 1 {
 		t.Fatalf("step 3: TaskSpecCalls = %d, want 1 (re-dispatch)", len(gw.TaskSpecCalls))
@@ -585,7 +586,7 @@ func TestRecoveryManagerDemoFlow(t *testing.T) {
 	tsTerminated2 := activeTask("task-terminated-1", "orch-terminated-1", 1)
 	seedMemory(t, mem, tsTerminated2)
 
-	m.HandleRecovery(tsTerminated2, types.RecoveryReasonAgentTerminated)
+	m.HandleRecovery(context.Background(), tsTerminated2, types.RecoveryReasonAgentTerminated)
 
 	if len(gw.TaskSpecCalls) != 1 {
 		t.Fatalf("step 4: TaskSpecCalls = %d, want 1", len(gw.TaskSpecCalls))
@@ -613,7 +614,7 @@ func TestRecoveryManagerDemoFlow(t *testing.T) {
 	tsMaxed := activeTask("task-maxed-1", "orch-maxed-1", 3)
 	seedMemory(t, mem, tsMaxed)
 
-	m.HandleRecovery(tsMaxed, types.RecoveryReasonAgentTerminated)
+	m.HandleRecovery(context.Background(), tsMaxed, types.RecoveryReasonAgentTerminated)
 
 	if len(gw.TaskSpecCalls) != 0 {
 		t.Fatal("step 5: task_spec published — must not re-dispatch when budget exhausted")
@@ -646,7 +647,7 @@ func TestRecoveryManagerDemoFlow(t *testing.T) {
 	tsScope := activeTask("task-scope-1", "orch-scope-1", 0)
 	seedMemory(t, mem, tsScope)
 
-	m.HandleRecovery(tsScope, types.RecoveryReasonAgentTerminated)
+	m.HandleRecovery(context.Background(), tsScope, types.RecoveryReasonAgentTerminated)
 
 	if len(gw.TaskSpecCalls) != 0 {
 		t.Fatal("step 6: task re-dispatched despite scope expiry — scope must not expand")
@@ -675,7 +676,7 @@ func TestRecoveryManagerDemoFlow(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		m.HandleRecovery(tsVaultDown, types.RecoveryReasonTimeout)
+		m.HandleRecovery(context.Background(), tsVaultDown, types.RecoveryReasonTimeout)
 		close(done)
 	}()
 

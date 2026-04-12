@@ -1,6 +1,7 @@
 package monitor_test
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 	"time"
@@ -22,7 +23,7 @@ type recoveryCall struct {
 	State  string
 }
 
-func (r *recoveryMock) HandleRecovery(ts *types.TaskState, reason types.RecoveryReason) {
+func (r *recoveryMock) HandleRecovery(_ context.Context, ts *types.TaskState, reason types.RecoveryReason) {
 	if ts == nil {
 		return
 	}
@@ -192,7 +193,7 @@ func TestStateTransition_ValidTransitionPersistsState(t *testing.T) {
 	ts := makeTaskState("task-20", types.StateDispatched)
 	m.TrackTask(ts)
 
-	if err := m.StateTransition("task-20", types.StateRunning, "agent became active"); err != nil {
+	if err := m.StateTransition(context.Background(), "task-20", types.StateRunning, "agent became active"); err != nil {
 		t.Fatalf("StateTransition() error = %v", err)
 	}
 
@@ -218,7 +219,7 @@ func TestStateTransition_InvalidTransitionReturnsError(t *testing.T) {
 	ts := makeTaskState("task-21", types.StateDispatched)
 	m.TrackTask(ts)
 
-	err := m.StateTransition("task-21", types.StateDispatchPending, "go backwards")
+	err := m.StateTransition(context.Background(), "task-21", types.StateDispatchPending, "go backwards")
 	if err == nil {
 		t.Fatal("StateTransition() error = nil, want invalid transition error")
 	}
@@ -230,7 +231,7 @@ func TestStateTransition_TerminalStateSetsCompletedAtAndErrorCode(t *testing.T) 
 	ts := makeTaskState("task-22", types.StateRunning)
 	m.TrackTask(ts)
 
-	if err := m.StateTransition("task-22", types.StateTimedOut, "deadline exceeded"); err != nil {
+	if err := m.StateTransition(context.Background(), "task-22", types.StateTimedOut, "deadline exceeded"); err != nil {
 		t.Fatalf("StateTransition() error = %v", err)
 	}
 
@@ -263,7 +264,7 @@ func TestHandleAgentStatusUpdate_ActiveMovesTaskToRunning(t *testing.T) {
 		State:  types.AgentStateActive,
 	}
 
-	if err := m.HandleAgentStatusUpdate(update); err != nil {
+	if err := m.HandleAgentStatusUpdate(context.Background(), update); err != nil {
 		t.Fatalf("HandleAgentStatusUpdate() error = %v", err)
 	}
 
@@ -285,7 +286,7 @@ func TestHandleAgentStatusUpdate_RecoveringTransitionsAndCallsRecoveryManager(t 
 		Reason: "agent restarting",
 	}
 
-	if err := m.HandleAgentStatusUpdate(update); err != nil {
+	if err := m.HandleAgentStatusUpdate(context.Background(), update); err != nil {
 		t.Fatalf("HandleAgentStatusUpdate() error = %v", err)
 	}
 
@@ -317,7 +318,7 @@ func TestHandleAgentStatusUpdate_TerminatedCallsRecoveryManager(t *testing.T) {
 		Reason: "agent crashed",
 	}
 
-	if err := m.HandleAgentStatusUpdate(update); err != nil {
+	if err := m.HandleAgentStatusUpdate(context.Background(), update); err != nil {
 		t.Fatalf("HandleAgentStatusUpdate() error = %v", err)
 	}
 
@@ -342,7 +343,7 @@ func TestHandleAgentStatusUpdate_TerminatedDoesNothingForTerminalTask(t *testing
 		State:  types.AgentStateTerminated,
 	}
 
-	if err := m.HandleAgentStatusUpdate(update); err != nil {
+	if err := m.HandleAgentStatusUpdate(context.Background(), update); err != nil {
 		t.Fatalf("HandleAgentStatusUpdate() error = %v", err)
 	}
 
@@ -362,7 +363,7 @@ func TestHandleAgentStatusUpdate_UnknownStateReturnsError(t *testing.T) {
 		State:  "SOMETHING_UNKNOWN",
 	}
 
-	err := m.HandleAgentStatusUpdate(update)
+	err := m.HandleAgentStatusUpdate(context.Background(), update)
 	if err == nil {
 		t.Fatal("HandleAgentStatusUpdate() error = nil, want non-nil")
 	}
@@ -466,7 +467,7 @@ func TestMonitorDemoFlow(t *testing.T) {
 		State:  types.AgentStateActive,
 	}
 
-	if err := m.HandleAgentStatusUpdate(activeUpdate); err != nil {
+	if err := m.HandleAgentStatusUpdate(context.Background(), activeUpdate); err != nil {
 		t.Fatalf("HandleAgentStatusUpdate(ACTIVE) error = %v", err)
 	}
 
@@ -487,7 +488,7 @@ func TestMonitorDemoFlow(t *testing.T) {
 		Reason: "agent restarting after transient failure",
 	}
 
-	if err := m.HandleAgentStatusUpdate(recoveringUpdate); err != nil {
+	if err := m.HandleAgentStatusUpdate(context.Background(), recoveringUpdate); err != nil {
 		t.Fatalf("HandleAgentStatusUpdate(RECOVERING) error = %v", err)
 	}
 

@@ -31,16 +31,16 @@
 package gateway
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/mlim3/cerberOS/orchestrator/internal/interfaces"
-	"github.com/mlim3/cerberOS/orchestrator/internal/obslog"
+	"github.com/mlim3/cerberOS/orchestrator/internal/observability"
 	"github.com/mlim3/cerberOS/orchestrator/internal/types"
 )
 
@@ -77,13 +77,15 @@ const CapabilityQueryTimeout = 3 * time.Second
 // ── Handler Types ─────────────────────────────────────────────────────────────
 
 // TaskHandler is the callback the Task Dispatcher registers to receive parsed inbound tasks.
-type TaskHandler func(task types.UserTask) error
+// ctx carries the trace_id and task_id extracted/generated at the gateway entry point.
+type TaskHandler func(ctx context.Context, task types.UserTask) error
 
 // AgentStatusHandler is the callback the Task Monitor registers to receive agent status updates.
-type AgentStatusHandler func(update types.AgentStatusUpdate) error
+type AgentStatusHandler func(ctx context.Context, update types.AgentStatusUpdate) error
 
 // TaskResultHandler is the callback the Plan Executor registers to receive task results.
-type TaskResultHandler func(result types.TaskResult) error
+// ctx carries the trace_id extracted from the inbound message envelope.
+type TaskResultHandler func(ctx context.Context, result types.TaskResult) error
 
 // CredentialRequestHandler is called when an agent publishes a credential.request
 // that requires user input (operation: "user_input"). Registered by main.go to
@@ -96,12 +98,11 @@ type CredentialRequestHandler func(agentID, taskID, requestID, keyName, label st
 type Gateway struct {
 	nats   interfaces.NATSClient
 	nodeID string
-	logger *slog.Logger
 
-	taskHandler               TaskHandler
-	agentStatusHandler        AgentStatusHandler
-	taskResultHandler         TaskResultHandler
-	credentialRequestHandler  CredentialRequestHandler
+	taskHandler              TaskHandler
+	agentStatusHandler       AgentStatusHandler
+	taskResultHandler        TaskResultHandler
+	credentialRequestHandler CredentialRequestHandler
 
 	// pendingCapabilityQueries tracks in-flight capability query requests.
 	// key: query_id, value: chan *types.CapabilityResponse
@@ -113,7 +114,6 @@ func New(nats interfaces.NATSClient, nodeID string) *Gateway {
 	return &Gateway{
 		nats:   nats,
 		nodeID: nodeID,
-		logger: obslog.NewLogger("gateway").With("node_id", nodeID),
 	}
 }
 
@@ -166,7 +166,8 @@ func (g *Gateway) Start() error {
 	if err := g.nats.Subscribe(TopicCredentialRequest, g.handleRawCredentialRequest); err != nil {
 		return fmt.Errorf("subscribe %s: %w", TopicCredentialRequest, err)
 	}
-	g.logger.Info("gateway started")
+	observability.LogFromContext(observability.WithModule(context.Background(), "comms_gateway")).
+		Info("gateway started — subscribed to inbound topics", "node_id", g.nodeID)
 	return nil
 }
 
@@ -178,40 +179,49 @@ func (g *Gateway) IsConnected() bool {
 // ── Inbound Handlers ─────────────────────────────────────────────────────────
 
 // handleRawInboundTask handles aegis.orchestrator.tasks.inbound.
-// Validates envelope, deserializes UserTask, routes to taskHandler.
+// Validates envelope, generates/extracts a trace_id, deserializes UserTask,
+// builds the root context, logs receipt, then routes to taskHandler.
 // Invalid envelopes are dead-lettered and not forwarded (§11.1).
 func (g *Gateway) handleRawInboundTask(subject string, data []byte) error {
 	envelope, err := validateEnvelope(data)
 	if err != nil {
-		g.logger.Error("rejected malformed inbound task envelope", "err", err)
+		ctx := observability.WithModule(context.Background(), "comms_gateway")
+		observability.LogFromContext(ctx).Warn("rejected malformed inbound task envelope", "error", err)
 		_ = g.publishDeadLetter(data, err.Error())
 		return err
 	}
 
 	var task types.UserTask
 	if err := json.Unmarshal(envelope.Payload, &task); err != nil {
-		attrs := obslog.AppendTrace([]any{"err", err}, envelope.TraceID)
-		g.logger.Error("failed to deserialize user_task payload", attrs...)
+		ctx := observability.WithModule(context.Background(), "comms_gateway")
+		observability.LogFromContext(ctx).Warn("failed to deserialize user_task payload", "error", err)
 		_ = g.publishDeadLetter(data, fmt.Sprintf("payload deserialize error: %v", err))
 		return fmt.Errorf("deserialize user_task: %w", err)
 	}
 
-	if task.TraceID == "" {
-		task.TraceID = envelope.TraceID
-	}
+	ctx := extractOrCreateCtx(envelope, "comms_gateway")
+	ctx = observability.WithTaskID(ctx, task.TaskID)
+
+	ctx, span := observability.StartSpan(ctx, "task_received")
+	defer span.End()
+	observability.SpanSetTaskAttributes(span, task.TaskID, task.UserID)
+
+	observability.LogFromContext(ctx).Info("user task received",
+		"user_id", task.UserID,
+		"priority", task.Priority)
 
 	if g.taskHandler == nil {
 		return fmt.Errorf("no task handler registered")
 	}
-	g.logger.Info("inbound user_task received", obslog.AppendTrace([]any{"task_id", task.TaskID}, task.TraceID)...)
-	return g.taskHandler(task)
+	return g.taskHandler(ctx, task)
 }
 
 // handleRawAgentStatus handles aegis.agents.status.events.
 func (g *Gateway) handleRawAgentStatus(subject string, data []byte) error {
 	envelope, err := validateEnvelope(data)
 	if err != nil {
-		g.logger.Error("rejected malformed agent status envelope", "err", err)
+		observability.LogFromContext(observability.WithModule(context.Background(), "comms_gateway")).
+			Warn("rejected malformed agent status envelope", "error", err)
 		return err
 	}
 
@@ -229,7 +239,11 @@ func (g *Gateway) handleRawAgentStatus(subject string, data []byte) error {
 	if g.agentStatusHandler == nil {
 		return fmt.Errorf("no agent status handler registered")
 	}
-	return g.agentStatusHandler(types.AgentStatusUpdate{
+	ctx := extractOrCreateCtx(envelope, "task_monitor")
+	if payload.TaskID != "" {
+		ctx = observability.WithTaskID(ctx, payload.TaskID)
+	}
+	return g.agentStatusHandler(ctx, types.AgentStatusUpdate{
 		AgentID:             payload.AgentID,
 		OrchestratorTaskRef: envelope.CorrelationID,
 		TaskID:              payload.TaskID,
@@ -276,7 +290,8 @@ func (g *Gateway) handleCapabilityResponse(subject string, data []byte) error {
 func (g *Gateway) handleRawTaskAccepted(subject string, data []byte) error {
 	envelope, err := validateEnvelope(data)
 	if err != nil {
-		g.logger.Error("rejected malformed task accepted envelope", "err", err)
+		observability.LogFromContext(observability.WithModule(context.Background(), "comms_gateway")).
+			Warn("rejected malformed task accepted envelope", "error", err)
 		return err
 	}
 
@@ -297,9 +312,12 @@ func (g *Gateway) handleRawTaskAccepted(subject string, data []byte) error {
 func (g *Gateway) handleRawTaskResult(subject string, data []byte) error {
 	envelope, err := validateEnvelope(data)
 	if err != nil {
-		g.logger.Error("rejected malformed task result envelope", "err", err)
+		observability.LogFromContext(observability.WithModule(context.Background(), "comms_gateway")).
+			Warn("rejected malformed task result envelope", "error", err)
 		return err
 	}
+
+	ctx := extractOrCreateCtx(envelope, "comms_gateway")
 
 	var payload struct {
 		TaskID      string          `json:"task_id"`
@@ -314,6 +332,11 @@ func (g *Gateway) handleRawTaskResult(subject string, data []byte) error {
 	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
 		return fmt.Errorf("deserialize task.result: %w", err)
 	}
+
+	if payload.TaskID != "" {
+		ctx = observability.WithTaskID(ctx, payload.TaskID)
+	}
+	observability.LogFromContext(ctx).Info("received task result from agents")
 
 	if g.taskResultHandler == nil {
 		return fmt.Errorf("no task result handler registered")
@@ -330,7 +353,7 @@ func (g *Gateway) handleRawTaskResult(subject string, data []byte) error {
 	if !result.Success && result.ErrorCode == "" && payload.Error != "" {
 		result.ErrorCode = payload.Error
 	}
-	return g.taskResultHandler(result)
+	return g.taskResultHandler(ctx, result)
 }
 
 // handleRawTaskFailed normalizes task.failed into the same internal TaskResult
@@ -338,9 +361,12 @@ func (g *Gateway) handleRawTaskResult(subject string, data []byte) error {
 func (g *Gateway) handleRawTaskFailed(subject string, data []byte) error {
 	envelope, err := validateEnvelope(data)
 	if err != nil {
-		g.logger.Error("rejected malformed task failed envelope", "err", err)
+		observability.LogFromContext(observability.WithModule(context.Background(), "comms_gateway")).
+			Warn("rejected malformed task failed envelope", "error", err)
 		return err
 	}
+
+	ctx := extractOrCreateCtx(envelope, "comms_gateway")
 
 	var payload struct {
 		TaskID       string `json:"task_id"`
@@ -351,11 +377,16 @@ func (g *Gateway) handleRawTaskFailed(subject string, data []byte) error {
 	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
 		return fmt.Errorf("deserialize task.failed: %w", err)
 	}
+	if payload.TaskID != "" {
+		ctx = observability.WithTaskID(ctx, payload.TaskID)
+	}
+	observability.LogFromContext(ctx).Info("received task failed from agents", "error_code", payload.ErrorCode)
+
 	if g.taskResultHandler == nil {
 		return fmt.Errorf("no task result handler registered")
 	}
 
-	return g.taskResultHandler(types.TaskResult{
+	return g.taskResultHandler(ctx, types.TaskResult{
 		OrchestratorTaskRef: envelope.CorrelationID,
 		TaskID:              payload.TaskID,
 		AgentID:             payload.AgentID,
@@ -372,7 +403,8 @@ func (g *Gateway) handleRawTaskFailed(subject string, data []byte) error {
 func (g *Gateway) handleRawCredentialRequest(subject string, data []byte) error {
 	envelope, err := validateEnvelope(data)
 	if err != nil {
-		g.logger.Error("rejected malformed credential.request envelope", "err", err)
+		observability.LogFromContext(observability.WithModule(context.Background(), "comms_gateway")).
+			Warn("rejected malformed credential.request envelope", "error", err)
 		return err
 	}
 
@@ -396,8 +428,9 @@ func (g *Gateway) handleRawCredentialRequest(subject string, data []byte) error 
 	}
 
 	if g.credentialRequestHandler == nil {
-		g.logger.Warn("credential.request (user_input) received but no handler registered",
-			obslog.AppendTrace([]any{"task_id", payload.TaskID}, envelope.TraceID)...)
+		ctx := extractOrCreateCtx(envelope, "comms_gateway")
+		observability.LogFromContext(ctx).Warn("credential.request (user_input) received but no handler registered",
+			"task_id", payload.TaskID)
 		return nil
 	}
 	return g.credentialRequestHandler(
@@ -408,34 +441,30 @@ func (g *Gateway) handleRawCredentialRequest(subject string, data []byte) error 
 // ── Outbound: to User I/O Component ──────────────────────────────────────────
 
 // PublishTaskAccepted notifies User I/O that a task was accepted (§FR-ALC-03).
-func (g *Gateway) PublishTaskAccepted(callbackTopic string, accepted types.TaskAccepted) error {
-	return g.publishEnvelope(callbackTopic, "task_accepted", accepted.OrchestratorTaskRef, accepted)
+func (g *Gateway) PublishTaskAccepted(ctx context.Context, callbackTopic string, accepted types.TaskAccepted) error {
+	return g.publishEnvelope(ctx, callbackTopic, "task_accepted", accepted.OrchestratorTaskRef, accepted)
 }
 
 // PublishError sends a structured error response to the User I/O Component (§11.1).
-func (g *Gateway) PublishError(callbackTopic string, resp types.ErrorResponse) error {
-	return g.publishEnvelope(callbackTopic, "error_response", resp.TaskID, resp)
+func (g *Gateway) PublishError(ctx context.Context, callbackTopic string, resp types.ErrorResponse) error {
+	return g.publishEnvelope(ctx, callbackTopic, "error_response", resp.TaskID, resp)
 }
 
 // PublishStatusUpdate forwards an intermediate task progress update to User I/O (§FR-ALC-05).
-func (g *Gateway) PublishStatusUpdate(userContextID string, status types.StatusResponse) error {
-	return g.publishEnvelope(TopicStatusEvents, "task_status_update", status.TaskID, status)
+func (g *Gateway) PublishStatusUpdate(ctx context.Context, userContextID string, status types.StatusResponse) error {
+	return g.publishEnvelope(ctx, TopicStatusEvents, "task_status_update", status.TaskID, status)
 }
 
 // PublishTaskResult delivers the final task result to the task's callback_topic (§11.5).
-func (g *Gateway) PublishTaskResult(callbackTopic string, result types.TaskResult) error {
-	return g.publishEnvelope(callbackTopic, "task_result", result.OrchestratorTaskRef, result)
+func (g *Gateway) PublishTaskResult(ctx context.Context, callbackTopic string, result types.TaskResult) error {
+	return g.publishEnvelope(ctx, callbackTopic, "task_result", result.OrchestratorTaskRef, result)
 }
 
 // ── Outbound: to Agents Component ────────────────────────────────────────────
 
 // PublishTaskSpec dispatches a validated task.inbound request to the Agents
 // Component. The internal TaskSpec is adapted to the agents-component schema.
-func (g *Gateway) PublishTaskSpec(spec types.TaskSpec) error {
-	tid := spec.TraceID
-	if tid == "" {
-		tid = spec.OrchestratorTaskRef
-	}
+func (g *Gateway) PublishTaskSpec(ctx context.Context, spec types.TaskSpec) error {
 	wire := struct {
 		TaskID         string            `json:"task_id"`
 		RequiredSkills []string          `json:"required_skills"`
@@ -448,24 +477,20 @@ func (g *Gateway) PublishTaskSpec(spec types.TaskSpec) error {
 		RequiredSkills: spec.RequiredSkillDomains,
 		Instructions:   buildAgentInstructions(spec),
 		Metadata:       buildAgentMetadata(spec),
-		TraceID:        tid,
+		TraceID:        observability.TraceIDFrom(ctx),
 		UserContextID:  spec.UserContextID,
 	}
-	return g.publishEnvelopeWithTrace(TopicAgentTasksInbound, "task.inbound", spec.OrchestratorTaskRef, tid, wire)
+	return g.publishEnvelope(ctx, TopicAgentTasksInbound, "task.inbound", spec.OrchestratorTaskRef, wire)
 }
 
 // PublishCapabilityQuery sends a capability query and waits for the response.
 // Blocks up to CapabilityQueryTimeout. Returns error on timeout (§FR-ALC-01).
-func (g *Gateway) PublishCapabilityQuery(query types.CapabilityQuery) (*types.CapabilityResponse, error) {
+func (g *Gateway) PublishCapabilityQuery(ctx context.Context, query types.CapabilityQuery) (*types.CapabilityResponse, error) {
 	responseCh := make(chan *types.CapabilityResponse, 1)
 	queryID := query.OrchestratorTaskRef
 	g.pendingCapabilityQueries.Store(queryID, responseCh)
 	defer g.pendingCapabilityQueries.Delete(queryID)
 
-	qtid := query.TraceID
-	if qtid == "" {
-		qtid = query.OrchestratorTaskRef
-	}
 	wire := struct {
 		QueryID string   `json:"query_id"`
 		Domains []string `json:"domains"`
@@ -473,10 +498,10 @@ func (g *Gateway) PublishCapabilityQuery(query types.CapabilityQuery) (*types.Ca
 	}{
 		QueryID: queryID,
 		Domains: query.RequiredSkillDomains,
-		TraceID: qtid,
+		TraceID: observability.TraceIDFrom(ctx),
 	}
 
-	if err := g.publishEnvelopeWithTrace(TopicCapabilityQuery, "capability.query", queryID, qtid, wire); err != nil {
+	if err := g.publishEnvelope(ctx, TopicCapabilityQuery, "capability.query", queryID, wire); err != nil {
 		return nil, fmt.Errorf("publish capability_query: %w", err)
 	}
 
@@ -532,37 +557,32 @@ func buildAgentInstructions(spec types.TaskSpec) string {
 }
 
 // PublishAgentTerminate instructs the Agents Component to terminate an agent (§11.2).
-func (g *Gateway) PublishAgentTerminate(terminate types.AgentTerminate) error {
-	return g.publishEnvelope(TopicAgentTerminate, "agent_terminate", terminate.OrchestratorTaskRef, terminate)
+func (g *Gateway) PublishAgentTerminate(ctx context.Context, terminate types.AgentTerminate) error {
+	return g.publishEnvelope(ctx, TopicAgentTerminate, "agent_terminate", terminate.OrchestratorTaskRef, terminate)
 }
 
 // PublishTaskCancel notifies the Agents Component to cancel a task (§11.2).
-func (g *Gateway) PublishTaskCancel(cancel types.TaskCancel) error {
-	return g.publishEnvelope(TopicTaskCancel, "task_cancel", cancel.OrchestratorTaskRef, cancel)
+func (g *Gateway) PublishTaskCancel(ctx context.Context, cancel types.TaskCancel) error {
+	return g.publishEnvelope(ctx, TopicTaskCancel, "task_cancel", cancel.OrchestratorTaskRef, cancel)
 }
 
 // ── Outbound: Observability ───────────────────────────────────────────────────
 
 // PublishMetrics emits structured metrics to aegis.orchestrator.metrics (§15.2).
 func (g *Gateway) PublishMetrics(metrics types.MetricsPayload) error {
-	return g.publishEnvelope(TopicMetrics, "metrics", g.nodeID, metrics)
+	return g.publishEnvelope(context.Background(), TopicMetrics, "metrics", g.nodeID, metrics)
 }
 
 // PublishAuditEvent emits an audit event to aegis.orchestrator.audit.events (§11.5).
-func (g *Gateway) PublishAuditEvent(event types.AuditEvent) error {
-	return g.publishEnvelope(TopicAuditEvents, "audit_event", event.OrchestratorTaskRef, event)
+func (g *Gateway) PublishAuditEvent(ctx context.Context, event types.AuditEvent) error {
+	return g.publishEnvelope(ctx, TopicAuditEvents, "audit_event", event.OrchestratorTaskRef, event)
 }
 
 // ── Envelope Helpers ──────────────────────────────────────────────────────────
 
 // publishEnvelope wraps any payload in a signed MessageEnvelope and publishes it (§13.5).
-func (g *Gateway) publishEnvelope(topic, messageType, correlationID string, payload any) error {
-	return g.publishEnvelopeWithTrace(topic, messageType, correlationID, "", payload)
-}
-
-// publishEnvelopeWithTrace sets MessageEnvelope.trace_id when traceID is non-empty so NATS
-// subscribers and log pipelines can correlate without parsing inner payload JSON.
-func (g *Gateway) publishEnvelopeWithTrace(topic, messageType, correlationID, traceID string, payload any) error {
+// The trace_id from ctx is stamped into every outbound envelope (Step 5).
+func (g *Gateway) publishEnvelope(ctx context.Context, topic, messageType, correlationID string, payload any) error {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal payload for %s: %w", messageType, err)
@@ -573,12 +593,10 @@ func (g *Gateway) publishEnvelopeWithTrace(topic, messageType, correlationID, tr
 		MessageType:     messageType,
 		SourceComponent: SourceComponent,
 		CorrelationID:   correlationID,
+		TraceID:         observability.TraceIDFrom(ctx),
 		Timestamp:       time.Now().UTC(),
 		SchemaVersion:   SchemaVersion,
 		Payload:         raw,
-	}
-	if traceID != "" {
-		envelope.TraceID = traceID
 	}
 
 	envelopeBytes, err := json.Marshal(envelope)
@@ -630,6 +648,19 @@ func validateEnvelope(data []byte) (*types.MessageEnvelope, error) {
 		return nil, fmt.Errorf("envelope missing payload")
 	}
 	return &envelope, nil
+}
+
+// extractOrCreateCtx builds a context from the envelope's trace_id (or creates a new one)
+// and attaches the given module name. Used by inbound NATS message handlers.
+func extractOrCreateCtx(envelope *types.MessageEnvelope, module string) context.Context {
+	traceID := envelope.TraceID
+	if traceID == "" {
+		traceID = newUUID()
+	}
+	ctx := context.Background()
+	ctx = observability.WithTraceID(ctx, traceID)
+	ctx = observability.WithModule(ctx, module)
+	return ctx
 }
 
 // newUUID generates a random UUID v4 using crypto/rand.

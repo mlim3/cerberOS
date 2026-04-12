@@ -1,6 +1,7 @@
 package monitor
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -8,12 +9,13 @@ import (
 
 	"github.com/mlim3/cerberOS/orchestrator/internal/config"
 	"github.com/mlim3/cerberOS/orchestrator/internal/interfaces"
+	"github.com/mlim3/cerberOS/orchestrator/internal/observability"
 	"github.com/mlim3/cerberOS/orchestrator/internal/types"
 )
 
 // RecoveryManager defines the escalation operations M4 needs from M5.
 type RecoveryManager interface {
-	HandleRecovery(ts *types.TaskState, reason types.RecoveryReason)
+	HandleRecovery(ctx context.Context, ts *types.TaskState, reason types.RecoveryReason)
 }
 
 // Monitor is M4: Task Monitor.
@@ -100,7 +102,7 @@ func (m *Monitor) UntrackTask(taskID string) {
 // Validates the transition is legal per the state machine (§9),
 // updates the task record, appends to state_history, and
 // persists the new state to Memory Component.
-func (m *Monitor) StateTransition(taskID, newState, reason string) error {
+func (m *Monitor) StateTransition(_ context.Context, taskID, newState, reason string) error {
 	tsRaw, ok := m.activeTasks.Load(taskID)
 	if !ok {
 		return fmt.Errorf("task %s is not actively tracked", taskID)
@@ -162,23 +164,23 @@ func (m *Monitor) StateTransition(taskID, newState, reason string) error {
 
 // HandleAgentStatusUpdate processes an inbound agent_status_update from the Gateway.
 // Routes to the correct action based on agent state (§4.1 M4).
-func (m *Monitor) HandleAgentStatusUpdate(update types.AgentStatusUpdate) error {
+func (m *Monitor) HandleAgentStatusUpdate(ctx context.Context, update types.AgentStatusUpdate) error {
 	switch update.State {
 	case types.AgentStateActive:
-		return m.StateTransition(update.TaskID, types.StateRunning, "")
+		return m.StateTransition(ctx, update.TaskID, types.StateRunning, "")
 
 	case types.AgentStateRecovering:
-		if err := m.StateTransition(update.TaskID, types.StateRecovering, update.Reason); err != nil {
+		if err := m.StateTransition(ctx, update.TaskID, types.StateRecovering, update.Reason); err != nil {
 			return err
 		}
 		if ts := m.getTask(update.TaskID); ts != nil {
-			m.recovery.HandleRecovery(ts, types.RecoveryReasonAgentRecovering)
+			m.recovery.HandleRecovery(ctx, ts, types.RecoveryReasonAgentRecovering)
 		}
 		return nil
 
 	case types.AgentStateTerminated:
 		if ts := m.getTask(update.TaskID); ts != nil && !types.IsTerminalState(ts.State) {
-			m.recovery.HandleRecovery(ts, types.RecoveryReasonAgentTerminated)
+			m.recovery.HandleRecovery(ctx, ts, types.RecoveryReasonAgentTerminated)
 		}
 		return nil
 
@@ -205,10 +207,12 @@ func (m *Monitor) monitorTaskTimeout(ts *types.TaskState) {
 		return
 	}
 
+	ctx := taskCtx(ts, "task_monitor")
+
 	remaining := time.Until(*ts.TimeoutAt)
 	if remaining <= 0 {
 		if current := m.getTask(ts.TaskID); current != nil && !types.IsTerminalState(current.State) {
-			m.recovery.HandleRecovery(current, types.RecoveryReasonTimeout)
+			m.recovery.HandleRecovery(ctx, current, types.RecoveryReasonTimeout)
 		}
 		return
 	}
@@ -216,9 +220,21 @@ func (m *Monitor) monitorTaskTimeout(ts *types.TaskState) {
 	select {
 	case <-time.After(remaining):
 		if current := m.getTask(ts.TaskID); current != nil && !types.IsTerminalState(current.State) {
-			m.recovery.HandleRecovery(current, types.RecoveryReasonTimeout)
+			m.recovery.HandleRecovery(ctx, current, types.RecoveryReasonTimeout)
 		}
 	}
+}
+
+// taskCtx builds a context with observability IDs reconstructed from TaskState.
+// Used in goroutines that fire without an incoming request context.
+func taskCtx(ts *types.TaskState, module string) context.Context {
+	ctx := context.Background()
+	if ts.TraceID != "" {
+		ctx = observability.WithTraceID(ctx, ts.TraceID)
+	}
+	ctx = observability.WithTaskID(ctx, ts.TaskID)
+	ctx = observability.WithModule(ctx, module)
+	return ctx
 }
 
 func (m *Monitor) getTask(taskID string) *types.TaskState {
