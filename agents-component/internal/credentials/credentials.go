@@ -176,6 +176,16 @@ func WithBrokerConfig(cfg BrokerConfig) BrokerOption {
 	}
 }
 
+// WithConsumerName overrides the durable JetStream consumer name used when
+// subscribing to aegis.agents.credential.response. Use in tests to give each
+// test run a unique consumer name and avoid "already bound" errors when
+// multiple broker instances share the same NATS server.
+func WithConsumerName(name string) BrokerOption {
+	return func(b *natsBroker) {
+		b.consumerName = name
+	}
+}
+
 // natsBroker is the production implementation. It performs the full round-trip:
 // publishes credential.request (operation: authorize) to the Orchestrator via
 // NATS JetStream and awaits a credential.response filtered by request_id, with
@@ -184,8 +194,9 @@ func WithBrokerConfig(cfg BrokerConfig) BrokerOption {
 // It never calls OpenBao directly. All communication routes through the
 // Orchestrator via the comms.Client interface.
 type natsBroker struct {
-	comms comms.Client
-	cfg   BrokerConfig // retry/timeout parameters, populated with defaults at construction
+	comms        comms.Client
+	consumerName string       // durable consumer name; defaults to comms.ConsumerCredentialResponse
+	cfg          BrokerConfig // retry/timeout parameters, populated with defaults at construction
 
 	mu     sync.RWMutex
 	agents map[string]*agentAuth // agentID → stored permission token reference
@@ -211,9 +222,12 @@ func NewNATSBroker(c comms.Client, opts ...BrokerOption) (Broker, error) {
 	for _, o := range opts {
 		o(b)
 	}
+	if b.consumerName == "" {
+		b.consumerName = comms.ConsumerCredentialResponse
+	}
 	if err := c.SubscribeDurable(
 		comms.SubjectCredentialResponse,
-		comms.ConsumerCredentialResponse,
+		b.consumerName,
 		b.handleResponse,
 	); err != nil {
 		return nil, fmt.Errorf("credentials: subscribe %q: %w", comms.SubjectCredentialResponse, err)

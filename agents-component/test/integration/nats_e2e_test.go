@@ -78,20 +78,21 @@ func newNATSHarness(t *testing.T) *natsHarness {
 	}
 
 	// Simulator — subscribes aegis.orchestrator.* and publishes synthetic replies.
+	// Use a unique suffix per test run to avoid durable consumer collisions
+	// when multiple tests share the same NATS server.
+	componentID := fmt.Sprintf("test-%d", time.Now().UnixNano())
+
 	sim, err := simulator.New(url)
 	if err != nil {
 		nc.Close()
 		t.Skipf("simulator init failed (%v)", err)
 	}
+	sim.WithConsumerSuffix(componentID)
 	if err := sim.Start(); err != nil {
 		sim.Stop() //nolint:errcheck
 		nc.Close()
 		t.Fatalf("simulator.Start: %v", err)
 	}
-
-	// NATS-backed comms client (same as production). Use a unique component ID
-	// per test run to avoid consumer-name collisions if tests run in parallel.
-	componentID := fmt.Sprintf("test-%d", time.Now().UnixNano())
 	commsClient, err := comms.NewNATSClient(url, componentID)
 	if err != nil {
 		sim.Stop() //nolint:errcheck
@@ -104,7 +105,11 @@ func newNATSHarness(t *testing.T) *natsHarness {
 
 	// NATS-backed credential broker for the full round-trip (publish
 	// credential.request → simulator responds → PreAuthorize completes).
-	credBroker, err := credentials.NewNATSBroker(commsClient)
+	// Use a unique consumer name per test run to avoid "already bound" errors
+	// when multiple tests share the same NATS server.
+	credBroker, err := credentials.NewNATSBroker(commsClient,
+		credentials.WithConsumerName("cred-resp-"+componentID),
+	)
 	if err != nil {
 		commsClient.Close() //nolint:errcheck
 		sim.Stop()          //nolint:errcheck
