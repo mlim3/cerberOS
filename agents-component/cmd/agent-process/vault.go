@@ -89,6 +89,7 @@ type agentEnvelope struct {
 	MessageType     string      `json:"message_type"`
 	SourceComponent string      `json:"source_component"`
 	CorrelationID   string      `json:"correlation_id,omitempty"`
+	TraceID         string      `json:"trace_id,omitempty"`
 	Timestamp       string      `json:"timestamp"`
 	SchemaVersion   string      `json:"schema_version"`
 	Payload         interface{} `json:"payload"`
@@ -308,6 +309,7 @@ func (ve *VaultExecutor) emitAudit(eventType string, details map[string]string) 
 			MessageType:     comms.MsgTypeAuditEvent,
 			SourceComponent: "agents",
 			CorrelationID:   ve.traceID,
+			TraceID:         ve.traceID,
 			Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
 			SchemaVersion:   "1.0",
 			Payload:         event,
@@ -545,6 +547,7 @@ func (ve *VaultExecutor) publishRequest(req types.VaultOperationRequest) error {
 			MessageType:     comms.MsgTypeVaultExecuteRequest,
 			SourceComponent: "agents",
 			CorrelationID:   req.RequestID, // stable — Vault idempotency key
+			TraceID:         ve.traceID,
 			Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
 			SchemaVersion:   "1.0",
 			Payload:         req,
@@ -574,12 +577,14 @@ func (ve *VaultExecutor) publishCancellation(requestID, operationType, reason st
 		TaskID:        ve.taskID,
 		OperationType: operationType,
 		Reason:        reason,
+		TraceID:       ve.traceID,
 	}
 	env := agentEnvelope{
 		MessageID:       newUUID(),
 		MessageType:     comms.MsgTypeVaultExecuteCancel,
 		SourceComponent: "agents",
 		CorrelationID:   requestID,
+		TraceID:         ve.traceID,
 		Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
 		SchemaVersion:   "1.0",
 		Payload:         cancel,
@@ -621,6 +626,7 @@ func (ve *VaultExecutor) PublishError(errorCode, errorMessage, traceID string) {
 		MessageType:     comms.MsgTypeError,
 		SourceComponent: "agents",
 		CorrelationID:   ve.taskID,
+		TraceID:         traceID,
 		Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
 		SchemaVersion:   "1.0",
 		Payload:         payload,

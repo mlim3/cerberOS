@@ -179,6 +179,7 @@ func (s *Steerer) Ack(directiveID, status, reason string) {
 		DirectiveID: directiveID,
 		AgentID:     s.agentID,
 		TaskID:      s.taskID,
+		TraceID:     s.traceID,
 		Status:      status,
 		Reason:      reason,
 	}
@@ -187,6 +188,7 @@ func (s *Steerer) Ack(directiveID, status, reason string) {
 		MessageType:     comms.MsgTypeSteeringAck,
 		SourceComponent: "agents",
 		CorrelationID:   directiveID,
+		TraceID:         s.traceID,
 		Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
 		SchemaVersion:   "1.0",
 		Payload:         ack,

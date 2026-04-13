@@ -399,7 +399,7 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 
 	// Step 4: Pre-authorize credential permission set via real NATS round-trip.
 	// On VAULT_UNREACHABLE the broker has already exhausted its retry budget.
-	token, err := f.credentials.PreAuthorize(agentID, spec.TaskID, spec.RequiredSkills)
+	token, err := f.credentials.PreAuthorize(agentID, spec.TaskID, spec.TraceID, spec.RequiredSkills)
 	if err != nil {
 		f.log.Warn("credential.event",
 			"operation_type", "authorize",
@@ -552,11 +552,12 @@ func (f *Factory) CompleteTask(agentID, sessionID, traceID string, output interf
 
 	// Publish task_result to Orchestrator.
 	result := types.TaskResult{
-		TaskID:  agent.AssignedTask,
-		AgentID: agentID,
-		Success: taskErr == nil,
-		Output:  output,
-		TraceID: traceID,
+		TaskID:        agent.AssignedTask,
+		AgentID:       agentID,
+		Success:       taskErr == nil,
+		Output:        output,
+		TraceID:       traceID,
+		UserContextID: agent.UserContextID,
 	}
 	if taskErr != nil {
 		result.Error = taskErr.Error()
@@ -765,7 +766,7 @@ func (f *Factory) HandleCrash(agentID string) error {
 	_ = f.lifecycle.Terminate(agentID)
 
 	// Step 6: Credential re-authorization — fresh permission token for the new VM.
-	token, err := f.credentials.PreAuthorize(agentID, agent.AssignedTask, agent.SkillDomains)
+	token, err := f.credentials.PreAuthorize(agentID, agent.AssignedTask, agent.TraceID, agent.SkillDomains)
 	if err != nil {
 		f.log.Warn("credential.event",
 			"operation_type", "authorize",
@@ -930,6 +931,10 @@ func (f *Factory) publishStatus(agentID, taskID, state, traceID string) error {
 		State:   state,
 		TraceID: traceID,
 	}
+	// Best-effort: propagate user_context_id if the agent record is available.
+	if agent, err := f.registry.Get(agentID); err == nil {
+		update.UserContextID = agent.UserContextID
+	}
 	if err := f.comms.Publish(
 		comms.SubjectAgentStatus,
 		comms.PublishOptions{MessageType: comms.MsgTypeAgentStatus, CorrelationID: taskID},
@@ -976,6 +981,10 @@ func (f *Factory) publishFailed(agentID, taskID, errorCode, errorMessage, traceI
 		ErrorMessage: errorMessage,
 		Phase:        phase,
 		TraceID:      traceID,
+	}
+	// Best-effort: propagate user_context_id if the agent record is available.
+	if agent, err := f.registry.Get(agentID); err == nil {
+		failed.UserContextID = agent.UserContextID
 	}
 	if err := f.comms.Publish(
 		comms.SubjectTaskFailed,
@@ -1306,7 +1315,7 @@ func (f *Factory) wakeAgent(agentID string, spec *types.TaskSpec) error {
 
 	// Step 1: Fresh credential pre-authorization — the prior token expired during
 	// suspension. Required before the new VM can be spawned (EDD §6.2, CLAUDE.md §5).
-	token, err := f.credentials.PreAuthorize(agentID, spec.TaskID, agent.SkillDomains)
+	token, err := f.credentials.PreAuthorize(agentID, spec.TaskID, spec.TraceID, agent.SkillDomains)
 	if err != nil {
 		f.log.Warn("credential.event",
 			"operation_type", "authorize",

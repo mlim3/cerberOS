@@ -27,7 +27,7 @@ type Broker interface {
 	// skillDomains are the required skill domains passed to the Vault for scope
 	// resolution (e.g. ["web", "data"]). The Vault registers a scoped policy and
 	// returns an opaque permission_token — never a raw credential value.
-	PreAuthorize(agentID, taskID string, skillDomains []string) (permissionToken string, err error)
+	PreAuthorize(agentID, taskID, traceID string, skillDomains []string) (permissionToken string, err error)
 
 	// GetCredential delivers a single credential value to an agent. It validates
 	// that the requested key is within the pre-authorized permission set before
@@ -67,7 +67,7 @@ func New(stubSecrets map[string]string) Broker {
 	}
 }
 
-func (b *stubBroker) PreAuthorize(agentID, taskID string, skillDomains []string) (string, error) {
+func (b *stubBroker) PreAuthorize(agentID, taskID, _ string, skillDomains []string) (string, error) {
 	if agentID == "" {
 		return "", fmt.Errorf("credentials: agentID must not be empty")
 	}
@@ -228,7 +228,7 @@ func NewNATSBroker(c comms.Client, opts ...BrokerOption) (Broker, error) {
 // Retry policy: up to credAuthMaxAttempts attempts, each with a credAuthTimeout
 // deadline and exponential backoff (1s, 2s, 4s, …) between attempts.
 // Returns VAULT_UNREACHABLE after all attempts fail.
-func (b *natsBroker) PreAuthorize(agentID, taskID string, skillDomains []string) (string, error) {
+func (b *natsBroker) PreAuthorize(agentID, taskID, traceID string, skillDomains []string) (string, error) {
 	if agentID == "" {
 		return "", fmt.Errorf("credentials: agentID must not be empty")
 	}
@@ -248,6 +248,7 @@ func (b *natsBroker) PreAuthorize(agentID, taskID string, skillDomains []string)
 		Operation:    "authorize",
 		SkillDomains: skillDomains,
 		TTLSeconds:   credAuthDefaultTTL,
+		TraceID:      traceID,
 	}
 
 	// Register the result channel BEFORE the first publish so a fast response

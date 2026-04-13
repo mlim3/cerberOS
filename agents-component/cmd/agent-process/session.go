@@ -85,6 +85,7 @@ func ParentEntryIDFromCtx(ctx context.Context) string {
 type SessionLog struct {
 	agentID string
 	taskID  string
+	traceID string
 	log     *slog.Logger
 	js      nats.JetStreamContext
 	nc      *nats.Conn // needed for ephemeral subscribe on state.read.response
@@ -99,6 +100,7 @@ func NewSessionLog(ve *VaultExecutor, log *slog.Logger) *SessionLog {
 	return &SessionLog{
 		agentID: ve.agentID,
 		taskID:  ve.taskID,
+		traceID: ve.traceID,
 		log:     log,
 		js:      ve.js,
 		nc:      ve.nc,
@@ -149,6 +151,7 @@ func (sl *SessionLog) Write(turnType, content, parentID, vaultRequestID string) 
 		MessageType:     comms.MsgTypeStateWrite,
 		SourceComponent: "agents",
 		CorrelationID:   entryID,
+		TraceID:         sl.traceID,
 		Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
 		SchemaVersion:   "1.0",
 		Payload:         mw,
@@ -289,6 +292,7 @@ func (sl *SessionLog) publishStateReadRequest(traceID string) error {
 		MessageType:     comms.MsgTypeStateReadRequest,
 		SourceComponent: "agents",
 		CorrelationID:   sl.taskID,
+		TraceID:         traceID,
 		Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
 		SchemaVersion:   "1.0",
 		Payload:         req,
@@ -330,6 +334,7 @@ func (sl *SessionLog) PersistAgentMemory(domain, fact string) error {
 		MessageType:     comms.MsgTypeStateWrite,
 		SourceComponent: "agents",
 		CorrelationID:   sl.taskID,
+		TraceID:         sl.traceID,
 		Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
 		SchemaVersion:   "1.0",
 		Payload:         mw,
@@ -374,6 +379,7 @@ func (sl *SessionLog) PersistUserProfile(userContextID, observation string) erro
 		MessageType:     comms.MsgTypeStateWrite,
 		SourceComponent: "agents",
 		CorrelationID:   sl.taskID,
+		TraceID:         sl.traceID,
 		Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
 		SchemaVersion:   "1.0",
 		Payload:         mw,
@@ -423,6 +429,7 @@ func (sl *SessionLog) SearchSessions(query string, maxResults int) string {
 		MessageType:     comms.MsgTypeStateReadRequest,
 		SourceComponent: "agents",
 		CorrelationID:   sl.taskID,
+		TraceID:         sl.traceID,
 		Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
 		SchemaVersion:   "1.0",
 		Payload:         req,

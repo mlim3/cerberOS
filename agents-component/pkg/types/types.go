@@ -139,21 +139,23 @@ type Envelope struct {
 
 // TaskResult is published to the Orchestrator on task completion.
 type TaskResult struct {
-	TaskID  string      `json:"task_id"`
-	AgentID string      `json:"agent_id"`
-	Success bool        `json:"success"`
-	Output  interface{} `json:"output,omitempty"`
-	Error   string      `json:"error,omitempty"`
-	TraceID string      `json:"trace_id"`
+	TaskID        string      `json:"task_id"`
+	AgentID       string      `json:"agent_id"`
+	Success       bool        `json:"success"`
+	Output        interface{} `json:"output,omitempty"`
+	Error         string      `json:"error,omitempty"`
+	TraceID       string      `json:"trace_id"`
+	UserContextID string      `json:"user_context_id,omitempty"`
 }
 
 // StatusUpdate is published to the Orchestrator for progress events.
 type StatusUpdate struct {
-	TaskID  string `json:"task_id"`
-	AgentID string `json:"agent_id"`
-	State   string `json:"state"`
-	Message string `json:"message,omitempty"`
-	TraceID string `json:"trace_id"`
+	TaskID        string `json:"task_id"`
+	AgentID       string `json:"agent_id"`
+	State         string `json:"state"`
+	Message       string `json:"message,omitempty"`
+	TraceID       string `json:"trace_id"`
+	UserContextID string `json:"user_context_id,omitempty"`
 }
 
 // CapabilityQuery is received from the Orchestrator asking whether an agent
@@ -187,6 +189,7 @@ type CredentialRequest struct {
 	Operation    string   `json:"operation"`     // "authorize" | "revoke"
 	SkillDomains []string `json:"skill_domains"` // required skill domains for Vault scope resolution
 	TTLSeconds   int      `json:"ttl_seconds"`   // policy token TTL; 0 uses server default (3600)
+	TraceID      string   `json:"trace_id,omitempty"`
 }
 
 // CredentialResponse is received from the Orchestrator carrying the result of a
@@ -209,12 +212,13 @@ type CredentialResponse struct {
 // must be user-safe — it must not expose internal paths, credential details, or vault
 // implementation specifics.
 type TaskFailed struct {
-	TaskID       string `json:"task_id"`
-	AgentID      string `json:"agent_id,omitempty"`
-	ErrorCode    string `json:"error_code"`      // e.g. "VAULT_UNREACHABLE", "PROVISION_FAILED", "CONTEXT_BUDGET_EXCEEDED"
-	ErrorMessage string `json:"error_message"`   // user-safe description
-	Phase        string `json:"phase,omitempty"` // provisioning phase where failure occurred, e.g. "skill_resolution"
-	TraceID      string `json:"trace_id"`
+	TaskID        string `json:"task_id"`
+	AgentID       string `json:"agent_id,omitempty"`
+	ErrorCode     string `json:"error_code"`      // e.g. "VAULT_UNREACHABLE", "PROVISION_FAILED", "CONTEXT_BUDGET_EXCEEDED"
+	ErrorMessage  string `json:"error_message"`   // user-safe description
+	Phase         string `json:"phase,omitempty"` // provisioning phase where failure occurred, e.g. "skill_resolution"
+	TraceID       string `json:"trace_id"`
+	UserContextID string `json:"user_context_id,omitempty"`
 }
 
 // VaultOperationRequest is sent to the Orchestrator (routed to the Vault) to execute
@@ -336,6 +340,7 @@ type VaultCancelRequest struct {
 	TaskID        string `json:"task_id"`
 	OperationType string `json:"operation_type"`
 	Reason        string `json:"reason"` // "local_timeout" | "context_cancelled"
+	TraceID       string `json:"trace_id,omitempty"`
 }
 
 // Metrics event types — published by agent-process subprocesses to
@@ -428,6 +433,7 @@ type SteeringAck struct {
 	DirectiveID string `json:"directive_id"` // echoes SteeringDirective.DirectiveID
 	AgentID     string `json:"agent_id"`
 	TaskID      string `json:"task_id"`
+	TraceID     string `json:"trace_id,omitempty"`
 	Status      string `json:"status"`           // "received" | "applied" | "ignored_stale"
 	Reason      string `json:"reason,omitempty"` // human-readable explanation when status != "applied"
 }
