@@ -33,7 +33,7 @@ func (c *httpClient) QueryFacts(ctx context.Context, userID uuid.UUID, query str
 
 	reqBody := map[string]interface{}{
 		"query": query,
-		"top_k": topK,
+		"topK":  topK,
 	}
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
@@ -60,7 +60,7 @@ func (c *httpClient) QueryFacts(ctx context.Context, userID uuid.UUID, query str
 	var apiResp struct {
 		Data struct {
 			Results []struct {
-				ChunkID string `json:"chunk_id"`
+				ChunkID string `json:"chunkId"`
 				Text    string `json:"text"`
 			} `json:"results"`
 		} `json:"data"`
@@ -77,6 +77,9 @@ func (c *httpClient) QueryFacts(ctx context.Context, userID uuid.UUID, query str
 			ID:      id,
 			Content: r.Text,
 		})
+	}
+	if facts == nil {
+		facts = []Fact{}
 	}
 	return facts, nil
 }
@@ -103,9 +106,8 @@ func (c *httpClient) GetAllFacts(ctx context.Context, userID uuid.UUID) ([]Fact,
 	var apiResp struct {
 		Data struct {
 			Facts []struct {
-				FactID   string `json:"factId"`
-				Category string `json:"category"`
-				Value    string `json:"value"`
+				FactID    string          `json:"factId"`
+				FactValue json.RawMessage `json:"factValue"`
 			} `json:"facts"`
 		} `json:"data"`
 	}
@@ -119,8 +121,11 @@ func (c *httpClient) GetAllFacts(ctx context.Context, userID uuid.UUID) ([]Fact,
 		id, _ := uuid.Parse(f.FactID)
 		facts = append(facts, Fact{
 			ID:      id,
-			Content: f.Value,
+			Content: decodeFactContent(f.FactValue),
 		})
+	}
+	if facts == nil {
+		facts = []Fact{}
 	}
 	return facts, nil
 }
@@ -129,8 +134,10 @@ func (c *httpClient) SaveFact(ctx context.Context, userID uuid.UUID, fact string
 	url := fmt.Sprintf("%s/api/v1/personal_info/%s/save", c.baseURL, userID.String())
 
 	reqBody := map[string]interface{}{
-		"content":   fact,
-		"source_id": uuid.New().String(),
+		"content":      fact,
+		"sourceType":   "chat",
+		"sourceId":     uuid.New().String(),
+		"extractFacts": true,
 	}
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
@@ -201,6 +208,9 @@ func (c *httpClient) GetChatHistory(ctx context.Context, sessionID uuid.UUID, li
 			CreatedAt: m.CreatedAt,
 		})
 	}
+	if messages == nil {
+		messages = []Message{}
+	}
 
 	for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
 		messages[i], messages[j] = messages[j], messages[i]
@@ -252,6 +262,9 @@ func (c *httpClient) GetAgentExecutions(ctx context.Context, taskID uuid.UUID, l
 			CreatedAt: e.CreatedAt,
 		})
 	}
+	if execs == nil {
+		execs = []AgentExecution{}
+	}
 	return execs, nil
 }
 
@@ -277,10 +290,10 @@ func (c *httpClient) GetSystemEvents(ctx context.Context, limit int) ([]SystemEv
 	var apiResp struct {
 		Data struct {
 			Events []struct {
-				ID        string `json:"id"`
-				EventType string `json:"event_type"`
-				Payload   string `json:"payload"`
-				CreatedAt string `json:"created_at"`
+				EventID   string `json:"eventId"`
+				Severity  string `json:"severity"`
+				Message   string `json:"message"`
+				CreatedAt string `json:"createdAt"`
 			} `json:"events"`
 		} `json:"data"`
 	}
@@ -291,13 +304,16 @@ func (c *httpClient) GetSystemEvents(ctx context.Context, limit int) ([]SystemEv
 
 	var events []SystemEvent
 	for _, e := range apiResp.Data.Events {
-		id, _ := uuid.Parse(e.ID)
+		id, _ := uuid.Parse(e.EventID)
 		events = append(events, SystemEvent{
 			ID:        id,
-			EventType: e.EventType,
-			Message:   e.Payload,
+			EventType: e.Severity,
+			Message:   e.Message,
 			CreatedAt: e.CreatedAt,
 		})
+	}
+	if events == nil {
+		events = []SystemEvent{}
 	}
 	return events, nil
 }

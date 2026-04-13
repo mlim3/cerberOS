@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -102,6 +104,9 @@ func (c *dbClient) QueryFacts(ctx context.Context, userID uuid.UUID, query strin
 			Content: r.Text,
 		})
 	}
+	if facts == nil {
+		facts = []Fact{}
+	}
 	return facts, nil
 }
 
@@ -121,21 +126,61 @@ func (c *dbClient) GetAllFacts(ctx context.Context, userID uuid.UUID) ([]Fact, e
 		id, _ := uuid.Parse(formatUUID(f.ID))
 		facts = append(facts, Fact{
 			ID:      id,
-			Content: string(f.FactValue),
+			Content: decodeFactContent(f.FactValue),
 		})
+	}
+	if facts == nil {
+		facts = []Fact{}
 	}
 	return facts, nil
 }
 
 func (c *dbClient) SaveFact(ctx context.Context, userID uuid.UUID, fact string) error {
-	req := logic.SaveRequest{
-		UserID:  userID.String(),
-		Content: fact,
-		// using random source ID for CLI inserts
-		SourceID: uuid.New().String(),
+	var userUUID pgtype.UUID
+	if err := userUUID.Scan(userID.String()); err != nil {
+		return fmt.Errorf("invalid user ID: %w", err)
 	}
-	_, err := c.piProcessor.SavePersonalInfo(ctx, req)
-	return err
+
+	exists, err := c.piRepo.UserExists(ctx, userUUID)
+	if err != nil {
+		return fmt.Errorf("failed to validate user: %w", err)
+	}
+	if !exists {
+		return fmt.Errorf("user not found")
+	}
+
+	factValue, err := json.Marshal(fact)
+	if err != nil {
+		return fmt.Errorf("failed to encode fact value: %w", err)
+	}
+
+	factID := uuid.Must(uuid.NewV7())
+	keySeed := strings.ToLower(strings.TrimSpace(fact))
+	if len(keySeed) > 48 {
+		keySeed = keySeed[:48]
+	}
+	keySeed = strings.ReplaceAll(keySeed, " ", "_")
+	if keySeed == "" {
+		keySeed = "cli_fact"
+	}
+
+	_, err = c.piRepo.Querier().UpsertFact(ctx, storage.UpsertFactParams{
+		ID:        pgtype.UUID{Bytes: factID, Valid: true},
+		UserID:    userUUID,
+		Category:  pgtype.Text{String: "CLI", Valid: true},
+		FactKey:   fmt.Sprintf("cli_%s_%s", keySeed, factID.String()[:8]),
+		FactValue: factValue,
+		Confidence: pgtype.Float8{
+			Float64: 1.0,
+			Valid:   true,
+		},
+		Version: pgtype.Int4{Int32: 1, Valid: true},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to save fact: %w", err)
+	}
+
+	return nil
 }
 
 func (c *dbClient) GetChatHistory(ctx context.Context, sessionID uuid.UUID, limit int) ([]Message, error) {
@@ -158,6 +203,9 @@ func (c *dbClient) GetChatHistory(ctx context.Context, sessionID uuid.UUID, limi
 			Content:   string(m.Content),
 			CreatedAt: m.CreatedAt.Time.String(),
 		})
+	}
+	if messages == nil {
+		messages = []Message{}
 	}
 
 	// reverse to show chronological order
@@ -189,6 +237,9 @@ func (c *dbClient) GetAgentExecutions(ctx context.Context, taskID uuid.UUID, lim
 			CreatedAt: ex.CreatedAt.Time.String(),
 		})
 	}
+	if res == nil {
+		res = []AgentExecution{}
+	}
 	return res, nil
 }
 
@@ -209,6 +260,9 @@ func (c *dbClient) GetSystemEvents(ctx context.Context, limit int) ([]SystemEven
 			Message:   e.Message,
 			CreatedAt: e.CreatedAt.Time.String(),
 		})
+	}
+	if res == nil {
+		res = []SystemEvent{}
 	}
 	return res, nil
 }
@@ -238,4 +292,20 @@ func formatUUID(u pgtype.UUID) string {
 	// 8-4-4-4-12
 	return fmt.Sprintf("%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
 		b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15])
+}
+
+func decodeFactContent(raw []byte) string {
+	var str string
+	if err := json.Unmarshal(raw, &str); err == nil {
+		return str
+	}
+
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err == nil {
+		if v, ok := obj["text"].(string); ok {
+			return v
+		}
+	}
+
+	return string(raw)
 }
