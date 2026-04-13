@@ -184,6 +184,64 @@ const (
 	agentTypeExisting = "existing_assigned"
 )
 
+// LoadSynthesizedSkills reads all persisted "skill_cache" entries from the Memory
+// Component and registers them into the Skill Hierarchy Manager. Call this once at
+// component startup, after static skills have been loaded from config, so skills
+// synthesized in prior sessions extend the live skill tree.
+//
+// Domains that do not exist in the static config are skipped — a synthesized skill
+// requires its parent domain to be registered first. Individual registration failures
+// are logged and skipped; they do not abort the startup sequence.
+func (f *Factory) LoadSynthesizedSkills(ctx context.Context) error {
+	records, err := f.memory.ReadAllByType("skill_cache")
+	if err != nil {
+		return fmt.Errorf("factory: load synthesized skills: read: %w", err)
+	}
+	if len(records) == 0 {
+		f.log.Info("factory: no synthesized skills found in memory")
+		return nil
+	}
+
+	loaded := 0
+	for _, record := range records {
+		domain, ok := record.Tags["domain"]
+		if !ok || domain == "" {
+			f.log.Warn("factory: synthesized skill record missing domain tag; skipping",
+				"agent_id", record.AgentID)
+			continue
+		}
+
+		// MemoryWrite.Payload is interface{}; after a JSON round-trip through the
+		// Memory Component it deserializes as map[string]interface{}. Re-marshal
+		// and unmarshal to recover the typed SkillNode.
+		raw, err := json.Marshal(record.Payload)
+		if err != nil {
+			f.log.Warn("factory: marshal synthesized skill payload failed; skipping",
+				"domain", domain, "error", err)
+			continue
+		}
+		var node types.SkillNode
+		if err := json.Unmarshal(raw, &node); err != nil {
+			f.log.Warn("factory: unmarshal synthesized skill node failed; skipping",
+				"domain", domain, "error", err)
+			continue
+		}
+
+		if err := f.skills.RegisterCommand(domain, &node); err != nil {
+			f.log.Warn("factory: register synthesized skill failed; skipping",
+				"domain", domain, "skill_name", node.Name, "error", err)
+			continue
+		}
+		loaded++
+		f.log.Info("factory: synthesized skill registered",
+			"domain", domain, "skill_name", node.Name)
+	}
+
+	f.log.Info("factory: synthesized skill load complete",
+		"loaded", loaded, "found", len(records))
+	return nil
+}
+
 // emit dispatches an audit event off the critical path. It is a no-op when
 // the emitter is nil (unit tests that do not wire a Comms client).
 func (f *Factory) emit(event types.AuditEvent) {

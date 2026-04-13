@@ -90,6 +90,11 @@ type SkillNode struct {
 	RequiredCredentialTypes []string `json:"required_credential_types,omitempty"` // empty = no vault execution needed
 	TimeoutSeconds          int      `json:"timeout_seconds,omitempty"`           // 0 = default (30s); hard max 300s
 
+	// Origin and SynthesizedAt are set by the skill synthesis pipeline.
+	// Static skills loaded from config carry Origin "" (zero value).
+	Origin        string     `json:"origin,omitempty"`         // "static" | "synthesized"
+	SynthesizedAt *time.Time `json:"synthesized_at,omitempty"` // non-nil when Origin == "synthesized"
+
 	Children map[string]*SkillNode `json:"children,omitempty"`
 	Spec     *SkillSpec            `json:"spec,omitempty"` // only at leaf level
 }

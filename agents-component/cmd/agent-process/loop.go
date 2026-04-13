@@ -105,6 +105,11 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 	assistantTurn := 0
 	compactedThrough := 0
 
+	// toolCallCount accumulates every tool call dispatched across all iterations.
+	// When the task completes, shouldSynthesize uses this to decide whether the
+	// task was complex enough to warrant extracting a reusable skill.
+	toolCallCount := 0
+
 	// compactionPending is set by Phase 4 when the token count reaches the 80%
 	// threshold. It causes compaction to run before the next Reason phase.
 	compactionPending := false
@@ -178,6 +183,7 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 		if resp.StopReason == anthropic.StopReasonEndTurn {
 			for _, block := range resp.Content {
 				if block.Type == "text" && block.Text != "" {
+					attemptSkillSynthesis(ctx, client, log, spawnCtx, sl, history, toolCallCount)
 					return block.Text, nil
 				}
 			}
@@ -285,6 +291,9 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 		}
 		wg.Wait() // all concurrent dispatches complete (or are interrupted) before Phase 3
 
+		// Accumulate total tool calls for synthesis threshold check at task end.
+		toolCallCount += len(outcomes)
+
 		// Update LRU order for each successfully-dispatched tool so that
 		// recently-used specs are retained longest when the budget must evict.
 		if budget != nil {
@@ -359,6 +368,7 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 
 		if taskDone {
 			log.Info("task_complete called", "result_len", len(finalResult))
+			attemptSkillSynthesis(ctx, client, log, spawnCtx, sl, history, toolCallCount)
 			return finalResult, nil
 		}
 

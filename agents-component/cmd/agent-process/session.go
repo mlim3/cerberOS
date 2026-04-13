@@ -173,6 +173,48 @@ func (sl *SessionLog) Write(turnType, content, parentID, vaultRequestID string) 
 	return entryID
 }
 
+// PersistSkill writes a synthesized SkillNode to the Memory Component as
+// data_type "skill_cache". The domain tag is used by Factory.LoadSynthesizedSkills
+// at startup to route each skill into its parent domain's command tree.
+//
+// PersistSkill is a no-op and returns nil when sl is nil.
+func (sl *SessionLog) PersistSkill(domain string, node *types.SkillNode) error {
+	if sl == nil {
+		return nil
+	}
+	mw := types.MemoryWrite{
+		AgentID:   sl.agentID,
+		SessionID: sl.taskID,
+		DataType:  "skill_cache",
+		TTLHint:   0, // synthesized skills do not expire
+		Payload:   node,
+		Tags: map[string]string{
+			"domain":     domain,
+			"origin":     "synthesized",
+			"skill_name": node.Name,
+		},
+	}
+	env := agentEnvelope{
+		MessageID:       newUUID(),
+		MessageType:     comms.MsgTypeStateWrite,
+		SourceComponent: "agents",
+		CorrelationID:   node.Name,
+		Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
+		SchemaVersion:   "1.0",
+		Payload:         mw,
+	}
+	data, err := json.Marshal(env)
+	if err != nil {
+		return fmt.Errorf("session log: persist skill: marshal: %w", err)
+	}
+	if _, err := sl.js.Publish(comms.SubjectStateWrite, data); err != nil {
+		return fmt.Errorf("session log: persist skill: publish: %w", err)
+	}
+	sl.log.Info("session log: skill persisted",
+		"domain", domain, "skill_name", node.Name)
+	return nil
+}
+
 // ReadSession issues a state.read.request for this agent's session entries and
 // waits up to sessionReadTimeout for the response. Returns the recovered session
 // entries (all DataType "episode" entries for this task) so the caller can
