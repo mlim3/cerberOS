@@ -82,7 +82,7 @@ func TestContextWindowAction_JustBelowCompact(t *testing.T) {
 
 func TestBuildSystemPrompt_General_IgnoresManifest(t *testing.T) {
 	// "general" domain returns a fixed prompt regardless of manifest content.
-	got := buildSystemPrompt("general", "- some_tool: does something\n")
+	got := buildSystemPrompt("general", "- some_tool: does something\n", "", "")
 	if strings.Contains(got, "Available commands") {
 		t.Error("general domain prompt must not include command manifest")
 	}
@@ -93,7 +93,7 @@ func TestBuildSystemPrompt_General_IgnoresManifest(t *testing.T) {
 
 func TestBuildSystemPrompt_Domain_NoManifest(t *testing.T) {
 	// An empty manifest should produce the base prompt with no manifest section.
-	got := buildSystemPrompt("web", "")
+	got := buildSystemPrompt("web", "", "", "")
 	if strings.Contains(got, "Available commands") {
 		t.Errorf("empty manifest: prompt must not include 'Available commands' section; got %q", got)
 	}
@@ -104,7 +104,7 @@ func TestBuildSystemPrompt_Domain_NoManifest(t *testing.T) {
 
 func TestBuildSystemPrompt_Domain_WithManifest(t *testing.T) {
 	manifest := "- web_fetch: Fetches a webpage by URL.\n- web_parse: Parses HTML into text.\n"
-	got := buildSystemPrompt("web", manifest)
+	got := buildSystemPrompt("web", manifest, "", "")
 	if !strings.Contains(got, "Available commands:") {
 		t.Errorf("prompt with manifest must include 'Available commands:' header; got %q", got)
 	}
@@ -118,7 +118,7 @@ func TestBuildSystemPrompt_Domain_WithManifest(t *testing.T) {
 
 func TestBuildSystemPrompt_ManifestAppendsAfterBase(t *testing.T) {
 	manifest := "- web_fetch: Fetches a webpage.\n"
-	got := buildSystemPrompt("web", manifest)
+	got := buildSystemPrompt("web", manifest, "", "")
 	// Manifest must come after the base instructional text, not before.
 	baseIdx := strings.Index(got, "task_complete")
 	manifestIdx := strings.Index(got, "Available commands:")

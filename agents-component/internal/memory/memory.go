@@ -148,6 +148,8 @@ var dataTypePolicy = map[string]writePolicy{
 	"task_result":      policyDegradable, // task completed; persist when possible
 	"episode":          policyDegradable, // session log; tolerate partial loss
 	"skill_cache":      policyDegradable, // synthesized skills; valuable but not crash-critical
+	"agent_memory":     policyDegradable, // domain-scoped procedural memory; updated post-task
+	"user_profile":     policyDegradable, // user preference observations; updated post-task
 	"agent_state":      policyBestEffort, // in-memory registry is authoritative
 }
 

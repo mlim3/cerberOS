@@ -81,18 +81,22 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 	c := anthropic.NewClient(clientOpts...)
 	client := &c
 
+	// Session log persists each turn to episodic memory (EDD §13.4).
+	// Created before tools so memory tools can capture sl in their closures.
+	// nil-safe: all methods are no-ops when sl is nil.
+	sl := NewSessionLog(ve, log)
+	ctx = WithSessionLog(ctx, sl)
+
 	tools := toolsForDomain(spawnCtx.SkillDomain, ve, as)
+	// Memory tools (memory_update, profile_update, memory_search) are available
+	// in every domain — they are not domain-specific skills.
+	tools = append(tools, memoryTools(sl, spawnCtx.SkillDomain, spawnCtx.UserContextID)...)
 	// Apply spec budget: register each tool's definition cost and evict LRU
 	// entries if the ceiling is exceeded. Pinned tools (task_complete,
 	// spawn_agent) are never evicted.
 	tools = applySpecBudget(budget, spawnCtx.SkillDomain, tools, log)
 	toolDefs := toolDefinitions(tools)
-	systemPrompt := buildSystemPrompt(spawnCtx.SkillDomain, spawnCtx.CommandManifest)
-
-	// Session log persists each turn to episodic memory (EDD §13.4).
-	// nil-safe: all methods are no-ops when sl is nil.
-	sl := NewSessionLog(ve, log)
-	ctx = WithSessionLog(ctx, sl)
+	systemPrompt := buildSystemPrompt(spawnCtx.SkillDomain, spawnCtx.CommandManifest, spawnCtx.AgentMemory, spawnCtx.UserProfile)
 
 	history := []anthropic.MessageParam{
 		anthropic.NewUserMessage(anthropic.NewTextBlock(spawnCtx.Instructions)),
@@ -478,22 +482,34 @@ func contextWindowAction(totalTokens int64) contextAction {
 // SpawnContext. When non-empty it is appended to the base prompt so the agent
 // knows what commands are available from turn 1 without a discovery round-trip.
 // For the "general" domain there is no skill manifest to inject.
-func buildSystemPrompt(skillDomain, manifest string) string {
+//
+// agentMemory and userProfile are injected as read-only context sections when
+// non-empty. They are excluded from the spawn context token budget because they
+// are system overhead, not task payload.
+func buildSystemPrompt(skillDomain, manifest, agentMemory, userProfile string) string {
+	var base string
 	if skillDomain == "general" {
-		return `You are an Aegis OS general-purpose reasoning agent. ` +
+		base = `You are an Aegis OS general-purpose reasoning agent. ` +
 			`Answer questions and complete tasks using your own knowledge and reasoning. ` +
 			`When the task is complete, call task_complete with the final result. ` +
 			`Be concise and factual.`
+	} else {
+		base = fmt.Sprintf(
+			`You are an Aegis OS agent scoped to the "%s" skill domain. `+
+				`Execute the assigned task using only the capabilities available within that domain. `+
+				`When the task is complete, call task_complete with the final result. `+
+				`Be concise and factual.`,
+			skillDomain,
+		)
+		if manifest != "" {
+			base += "\n\nAvailable commands:\n" + manifest
+		}
 	}
-	base := fmt.Sprintf(
-		`You are an Aegis OS agent scoped to the "%s" skill domain. `+
-			`Execute the assigned task using only the capabilities available within that domain. `+
-			`When the task is complete, call task_complete with the final result. `+
-			`Be concise and factual.`,
-		skillDomain,
-	)
-	if manifest == "" {
-		return base
+	if agentMemory != "" {
+		base += "\n\n## Knowledge from past tasks\n" + agentMemory
 	}
-	return base + "\n\nAvailable commands:\n" + manifest
+	if userProfile != "" {
+		base += "\n\n## User context\n" + userProfile
+	}
+	return base
 }

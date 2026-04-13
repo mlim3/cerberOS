@@ -270,11 +270,15 @@ type CrashSnapshot struct {
 // The Orchestrator routes this to the Memory Component.
 // DataType filters by MemoryWrite.DataType; when set with an empty AgentID, all
 // agents' records of that type are returned (used for component-wide startup recovery).
+// When SearchQuery is set the Memory Component runs a full-text search across
+// matching records and returns the top MaxResults entries (0 = server default).
 type MemoryReadRequest struct {
-	AgentID    string `json:"agent_id"`
-	DataType   string `json:"data_type,omitempty"`
-	ContextTag string `json:"context_tag"`
-	TraceID    string `json:"trace_id"`
+	AgentID     string `json:"agent_id"`
+	DataType    string `json:"data_type,omitempty"`
+	ContextTag  string `json:"context_tag"`
+	TraceID     string `json:"trace_id"`
+	SearchQuery string `json:"search_query,omitempty"` // when set, triggers FTS search in the Memory Component
+	MaxResults  int    `json:"max_results,omitempty"`  // cap on search results; 0 = server default (3)
 }
 
 // MemoryResponse is received from the Orchestrator carrying records returned

@@ -438,7 +438,12 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 		},
 	})
 
-	// Step 5: Spawn agent process.
+	// Step 5: Fetch multi-layer memory to inject at spawn (capability 2).
+	// These reads are best-effort; failure does not abort provisioning.
+	agentMemory := f.fetchAgentMemory(entryDomain, spec.TraceID)
+	userProfile := f.fetchUserProfile(spec.UserContextID, spec.TraceID)
+
+	// Step 6: Spawn agent process.
 	vmCfg := lifecycle.VMConfig{
 		AgentID:         agentID,
 		VMID:            vmID,
@@ -447,6 +452,8 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 		CredentialPtr:   token,
 		Instructions:    spec.Instructions,
 		CommandManifest: manifest,
+		AgentMemory:     agentMemory,
+		UserProfile:     userProfile,
 		TraceID:         spec.TraceID,
 		UserContextID:   spec.UserContextID,
 		OnComplete:      f.processCompletionHandler(agentID),
@@ -1077,8 +1084,10 @@ func buildManifestText(commands []*types.SkillNode) string {
 }
 
 // spawnSystemPrompt returns the domain-scoped system prompt (including command
-// manifest) that will be sent to the agent at spawn time.
+// manifest) that will be used at spawn time for token-budget enforcement.
 // Must stay in sync with buildSystemPrompt in cmd/agent-process/loop.go.
+// agentMemory and userProfile are intentionally excluded from the budget count —
+// they are system overhead, not task payload.
 func spawnSystemPrompt(skillDomain, manifest string) string {
 	base := fmt.Sprintf(
 		`You are an Aegis OS agent scoped to the "%s" skill domain. `+
@@ -1091,6 +1100,70 @@ func spawnSystemPrompt(skillDomain, manifest string) string {
 		return base
 	}
 	return base + "\n\nAvailable commands:\n" + manifest
+}
+
+// fetchAgentMemory reads domain-scoped agent memory facts from the Memory
+// Component via the in-process stub or NATS-backed client. Returns "" when
+// no records exist or the read fails (best-effort).
+//
+// The synthetic agent ID "domain:<domain>" is the stable key used by
+// PersistAgentMemory in cmd/agent-process/session.go.
+func (f *Factory) fetchAgentMemory(domain, traceID string) string {
+	if domain == "" {
+		return ""
+	}
+	records, err := f.memory.Read("domain:"+domain, "agent_memory")
+	if err != nil || len(records) == 0 {
+		if err != nil {
+			f.log.Warn("factory: fetchAgentMemory failed", "domain", domain, "error", err, "trace_id", traceID)
+		}
+		return ""
+	}
+	return joinMemoryPayloads(records, 4000)
+}
+
+// fetchUserProfile reads user-scoped profile observations from the Memory
+// Component. Returns "" when userContextID is empty, no records exist, or
+// the read fails (best-effort).
+//
+// The synthetic agent ID "user:<userContextID>" is the stable key used by
+// PersistUserProfile in cmd/agent-process/session.go.
+func (f *Factory) fetchUserProfile(userContextID, traceID string) string {
+	if userContextID == "" {
+		return ""
+	}
+	records, err := f.memory.Read("user:"+userContextID, "user_profile")
+	if err != nil || len(records) == 0 {
+		if err != nil {
+			f.log.Warn("factory: fetchUserProfile failed", "user_context_id", userContextID, "error", err, "trace_id", traceID)
+		}
+		return ""
+	}
+	return joinMemoryPayloads(records, 2000)
+}
+
+// joinMemoryPayloads extracts string payloads from MemoryWrite records and
+// joins them as a newline-separated list, truncated to maxChars total.
+func joinMemoryPayloads(records []types.MemoryWrite, maxChars int) string {
+	var parts []string
+	total := 0
+	for _, r := range records {
+		s, ok := r.Payload.(string)
+		if !ok {
+			// payload may be map[string]interface{} after JSON round-trip
+			raw, err := json.Marshal(r.Payload)
+			if err != nil {
+				continue
+			}
+			s = string(raw)
+		}
+		if total+len(s) > maxChars {
+			break
+		}
+		parts = append(parts, s)
+		total += len(s) + 1
+	}
+	return strings.Join(parts, "\n")
 }
 
 // buildSpawnContextText assembles the full spawn-context string whose token count
