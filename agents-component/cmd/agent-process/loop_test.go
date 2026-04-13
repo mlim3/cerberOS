@@ -129,3 +129,71 @@ func TestBuildSystemPrompt_ManifestAppendsAfterBase(t *testing.T) {
 		t.Errorf("manifest section must appear after base prompt text; baseIdx=%d manifestIdx=%d", baseIdx, manifestIdx)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// buildSystemPrompt — agentMemory and userProfile injection (capability 2)
+// ---------------------------------------------------------------------------
+
+func TestBuildSystemPrompt_WithAgentMemory_InjectsSection(t *testing.T) {
+	got := buildSystemPrompt("web", "", "The target API returns ISO8601 timestamps.", "")
+	if !strings.Contains(got, "## Knowledge from past tasks") {
+		t.Error("agentMemory: expected '## Knowledge from past tasks' section header")
+	}
+	if !strings.Contains(got, "ISO8601") {
+		t.Error("agentMemory: expected fact text in prompt")
+	}
+}
+
+func TestBuildSystemPrompt_WithUserProfile_InjectsSection(t *testing.T) {
+	got := buildSystemPrompt("web", "", "", "User prefers concise bullet points.")
+	if !strings.Contains(got, "## User context") {
+		t.Error("userProfile: expected '## User context' section header")
+	}
+	if !strings.Contains(got, "bullet points") {
+		t.Error("userProfile: expected profile text in prompt")
+	}
+}
+
+func TestBuildSystemPrompt_WithBoth_BothSectionsPresent(t *testing.T) {
+	got := buildSystemPrompt("web", "", "API fact.", "User pref.")
+	if !strings.Contains(got, "## Knowledge from past tasks") {
+		t.Error("both: expected knowledge section")
+	}
+	if !strings.Contains(got, "## User context") {
+		t.Error("both: expected user context section")
+	}
+}
+
+func TestBuildSystemPrompt_EmptyMemory_NoSectionsAdded(t *testing.T) {
+	got := buildSystemPrompt("web", "- cmd: desc.", "", "")
+	if strings.Contains(got, "## Knowledge") {
+		t.Error("empty agentMemory must not produce knowledge section")
+	}
+	if strings.Contains(got, "## User context") {
+		t.Error("empty userProfile must not produce user context section")
+	}
+}
+
+func TestBuildSystemPrompt_MemorySectionsAfterManifest(t *testing.T) {
+	manifest := "- web_fetch: Fetches.\n"
+	got := buildSystemPrompt("web", manifest, "fact", "pref")
+	manifestIdx := strings.Index(got, "Available commands:")
+	memIdx := strings.Index(got, "## Knowledge from past tasks")
+	if manifestIdx < 0 || memIdx < 0 {
+		t.Fatalf("expected manifest and memory section in output; got %q", got)
+	}
+	if memIdx < manifestIdx {
+		t.Error("memory section must appear after the command manifest")
+	}
+}
+
+func TestBuildSystemPrompt_General_WithMemory_SectionsAppended(t *testing.T) {
+	// General domain still gets memory sections even though it has no manifest.
+	got := buildSystemPrompt("general", "", "stored fact", "")
+	if !strings.Contains(got, "general-purpose") {
+		t.Error("general domain base text must be present")
+	}
+	if !strings.Contains(got, "## Knowledge from past tasks") {
+		t.Error("general domain with agentMemory must still include knowledge section")
+	}
+}

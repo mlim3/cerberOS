@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/cerberOS/agents-component/pkg/types"
@@ -140,6 +141,126 @@ func TestExtractSessionEntries_VaultRequestIDPreserved(t *testing.T) {
 	}
 	if got[0].VaultRequestID != "req-abc-123" {
 		t.Errorf("VaultRequestID: want %q, got %q", "req-abc-123", got[0].VaultRequestID)
+	}
+}
+
+// ---- nil-safe new method tests (capability 2) ----
+
+func TestSessionLog_NilReceiver_PersistAgentMemory(t *testing.T) {
+	var sl *SessionLog
+	if err := sl.PersistAgentMemory("web", "some fact"); err != nil {
+		t.Errorf("nil receiver PersistAgentMemory: want nil error, got %v", err)
+	}
+}
+
+func TestSessionLog_NilReceiver_PersistUserProfile(t *testing.T) {
+	var sl *SessionLog
+	if err := sl.PersistUserProfile("ctx-1", "some observation"); err != nil {
+		t.Errorf("nil receiver PersistUserProfile: want nil error, got %v", err)
+	}
+}
+
+func TestSessionLog_NilReceiver_SearchSessions_ReturnsNotice(t *testing.T) {
+	var sl *SessionLog
+	got := sl.SearchSessions("anything", 3)
+	if got == "" {
+		t.Error("nil receiver SearchSessions must return a non-empty notice string")
+	}
+	if !strings.Contains(got, "unavailable") {
+		t.Errorf("nil receiver SearchSessions must mention 'unavailable'; got %q", got)
+	}
+}
+
+func TestSessionLog_PersistAgentMemory_EmptyDomain_ReturnsNil(t *testing.T) {
+	// Calling PersistAgentMemory with empty domain on a non-nil sl that has
+	// js=nil: js.Publish would panic. But note the function body starts with
+	// if sl == nil { return nil } — for non-nil sl with empty domain the function
+	// proceeds to Publish. We test only the nil-receiver guard here.
+	// The live path requires a real NATS connection.
+	var sl *SessionLog
+	if err := sl.PersistAgentMemory("", "fact"); err != nil {
+		t.Errorf("nil receiver with empty domain: want nil, got %v", err)
+	}
+}
+
+func TestSessionLog_PersistUserProfile_EmptyUserContextID_NilReceiver(t *testing.T) {
+	var sl *SessionLog
+	if err := sl.PersistUserProfile("", "observation"); err != nil {
+		t.Errorf("nil receiver with empty userContextID: want nil, got %v", err)
+	}
+}
+
+// ---- formatSearchResults tests ----
+
+func TestFormatSearchResults_EmptyEntries(t *testing.T) {
+	got := formatSearchResults(nil)
+	if got != "" {
+		t.Errorf("empty entries: want empty string, got %q", got)
+	}
+}
+
+func TestFormatSearchResults_SingleEntry(t *testing.T) {
+	entries := []types.SessionEntry{
+		{EntryID: "e1", TurnType: turnTypeAssistantResponse, Content: "The answer is 42."},
+	}
+	got := formatSearchResults(entries)
+	if !strings.Contains(got, "[1]") {
+		t.Errorf("expected numbered prefix [1]; got %q", got)
+	}
+	if !strings.Contains(got, turnTypeAssistantResponse) {
+		t.Errorf("expected turn type in output; got %q", got)
+	}
+	if !strings.Contains(got, "The answer is 42.") {
+		t.Errorf("expected content in output; got %q", got)
+	}
+}
+
+func TestFormatSearchResults_MultipleEntries_Numbered(t *testing.T) {
+	entries := []types.SessionEntry{
+		{EntryID: "e1", TurnType: turnTypeToolResult, Content: "result one"},
+		{EntryID: "e2", TurnType: turnTypeToolResult, Content: "result two"},
+		{EntryID: "e3", TurnType: turnTypeToolResult, Content: "result three"},
+	}
+	got := formatSearchResults(entries)
+	for i := 1; i <= 3; i++ {
+		prefix := strings.Contains(got, strings.Repeat("", 0)+strings.TrimSpace(strings.Repeat("a", 0)))
+		_ = prefix
+		marker := strings.Contains(got, "["+strings.Repeat("a", i-1)+"1"[:1]+"]")
+		_ = marker
+	}
+	// Verify all three entries appear and are separated by newlines.
+	if !strings.Contains(got, "result one") {
+		t.Error("first entry content missing")
+	}
+	if !strings.Contains(got, "result two") {
+		t.Error("second entry content missing")
+	}
+	if !strings.Contains(got, "result three") {
+		t.Error("third entry content missing")
+	}
+	if !strings.Contains(got, "[1]") || !strings.Contains(got, "[2]") || !strings.Contains(got, "[3]") {
+		t.Errorf("expected [1], [2], [3] prefixes; got %q", got)
+	}
+}
+
+func TestFormatSearchResults_EntriesSeparatedByNewlines(t *testing.T) {
+	entries := []types.SessionEntry{
+		{Content: "first"},
+		{Content: "second"},
+	}
+	got := formatSearchResults(entries)
+	if !strings.Contains(got, "\n") {
+		t.Errorf("multiple entries must be newline-separated; got %q", got)
+	}
+}
+
+// ---- PersistSkill nil-receiver test ----
+
+func TestSessionLog_NilReceiver_PersistSkill(t *testing.T) {
+	var sl *SessionLog
+	node := &types.SkillNode{Name: "web_fetch", Level: "command"}
+	if err := sl.PersistSkill("web", node); err != nil {
+		t.Errorf("nil receiver PersistSkill: want nil error, got %v", err)
 	}
 }
 
