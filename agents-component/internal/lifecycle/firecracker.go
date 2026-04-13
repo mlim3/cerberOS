@@ -380,6 +380,8 @@ func (m *firecrackerManager) configureMMDS(vm *fcVM, config VMConfig) error {
 			Instructions:     config.Instructions,
 			CommandManifest:  config.CommandManifest,
 			RecoveredContext: config.RecoveredContext,
+			AgentMemory:      config.AgentMemory,
+			UserProfile:      config.UserProfile,
 			TraceID:          config.TraceID,
 			UserContextID:    config.UserContextID,
 		},

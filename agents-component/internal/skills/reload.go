@@ -65,7 +65,7 @@ func (m *hierarchyManager) Reload(domains []*types.SkillNode) (ReloadResult, err
 		}
 		for _, child := range node.Children {
 			if child.Level == "command" {
-				if err := validateCommandContract(child); err != nil {
+				if err := ValidateCommandContract(child); err != nil {
 					return ReloadResult{}, fmt.Errorf("skills reload rejected: %w", err)
 				}
 			}

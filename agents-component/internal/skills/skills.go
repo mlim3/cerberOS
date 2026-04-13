@@ -52,6 +52,14 @@ type Manager interface {
 	// If topK is zero or negative the default (3) is used.
 	// Returns an error when query is empty or the embedder fails.
 	Search(query string, topK int) ([]types.SkillSearchResult, error)
+
+	// RegisterCommand adds or replaces a command-level node within an existing
+	// domain. Safe to call concurrently with reads. If a command with the same
+	// name already exists it is replaced (upsert — later synthesis wins).
+	// Returns an error if the domain does not exist or the node fails the Tool
+	// Contract (EDD §13.2). Used to load synthesized skills at startup and to
+	// accept new skills created during task execution.
+	RegisterCommand(domain string, node *types.SkillNode) error
 }
 
 // InvocationHook is called after each successful GetSpec call. It receives the
@@ -111,7 +119,7 @@ func New(opts ...Option) Manager {
 }
 
 // RegisterDomain adds a domain and its command subtree. Every command-level child
-// must pass validateCommandContract or the entire registration is rejected.
+// must pass ValidateCommandContract or the entire registration is rejected.
 // Embeddings for all command descriptions are pre-computed and added to the
 // in-memory search index (EDD §13.5).
 func (m *hierarchyManager) RegisterDomain(node *types.SkillNode) error {
@@ -126,7 +134,7 @@ func (m *hierarchyManager) RegisterDomain(node *types.SkillNode) error {
 	// the registration. This is the enforcement point described in EDD §13.2.
 	for _, child := range node.Children {
 		if child.Level == "command" {
-			if err := validateCommandContract(child); err != nil {
+			if err := ValidateCommandContract(child); err != nil {
 				return fmt.Errorf("skills: domain %q registration rejected: %w", node.Name, err)
 			}
 		}
@@ -329,9 +337,61 @@ func (m *hierarchyManager) Search(query string, topK int) ([]types.SkillSearchRe
 	return results, nil
 }
 
-// validateCommandContract enforces the Tool Contract from EDD §13.2 for a single
+// RegisterCommand adds or replaces a single command node within an existing domain.
+// The embedding index is updated atomically with the domain tree under the write lock.
+// Upsert semantics: a synthesized skill may refine an earlier version of the same name.
+func (m *hierarchyManager) RegisterCommand(domain string, node *types.SkillNode) error {
+	if node == nil {
+		return fmt.Errorf("skills: command node must not be nil")
+	}
+	if node.Level != "command" {
+		return fmt.Errorf("skills: RegisterCommand: expected level=command, got %q", node.Level)
+	}
+	if err := ValidateCommandContract(node); err != nil {
+		return fmt.Errorf("skills: RegisterCommand rejected: %w", err)
+	}
+
+	// Build embedding before acquiring the write lock — may call a remote
+	// embedder and must not block concurrent readers longer than necessary.
+	proxy := &types.SkillNode{
+		Name:     domain,
+		Level:    "domain",
+		Children: map[string]*types.SkillNode{node.Name: node},
+	}
+	newEntries := m.buildEmbeddings(proxy)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	d, ok := m.domains[domain]
+	if !ok {
+		return fmt.Errorf("skills: domain %q not found", domain)
+	}
+	if d.Children == nil {
+		d.Children = make(map[string]*types.SkillNode)
+	}
+	d.Children[node.Name] = node
+
+	// Update embedding index: replace an existing entry for this command or append.
+	replaced := false
+	for i, e := range m.embeddings {
+		if e.domain == domain && e.name == node.Name {
+			if len(newEntries) > 0 {
+				m.embeddings[i] = newEntries[0]
+			}
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		m.embeddings = append(m.embeddings, newEntries...)
+	}
+	return nil
+}
+
+// ValidateCommandContract enforces the Tool Contract from EDD §13.2 for a single
 // command-level SkillNode. Returns a descriptive error for every violation found.
-func validateCommandContract(node *types.SkillNode) error {
+func ValidateCommandContract(node *types.SkillNode) error {
 	// name: required, max 64 chars.
 	if node.Name == "" {
 		return fmt.Errorf("contract violation: command name is required")

@@ -108,13 +108,14 @@ type vaultExecuteResult struct {
 // Simulator subscribes to all aegis.orchestrator.* topics and publishes
 // synthetic responses to the corresponding aegis.agents.* topics.
 type Simulator struct {
-	nc         *nats.Conn
-	js         nats.JetStreamContext
-	log        *slog.Logger
-	mu         sync.Mutex
-	subs       []*nats.Subscription
-	credMu     sync.RWMutex
-	credTokens map[string]string // agentID → permission_token granted
+	nc             *nats.Conn
+	js             nats.JetStreamContext
+	log            *slog.Logger
+	mu             sync.Mutex
+	subs           []*nats.Subscription
+	credMu         sync.RWMutex
+	credTokens     map[string]string // agentID → permission_token granted
+	consumerSuffix string            // appended to all durable consumer names when non-empty
 }
 
 // New connects to NATS at natsURL and returns a Simulator ready to be started.
@@ -144,6 +145,15 @@ func New(natsURL string) (*Simulator, error) {
 // WithLogger replaces the default logger.
 func (s *Simulator) WithLogger(l *slog.Logger) *Simulator {
 	s.log = l
+	return s
+}
+
+// WithConsumerSuffix appends suffix to every durable consumer name used by
+// Start. Use in tests to give each simulator instance a unique set of
+// consumers and avoid "consumer is already bound" errors when multiple
+// simulator instances share the same NATS server.
+func (s *Simulator) WithConsumerSuffix(suffix string) *Simulator {
+	s.consumerSuffix = suffix
 	return s
 }
 
@@ -222,15 +232,19 @@ func (s *Simulator) Start() error {
 	}
 
 	for _, sub := range subscriptions {
+		consumer := sub.durable
+		if s.consumerSuffix != "" {
+			consumer = sub.durable + "-" + s.consumerSuffix
+		}
 		natsSub, err := s.js.Subscribe(
 			sub.subject,
 			sub.handler,
-			nats.Durable(sub.durable),
+			nats.Durable(consumer),
 			nats.DeliverNew(),
 			nats.AckExplicit(),
 		)
 		if err != nil {
-			return fmt.Errorf("simulator: subscribe %q (consumer %q): %w", sub.subject, sub.durable, err)
+			return fmt.Errorf("simulator: subscribe %q (consumer %q): %w", sub.subject, consumer, err)
 		}
 		s.mu.Lock()
 		s.subs = append(s.subs, natsSub)

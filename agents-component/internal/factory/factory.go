@@ -184,6 +184,64 @@ const (
 	agentTypeExisting = "existing_assigned"
 )
 
+// LoadSynthesizedSkills reads all persisted "skill_cache" entries from the Memory
+// Component and registers them into the Skill Hierarchy Manager. Call this once at
+// component startup, after static skills have been loaded from config, so skills
+// synthesized in prior sessions extend the live skill tree.
+//
+// Domains that do not exist in the static config are skipped — a synthesized skill
+// requires its parent domain to be registered first. Individual registration failures
+// are logged and skipped; they do not abort the startup sequence.
+func (f *Factory) LoadSynthesizedSkills(ctx context.Context) error {
+	records, err := f.memory.ReadAllByType("skill_cache")
+	if err != nil {
+		return fmt.Errorf("factory: load synthesized skills: read: %w", err)
+	}
+	if len(records) == 0 {
+		f.log.Info("factory: no synthesized skills found in memory")
+		return nil
+	}
+
+	loaded := 0
+	for _, record := range records {
+		domain, ok := record.Tags["domain"]
+		if !ok || domain == "" {
+			f.log.Warn("factory: synthesized skill record missing domain tag; skipping",
+				"agent_id", record.AgentID)
+			continue
+		}
+
+		// MemoryWrite.Payload is interface{}; after a JSON round-trip through the
+		// Memory Component it deserializes as map[string]interface{}. Re-marshal
+		// and unmarshal to recover the typed SkillNode.
+		raw, err := json.Marshal(record.Payload)
+		if err != nil {
+			f.log.Warn("factory: marshal synthesized skill payload failed; skipping",
+				"domain", domain, "error", err)
+			continue
+		}
+		var node types.SkillNode
+		if err := json.Unmarshal(raw, &node); err != nil {
+			f.log.Warn("factory: unmarshal synthesized skill node failed; skipping",
+				"domain", domain, "error", err)
+			continue
+		}
+
+		if err := f.skills.RegisterCommand(domain, &node); err != nil {
+			f.log.Warn("factory: register synthesized skill failed; skipping",
+				"domain", domain, "skill_name", node.Name, "error", err)
+			continue
+		}
+		loaded++
+		f.log.Info("factory: synthesized skill registered",
+			"domain", domain, "skill_name", node.Name)
+	}
+
+	f.log.Info("factory: synthesized skill load complete",
+		"loaded", loaded, "found", len(records))
+	return nil
+}
+
 // emit dispatches an audit event off the critical path. It is a no-op when
 // the emitter is nil (unit tests that do not wire a Comms client).
 func (f *Factory) emit(event types.AuditEvent) {
@@ -341,7 +399,7 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 
 	// Step 4: Pre-authorize credential permission set via real NATS round-trip.
 	// On VAULT_UNREACHABLE the broker has already exhausted its retry budget.
-	token, err := f.credentials.PreAuthorize(agentID, spec.TaskID, spec.RequiredSkills)
+	token, err := f.credentials.PreAuthorize(agentID, spec.TaskID, spec.TraceID, spec.RequiredSkills)
 	if err != nil {
 		f.log.Warn("credential.event",
 			"operation_type", "authorize",
@@ -380,7 +438,12 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 		},
 	})
 
-	// Step 5: Spawn agent process.
+	// Step 5: Fetch multi-layer memory to inject at spawn (capability 2).
+	// These reads are best-effort; failure does not abort provisioning.
+	agentMemory := f.fetchAgentMemory(entryDomain, spec.TraceID)
+	userProfile := f.fetchUserProfile(spec.UserContextID, spec.TraceID)
+
+	// Step 6: Spawn agent process.
 	vmCfg := lifecycle.VMConfig{
 		AgentID:         agentID,
 		VMID:            vmID,
@@ -389,6 +452,8 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 		CredentialPtr:   token,
 		Instructions:    spec.Instructions,
 		CommandManifest: manifest,
+		AgentMemory:     agentMemory,
+		UserProfile:     userProfile,
 		TraceID:         spec.TraceID,
 		UserContextID:   spec.UserContextID,
 		OnComplete:      f.processCompletionHandler(agentID),
@@ -487,11 +552,12 @@ func (f *Factory) CompleteTask(agentID, sessionID, traceID string, output interf
 
 	// Publish task_result to Orchestrator.
 	result := types.TaskResult{
-		TaskID:  agent.AssignedTask,
-		AgentID: agentID,
-		Success: taskErr == nil,
-		Output:  output,
-		TraceID: traceID,
+		TaskID:        agent.AssignedTask,
+		AgentID:       agentID,
+		Success:       taskErr == nil,
+		Output:        output,
+		TraceID:       traceID,
+		UserContextID: agent.UserContextID,
 	}
 	if taskErr != nil {
 		result.Error = taskErr.Error()
@@ -700,7 +766,7 @@ func (f *Factory) HandleCrash(agentID string) error {
 	_ = f.lifecycle.Terminate(agentID)
 
 	// Step 6: Credential re-authorization — fresh permission token for the new VM.
-	token, err := f.credentials.PreAuthorize(agentID, agent.AssignedTask, agent.SkillDomains)
+	token, err := f.credentials.PreAuthorize(agentID, agent.AssignedTask, agent.TraceID, agent.SkillDomains)
 	if err != nil {
 		f.log.Warn("credential.event",
 			"operation_type", "authorize",
@@ -865,6 +931,10 @@ func (f *Factory) publishStatus(agentID, taskID, state, traceID string) error {
 		State:   state,
 		TraceID: traceID,
 	}
+	// Best-effort: propagate user_context_id if the agent record is available.
+	if agent, err := f.registry.Get(agentID); err == nil {
+		update.UserContextID = agent.UserContextID
+	}
 	if err := f.comms.Publish(
 		comms.SubjectAgentStatus,
 		comms.PublishOptions{MessageType: comms.MsgTypeAgentStatus, CorrelationID: taskID},
@@ -911,6 +981,10 @@ func (f *Factory) publishFailed(agentID, taskID, errorCode, errorMessage, traceI
 		ErrorMessage: errorMessage,
 		Phase:        phase,
 		TraceID:      traceID,
+	}
+	// Best-effort: propagate user_context_id if the agent record is available.
+	if agent, err := f.registry.Get(agentID); err == nil {
+		failed.UserContextID = agent.UserContextID
 	}
 	if err := f.comms.Publish(
 		comms.SubjectTaskFailed,
@@ -1019,8 +1093,10 @@ func buildManifestText(commands []*types.SkillNode) string {
 }
 
 // spawnSystemPrompt returns the domain-scoped system prompt (including command
-// manifest) that will be sent to the agent at spawn time.
+// manifest) that will be used at spawn time for token-budget enforcement.
 // Must stay in sync with buildSystemPrompt in cmd/agent-process/loop.go.
+// agentMemory and userProfile are intentionally excluded from the budget count —
+// they are system overhead, not task payload.
 func spawnSystemPrompt(skillDomain, manifest string) string {
 	base := fmt.Sprintf(
 		`You are an Aegis OS agent scoped to the "%s" skill domain. `+
@@ -1033,6 +1109,70 @@ func spawnSystemPrompt(skillDomain, manifest string) string {
 		return base
 	}
 	return base + "\n\nAvailable commands:\n" + manifest
+}
+
+// fetchAgentMemory reads domain-scoped agent memory facts from the Memory
+// Component via the in-process stub or NATS-backed client. Returns "" when
+// no records exist or the read fails (best-effort).
+//
+// The synthetic agent ID "domain:<domain>" is the stable key used by
+// PersistAgentMemory in cmd/agent-process/session.go.
+func (f *Factory) fetchAgentMemory(domain, traceID string) string {
+	if domain == "" {
+		return ""
+	}
+	records, err := f.memory.Read("domain:"+domain, "agent_memory")
+	if err != nil || len(records) == 0 {
+		if err != nil {
+			f.log.Warn("factory: fetchAgentMemory failed", "domain", domain, "error", err, "trace_id", traceID)
+		}
+		return ""
+	}
+	return joinMemoryPayloads(records, 4000)
+}
+
+// fetchUserProfile reads user-scoped profile observations from the Memory
+// Component. Returns "" when userContextID is empty, no records exist, or
+// the read fails (best-effort).
+//
+// The synthetic agent ID "user:<userContextID>" is the stable key used by
+// PersistUserProfile in cmd/agent-process/session.go.
+func (f *Factory) fetchUserProfile(userContextID, traceID string) string {
+	if userContextID == "" {
+		return ""
+	}
+	records, err := f.memory.Read("user:"+userContextID, "user_profile")
+	if err != nil || len(records) == 0 {
+		if err != nil {
+			f.log.Warn("factory: fetchUserProfile failed", "user_context_id", userContextID, "error", err, "trace_id", traceID)
+		}
+		return ""
+	}
+	return joinMemoryPayloads(records, 2000)
+}
+
+// joinMemoryPayloads extracts string payloads from MemoryWrite records and
+// joins them as a newline-separated list, truncated to maxChars total.
+func joinMemoryPayloads(records []types.MemoryWrite, maxChars int) string {
+	var parts []string
+	total := 0
+	for _, r := range records {
+		s, ok := r.Payload.(string)
+		if !ok {
+			// payload may be map[string]interface{} after JSON round-trip
+			raw, err := json.Marshal(r.Payload)
+			if err != nil {
+				continue
+			}
+			s = string(raw)
+		}
+		if total+len(s) > maxChars {
+			break
+		}
+		parts = append(parts, s)
+		total += len(s) + 1
+	}
+	return strings.Join(parts, "\n")
 }
 
 // buildSpawnContextText assembles the full spawn-context string whose token count
@@ -1175,7 +1315,7 @@ func (f *Factory) wakeAgent(agentID string, spec *types.TaskSpec) error {
 
 	// Step 1: Fresh credential pre-authorization — the prior token expired during
 	// suspension. Required before the new VM can be spawned (EDD §6.2, CLAUDE.md §5).
-	token, err := f.credentials.PreAuthorize(agentID, spec.TaskID, agent.SkillDomains)
+	token, err := f.credentials.PreAuthorize(agentID, spec.TaskID, spec.TraceID, agent.SkillDomains)
 	if err != nil {
 		f.log.Warn("credential.event",
 			"operation_type", "authorize",

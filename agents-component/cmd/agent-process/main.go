@@ -72,6 +72,8 @@ type SpawnContext struct {
 	Instructions     string `json:"instructions"`
 	CommandManifest  string `json:"command_manifest,omitempty"`  // "- name: description" list built by factory; injected into system prompt
 	RecoveredContext string `json:"recovered_context,omitempty"` // non-empty on respawn
+	AgentMemory      string `json:"agent_memory,omitempty"`      // distilled facts from past tasks in this domain; injected into system prompt
+	UserProfile      string `json:"user_profile,omitempty"`      // user preference observations; injected into system prompt
 	TraceID          string `json:"trace_id"`
 	UserContextID    string `json:"user_context_id,omitempty"` // propagated from parent TaskSpec; echoed in all outbound events (issue #67)
 }

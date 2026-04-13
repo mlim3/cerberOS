@@ -36,6 +36,8 @@ type VMConfig struct {
 	Instructions     string // natural-language task description for the agent
 	CommandManifest  string // pre-built "- name: description" list for the entry domain; injected into system prompt
 	RecoveredContext string // non-empty on respawn: serialised CrashSnapshot for checkpoint resume
+	AgentMemory      string // distilled facts from past tasks in this domain; injected into system prompt
+	UserProfile      string // user preference observations; injected into system prompt
 	TraceID          string
 	UserContextID    string // propagated from TaskSpec; echoed in all outbound events (issue #67)
 
@@ -78,6 +80,8 @@ type agentSpawnContext struct {
 	Instructions     string `json:"instructions"`
 	CommandManifest  string `json:"command_manifest,omitempty"`  // "- name: description" list; injected into system prompt
 	RecoveredContext string `json:"recovered_context,omitempty"` // non-empty on respawn; contains crash snapshot for checkpoint resume
+	AgentMemory      string `json:"agent_memory,omitempty"`      // distilled facts from past tasks in this domain
+	UserProfile      string `json:"user_profile,omitempty"`      // user preference observations
 	TraceID          string `json:"trace_id"`
 	UserContextID    string `json:"user_context_id,omitempty"` // propagated from TaskSpec; echoed in all child agent events (issue #67)
 }
@@ -122,6 +126,8 @@ func (m *processManager) Spawn(config VMConfig) error {
 		Instructions:     config.Instructions,
 		CommandManifest:  config.CommandManifest,
 		RecoveredContext: config.RecoveredContext,
+		AgentMemory:      config.AgentMemory,
+		UserProfile:      config.UserProfile,
 		TraceID:          config.TraceID,
 		UserContextID:    config.UserContextID,
 	})
