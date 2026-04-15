@@ -49,3 +49,4 @@ def transcribe(audio_path: str, language: str | None = None) -> dict:
         "language": info.language or language or "en",
         "duration": info.duration or 0.0,
     }
+    

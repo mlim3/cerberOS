@@ -268,7 +268,7 @@ services:
     image: grafana/tempo:2.4.1
     command: -config.file=/etc/tempo/config.yaml
     volumes:
-      - ./orchestrator/observability/tempo-config.yml:/etc/tempo/config.yaml:ro
+      - ./orchestrator/observability/tempo/config.yaml:/etc/tempo/config.yaml:ro
     ports:
       - "3200:3200"   # Tempo HTTP (query)
       - "4317:4317"   # OTLP gRPC (trace ingest)
