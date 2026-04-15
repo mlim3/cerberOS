@@ -3,8 +3,7 @@
 .gitignore
 .cursor
 
-# Documentation (not needed at runtime)
-docs/
+# Documentation (not needed at runtime — except docs/ which has generated swagger Go code)
 *.md
 *.pdf
 *.pptx
