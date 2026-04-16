@@ -106,6 +106,7 @@ type TaskState struct {
 	OrchestratorTaskRef  string          `json:"orchestrator_task_ref"` // UUID — Orchestrator-internal, distinct from task_id
 	TaskID               string          `json:"task_id"`               // User-provided deduplication key
 	UserID               string          `json:"user_id"`
+	TraceID              string          `json:"trace_id,omitempty"`    // Distributed trace ID from inbound envelope
 	State                string          `json:"state"`
 	RequiredSkillDomains []string        `json:"required_skill_domains,omitempty"`
 	PolicyScope          PolicyScope     `json:"policy_scope"`
@@ -121,8 +122,6 @@ type TaskState struct {
 	CallbackTopic        string          `json:"callback_topic"`
 	UserContextID        string          `json:"user_context_id,omitempty"`
 	IdempotencyWindow    int             `json:"idempotency_window_seconds"`
-	// TraceID is W3C trace_id (32 hex) for logs and agent wire propagation; optional for legacy state.
-	TraceID string `json:"trace_id,omitempty"`
 }
 
 // ─── UserTask ─────────────────────────────────────────────────────────────────

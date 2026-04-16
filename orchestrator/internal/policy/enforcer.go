@@ -19,14 +19,14 @@
 package policy
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"log"
-	"os"
 	"time"
 
 	"github.com/mlim3/cerberOS/orchestrator/internal/config"
 	"github.com/mlim3/cerberOS/orchestrator/internal/interfaces"
+	"github.com/mlim3/cerberOS/orchestrator/internal/observability"
 	"github.com/mlim3/cerberOS/orchestrator/internal/types"
 )
 
@@ -37,7 +37,6 @@ type Enforcer struct {
 	memory interfaces.MemoryClient
 	cache  *PolicyCache
 	nodeID string
-	logger *log.Logger
 }
 
 // New creates a new Policy Enforcer.
@@ -45,19 +44,13 @@ func New(
 	cfg *config.OrchestratorConfig,
 	vault interfaces.VaultClient,
 	memory interfaces.MemoryClient,
-	logger *log.Logger,
 ) *Enforcer {
-	if logger == nil {
-		logger = log.New(os.Stdout, "[policy-enforcer] ", log.LstdFlags|log.LUTC)
-	}
-
 	return &Enforcer{
 		cfg:    cfg,
 		vault:  vault,
 		memory: memory,
 		cache:  NewPolicyCache(cfg.VaultPolicyCacheTTL),
 		nodeID: cfg.NodeID,
-		logger: logger,
 	}
 }
 
@@ -66,21 +59,22 @@ func New(
 // taskID and orchestratorTaskRef are included so every ALLOW/DENY decision
 // can be written as a task-linked audit event to Memory.
 func (e *Enforcer) ValidateAndScope(
+	ctx context.Context,
 	taskID string,
 	orchestratorTaskRef string,
 	userID string,
 	requiredSkillDomains []string,
 	timeoutSeconds int,
 ) (types.PolicyScope, error) {
+	logger := observability.LogFromContext(ctx)
 	if cachedScope, ok := e.cache.Get(userID, requiredSkillDomains); ok {
-		auditErr := e.writeAuditEvent(taskID, orchestratorTaskRef, userID, types.OutcomeSuccess, "cache_hit")
+		auditErr := e.writeAuditEvent(ctx, taskID, orchestratorTaskRef, userID, types.OutcomeSuccess, "cache_hit")
 		if auditErr != nil {
-			e.logger.Printf(
-				"failed to write policy audit event on cache hit: task_id=%s orchestrator_task_ref=%s user_id=%s error=%v",
-				taskID,
-				orchestratorTaskRef,
-				userID,
-				auditErr,
+			logger.Warn("failed to write policy audit event on cache hit",
+				"task_id", taskID,
+				"orchestrator_task_ref", orchestratorTaskRef,
+				"user_id", userID,
+				"error", auditErr,
 			)
 		}
 		return cachedScope, nil
@@ -90,29 +84,27 @@ func (e *Enforcer) ValidateAndScope(
 	if err != nil {
 		if e.cfg.VaultFailureMode == config.VaultFailureModeOpen {
 			if cachedScope, ok := e.cache.Get(userID, requiredSkillDomains); ok {
-				auditErr := e.writeAuditEvent(taskID, orchestratorTaskRef, userID, types.OutcomeSuccess, "cache_fallback")
+				auditErr := e.writeAuditEvent(ctx, taskID, orchestratorTaskRef, userID, types.OutcomeSuccess, "cache_fallback")
 				if auditErr != nil {
-					e.logger.Printf(
-						"failed to write policy audit event on cache fallback: task_id=%s orchestrator_task_ref=%s user_id=%s error=%v",
-						taskID,
-						orchestratorTaskRef,
-						userID,
-						auditErr,
+					logger.Warn("failed to write policy audit event on cache fallback",
+						"task_id", taskID,
+						"orchestrator_task_ref", orchestratorTaskRef,
+						"user_id", userID,
+						"error", auditErr,
 					)
 				}
 				return cachedScope, nil
 			}
 		}
 
-		auditErr := e.writeAuditEvent(taskID, orchestratorTaskRef, userID, types.OutcomeDenied, err.Error())
+		auditErr := e.writeAuditEvent(ctx, taskID, orchestratorTaskRef, userID, types.OutcomeDenied, err.Error())
 		if auditErr != nil {
 			// TODO Phase 1: emit metric for audit write failure.
-			e.logger.Printf(
-				"failed to write policy audit event on deny: task_id=%s orchestrator_task_ref=%s user_id=%s error=%v",
-				taskID,
-				orchestratorTaskRef,
-				userID,
-				auditErr,
+			logger.Warn("failed to write policy audit event on deny",
+				"task_id", taskID,
+				"orchestrator_task_ref", orchestratorTaskRef,
+				"user_id", userID,
+				"error", auditErr,
 			)
 		}
 		return types.PolicyScope{}, err
@@ -120,15 +112,14 @@ func (e *Enforcer) ValidateAndScope(
 
 	e.cache.Set(userID, requiredSkillDomains, scope)
 
-	auditErr := e.writeAuditEvent(taskID, orchestratorTaskRef, userID, types.OutcomeSuccess, "")
+	auditErr := e.writeAuditEvent(ctx, taskID, orchestratorTaskRef, userID, types.OutcomeSuccess, "")
 	if auditErr != nil {
 		// TODO Phase 1: emit metric for audit write failure.
-		e.logger.Printf(
-			"failed to write policy audit event on allow: task_id=%s orchestrator_task_ref=%s user_id=%s error=%v",
-			taskID,
-			orchestratorTaskRef,
-			userID,
-			auditErr,
+		logger.Warn("failed to write policy audit event on allow",
+			"task_id", taskID,
+			"orchestrator_task_ref", orchestratorTaskRef,
+			"user_id", userID,
+			"error", auditErr,
 		)
 	}
 
@@ -139,7 +130,8 @@ func (e *Enforcer) ValidateAndScope(
 // The scope CANNOT expand — if Vault says the scope has changed, escalate to SCOPE_EXPIRED (§13.2).
 //
 // TODO Phase 2: implement
-func (e *Enforcer) VerifyScopeStillValid(scope types.PolicyScope) error {
+func (e *Enforcer) VerifyScopeStillValid(_ context.Context, scope types.PolicyScope) error {
+	_ = scope
 	// TODO Phase 2
 	return nil
 }
@@ -151,7 +143,8 @@ func (e *Enforcer) VerifyScopeStillValid(scope types.PolicyScope) error {
 // exponential backoff). Does NOT block task termination.
 //
 // TODO Phase 2: implement with retry scheduler
-func (e *Enforcer) RevokeCredentials(orchestratorTaskRef string) error {
+func (e *Enforcer) RevokeCredentials(_ context.Context, orchestratorTaskRef string) error {
+	_ = orchestratorTaskRef
 	// TODO Phase 2
 	return nil
 }
@@ -169,7 +162,7 @@ func (e *Enforcer) InvalidateCacheForPolicy(policyName string) {
 // policy_event audit record.
 // In phase 1, callers treat audit persistence as best effort: write failures
 // are returned to the caller but do not override the primary Vault decision.
-func (e *Enforcer) writeAuditEvent(taskID, orchestratorTaskRef, userID string, outcome string, reason string) error {
+func (e *Enforcer) writeAuditEvent(_ context.Context, taskID, orchestratorTaskRef, userID string, outcome string, reason string) error {
 	eventType := types.EventPolicyAllow
 	if outcome != types.OutcomeSuccess {
 		eventType = types.EventPolicyDeny

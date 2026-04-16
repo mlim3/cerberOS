@@ -63,6 +63,10 @@ services:
       MEMORY_ENDPOINT: http://memory-api:8081
       IO_API_BASE: http://io:3001
       DECOMPOSITION_TIMEOUT_SECONDS: "120"
+      OTEL_EXPORTER_OTLP_ENDPOINT: tempo:4317
+      LOG_LEVEL: info
+      LOG_FORMAT: json
+      LOKI_URL: http://loki:3100
     ports:
       - "8080:8080"
     restart: unless-stopped
@@ -89,6 +93,8 @@ services:
       LOG_LEVEL: debug
       STT_PROVIDER: disabled
       MEMORY_API_BASE: http://memory-api:8081
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
+      OTEL_SERVICE_NAME: io-api
     restart: unless-stopped
     networks:
       - cerberos

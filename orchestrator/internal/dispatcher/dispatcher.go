@@ -33,6 +33,7 @@
 package dispatcher
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -45,7 +46,7 @@ import (
 	"github.com/mlim3/cerberOS/orchestrator/internal/config"
 	"github.com/mlim3/cerberOS/orchestrator/internal/interfaces"
 	ioclient "github.com/mlim3/cerberOS/orchestrator/internal/io"
-	"github.com/mlim3/cerberOS/orchestrator/internal/obslog"
+	"github.com/mlim3/cerberOS/orchestrator/internal/observability"
 	"github.com/mlim3/cerberOS/orchestrator/internal/types"
 )
 
@@ -60,17 +61,17 @@ const defaultIdempotencyWindow = 300 // seconds
 // Gateway defines the outbound operations the Dispatcher needs from M1.
 // Avoids a direct import cycle with the gateway package.
 type Gateway interface {
-	PublishTaskAccepted(callbackTopic string, accepted types.TaskAccepted) error
-	PublishError(callbackTopic string, resp types.ErrorResponse) error
-	PublishTaskResult(callbackTopic string, result types.TaskResult) error
-	PublishTaskSpec(spec types.TaskSpec) error
-	PublishStatusUpdate(userContextID string, status types.StatusResponse) error
+	PublishTaskAccepted(ctx context.Context, callbackTopic string, accepted types.TaskAccepted) error
+	PublishError(ctx context.Context, callbackTopic string, resp types.ErrorResponse) error
+	PublishTaskResult(ctx context.Context, callbackTopic string, result types.TaskResult) error
+	PublishTaskSpec(ctx context.Context, spec types.TaskSpec) error
+	PublishStatusUpdate(ctx context.Context, userContextID string, status types.StatusResponse) error
 }
 
 // PolicyEnforcer defines the policy operations the Dispatcher needs from M3.
 type PolicyEnforcer interface {
-	ValidateAndScope(taskID string, orchestratorTaskRef string, userID string, requiredSkillDomains []string, timeoutSeconds int) (types.PolicyScope, error)
-	RevokeCredentials(orchestratorTaskRef string) error
+	ValidateAndScope(ctx context.Context, taskID string, orchestratorTaskRef string, userID string, requiredSkillDomains []string, timeoutSeconds int) (types.PolicyScope, error)
+	RevokeCredentials(ctx context.Context, orchestratorTaskRef string) error
 }
 
 // TaskMonitor defines the monitor operations the Dispatcher needs from M4.
@@ -81,8 +82,8 @@ type TaskMonitor interface {
 
 // PlanExecutor defines the plan execution interface the Dispatcher delegates to (M7).
 type PlanExecutor interface {
-	Execute(plan types.ExecutionPlan, ts *types.TaskState) error
-	HandleSubtaskResult(result types.TaskResult) error
+	Execute(ctx context.Context, plan types.ExecutionPlan, ts *types.TaskState) error
+	HandleSubtaskResult(ctx context.Context, result types.TaskResult) error
 }
 
 // ── Dispatcher ────────────────────────────────────────────────────────────────
@@ -136,13 +137,14 @@ func New(
 		monitor:  monitor,
 		executor: executor,
 		io:       io,
-		logger:   obslog.NewLogger("dispatcher"),
+		logger:   slog.Default().With("module", "dispatcher"),
 	}
 }
 
 // ── Inbound Task Pipeline ─────────────────────────────────────────────────────
 
 // HandleInboundTask is the entry point for all user_task messages from the Gateway.
+// ctx carries the trace_id and task_id established at the gateway entry point.
 // Implements the full validation → dedup → policy → decomposition pipeline (§7, §17.3).
 //
 // Pipeline (§7):
@@ -153,13 +155,17 @@ func New(
 //  5. Persist DECOMPOSING state to Memory BEFORE sending planner dispatch (§14.1)
 //  6. Publish a standard task.inbound request to a general planner agent
 //  7. Start decomposition timeout goroutine
-func (d *Dispatcher) HandleInboundTask(task types.UserTask) error {
+func (d *Dispatcher) HandleInboundTask(ctx context.Context, task types.UserTask) error {
+	ctx = observability.WithModule(ctx, "task_dispatcher")
+	log := observability.LogFromContext(ctx)
+
 	atomic.AddInt64(&d.tasksReceived, 1)
+	log.Info("task dispatch pipeline started", "task_id", task.TaskID)
 
 	// ── Step 1: Schema validation ──────────────────────────────────────────
 	if err := validateSchema(task); err != nil {
-		d.logger.Error("schema validation failed", obslog.AppendTrace([]any{"task_id", task.TaskID, "err", err}, task.TraceID)...)
-		_ = d.gateway.PublishError(task.CallbackTopic, types.ErrorResponse{
+		log.Warn("schema validation failed", "error", err)
+		_ = d.gateway.PublishError(ctx, task.CallbackTopic, types.ErrorResponse{
 			TaskID:      task.TaskID,
 			ErrorCode:   types.ErrCodeInvalidTaskSpec,
 			UserMessage: err.Error(),
@@ -173,32 +179,46 @@ func (d *Dispatcher) HandleInboundTask(task types.UserTask) error {
 		idempotencyWindow = defaultIdempotencyWindow
 	}
 
-	if existing := d.dedupCheck(task.TaskID, idempotencyWindow); existing != nil {
-		d.logger.Warn("duplicate task rejected", obslog.AppendTrace([]any{"task_id", task.TaskID, "current_state", existing.State}, task.TraceID)...)
-		_ = d.gateway.PublishError(task.CallbackTopic, types.ErrorResponse{
-			TaskID:      task.TaskID,
-			ErrorCode:   types.ErrCodeDuplicateTask,
-			UserMessage: fmt.Sprintf("task already submitted — current state: %s", existing.State),
-		})
-		return nil
+	{
+		dedupCtx, dedupSpan := observability.StartSpan(ctx, "dedup_check")
+		existing := d.dedupCheck(task.TaskID, idempotencyWindow)
+		dedupSpan.End()
+		_ = dedupCtx
+		if existing != nil {
+			log.Info("duplicate task rejected", "current_state", existing.State)
+			_ = d.gateway.PublishError(ctx, task.CallbackTopic, types.ErrorResponse{
+				TaskID:      task.TaskID,
+				ErrorCode:   types.ErrCodeDuplicateTask,
+				UserMessage: fmt.Sprintf("task already submitted — current state: %s", existing.State),
+			})
+			return nil
+		}
 	}
 
 	// ── Step 3: Generate orchestrator_task_ref ─────────────────────────────
 	orchRef := newUUID()
 
 	// ── Step 4: Policy validation ──────────────────────────────────────────
-	scope, err := d.policy.ValidateAndScope(
-		task.TaskID, orchRef, task.UserID, task.RequiredSkillDomains, task.TimeoutSeconds,
-	)
-	if err != nil {
-		atomic.AddInt64(&d.policyViolations, 1)
-		d.logger.Warn("policy denied", obslog.AppendTrace([]any{"task_id", task.TaskID, "orchestrator_task_ref", orchRef, "err", err}, task.TraceID)...)
-		_ = d.gateway.PublishError(task.CallbackTopic, types.ErrorResponse{
-			TaskID:      task.TaskID,
-			ErrorCode:   types.ErrCodePolicyViolation,
-			UserMessage: "Task requires resources outside your configured permissions.",
-		})
-		return fmt.Errorf("policy validation denied: %w", err)
+	var scope types.PolicyScope
+	{
+		policyCtx, policySpan := observability.StartSpan(ctx, "policy_validation")
+		observability.SpanSetTaskAttributes(policySpan, task.TaskID, task.UserID)
+		var err error
+		scope, err = d.policy.ValidateAndScope(
+			policyCtx, task.TaskID, orchRef, task.UserID, task.RequiredSkillDomains, task.TimeoutSeconds,
+		)
+		observability.SpanRecordError(policySpan, err)
+		policySpan.End()
+		if err != nil {
+			atomic.AddInt64(&d.policyViolations, 1)
+			log.Warn("policy validation denied", "orchestrator_task_ref", orchRef)
+			_ = d.gateway.PublishError(ctx, task.CallbackTopic, types.ErrorResponse{
+				TaskID:      task.TaskID,
+				ErrorCode:   types.ErrCodePolicyViolation,
+				UserMessage: "Task requires resources outside your configured permissions.",
+			})
+			return fmt.Errorf("policy validation denied: %w", err)
+		}
 	}
 
 	// ── Build initial task state as DECOMPOSING ────────────────────────────
@@ -209,6 +229,7 @@ func (d *Dispatcher) HandleInboundTask(task types.UserTask) error {
 		OrchestratorTaskRef:  orchRef,
 		TaskID:               task.TaskID,
 		UserID:               task.UserID,
+		TraceID:              observability.TraceIDFrom(ctx),
 		State:                types.StateDecomposing,
 		RequiredSkillDomains: task.RequiredSkillDomains,
 		PolicyScope:          scope,
@@ -216,7 +237,6 @@ func (d *Dispatcher) HandleInboundTask(task types.UserTask) error {
 		CallbackTopic:        task.CallbackTopic,
 		UserContextID:        task.UserContextID,
 		IdempotencyWindow:    idempotencyWindow,
-		TraceID:              task.TraceID,
 		Payload:              task.Payload,
 		StateHistory: []types.StateEvent{
 			{State: types.StateReceived, Timestamp: now, NodeID: d.cfg.NodeID},
@@ -226,8 +246,8 @@ func (d *Dispatcher) HandleInboundTask(task types.UserTask) error {
 
 	// ── Step 5: Persist DECOMPOSING BEFORE sending planner dispatch ────────
 	if err := d.persistTaskState(ts, now); err != nil {
-		d.logger.Error("memory write failed before decomposition", obslog.AppendTrace([]any{"task_id", task.TaskID, "err", err}, ts.TraceID)...)
-		_ = d.gateway.PublishError(task.CallbackTopic, types.ErrorResponse{
+		log.Error("memory write failed before decomposition", "error", err)
+		_ = d.gateway.PublishError(ctx, task.CallbackTopic, types.ErrorResponse{
 			TaskID:      task.TaskID,
 			ErrorCode:   types.ErrCodeStorageUnavailable,
 			UserMessage: "Unable to persist task state. Task not dispatched.",
@@ -262,27 +282,35 @@ func (d *Dispatcher) HandleInboundTask(task types.UserTask) error {
 		CallbackTopic:   task.CallbackTopic,
 		UserContextID:   task.UserContextID,
 		ProgressSummary: "Generating execution plan",
-		TraceID:         task.TraceID,
+		TraceID:         ts.TraceID,
 	}
 
-	if err := d.gateway.PublishTaskSpec(spec); err != nil {
-		d.logger.Error("planner task publish failed", obslog.AppendTrace([]any{"task_id", task.TaskID, "err", err}, task.TraceID)...)
-		d.failTask(ts, types.ErrCodeAgentsUnavailable, "Could not reach Planner Agent. Please retry.")
-		return fmt.Errorf("publish planner task: %w", err)
+	{
+		decompCtx, decompSpan := observability.StartSpan(ctx, "decomposition")
+		observability.SpanSetTaskAttributes(decompSpan, task.TaskID, task.UserID)
+		err := d.gateway.PublishTaskSpec(decompCtx, spec)
+		observability.SpanRecordError(decompSpan, err)
+		decompSpan.End()
+		if err != nil {
+			log.Error("planner task publish failed", "error", err)
+			d.failTask(ctx, ts, types.ErrCodeAgentsUnavailable, "Could not reach Planner Agent. Please retry.")
+			return fmt.Errorf("publish planner task: %w", err)
+		}
 	}
 	d.pendingDecompositions.Store(orchRef, task.TaskID)
 
 	// ── Step 7: Start decomposition timeout goroutine ──────────────────────
-	go d.watchDecompositionTimeout(ts)
+	go d.watchDecompositionTimeout(ctx, ts)
 
-	d.logger.Info("task sent to planner agent", obslog.AppendTrace([]any{"task_id", task.TaskID, "orchestrator_task_ref", orchRef}, task.TraceID)...)
+	log.Info("task sent to planner agent", "orchestrator_task_ref", orchRef)
 	return nil
 }
 
 // HandleTaskResult routes terminal agent outcomes. Planner-task results are
 // parsed into execution plans; all other outcomes are delegated to the executor
 // as subtask results.
-func (d *Dispatcher) HandleTaskResult(result types.TaskResult) error {
+// ctx is built by the inbound handler from the message envelope's trace_id.
+func (d *Dispatcher) HandleTaskResult(ctx context.Context, result types.TaskResult) error {
 	if _, ok := d.pendingDecompositions.Load(result.OrchestratorTaskRef); ok {
 		d.pendingDecompositions.Delete(result.OrchestratorTaskRef)
 		if !result.Success {
@@ -291,7 +319,7 @@ func (d *Dispatcher) HandleTaskResult(result types.TaskResult) error {
 				if result.ErrorCode != "" {
 					msg = fmt.Sprintf("Planner agent failed: %s", result.ErrorCode)
 				}
-				d.failTask(ts, types.ErrCodeAgentsUnavailable, msg)
+				d.failTask(ctx, ts, types.ErrCodeAgentsUnavailable, msg)
 			}
 			return nil
 		}
@@ -299,44 +327,46 @@ func (d *Dispatcher) HandleTaskResult(result types.TaskResult) error {
 		plan, err := parseExecutionPlan(result.Result)
 		if err != nil {
 			if ts := d.activeTaskByOrchRef(result.OrchestratorTaskRef); ts != nil {
-				d.failTask(ts, types.ErrCodeInvalidPlan,
+				d.failTask(ctx, ts, types.ErrCodeInvalidPlan,
 					fmt.Sprintf("Planner agent returned an invalid plan: %v", err))
 			}
 			return fmt.Errorf("parse planner result: %w", err)
 		}
-		return d.HandleDecompositionResponse(types.DecompositionResponse{
+		return d.HandleDecompositionResponse(ctx, types.DecompositionResponse{
 			TaskID: plan.ParentTaskID,
 			Plan:   plan,
 		})
 	}
 
-	return d.executor.HandleSubtaskResult(result)
+	return d.executor.HandleSubtaskResult(ctx, result)
 }
 
 // HandleDecompositionResponse processes a task_decomposition_response from the Planner Agent.
 // Validates the plan, transitions task to PLAN_ACTIVE, passes plan to Plan Executor,
 // and sends task_accepted to User I/O (§7 Flow 3.5, §8.1 steps 13–22).
-func (d *Dispatcher) HandleDecompositionResponse(resp types.DecompositionResponse) error {
+func (d *Dispatcher) HandleDecompositionResponse(ctx context.Context, resp types.DecompositionResponse) error {
+	ctx = observability.WithModule(ctx, "task_dispatcher")
+	log := observability.LogFromContext(ctx)
+
 	tsVal, ok := d.activeTasks.Load(resp.TaskID)
 	if !ok {
 		// Task may have timed out already — ignore stale response.
-		d.logger.Warn("decomposition response for unknown/timed-out task", "task_id", resp.TaskID)
+		log.Info("decomposition response for unknown/timed-out task")
 		return nil
 	}
 	ts := tsVal.(*types.TaskState)
 
 	// Guard: only act if task is still DECOMPOSING.
 	if ts.State != types.StateDecomposing {
-		d.logger.Warn("decomposition response ignored — task not in DECOMPOSING state",
-			obslog.AppendTrace([]any{"task_id", resp.TaskID, "state", ts.State}, ts.TraceID)...)
+		log.Info("decomposition response ignored — task not in DECOMPOSING state", "state", ts.State)
 		return nil
 	}
 
 	// ── Validate plan ──────────────────────────────────────────────────────
 	if err := d.validatePlan(resp.Plan, ts); err != nil {
-		d.logger.Error("plan validation failed", obslog.AppendTrace([]any{"task_id", resp.TaskID, "err", err}, ts.TraceID)...)
+		log.Warn("plan validation failed", "error", err)
 		errorCode := classifyPlanError(err)
-		d.failTask(ts, errorCode, fmt.Sprintf("Execution plan is invalid: %s", err.Error()))
+		d.failTask(ctx, ts, errorCode, fmt.Sprintf("Execution plan is invalid: %s", err.Error()))
 		return fmt.Errorf("plan validation: %w", err)
 	}
 
@@ -352,14 +382,13 @@ func (d *Dispatcher) HandleDecompositionResponse(resp types.DecompositionRespons
 	})
 
 	if err := d.persistTaskState(ts, now); err != nil {
-		d.logger.Error("memory write failed on PLAN_ACTIVE", obslog.AppendTrace([]any{"task_id", resp.TaskID, "err", err}, ts.TraceID)...)
+		log.Warn("memory write failed on PLAN_ACTIVE", "error", err)
 		// Non-fatal: plan will still proceed. Reconciliation handles it later.
 	}
 
 	// Persist the plan itself.
 	if err := d.persistPlanState(resp.Plan, ts.TaskID, ts.OrchestratorTaskRef, now); err != nil {
-		d.logger.Error("plan state persist failed",
-			obslog.AppendTrace([]any{"task_id", resp.TaskID, "plan_id", resp.Plan.PlanID, "err", err}, ts.TraceID)...)
+		log.Warn("plan state persist failed", "plan_id", resp.Plan.PlanID, "error", err)
 		// Non-fatal: executor holds plan in memory.
 	}
 
@@ -373,9 +402,10 @@ func (d *Dispatcher) HandleDecompositionResponse(resp types.DecompositionRespons
 		fmt.Sprintf("Executing %d subtasks...", subtaskCount), &expectedMins)
 
 	// ── Hand off to Plan Executor ──────────────────────────────────────────
-	if err := d.executor.Execute(resp.Plan, ts); err != nil {
-		d.logger.Error("plan executor failed to start", obslog.AppendTrace([]any{"task_id", resp.TaskID, "err", err}, ts.TraceID)...)
-		d.failTask(ts, types.ErrCodeAgentsUnavailable, "Failed to start plan execution.")
+	planCtx := observability.WithPlanID(ctx, resp.Plan.PlanID)
+	if err := d.executor.Execute(planCtx, resp.Plan, ts); err != nil {
+		log.Error("plan executor failed to start", "error", err)
+		d.failTask(ctx, ts, types.ErrCodeAgentsUnavailable, "Failed to start plan execution.")
 		return fmt.Errorf("plan executor execute: %w", err)
 	}
 
@@ -392,19 +422,21 @@ func (d *Dispatcher) HandleDecompositionResponse(resp types.DecompositionRespons
 		OrchestratorTaskRef: ts.OrchestratorTaskRef,
 		EstimatedCompletion: estimatedCompletion,
 	}
-	if err := d.gateway.PublishTaskAccepted(ts.CallbackTopic, accepted); err != nil {
-		d.logger.Error("publish task_accepted failed", obslog.AppendTrace([]any{"task_id", resp.TaskID, "err", err}, ts.TraceID)...)
+	if err := d.gateway.PublishTaskAccepted(ctx, ts.CallbackTopic, accepted); err != nil {
+		log.Warn("publish task_accepted failed", "error", err)
 		// Non-fatal: plan is running; user may poll for status.
 	}
 
-	d.logger.Info("plan execution started",
-		obslog.AppendTrace([]any{"task_id", resp.TaskID, "plan_id", resp.Plan.PlanID, "subtasks", len(resp.Plan.Subtasks)}, ts.TraceID)...)
+	log.Info("plan execution started", "plan_id", resp.Plan.PlanID, "subtask_count", len(resp.Plan.Subtasks))
 	return nil
 }
 
 // HandlePlanComplete is called by the Plan Executor when all subtasks complete successfully.
 // Writes COMPLETED state, delivers aggregated result to User I/O, revokes credentials.
 func (d *Dispatcher) HandlePlanComplete(ts *types.TaskState, aggregatedResults []types.PriorResult) {
+	ctx := ctxFromTaskState(ts, "task_dispatcher")
+	log := observability.LogFromContext(ctx)
+
 	now := time.Now().UTC()
 
 	ts.State = types.StateCompleted
@@ -416,7 +448,7 @@ func (d *Dispatcher) HandlePlanComplete(ts *types.TaskState, aggregatedResults [
 	})
 
 	if err := d.persistTaskState(ts, now); err != nil {
-		d.logger.Error("memory write failed on task completion", obslog.AppendTrace([]any{"task_id", ts.TaskID, "err", err}, ts.TraceID)...)
+		log.Error("memory write failed on task completion", "error", err)
 	}
 
 	// Build and deliver final task result.
@@ -427,17 +459,23 @@ func (d *Dispatcher) HandlePlanComplete(ts *types.TaskState, aggregatedResults [
 		Result:              resultsJSON,
 		CompletedAt:         now,
 	}
-	if err := d.gateway.PublishTaskResult(ts.CallbackTopic, result); err != nil {
-		d.logger.Error("publish task_result failed", obslog.AppendTrace([]any{"task_id", ts.TaskID, "err", err}, ts.TraceID)...)
+	{
+		deliveryCtx, deliverySpan := observability.StartSpan(ctx, "result_delivery")
+		observability.SpanSetTaskAttributes(deliverySpan, ts.TaskID, ts.UserID)
+		err := d.gateway.PublishTaskResult(deliveryCtx, ts.CallbackTopic, result)
+		observability.SpanRecordError(deliverySpan, err)
+		deliverySpan.End()
+		if err != nil {
+			log.Error("publish task_result failed", "error", err)
+		}
 	}
 
 	// Notify IO: task complete.
 	zero := 0
 	_ = d.io.PushStatus(ts.TaskID, ioclient.StatusCompleted, "Task complete", &zero)
 
-	if err := d.policy.RevokeCredentials(ts.OrchestratorTaskRef); err != nil {
-		d.logger.Error("credential revocation failed",
-			obslog.AppendTrace([]any{"orchestrator_task_ref", ts.OrchestratorTaskRef, "err", err}, ts.TraceID)...)
+	if err := d.policy.RevokeCredentials(ctx, ts.OrchestratorTaskRef); err != nil {
+		log.Error("credential revocation failed", "error", err)
 	}
 
 	d.activeTasks.Delete(ts.TaskID)
@@ -445,12 +483,15 @@ func (d *Dispatcher) HandlePlanComplete(ts *types.TaskState, aggregatedResults [
 	atomic.AddInt64(&d.queueDepth, -1)
 	atomic.AddInt64(&d.tasksCompleted, 1)
 
-	d.logger.Info("task completed", obslog.AppendTrace([]any{"task_id", ts.TaskID, "plan_id", ts.PlanID}, ts.TraceID)...)
+	log.Info("task completed", "plan_id", ts.PlanID)
 }
 
 // HandlePlanFailed is called by the Plan Executor when the plan cannot complete.
 // Writes FAILED or PARTIAL_COMPLETE state, delivers error to User I/O.
 func (d *Dispatcher) HandlePlanFailed(ts *types.TaskState, errorCode string, partial bool, partialResults []types.PriorResult) {
+	ctx := ctxFromTaskState(ts, "task_dispatcher")
+	log := observability.LogFromContext(ctx)
+
 	now := time.Now().UTC()
 
 	finalState := types.StateFailed
@@ -469,7 +510,7 @@ func (d *Dispatcher) HandlePlanFailed(ts *types.TaskState, errorCode string, par
 	})
 
 	if err := d.persistTaskState(ts, now); err != nil {
-		d.logger.Error("memory write failed on task failure", obslog.AppendTrace([]any{"task_id", ts.TaskID, "err", err}, ts.TraceID)...)
+		log.Error("memory write failed on task failure", "error", err)
 	}
 
 	if partial && len(partialResults) > 0 {
@@ -481,9 +522,9 @@ func (d *Dispatcher) HandlePlanFailed(ts *types.TaskState, errorCode string, par
 			ErrorCode:           errorCode,
 			CompletedAt:         now,
 		}
-		_ = d.gateway.PublishTaskResult(ts.CallbackTopic, result)
+		_ = d.gateway.PublishTaskResult(ctx, ts.CallbackTopic, result)
 	} else {
-		_ = d.gateway.PublishError(ts.CallbackTopic, types.ErrorResponse{
+		_ = d.gateway.PublishError(ctx, ts.CallbackTopic, types.ErrorResponse{
 			TaskID:      ts.TaskID,
 			ErrorCode:   errorCode,
 			UserMessage: humanReadableError(errorCode),
@@ -498,9 +539,8 @@ func (d *Dispatcher) HandlePlanFailed(ts *types.TaskState, errorCode string, par
 	}
 	_ = d.io.PushStatus(ts.TaskID, ioclient.StatusCompleted, lastUpdate, &zero)
 
-	if err := d.policy.RevokeCredentials(ts.OrchestratorTaskRef); err != nil {
-		d.logger.Error("credential revocation failed",
-			obslog.AppendTrace([]any{"orchestrator_task_ref", ts.OrchestratorTaskRef, "err", err}, ts.TraceID)...)
+	if err := d.policy.RevokeCredentials(ctx, ts.OrchestratorTaskRef); err != nil {
+		log.Error("credential revocation failed", "error", err)
 	}
 
 	d.activeTasks.Delete(ts.TaskID)
@@ -508,8 +548,7 @@ func (d *Dispatcher) HandlePlanFailed(ts *types.TaskState, errorCode string, par
 	atomic.AddInt64(&d.queueDepth, -1)
 	atomic.AddInt64(&d.tasksFailed, 1)
 
-	d.logger.Info("task terminal failure",
-		obslog.AppendTrace([]any{"final_state", finalState, "task_id", ts.TaskID, "plan_id", ts.PlanID, "error_code", errorCode}, ts.TraceID)...)
+	log.Info("task reached terminal state", "final_state", finalState, "plan_id", ts.PlanID, "error_code", errorCode)
 }
 
 // ── Read-only Accessors ───────────────────────────────────────────────────────
@@ -541,7 +580,7 @@ func (d *Dispatcher) GetMetrics() (received, completed, failed, violations, deco
 
 // watchDecompositionTimeout fires DECOMPOSITION_TIMEOUT if task is still DECOMPOSING
 // after DecompositionTimeoutSeconds (§FR-TD-02, §8.5).
-func (d *Dispatcher) watchDecompositionTimeout(ts *types.TaskState) {
+func (d *Dispatcher) watchDecompositionTimeout(ctx context.Context, ts *types.TaskState) {
 	timeout := time.Duration(d.cfg.DecompositionTimeoutSeconds) * time.Second
 	<-time.After(timeout)
 
@@ -555,14 +594,15 @@ func (d *Dispatcher) watchDecompositionTimeout(ts *types.TaskState) {
 	}
 
 	atomic.AddInt64(&d.decompositionFailed, 1)
-	d.logger.Error("decomposition timeout",
-		obslog.AppendTrace([]any{"task_id", ts.TaskID, "orchestrator_task_ref", ts.OrchestratorTaskRef, "timeout", timeout.String()}, ts.TraceID)...)
-	d.failTask(current, types.ErrCodeDecompositionTimeout,
+	log := observability.LogFromContext(ctx)
+	log.Warn("decomposition timeout", "orchestrator_task_ref", ts.OrchestratorTaskRef, "timeout", timeout)
+	d.failTask(ctx, current, types.ErrCodeDecompositionTimeout,
 		fmt.Sprintf("Planner Agent did not respond within %d seconds.", d.cfg.DecompositionTimeoutSeconds))
 }
 
 // failTask transitions a task to a terminal failure state, publishes error, and cleans up.
-func (d *Dispatcher) failTask(ts *types.TaskState, errorCode, userMessage string) {
+func (d *Dispatcher) failTask(ctx context.Context, ts *types.TaskState, errorCode, userMessage string) {
+	log := observability.LogFromContext(observability.WithModule(ctx, "task_dispatcher"))
 	now := time.Now().UTC()
 	d.pendingDecompositions.Delete(ts.OrchestratorTaskRef)
 
@@ -577,10 +617,10 @@ func (d *Dispatcher) failTask(ts *types.TaskState, errorCode, userMessage string
 	})
 
 	if err := d.persistTaskState(ts, now); err != nil {
-		d.logger.Error("memory write failed on task failure", obslog.AppendTrace([]any{"task_id", ts.TaskID, "err", err}, ts.TraceID)...)
+		log.Error("memory write failed on task failure", "error", err)
 	}
 
-	_ = d.gateway.PublishError(ts.CallbackTopic, types.ErrorResponse{
+	_ = d.gateway.PublishError(ctx, ts.CallbackTopic, types.ErrorResponse{
 		TaskID:      ts.TaskID,
 		ErrorCode:   errorCode,
 		UserMessage: userMessage,
@@ -593,6 +633,20 @@ func (d *Dispatcher) failTask(ts *types.TaskState, errorCode, userMessage string
 	d.activeTasks.Delete(ts.TaskID)
 	d.monitor.UntrackTask(ts.TaskID)
 	atomic.AddInt64(&d.queueDepth, -1)
+}
+
+// ctxFromTaskState reconstructs an observability context from a persisted TaskState.
+// Used by callbacks that don't have an explicit context (e.g. HandlePlanComplete).
+func ctxFromTaskState(ts *types.TaskState, module string) context.Context {
+	ctx := context.Background()
+	if ts.TraceID != "" {
+		ctx = observability.WithTraceID(ctx, ts.TraceID)
+	}
+	ctx = observability.WithTaskID(ctx, ts.TaskID)
+	if ts.PlanID != "" {
+		ctx = observability.WithPlanID(ctx, ts.PlanID)
+	}
+	return observability.WithModule(ctx, module)
 }
 
 // validatePlan checks an execution plan for structural validity (§FR-TD-04, §FR-TD-07).

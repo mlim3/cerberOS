@@ -419,15 +419,15 @@ app.post('/api/chat', async (c) => {
     history_len: conversationHistory?.length,
   })
 
-  // Log user message via memory client (uses in-memory when MEMORY_API_BASE is unset)
+  // Log user message via memory client — fire-and-forget so the SSE stream opens immediately.
   const sessionId = getOrCreateSessionId(taskId, '00000000-0000-0000-0000-000000000001')
-  await appendLogEntry({
+  appendLogEntry({
     sessionId,
     userId: '00000000-0000-0000-0000-000000000001',
     role: 'user',
     content,
     taskId,
-  })
+  }).catch(() => { /* best-effort */ })
 
   const workingStatus: StatusUpdate = {
     taskId,
