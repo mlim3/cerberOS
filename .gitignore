@@ -89,6 +89,9 @@ htmlcov/
 *.orig
 .todos/
 
+# Git worktrees
+.worktrees/
+
 # Claude Code
 .sidecar/
 CLAUDE.md
