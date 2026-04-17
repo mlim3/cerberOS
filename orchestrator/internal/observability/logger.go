@@ -71,6 +71,7 @@ func InitLogger(level, format, node string) {
 //   - planner output
 func LogFromContext(ctx context.Context) *slog.Logger {
 	attrs := []any{
+		"service", "orchestrator",
 		"component", "orchestrator",
 	}
 	if nodeID != "" {
