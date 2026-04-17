@@ -4,7 +4,7 @@
 | Field | Value |
 |---|---|
 | Document ID | EDD-AEGIS-ORC-002 |
-| Version | 3.1 |
+| Version | 3.4 |
 | Status | Draft — For Review |
 | Date | April 2026 |
 | Component | Orchestrator Component |
@@ -26,11 +26,11 @@
 8. [Sequence Diagrams](#8-sequence-diagrams)
 9. [Task Lifecycle State Machine](#9-task-lifecycle-state-machine)
 10. [Data Models](#10-data-models)
-11. [Interface Specifications](#11-interface-specifications) *(updated: IO Component HTTP bridge added)*
+11. [Interface Specifications](#11-interface-specifications) *(updated: confirmation request/response schemas added)*
 12. [Heartbeat & Health Monitoring](#12-heartbeat--health-monitoring)
 13. [Security Design](#13-security-design)
 14. [Error Handling & Resilience](#14-error-handling--resilience)
-15. [Observability Design](#15-observability-design)
+15. [Observability Design](#15-observability-design) *(updated: structured logging, OTel tracing, Grafana stack, debug endpoint)*
 16. [Configuration & Environment Variables](#16-configuration--environment-variables)
 17. [Proof of Concept (PoC)](#17-proof-of-concept-poc)
 18. [Open Questions](#18-open-questions)
@@ -108,7 +108,7 @@ The Orchestrator sits at the center of the Aegis OS control plane, interfacing w
 | Vault (OpenBao) | Bidirectional | OpenBao HTTP API | Outbound: `policy_validation_request`, `token_revoke`. Inbound: `policy_result`, `scoped_token` |
 | Memory Component | Bidirectional | Memory Interface abstraction | Outbound: tagged task state writes, plan state writes, subtask state writes, audit events. Inbound: task state reads for recovery and deduplication |
 | Communications (NATS) | Bidirectional | NATS JetStream | All inter-component messages routed through NATS streams. Orchestrator publishes and subscribes via defined topic hierarchy. |
-| IO Component | Outbound | HTTP (JSON POST) | Orchestrator pushes real-time task status updates and credential requests to the IO Component's HTTP bridge endpoint (`POST /api/orchestrator/stream-events`). Optional — disabled when `IO_API_BASE` is not set. |
+| IO Component | Bidirectional | HTTP (outbound) + NATS (inbound) | **Outbound (HTTP):** real-time task status, credential requests, plan preview cards, and subtask confirmation prompts pushed to `POST /api/orchestrator/stream-events`. Optional — disabled when `IO_API_BASE` is not set. **Inbound (NATS):** user plan approve/reject decisions on `aegis.orchestrator.plan.decision`; user subtask confirmation responses on `aegis.orchestrator.task.confirmation_response`. |
 
 ---
 
@@ -122,16 +122,16 @@ The Orchestrator consists of **seven internal modules**. Each module has a singl
 
 | | |
 |---|---|
-| **Responsibilities** | Single inbound/outbound gateway for all NATS messaging. Receives `user_task` from User I/O Component. Routes outbound messages (results, status, errors, planner tasks, subtask tasks) to User I/O and Agents Component. Enforces message envelope validation — rejects malformed messages before they enter the pipeline. Adapts internal Orchestrator structs to the real Agents Component wire schema. Manages NATS consumer ACK/NAK and dead-letter queue monitoring. Subscribes to `aegis.orchestrator.credential.request` and forwards `user_input` credential requests to the registered handler (IO Component bridge); vault `authorize`/`revoke` operations are filtered out and not forwarded. |
-| **Inputs** | `user_task` from User I/O (via NATS); `task.result`, `task.failed`, `agent.status`, and `credential.request` from Agents Component (via NATS); internal messages from Task Dispatcher and Plan Executor |
-| **Outputs** | Parsed `user_task` to Task Dispatcher; routed responses to User I/O and Agents Component; planner `task.inbound` to Agents Component; subtask `task.inbound` to Agents Component; `credential_request` events forwarded to IO Component HTTP bridge |
-| **Interfaces With** | Task Dispatcher (internal), Plan Executor (internal), NATS / Communications Component (external), IO Component (external — HTTP) |
+| **Responsibilities** | Single inbound/outbound gateway for all NATS messaging. Receives `user_task` from User I/O Component. Routes outbound messages (results, status, errors, planner tasks, subtask tasks) to User I/O and Agents Component. Enforces message envelope validation — rejects malformed messages before they enter the pipeline. Adapts internal Orchestrator structs to the real Agents Component wire schema. Manages NATS consumer ACK/NAK and dead-letter queue monitoring. Subscribes to `aegis.orchestrator.credential.request` and forwards `user_input` credential requests to the registered handler (IO Component bridge); vault `authorize`/`revoke` operations are filtered out and not forwarded. Subscribes to `aegis.orchestrator.plan.decision` and routes user plan approve/reject decisions to the Task Dispatcher's registered handler. Subscribes to `aegis.orchestrator.task.confirmation_response` and routes user subtask confirmation/rejection responses to the Plan Executor's registered handler. Exposes `PublishConfirmationRequest` — called by the Plan Executor to forward subtask confirmation prompts to the IO Component via the registered HTTP callback. |
+| **Inputs** | `user_task` from User I/O (via NATS); `task.result`, `task.failed`, `agent.status`, `credential.request`, `plan.decision`, and `confirmation_response` from NATS; internal messages from Task Dispatcher and Plan Executor |
+| **Outputs** | Parsed `user_task` to Task Dispatcher; routed responses to User I/O and Agents Component; planner `task.inbound` to Agents Component; subtask `task.inbound` to Agents Component; `credential_request` events forwarded to IO Component HTTP bridge; `plan_preview` events forwarded to IO Component HTTP bridge; `confirmation_request` events forwarded to IO Component HTTP bridge; `plan.decision` events routed to Task Dispatcher; `confirmation_response` events routed to Plan Executor |
+| **Interfaces With** | Task Dispatcher (internal), Plan Executor (internal), NATS / Communications Component (external), IO Component (external — HTTP push + NATS receive) |
 
 #### M2: Task Dispatcher
 
 | | |
 |---|---|
-| **Responsibilities** | Central coordinator for all incoming task routing decisions. Validates `user_task` envelope; rejects invalid specs immediately. Performs deduplication check via Memory Component using `task_id`. Routes to Policy Enforcer for permission validation before any agent interaction. **After policy validation, dispatches a standard `task.inbound` request to the Agents Component targeting the `general` skill domain with planner-specific instructions.** When the planner task returns a JSON execution plan through the normal `task.result` path, the Task Dispatcher validates the plan and passes it to the Plan Executor (M7) for subtask-level dispatch. Tracks top-level task status and correlates plan results back to the originating `user_task`. Persists `DECOMPOSING` before publishing the planner task. **Pushes real-time status updates to the IO Component at key lifecycle transitions:** task received (DECOMPOSING → `working`), plan active (PLAN_ACTIVE → `working` with subtask count), task completed (`completed`), and task failed (`completed` with error detail). |
+| **Responsibilities** | Central coordinator for all incoming task routing decisions. Validates `user_task` envelope; rejects invalid specs immediately. Performs deduplication check via Memory Component using `task_id` — a prior task at a terminal state is **not** treated as a duplicate; the same `task_id` may re-enter as a follow-up (chat-style continuations). Routes to Policy Enforcer for permission validation before any agent interaction. **After policy validation, dispatches a standard `task.inbound` request to the Agents Component targeting the `general` skill domain with planner-specific instructions.** Personalization: optionally fetches user facts from the Memory Component's `personal_info` store and prepends them to the planner prompt (best-effort; failure is non-fatal). When the planner task returns a JSON execution plan through the normal `task.result` path, the Task Dispatcher validates the plan. **Plan approval gate (NEW m3):** When `PLAN_APPROVAL_MODE` is `always`, or `multi` (default) and the plan has more than one subtask, the Dispatcher transitions the task to `AWAITING_APPROVAL`, pushes a `plan_preview` event to the IO Component, and waits for an explicit user approve/reject decision on `aegis.orchestrator.plan.decision`. On approval the plan is handed to Plan Executor (M7). On rejection the task is failed with `PLAN_REJECTED`. If no decision arrives within `PLAN_APPROVAL_TIMEOUT_SECONDS` the task is failed with `PLAN_APPROVAL_TIMEOUT`. Single-subtask plans and plans where mode is `off` bypass the gate and are dispatched immediately. Tracks top-level task status and correlates plan results back to the originating `user_task`. Persists `DECOMPOSING` before publishing the planner task. Publishes `task_accepted` early — right after policy validation — so the user sees acknowledgement before the planner LLM round-trip. **Pushes real-time status updates to the IO Component at key lifecycle transitions:** task received (DECOMPOSING → `working`), awaiting approval (`awaiting_feedback`), plan active (PLAN_ACTIVE → `working` with subtask count), task completed (`completed`), and task failed (`completed` with error detail). |
 | **Inputs** | Parsed `user_task` from Communications Gateway; `policy_result` from Policy Enforcer; planner `task.result` / `task.failed` from Comms Gateway (via Agents Component); `plan_completed`/`plan_failed` from Plan Executor; `dedup_result` from Memory Interface |
 | **Outputs** | `policy_check_request` to Policy Enforcer; planner `task.inbound` to Communications Gateway; `execution_plan` to Plan Executor (M7); `task_accepted`/`task_failed`/`policy_violation` to Communications Gateway (for User I/O); `status_update` events to IO Component HTTP bridge (fire-and-forget; failures logged but not fatal) |
 | **Interfaces With** | Communications Gateway, Policy Enforcer, Plan Executor (M7), Memory Interface, Recovery Manager, IO Component (external — HTTP) |
@@ -149,7 +149,7 @@ The Orchestrator consists of **seven internal modules**. Each module has a singl
 
 | | |
 |---|---|
-| **Responsibilities** | Tracks every active task and subtask from dispatch to completion or failure. Maintains an in-memory task state map and subtask state map (rehydrated from Memory Component on startup). Enforces task-level timeout: if a task exceeds `timeout_seconds`, signals Recovery Manager to terminate the running agents and return `TIMED_OUT`. Enforces per-subtask timeouts as specified in the execution plan. Subscribes to `agent_status_update` events from the Agents Component. Detects RECOVERING/TERMINATED events and escalates to Recovery Manager. Emits `task_progress` events when agents publish intermediate progress. Transitions RECOVERING subtasks into a monitored waiting state; timeout remains the safety net if self-recovery does not complete. |
+| **Responsibilities** | Tracks every active task and subtask from dispatch to completion or failure. Maintains an in-memory task state map and subtask state map (rehydrated from Memory Component on startup). Enforces task-level timeout: if a task exceeds `timeout_seconds`, signals Recovery Manager to terminate the running agents and return `TIMED_OUT`. **Exception: tasks in `AWAITING_APPROVAL` are exempted from the global timeout while user review is pending** — the Dispatcher's `PLAN_APPROVAL_TIMEOUT_SECONDS` is the authoritative clock for that phase; the Monitor re-checks after a short interval and enforces the backstop once execution resumes. Enforces per-subtask timeouts as specified in the execution plan. Subscribes to `agent_status_update` events from the Agents Component. Detects RECOVERING/TERMINATED events and escalates to Recovery Manager. Emits `task_progress` events when agents publish intermediate progress. Transitions RECOVERING subtasks into a monitored waiting state; timeout remains the safety net if self-recovery does not complete. |
 | **Inputs** | Task dispatch confirmation from Task Dispatcher; subtask dispatch confirmation from Plan Executor; `agent_status_update` from Comms Gateway; `timeout_tick` from internal scheduler |
 | **Outputs** | `timeout_signal` to Recovery Manager; `task_progress` to Communications Gateway; `state_write` to Memory Interface (on every state change) |
 | **Interfaces With** | Task Dispatcher, Plan Executor, Communications Gateway, Recovery Manager, Memory Interface |
@@ -176,9 +176,9 @@ The Orchestrator consists of **seven internal modules**. Each module has a singl
 
 | | |
 |---|---|
-| **Responsibilities** | Manages execution of structured plans returned by the Planner Agent. Receives an execution plan from the Task Dispatcher. Validates the plan's dependency graph (rejects circular dependencies and empty plans). Resolves subtask dependencies (DAG-based). Dispatches subtasks to the Agents Component in correct topological order via Communications Gateway. Tracks each subtask's state independently (`PENDING`, `DISPATCHED`, `RUNNING`, `COMPLETED`, `FAILED`, `BLOCKED`). Passes subtask output as input to dependent subtasks via `prior_results[]` injection. Aggregates final results when all subtasks complete. Signals Task Dispatcher on plan completion or failure. Supports up to `PLAN_EXECUTOR_MAX_PARALLEL` concurrent subtasks. |
-| **Inputs** | `execution_plan` from Task Dispatcher; `task_result`/`task_failed` events from Communications Gateway (per subtask); `agent_status_update` events from Communications Gateway (per subtask agent) |
-| **Outputs** | `task_spec` per subtask to Communications Gateway (for Agents Component); `plan_completed`/`plan_failed` to Task Dispatcher; `subtask_state_write` and `plan_state_write` to Memory Interface; `plan_progress` to Communications Gateway (for User I/O progress streaming) |
+| **Responsibilities** | Manages execution of structured plans returned by the Planner Agent. Receives an execution plan from the Task Dispatcher. Validates the plan's dependency graph (rejects circular dependencies and empty plans). Resolves subtask dependencies (DAG-based). Dispatches subtasks to the Agents Component in correct topological order via Communications Gateway. Tracks each subtask's state independently (`PENDING`, `DISPATCHED`, `RUNNING`, `COMPLETED`, `FAILED`, `BLOCKED`, `AWAITING_CONFIRMATION`). Passes subtask output as input to dependent subtasks via `prior_results[]` injection. Aggregates final results when all subtasks complete. Signals Task Dispatcher on plan completion or failure. Supports up to `PLAN_EXECUTOR_MAX_PARALLEL` concurrent subtasks. **Multi-step confirmation (NEW v3.3):** When a subtask has `requires_confirmation=true` and its dependencies are met, the Plan Executor transitions it to `AWAITING_CONFIRMATION` and calls `PublishConfirmationRequest` on the Communications Gateway instead of dispatching it. Dispatch is suspended until `HandleConfirmationResponse` receives an explicit user approval via `aegis.orchestrator.task.confirmation_response`. On approval the subtask is reset to `PENDING` and dispatched normally. On rejection it is marked `FAILED` and its dependents are `BLOCKED`. |
+| **Inputs** | `execution_plan` from Task Dispatcher; `task_result`/`task_failed` events from Communications Gateway (per subtask); `agent_status_update` events from Communications Gateway (per subtask agent); `confirmation_response` events from Communications Gateway (per awaiting subtask) |
+| **Outputs** | `task_spec` per subtask to Communications Gateway (for Agents Component); `confirmation_request` to Communications Gateway (for IO Component); `plan_completed`/`plan_failed` to Task Dispatcher; `subtask_state_write` and `plan_state_write` to Memory Interface; `plan_progress` to Communications Gateway (for User I/O progress streaming) |
 | **Interfaces With** | Task Dispatcher, Communications Gateway, Task Monitor, Memory Interface |
 
 **Key Design Decisions for M7:**
@@ -188,6 +188,7 @@ The Orchestrator consists of **seven internal modules**. Each module has a singl
 3. **Partial failure handling:** If a subtask fails and has no dependents, the plan may continue. If a failed subtask has dependents, those dependents are marked `BLOCKED` and the plan reports partial completion.
 4. **Crash recovery:** Plan state is persisted to Memory Interface on every subtask transition. On Orchestrator restart, in-flight plans are rehydrated and execution resumes.
 5. **Parallel dispatch:** Up to `PLAN_EXECUTOR_MAX_PARALLEL` subtasks may be dispatched simultaneously when their dependencies are satisfied.
+6. **Multi-step confirmation:** Subtasks flagged `requires_confirmation=true` are suspended before dispatch, not before dependency resolution. Dependencies still execute in parallel; the confirmation gate applies only to the individual subtask that requires it.
 
 ---
 
@@ -222,11 +223,33 @@ The Orchestrator consists of **seven internal modules**. Each module has a singl
 |---|---|---|
 | FR-TD-01 | After policy validation, the Task Dispatcher SHALL send a standard `task.inbound` request to the Agents Component containing planner-specific `instructions`, `required_skills=["general"]`, and correlation metadata. The Orchestrator SHALL NOT attempt to interpret, classify, or decompose the task itself. | MUST |
 | FR-TD-02 | The Orchestrator SHALL wait for the planner task's terminal response from the Agents Component within a configurable timeout (`DECOMPOSITION_TIMEOUT_SECONDS`, default: 30). On timeout, the task SHALL be marked `DECOMPOSITION_FAILED` and returned to User I/O. | MUST |
-| FR-TD-03 | The planner task's successful `task.result` SHALL contain a structured execution plan: an ordered list of subtasks, each with a `subtask_id`, `required_skill_domains[]`, `action`, `instructions`, `params`, `depends_on[]`, and `timeout_seconds`. | MUST |
+| FR-TD-03 | The planner task's successful `task.result` SHALL contain a structured execution plan: an ordered list of subtasks, each with a `subtask_id`, `required_skill_domains[]`, `action`, `instructions`, `params`, `depends_on[]`, `timeout_seconds`, and optional `requires_confirmation` flag. | MUST |
 | FR-TD-04 | The Plan Executor (M7) SHALL validate the execution plan's dependency graph. Circular dependencies SHALL be rejected with `INVALID_PLAN`. Plans with zero subtasks SHALL be rejected with `EMPTY_PLAN`. Plans exceeding `MAX_SUBTASKS_PER_PLAN` SHALL be rejected with `PLAN_TOO_LARGE`. | MUST |
 | FR-TD-05 | The Plan Executor SHALL dispatch subtasks in topological order based on `depends_on[]`. Subtasks with no unmet dependencies MAY be dispatched in parallel, up to `PLAN_EXECUTOR_MAX_PARALLEL`. Each subtask SHALL be dispatched as an independent `task_spec` to the Agents Component with its own `policy_scope` (inherited from the parent task, never expanded). | MUST |
 | FR-TD-06 | When a subtask completes, the Plan Executor SHALL inject its result into the payload of all dependent subtasks as `prior_results[{subtask_id, result}]` before dispatching them. This enables result piping across the subtask chain. | MUST |
 | FR-TD-07 | The Planner Agent SHALL only assign `required_skill_domains[]` values that are within the parent task's `policy_scope`. If the Planner Agent returns a plan with out-of-scope subtasks, the Plan Executor SHALL reject the plan with `SCOPE_VIOLATION`. | MUST |
+
+### 5.3.1 Multi-step Confirmation Requirements (NEW in v3.3)
+
+| ID | Requirement | Priority |
+|---|---|---|
+| FR-MS-01 | The Planner Agent MAY set `requires_confirmation=true` on any subtask in the execution plan. When set, the Plan Executor SHALL NOT dispatch the subtask to the Agents Component until it receives an explicit user approval for that subtask. | MUST |
+| FR-MS-02 | When a subtask with `requires_confirmation=true` has all its dependencies met, the Plan Executor SHALL transition it to `AWAITING_CONFIRMATION` and forward a `ConfirmationRequest` (`plan_id`, `subtask_id`, `task_id`, `action`, `prompt`) to the IO Component via the Communications Gateway. | MUST |
+| FR-MS-03 | When the user approves, the IO Component SHALL publish a `ConfirmationResponse` (`confirmed=true`) on `aegis.orchestrator.task.confirmation_response`. The Plan Executor SHALL resume dispatch of the confirmed subtask via the normal `PENDING` → `DISPATCH_PENDING` → `DISPATCHED` path. | MUST |
+| FR-MS-04 | When the user rejects, the IO Component SHALL publish a `ConfirmationResponse` (`confirmed=false`, optional `reason`). The Plan Executor SHALL mark the subtask `FAILED` with error code `USER_REJECTED` and block all dependents. | MUST |
+| FR-MS-05 | A subtask in `AWAITING_CONFIRMATION` SHALL NOT count toward the `PLAN_EXECUTOR_MAX_PARALLEL` active dispatch limit. | MUST |
+| FR-MS-06 | The `AWAITING_CONFIRMATION` state is **not a terminal state**. The task pipeline continues for subtasks that do not require confirmation. The parent task state remains `PLAN_ACTIVE` while any subtask is awaiting confirmation. | MUST |
+
+### 5.3.2 Plan Approval Requirements (NEW in m3)
+
+| ID | Requirement | Priority |
+|---|---|---|
+| FR-PA-01 | After plan validation and when `PLAN_APPROVAL_MODE` is `always`, or `multi` (default) and the plan contains more than one subtask, the Task Dispatcher SHALL transition the task to `AWAITING_APPROVAL` and push a `plan_preview` event to the IO Component before handing the plan to the Plan Executor. | MUST |
+| FR-PA-02 | When the user approves via `aegis.orchestrator.plan.decision` (`approved=true`), the Task Dispatcher SHALL transition the task to `PLAN_ACTIVE` and hand the plan to the Plan Executor. | MUST |
+| FR-PA-03 | When the user rejects (`approved=false`), the Task Dispatcher SHALL fail the task with error code `PLAN_REJECTED` and return a human-readable explanation to the User I/O Component. | MUST |
+| FR-PA-04 | If no decision arrives within `PLAN_APPROVAL_TIMEOUT_SECONDS` (default: 300), the Task Dispatcher SHALL fail the task with error code `PLAN_APPROVAL_TIMEOUT`. | MUST |
+| FR-PA-05 | The Task Monitor SHALL NOT enforce the global task timeout while the task is in `AWAITING_APPROVAL`. The `PLAN_APPROVAL_TIMEOUT_SECONDS` timer in the Dispatcher is the authoritative deadline for the approval phase. | MUST |
+| FR-PA-06 | When `PLAN_APPROVAL_MODE` is `off`, or the plan has exactly one subtask and mode is `multi`, the Dispatcher SHALL bypass the approval gate and proceed directly to `PLAN_ACTIVE`. | MUST |
 
 ### 5.4 Agent Lifecycle Coordination
 
@@ -346,8 +369,51 @@ The Orchestrator pushes real-time status events to the IO Component over HTTP so
 | Orchestrator State | IO `status` value |
 |---|---|
 | DECOMPOSING, PLAN_ACTIVE | `working` |
+| PLAN_ACTIVE (any subtask in `AWAITING_CONFIRMATION`) | `awaiting_feedback` — also triggers `confirmation_request` event |
 | COMPLETED | `completed` |
 | FAILED, PARTIAL_COMPLETE, DECOMPOSITION_FAILED, POLICY_VIOLATION, TIMED_OUT | `completed` (with error detail in `lastUpdate`) |
+
+### Flow 6.6: Multi-step Confirmation Flow (NEW in v3.3)
+
+When the Planner Agent marks a subtask `requires_confirmation=true`, the Plan Executor pauses dispatch and requests user approval via the IO Component before executing the action.
+
+1. Plan Executor's `dispatchReadySubtasks` identifies a `PENDING` subtask with all dependencies met and `requires_confirmation=true` (and not yet confirmed in `confirmedSubtasks` map).
+2. Plan Executor transitions subtask state to `AWAITING_CONFIRMATION` and persists to Memory Interface.
+3. Plan Executor calls `gw.PublishConfirmationRequest(ctx, ConfirmationRequest{plan_id, subtask_id, task_id, action, prompt})`.
+4. Communications Gateway calls the registered `ConfirmationRequestHandler` callback.
+5. In `main.go`: handler calls `ioClient.PushStatus(taskID, "awaiting_feedback", ...)` then `ioClient.PushConfirmationRequest({planId, subtaskId, taskId, action, prompt})`.
+6. IO Component receives `{"type": "confirmation_request", "payload": {...}}` via HTTP and displays a confirmation modal to the user.
+7. **User approves:**
+   - IO Component publishes `ConfirmationResponse{confirmed: true}` wrapped in a `MessageEnvelope` on `aegis.orchestrator.task.confirmation_response`.
+   - Communications Gateway's `handleRawConfirmationResponse` deserializes it and calls `confirmationResponseHandler`.
+   - Plan Executor `HandleConfirmationResponse`: marks subtask confirmed in `confirmedSubtasks`, resets state to `PENDING`, persists, and calls `dispatchReadySubtasks`.
+   - Subtask is dispatched normally via capability query → `task.inbound`.
+8. **User rejects:**
+   - IO Component publishes `ConfirmationResponse{confirmed: false, reason: "..."}`.
+   - Plan Executor marks subtask `FAILED` with `error_code: USER_REJECTED`. Dependent subtasks are marked `BLOCKED`. `checkPlanCompletion` runs.
+
+**IO Component contract (what the IO team must implement):**
+- Handle incoming `{"type": "confirmation_request"}` events from `POST /api/orchestrator/stream-events`.
+- Show the user a modal with `action` (short label) and `prompt` (full explanation).
+- On user decision, publish to NATS `aegis.orchestrator.task.confirmation_response` with:
+
+```json
+{
+  "message_id": "<uuid>",
+  "message_type": "confirmation_response",
+  "source_component": "io",
+  "correlation_id": "<subtask_id>",
+  "timestamp": "<ISO8601>",
+  "schema_version": "1.0",
+  "payload": {
+    "plan_id": "<plan_id>",
+    "subtask_id": "<subtask_id>",
+    "task_id": "<task_id>",
+    "confirmed": true,
+    "reason": ""
+  }
+}
+```
 
 ### Flow 6: Subtask Recovery Flow
 1. Agent RECOVERING event received from Agents Component for a specific subtask.
@@ -494,8 +560,9 @@ The Task Monitor is the **sole authority** for task and subtask state transition
 |---|---|---|---|
 | RECEIVED | Task arrived, schema validated | `user_task` passes envelope validation | → DEDUP_CHECK → POLICY_CHECK → REJECTED (schema fail) |
 | POLICY_CHECK | Awaiting Vault policy validation | Passed dedup check; `policy_check_request` sent | → DECOMPOSING (ALLOW) → POLICY_VIOLATION (DENY) |
-| DECOMPOSING | Awaiting plan from Planner Agent | `policy_result` ALLOWED; `task_decomposition_request` sent | → PLAN_ACTIVE (valid plan received) → DECOMPOSITION_FAILED |
-| PLAN_ACTIVE | Plan Executor dispatching subtasks | Valid execution plan received from Planner Agent | → COMPLETED (all subtasks done) → FAILED → TIMED_OUT → PARTIAL_COMPLETE |
+| DECOMPOSING | Awaiting plan from Planner Agent | `policy_result` ALLOWED; `task_decomposition_request` sent | → AWAITING_APPROVAL (plan valid, approval required) → PLAN_ACTIVE (plan valid, no approval needed) → DECOMPOSITION_FAILED |
+| AWAITING_APPROVAL | Plan produced; waiting for user to approve or reject | Valid plan received AND `PLAN_APPROVAL_MODE` requires approval | → PLAN_ACTIVE (user approves) → FAILED (`PLAN_REJECTED`) → FAILED (`PLAN_APPROVAL_TIMEOUT`) |
+| PLAN_ACTIVE | Plan Executor dispatching subtasks | Plan approved (or approval not required) | → COMPLETED (all subtasks done) → FAILED → TIMED_OUT → PARTIAL_COMPLETE |
 | DECOMPOSITION_FAILED | Planner Agent timed out or returned invalid plan | Decomposition timeout OR plan validation failed | **Terminal.** No agents touched. |
 | TIMED_OUT | Parent task exceeded `timeout_seconds` | Task Monitor `timeout_signal` fires | **Terminal.** All running subtask agents terminated; credentials revoked. |
 | POLICY_VIOLATION | Task denied by policy validation | `policy_result` DENIED from Policy Enforcer | **Terminal.** No decomposition, no agent touched. |
@@ -507,13 +574,14 @@ The Task Monitor is the **sole authority** for task and subtask state transition
 
 | State | Description | Entry Condition | Valid Transitions |
 |---|---|---|---|
-| PENDING | Subtask waiting for dependencies to complete | Subtask has unmet `depends_on[]` | → DISPATCH_PENDING (deps met) → BLOCKED (dep failed) |
-| DISPATCH_PENDING | Subtask state persisted before agent publish | Dependencies met; pre-dispatch persistence succeeded | → DISPATCHED → DELIVERY_FAILED |
+| PENDING | Subtask waiting for dependencies to complete | Subtask has unmet `depends_on[]` | → AWAITING_CONFIRMATION (requires_confirmation=true, deps met) → DISPATCH_PENDING (deps met, no confirmation needed) → BLOCKED (dep failed) |
+| AWAITING_CONFIRMATION | Subtask suspended pending explicit user approval | `requires_confirmation=true` and all dependencies are COMPLETED | → PENDING (user confirms) → FAILED (user rejects, `USER_REJECTED`) |
+| DISPATCH_PENDING | Subtask state persisted before agent publish | Dependencies met (and confirmed if required); pre-dispatch persistence succeeded | → DISPATCHED → DELIVERY_FAILED |
 | DISPATCHED | `task_spec` successfully published; `task_accepted` confirmed | Agent publish succeeded | → RUNNING → RECOVERING → TIMED_OUT |
 | RUNNING | Agent actively executing the subtask | Agent ACTIVE confirmed by Agents Component | → COMPLETED → RECOVERING → TIMED_OUT |
 | RECOVERING | Agent self-healing; Orchestrator monitoring | `agent_status_update` RECOVERING received | → RUNNING → FAILED → TIMED_OUT |
 | COMPLETED | Subtask result received | `task_result` received from Agents Component | **Terminal.** Result piped into dependents. |
-| FAILED | Max retries exceeded or provisioning failure | Recovery Manager gives up | **Terminal.** Credentials revoked. Dependents → BLOCKED. |
+| FAILED | Max retries exceeded, provisioning failure, or user rejection | Recovery Manager gives up or `confirmed=false` received | **Terminal.** Credentials revoked. Dependents → BLOCKED. |
 | BLOCKED | A dependency failed, this subtask cannot run | Ancestor subtask reached FAILED | **Terminal.** No agent dispatched. |
 | TIMED_OUT | Subtask exceeded its own `timeout_seconds` | Task Monitor timeout for subtask | **Terminal.** Agent terminated; credentials revoked. |
 | DELIVERY_FAILED | Subtask could not be published | `task_spec` publish failed | **Terminal.** Cleanup performed. |
@@ -575,11 +643,12 @@ Returned by the Planner Agent in `task_decomposition_response`. Stored as `plan_
 |---|---|---|
 | `subtask_id` | string | Unique within the plan (e.g., `"s1"`, `"s2"`). |
 | `required_skill_domains` | string[] | Skill domains this subtask requires. Populated by the Planner Agent. Must be within parent `policy_scope`. |
-| `action` | string | Human-readable action label (e.g., `"search_flights"`, `"find_hotels"`). |
-| `instructions` | string | Natural-language instruction for the executing agent. Written by the Planner Agent. |
+| `action` | string | Human-readable action label (e.g., `"search_flights"`, `"find_hotels"`). Also shown as the modal title in the IO confirmation UI. |
+| `instructions` | string | Natural-language instruction for the executing agent. Written by the Planner Agent. Also used as the confirmation prompt text shown to the user. |
 | `params` | object | Subtask-specific parameters extracted by the Planner Agent. |
 | `depends_on` | string[] | List of `subtask_ids` that must complete before this subtask can start. Empty = no dependencies. |
 | `timeout_seconds` | integer | Per-subtask timeout. Must not exceed parent task's remaining time. |
+| `requires_confirmation` | boolean | **NEW v3.3.** Optional. Default `false`. When `true`, the Plan Executor pauses dispatch and requests explicit user approval from the IO Component before executing this subtask. Use for high-impact, irreversible actions (e.g., `send_email`, `delete_file`, `make_payment`). |
 
 ### 10.4 Subtask State Record Schema (NEW in v3.0)
 
@@ -653,6 +722,22 @@ Stored in Memory Component, **append-only**. Every state transition and policy d
 | `agent.status` | `aegis.orchestrator.agent.status` | Agent lifecycle state change |
 | `capability.response` | `aegis.orchestrator.capability.response` | Response to capability query |
 
+### 11.3.1 Inbound: Orchestrator ← IO Component (NEW in v3.3)
+
+| Message Type | NATS Topic | Trigger |
+|---|---|---|
+| `confirmation_response` | `aegis.orchestrator.task.confirmation_response` | User approves or rejects a subtask confirmation prompt in the IO dashboard |
+
+**Payload (wrapped in standard `MessageEnvelope`):**
+
+| Field | Type | Description |
+|---|---|---|
+| `plan_id` | UUID | Plan containing the subtask awaiting confirmation. |
+| `subtask_id` | string | The subtask the user is responding to. |
+| `task_id` | UUID | Parent user task. |
+| `confirmed` | boolean | `true` = approved; `false` = rejected. |
+| `reason` | string | Optional. Human-readable rejection reason from the user. |
+
 ### 11.4 Planner `task.inbound` Payload Schema
 
 The planner call uses the same agents-component wire schema as every other task:
@@ -712,6 +797,23 @@ The Orchestrator pushes events to the IO Component over HTTP when `IO_API_BASE` 
 }
 ```
 
+**Event envelope — confirmation request (NEW v3.3):**
+
+```json
+{
+  "type": "confirmation_request",
+  "payload": {
+    "planId": "<plan_id>",
+    "subtaskId": "<subtask_id>",
+    "taskId": "<user task_id>",
+    "action": "<action label, e.g. send_email>",
+    "prompt": "<full instructions text shown to user>"
+  }
+}
+```
+
+When this event is received, the IO Component MUST display a confirmation modal with an **Approve** and a **Reject** button. On decision, the IO Component publishes the response to NATS (see §11.3 and §11.9).
+
 **Error handling:** HTTP errors and network failures are **logged but not propagated**. The task pipeline continues regardless of IO Component availability. The 5-second HTTP timeout prevents IO unavailability from blocking dispatch.
 
 **Credential routing rule:** Only `credential.request` messages from the Agents Component with `operation: "user_input"` are forwarded to IO. Vault pre-authorization (`authorize`) and revocation (`revoke`) operations are handled internally and never surface in the IO UI.
@@ -748,6 +850,7 @@ All interactions are mediated by M6 (Memory Interface). **Direct Memory Componen
 | `aegis.orchestrator.agent.status` | INBOUND | At-least-once | 8 KB |
 | `aegis.orchestrator.capability.response` | INBOUND | At-most-once | 16 KB |
 | `aegis.orchestrator.credential.request` | INBOUND | At-least-once | 8 KB |
+| `aegis.orchestrator.task.confirmation_response` | INBOUND | At-least-once | 8 KB |
 | `aegis.agents.task.inbound` | OUTBOUND | At-least-once | 1 MB |
 | `aegis.agents.capability.query` | OUTBOUND | At-most-once | 8 KB |
 | `aegis.agents.lifecycle.terminate` | OUTBOUND | At-least-once | 8 KB |
@@ -868,6 +971,10 @@ The planner task receives the parent task's effective scope constraints in its g
 | Memory write fails on dispatch | Memory Interface returns error | Retry up to 3 times. On persistent failure: abort dispatch, return `STORAGE_UNAVAILABLE`. Ensure no orphaned agent exists. |
 | `user_task` schema invalid | JSON schema validation | Return `INVALID_TASK_SPEC` immediately. No Vault query, no decomposition, no agent interaction. |
 | Duplicate `task_id` received | Dedup check in Memory Interface | Return `DUPLICATE_TASK` with current task status. Do not spawn agent. |
+| User rejects a subtask confirmation prompt | `confirmation_response.confirmed=false` received by Plan Executor | Subtask marked `FAILED` with `error_code: USER_REJECTED`. Dependent subtasks marked `BLOCKED`. Plan reports partial or failed. |
+| Subtask confirmation request not delivered (IO down or handler unregistered) | `PushConfirmationRequest` returns error | Subtask immediately failed with `CONFIRMATION_UNAVAILABLE`. Dependents `BLOCKED`. Plan proceeds to partial/failed evaluation without waiting for a response that can never arrive. |
+| User rejects an entire plan | `plan.decision.approved=false` received by Task Dispatcher | Task failed with `PLAN_REJECTED`. Human-readable message returned to User I/O. No agent is ever dispatched. |
+| Plan approval timed out | `PLAN_APPROVAL_TIMEOUT_SECONDS` elapsed with no `plan.decision` | Task failed with `PLAN_APPROVAL_TIMEOUT`. User is prompted to resubmit. |
 
 ### 14.2 Runtime Failures
 
@@ -889,9 +996,26 @@ The Orchestrator is designed to be **fully observable without requiring access t
 
 ### 15.1 Structured Logging
 
-Every log line emitted by the Orchestrator is structured JSON. Required fields: `timestamp`, `level`, `component`, `module`, `orchestrator_task_ref` (when applicable), `plan_id` (when applicable), `subtask_id` (when applicable), `node_id`, `message`, `duration_ms` (for timed operations).
+Every log line emitted by the Orchestrator is structured JSON written to stdout via Go's `log/slog` package. Promtail scrapes Docker container stdout and ships log lines to Loki.
 
-> **Credential values, task payloads, and raw user input MUST NEVER appear in log output.**
+**Required fields on every log line:**
+
+| Field | Source | Notes |
+|---|---|---|
+| `timestamp` | slog (automatic) | RFC3339Nano UTC |
+| `level` | slog (automatic) | `debug`, `info`, `warn`, `error` |
+| `component` | always `"orchestrator"` | constant |
+| `node_id` | `NODE_ID` env var | identifies the instance |
+| `module` | context (`WithModule`) | e.g. `task_dispatcher`, `plan_executor` |
+| `trace_id` | context (`WithTraceID`) | present on all task-scoped log lines |
+| `task_id` | context (`WithTaskID`) | present when processing a task |
+| `plan_id` | context (`WithPlanID`) | present during plan execution |
+| `subtask_id` | context (`WithSubtaskID`) | present during subtask dispatch |
+| `message` | slog (automatic) | human-readable description |
+
+All context fields are injected via `observability.LogFromContext(ctx)`, which reads the context keys set by `observability.WithTraceID`, `WithTaskID`, `WithPlanID`, `WithSubtaskID`, and `WithModule`.
+
+> **The following MUST NEVER appear in any log line or span attribute:** raw user input (`payload.raw_input`), credential values, task result payloads, planner output, or policy scope tokens.
 
 ### 15.2 Metrics (emitted to `aegis.orchestrator.metrics`)
 
@@ -917,11 +1041,73 @@ Every log line emitted by the Orchestrator is structured JSON. Required fields: 
 
 ### 15.3 Distributed Tracing
 
-Each task generates a trace span tree compatible with OpenTelemetry (OTLP export).
+Each task generates a trace span tree using the OpenTelemetry Go SDK (`go.opentelemetry.io/otel`). Spans are exported via OTLP gRPC to Grafana Tempo. The `trace_id` is stamped on every outbound NATS `MessageEnvelope` and extracted from every inbound envelope so the trace is continuous across component boundaries.
 
-Top-level spans: (1) `task_received` → (2) `dedup_check` → (3) `policy_validation` → (4) `decomposition` → (5) `plan_execution` → (6) `result_delivery`
+**Span tree per task:**
 
-Under `plan_execution`, each subtask creates a child span tree: `capability_query` → `subtask_dispatch` → `subtask_result_received`. Recovery attempts create child spans of the subtask span.
+```
+task_received          (Gateway — root span, created on inbound task receipt)
+  dedup_check          (Dispatcher — Memory read for deduplication)
+  policy_validation    (Dispatcher — Vault policy check via Policy Enforcer)
+  decomposition        (Dispatcher — planner task.inbound publish)
+  plan_execution       (Executor — parent span for full plan)
+    subtask_dispatch   (Executor — one child span per subtask dispatched)
+  result_delivery      (Dispatcher — final result push to User I/O / IO Component)
+  recovery_attempt     (Recovery Manager — child span when a subtask is re-dispatched)
+```
+
+**Span attributes set on key spans:**
+
+| Span | Attributes |
+|---|---|
+| `task_received` | `task_id`, `user_id` |
+| `dedup_check` | `task_id` |
+| `policy_validation` | `task_id`, `user_id` |
+| `decomposition` | `task_id`, `user_id` |
+| `plan_execution` | `task_id`, `user_id` |
+| `subtask_dispatch` | `task_id`, `user_id` |
+| `result_delivery` | `task_id`, `user_id` |
+| `recovery_attempt` | `task_id`, `user_id` |
+
+Errors are recorded via `span.RecordError(err)` + `span.SetStatus(codes.Error, ...)`. Raw user input, credential values, and task payloads are never set as span attributes.
+
+The `InitTracer` function in `internal/observability/tracing.go` configures the OTLP gRPC exporter with retry buffering. If Tempo is unreachable at startup, the Orchestrator continues — the exporter retries in the background.
+
+### 15.4 Observability Stack
+
+The following services are included in `docker-compose.yml` and start alongside the Orchestrator:
+
+| Service | Image | Port | Role |
+|---|---|---|---|
+| Loki | `grafana/loki:2.9.0` | 3100 | Log aggregation backend |
+| Promtail | `grafana/promtail:2.9.0` | 9080 | Scrapes Docker container stdout → Loki |
+| Tempo | `grafana/tempo:2.3.0` | 4317 (OTLP gRPC), 3200 (HTTP) | Distributed trace backend |
+| Grafana | `grafana/grafana:10.2.0` | 3000 | Unified UI — Loki + Tempo with log→trace linking |
+
+Grafana is auto-provisioned (no manual configuration required) with:
+- Loki data source as default, with a derived field that links `trace_id` values in log lines to the matching Tempo trace waterfall.
+- Tempo data source with traces-to-logs linking (±5 min window around each span).
+
+Promtail uses Docker service discovery and a JSON pipeline stage that promotes `level`, `component`, `module`, `trace_id`, and `task_id` as Loki label dimensions for efficient querying.
+
+### 15.5 Debug Trace Endpoint
+
+`GET /debug/trace/{trace_id}` — available on the Orchestrator's HTTP server (`:8080`).
+
+Queries Loki `query_range` for all log lines tagged with the given `trace_id` in the last hour, flattens the Loki streams into a single chronological list, and returns:
+
+```json
+{
+  "trace_id": "<id>",
+  "count": 12,
+  "entries": [
+    { "timestamp": "...", "level": "info", "module": "comms_gateway", "message": "user task received" },
+    ...
+  ]
+}
+```
+
+This endpoint is intended for demo and development use. It does not require Grafana access.
 
 ---
 
@@ -937,7 +1123,7 @@ All Orchestrator configuration is injected via environment variables. No configu
 | `VAULT_FAILURE_MODE` | enum | `FAIL_CLOSED` | Behavior when Vault is unreachable. |
 | `VAULT_POLICY_CACHE_TTL_SECONDS` | integer | 60 | TTL for cached Vault policy responses. |
 | `NATS_URL` | URL | Required | NATS JetStream server URL. |
-| `NATS_CREDS_PATH` | path | Required | Path to NATS mTLS credentials file. |
+| `NATS_CREDS_PATH` | path | _(empty)_ | Path to NATS credentials file. Optional — omit when NATS does not require authentication. |
 | `MEMORY_ENDPOINT` | URL | Required | Memory Component write/read API. |
 | `MAX_TASK_RETRIES` | integer | 3 | Max recovery re-dispatches per subtask. |
 | `TASK_DEDUP_WINDOW_SECONDS` | integer | 300 | Deduplication window for `task_id` reuse detection. |
@@ -949,7 +1135,13 @@ All Orchestrator configuration is injected via environment variables. No configu
 | `QUEUE_HIGH_WATER_MARK` | integer | 500 | Pending task queue depth that triggers `queue_pressure` metric. |
 | `MEMORY_WRITE_BUFFER_SECONDS` | integer | 30 | How long to buffer writes locally if Memory Component is unreachable. |
 | `NODE_ID` | string | hostname | Unique identifier for this Orchestrator instance. Included in all audit events. |
-| `IO_API_BASE` | URL | _(empty — disabled)_ | Base URL of the IO Component HTTP server (e.g. `http://localhost:3001`). When set, the Orchestrator pushes real-time status and credential request events to the IO dashboard. When empty, the IO client is a no-op and the Orchestrator runs normally without a connected UI. |
+| `IO_API_BASE` | URL | _(empty — disabled)_ | Base URL of the IO Component HTTP server (e.g. `http://localhost:3001`). When set, the Orchestrator pushes real-time status, credential requests, plan previews, and confirmation prompts to the IO dashboard. When empty, the IO client is a no-op and the Orchestrator runs normally without a connected UI. |
+| `PLAN_APPROVAL_MODE` | enum | `multi` | Controls when the Dispatcher gates plan execution on user approval. `off` — never require approval; `multi` (default) — require approval only for plans with more than one subtask; `always` — require approval for every plan. |
+| `PLAN_APPROVAL_TIMEOUT_SECONDS` | integer | 300 | How long the Dispatcher waits for a user approve/reject decision before failing the task with `PLAN_APPROVAL_TIMEOUT`. |
+| `LOG_LEVEL` | enum | `info` | Log verbosity: `debug`, `info`, `warn`, `error`. |
+| `LOG_FORMAT` | enum | `json` | Log output format: `json` (production / Loki ingestion) or `text` (local dev). |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | host:port | `tempo:4317` | OTLP gRPC endpoint for OpenTelemetry trace export. If unreachable, the Orchestrator starts normally and retries in the background. |
+| `LOKI_URL` | URL | `http://loki:3100` | Loki base URL used by the `/debug/trace/{trace_id}` endpoint to query log timelines. |
 
 ---
 
@@ -1319,5 +1511,8 @@ func (o *Orchestrator) failTask(ts *TaskState, reason string) {
 |---|---|---|---|
 | 1.0 | February 2026 | Junyu Ding | Initial draft. High-level concepts. Missing NFRs, security detail, and PoC rigor. |
 | 2.0 | February 2026 | Junyu Ding | Full EDD. Added: module inventory, full requirements (FR + NFR), complete sequence diagrams, data models, interface specs, heartbeat design, security model, error handling, observability, configuration table, complete PoC with Go implementation, and open questions. |
+| 3.4 | April 2026 | Junyu Ding | **Plan Approval Gate & Personalization (Milestone 3 — continued).** Added: `AWAITING_APPROVAL` task state — after plan validation the Dispatcher optionally gates execution on explicit user approve/reject before handing off to the Plan Executor; `plan_preview` HTTP event pushed to IO Component with full subtask summary and expiry; `aegis.orchestrator.plan.decision` NATS inbound topic for user decisions; `HandlePlanDecision` on Task Dispatcher; `PLAN_REJECTED` and `PLAN_APPROVAL_TIMEOUT` error codes; `PLAN_APPROVAL_MODE` (`off`/`multi`/`always`) and `PLAN_APPROVAL_TIMEOUT_SECONDS` config vars; Task Monitor `AWAITING_APPROVAL` reprieve (approval phase is governed by Dispatcher timer, not global task timeout). Also: personalization client fetches user facts from Memory `personal_info` and prepends to planner prompt (best-effort); early `task_accepted` published right after policy check; dedup re-entry from terminal states allowed for follow-up tasks; `CONFIRMATION_UNAVAILABLE` error replaces silent hang on IO-down confirmation delivery failure. §3.1, §4.1 M1/M2/M4, §5.3.2 (new FR-PA-01–06), §9.1, §14.1, §16 updated. |
+| 3.3 | April 2026 | Junyu Ding | **Multi-step Prompting & Confirmation (Milestone 3).** Added: `requires_confirmation` flag on `Subtask` — when `true`, Plan Executor (M7) suspends dispatch and transitions subtask to new `AWAITING_CONFIRMATION` state; `PublishConfirmationRequest` on Communications Gateway (M1) forwards prompt to IO Component via HTTP; new NATS inbound topic `aegis.orchestrator.task.confirmation_response` for user approval/rejection; `HandleConfirmationResponse` on Plan Executor resumes (confirm) or fails+blocks (reject) the waiting subtask; `ErrCodeUserRejected` error code; IO Component contract documented in new §11.3.1 and §6.6; §3.1, §4.1 M1/M7, §5.3, §9.2, §10.3, §11.6, §11.9, §14.1 all updated to reflect confirmation flow. |
+| 3.2 | April 2026 | Junyu Ding | **Centralized Logging & Distributed Tracing (Milestone 2).** Added: `internal/observability` package (`logger.go`, `context.go`, `tracing.go`) — structured JSON logging via `log/slog` with context-propagated `trace_id`/`task_id`/`plan_id`/`subtask_id`/`module` fields; `trace_id` generated at Gateway entry point and stamped on every outbound `MessageEnvelope`; extracted from every inbound envelope to continue traces across component boundaries; OpenTelemetry span tree (`task_received` → `dedup_check` → `policy_validation` → `decomposition` → `plan_execution` → `subtask_dispatch` / `result_delivery` / `recovery_attempt`) exported via OTLP gRPC to Tempo; Grafana observability stack (Loki + Promtail + Tempo + Grafana) added to `docker-compose.yml` with auto-provisioned log→trace linking; `GET /debug/trace/{trace_id}` HTTP endpoint; §15 fully rewritten to reflect implementation; four new env vars added to §16 (`LOG_LEVEL`, `LOG_FORMAT`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `LOKI_URL`); `NATS_CREDS_PATH` corrected to optional. |
 | 3.1 | April 2026 | Junyu Ding | **IO Component Integration.** Added: IO Component to system context (§3.1); M1 now subscribes to `aegis.orchestrator.credential.request` and routes `user_input` operations to IO (vault authorize/revoke filtered out); M2 now pushes real-time status updates to IO at DECOMPOSING, PLAN_ACTIVE, COMPLETED, and FAILED transitions; new `internal/io/client.go` package (HTTP client, disabled when `IO_API_BASE` unset); new data flow §6.5 (IO Component Status Push) with state→status mapping table; new interface spec §11.6 (Orchestrator → IO Component HTTP bridge) with full event envelope schemas and error-handling contract; `aegis.orchestrator.credential.request` added to NATS topic table (§11.9); `IO_API_BASE` added to configuration table (§16). |
 | 3.0 | April 2026 | Junyu Ding | **Task Decomposition via Planner Agent.** Added: M7 Plan Executor module; LLM-Free Orchestrator Principle (§2.5); task decomposition coordination as 4th core concern; new functional requirements FR-TD-01 through FR-TD-07; new task states DECOMPOSING, PLAN_ACTIVE, DECOMPOSITION_FAILED, PARTIAL_COMPLETE; new subtask state machine (§9.2); Execution Plan Schema (§10.3); Subtask State Record Schema (§10.4); new NATS topics for decomposition; Flow 3.5 (Task Decomposition); Sequence Diagram 8.5 (Decomposition Failure); new env vars (DECOMPOSITION_TIMEOUT_SECONDS, MAX_SUBTASKS_PER_PLAN, PLAN_EXECUTOR_MAX_PARALLEL); updated PoC with decomposition scenarios; subtask-level metrics; Planner Agent scope enforcement. FR-TRK-04 updated to accept empty `required_skill_domains[]`. Resolved OQ-05. New OQ-06 through OQ-08. Design rationale based on Conductor/Superset/Netflix Conductor research: the Orchestrator remains LLM-free; intelligence lives in the Planner Agent. |

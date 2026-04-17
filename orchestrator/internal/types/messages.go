@@ -174,6 +174,32 @@ type DecompositionResponse struct {
 	GenerationMetadata map[string]any `json:"generation_metadata,omitempty"`
 }
 
+// ─── Multi-step Confirmation (NEW in v3.1) ────────────────────────────────────
+// When a subtask has requires_confirmation=true, the Plan Executor suspends
+// dispatch and sends a ConfirmationRequest to the IO Component via HTTP.
+// The IO Component shows a confirmation modal; the user's response arrives
+// as a ConfirmationResponse on aegis.orchestrator.task.confirmation_response.
+
+// ConfirmationRequest is forwarded to the IO Component so it can prompt the user.
+type ConfirmationRequest struct {
+	PlanID    string `json:"plan_id"`
+	SubtaskID string `json:"subtask_id"`
+	TaskID    string `json:"task_id"`
+	Action    string `json:"action"`             // Human-readable name of the action requiring approval
+	Prompt    string `json:"prompt"`             // Explanation of what the subtask will do
+	TraceID   string `json:"trace_id,omitempty"`
+}
+
+// ConfirmationResponse is published by the IO Component to
+// aegis.orchestrator.task.confirmation_response after the user confirms or rejects.
+type ConfirmationResponse struct {
+	PlanID    string `json:"plan_id"`
+	SubtaskID string `json:"subtask_id"`
+	TaskID    string `json:"task_id"`
+	Confirmed bool   `json:"confirmed"`
+	Reason    string `json:"reason,omitempty"` // Optional: reason supplied when rejecting
+}
+
 // ─── Metrics Payload ──────────────────────────────────────────────────────────
 // Emitted to aegis.orchestrator.metrics on a configurable interval (§15.2).
 

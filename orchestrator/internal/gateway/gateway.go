@@ -63,6 +63,7 @@ const (
 	TopicMetrics                 = "aegis.orchestrator.metrics"
 	TopicDeadLetter              = "aegis.orchestrator.tasks.deadletter"
 	TopicStatusEvents            = "aegis.orchestrator.status.events"
+	TopicConfirmationResponse    = "aegis.orchestrator.task.confirmation_response" // NEW v3.1 — IO → Orchestrator after user approves/rejects
 )
 
 // SchemaVersion is the current message envelope schema version (§13.5).
@@ -93,6 +94,14 @@ type TaskResultHandler func(ctx context.Context, result types.TaskResult) error
 // forward the request to the IO Component.
 type CredentialRequestHandler func(agentID, taskID, requestID, keyName, label string) error
 
+// ConfirmationRequestHandler is called by PublishConfirmationRequest to forward
+// a subtask confirmation prompt to the IO Component. Registered by main.go.
+type ConfirmationRequestHandler func(req types.ConfirmationRequest) error
+
+// ConfirmationResponseHandler is the callback the Plan Executor registers to
+// receive user confirmation/rejection responses from the IO Component.
+type ConfirmationResponseHandler func(ctx context.Context, resp types.ConfirmationResponse) error
+
 // PlanDecisionHandler is called when User I/O forwards the user's approve/reject
 // decision for a proposed execution plan. Registered by main.go → Dispatcher.
 type PlanDecisionHandler func(ctx context.Context, decision types.PlanDecision) error
@@ -104,10 +113,12 @@ type Gateway struct {
 	nats   interfaces.NATSClient
 	nodeID string
 
-	taskHandler              TaskHandler
-	agentStatusHandler       AgentStatusHandler
-	taskResultHandler        TaskResultHandler
-	credentialRequestHandler CredentialRequestHandler
+	taskHandler                  TaskHandler
+	agentStatusHandler           AgentStatusHandler
+	taskResultHandler            TaskResultHandler
+	credentialRequestHandler     CredentialRequestHandler
+	confirmationRequestHandler   ConfirmationRequestHandler
+	confirmationResponseHandler  ConfirmationResponseHandler
 	planDecisionHandler      PlanDecisionHandler
 
 	// pendingCapabilityQueries tracks in-flight capability query requests.
@@ -148,6 +159,19 @@ func (g *Gateway) RegisterCredentialRequestHandler(h CredentialRequestHandler) {
 	g.credentialRequestHandler = h
 }
 
+// RegisterConfirmationRequestHandler registers the callback that forwards subtask
+// confirmation prompts to the IO Component. Optional — if not registered, the
+// request is logged and the subtask stays in AWAITING_CONFIRMATION.
+func (g *Gateway) RegisterConfirmationRequestHandler(h ConfirmationRequestHandler) {
+	g.confirmationRequestHandler = h
+}
+
+// RegisterConfirmationResponseHandler registers the callback (Plan Executor) for
+// inbound confirmation responses from the IO Component. Must be called before Start().
+func (g *Gateway) RegisterConfirmationResponseHandler(h ConfirmationResponseHandler) {
+	g.confirmationResponseHandler = h
+}
+
 // RegisterPlanDecisionHandler registers the callback for user approve/reject
 // decisions on a proposed execution plan. Optional — if unset, incoming
 // decisions are logged and dropped, and plan execution proceeds (or doesn't)
@@ -179,6 +203,9 @@ func (g *Gateway) Start() error {
 	}
 	if err := g.nats.Subscribe(TopicCredentialRequest, g.handleRawCredentialRequest); err != nil {
 		return fmt.Errorf("subscribe %s: %w", TopicCredentialRequest, err)
+	}
+	if err := g.nats.Subscribe(TopicConfirmationResponse, g.handleRawConfirmationResponse); err != nil {
+		return fmt.Errorf("subscribe %s: %w", TopicConfirmationResponse, err)
 	}
 	if err := g.nats.Subscribe(TopicPlanDecision, g.handleRawPlanDecision); err != nil {
 		return fmt.Errorf("subscribe %s: %w", TopicPlanDecision, err)
@@ -455,6 +482,34 @@ func (g *Gateway) handleRawCredentialRequest(subject string, data []byte) error 
 	)
 }
 
+// handleRawConfirmationResponse handles aegis.orchestrator.task.confirmation_response.
+// Published by the IO Component after the user approves or rejects a subtask prompt.
+func (g *Gateway) handleRawConfirmationResponse(subject string, data []byte) error {
+	envelope, err := validateEnvelope(data)
+	if err != nil {
+		observability.LogFromContext(observability.WithModule(context.Background(), "comms_gateway")).
+			Warn("rejected malformed confirmation response envelope", "error", err)
+		return err
+	}
+
+	var resp types.ConfirmationResponse
+	if err := json.Unmarshal(envelope.Payload, &resp); err != nil {
+		return fmt.Errorf("deserialize confirmation.response: %w", err)
+	}
+
+	ctx := extractOrCreateCtx(envelope, "comms_gateway")
+	if resp.TaskID != "" {
+		ctx = observability.WithTaskID(ctx, resp.TaskID)
+	}
+	observability.LogFromContext(ctx).Info("confirmation response received",
+		"plan_id", resp.PlanID, "subtask_id", resp.SubtaskID, "confirmed", resp.Confirmed)
+
+	if g.confirmationResponseHandler == nil {
+		return nil
+	}
+	return g.confirmationResponseHandler(ctx, resp)
+}
+
 // handleRawPlanDecision handles aegis.orchestrator.plan.decision. User I/O
 // publishes these when the user clicks Approve or Reject on a plan preview.
 func (g *Gateway) handleRawPlanDecision(subject string, data []byte) error {
@@ -512,6 +567,20 @@ func (g *Gateway) PublishStatusUpdate(ctx context.Context, userContextID string,
 // PublishTaskResult delivers the final task result to the task's callback_topic (§11.5).
 func (g *Gateway) PublishTaskResult(ctx context.Context, callbackTopic string, result types.TaskResult) error {
 	return g.publishEnvelope(ctx, callbackTopic, "task_result", result.OrchestratorTaskRef, result)
+}
+
+// PublishConfirmationRequest forwards a subtask confirmation prompt to the IO Component.
+// The IO Component displays a modal to the user; the response arrives asynchronously
+// via aegis.orchestrator.task.confirmation_response (§FR-M3-01).
+// If no handler is registered the request is logged and dropped — the subtask stays
+// in AWAITING_CONFIRMATION until the orchestrator restarts.
+func (g *Gateway) PublishConfirmationRequest(ctx context.Context, req types.ConfirmationRequest) error {
+	if g.confirmationRequestHandler == nil {
+		observability.LogFromContext(ctx).Warn("confirmation request dropped — no IO handler registered",
+			"plan_id", req.PlanID, "subtask_id", req.SubtaskID)
+		return nil
+	}
+	return g.confirmationRequestHandler(req)
 }
 
 // ── Outbound: to Agents Component ────────────────────────────────────────────

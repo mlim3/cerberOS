@@ -208,6 +208,22 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 		})
 	})
 
+	// Forward subtask confirmation prompts to the IO Component.
+	gw.RegisterConfirmationRequestHandler(func(req types.ConfirmationRequest) error {
+		_ = ioClient.PushStatus(req.TaskID, ioclient.StatusAwaitingFeedback,
+			"Waiting for your confirmation: "+req.Action, nil)
+		return ioClient.PushConfirmationRequest(ioclient.ConfirmationRequestPayload{
+			PlanID:    req.PlanID,
+			SubtaskID: req.SubtaskID,
+			TaskID:    req.TaskID,
+			Action:    req.Action,
+			Prompt:    req.Prompt,
+		})
+	})
+
+	// Route confirmation responses from the IO Component back to the Plan Executor.
+	gw.RegisterConfirmationResponseHandler(planExecutor.HandleConfirmationResponse)
+
 	healthHandler := health.New(vaultClient, memClient, natsClient, taskMonitor, cfg.NodeID)
 
 	debugHandler := &api.DebugHandler{LokiURL: cfg.LokiURL}

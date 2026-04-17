@@ -91,6 +91,23 @@ type CredentialRequestPayload struct {
 	Description string `json:"description,omitempty"`
 }
 
+// confirmationRequestEvent is the envelope for a subtask confirmation prompt pushed to IO.
+// Matches: { type: 'confirmation_request', payload: ConfirmationRequest } in io/core/src/types.ts
+type confirmationRequestEvent struct {
+	Type    string                     `json:"type"`
+	Payload ConfirmationRequestPayload `json:"payload"`
+}
+
+// ConfirmationRequestPayload is sent when the orchestrator needs the user to approve
+// or reject a planned subtask action before it is dispatched to an agent.
+type ConfirmationRequestPayload struct {
+	PlanID    string `json:"planId"`
+	SubtaskID string `json:"subtaskId"`
+	TaskID    string `json:"taskId"`
+	Action    string `json:"action"` // Short name of the action (e.g. "send_email")
+	Prompt    string `json:"prompt"` // Full explanation shown to the user
+}
+
 // Client pushes events to the IO Component over HTTP.
 // All methods are safe to call concurrently.
 type Client struct {
@@ -156,6 +173,21 @@ func (c *Client) PushCredentialRequest(req CredentialRequestPayload) error {
 	}
 	evt := credentialRequestEvent{
 		Type:    "credential_request",
+		Payload: req,
+	}
+	return c.post(evt)
+}
+
+// PushConfirmationRequest asks the IO Component to display a confirmation modal
+// for a subtask that requires explicit user approval before dispatch.
+// The user's response is returned asynchronously via NATS
+// (aegis.orchestrator.task.confirmation_response).
+func (c *Client) PushConfirmationRequest(req ConfirmationRequestPayload) error {
+	if c.Disabled() {
+		return nil
+	}
+	evt := confirmationRequestEvent{
+		Type:    "confirmation_request",
 		Payload: req,
 	}
 	return c.post(evt)

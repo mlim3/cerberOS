@@ -31,16 +31,17 @@ const (
 // All valid states for subtasks managed by Plan Executor (M7) (§9.2).
 
 const (
-	SubtaskStatePending         = "PENDING"
-	SubtaskStateDispatchPending = "DISPATCH_PENDING"
-	SubtaskStateDispatched      = "DISPATCHED"
-	SubtaskStateRunning         = "RUNNING"
-	SubtaskStateRecovering      = "RECOVERING"
-	SubtaskStateCompleted       = "COMPLETED"
-	SubtaskStateFailed          = "FAILED"
-	SubtaskStateBlocked         = "BLOCKED"
-	SubtaskStateTimedOut        = "TIMED_OUT"
-	SubtaskStateDeliveryFailed  = "DELIVERY_FAILED"
+	SubtaskStatePending              = "PENDING"
+	SubtaskStateDispatchPending      = "DISPATCH_PENDING"
+	SubtaskStateDispatched           = "DISPATCHED"
+	SubtaskStateRunning              = "RUNNING"
+	SubtaskStateRecovering           = "RECOVERING"
+	SubtaskStateCompleted            = "COMPLETED"
+	SubtaskStateFailed               = "FAILED"
+	SubtaskStateBlocked              = "BLOCKED"
+	SubtaskStateTimedOut             = "TIMED_OUT"
+	SubtaskStateDeliveryFailed       = "DELIVERY_FAILED"
+	SubtaskStateAwaitingConfirmation = "AWAITING_CONFIRMATION" // NEW v3.1 — suspended pending user approval
 )
 
 // ─── Error Code Constants ─────────────────────────────────────────────────────
@@ -63,8 +64,10 @@ const (
 	ErrCodeInvalidPlan          = "INVALID_PLAN"          // NEW v3.0
 	ErrCodeEmptyPlan            = "EMPTY_PLAN"            // NEW v3.0
 	ErrCodePlanTooLarge         = "PLAN_TOO_LARGE"        // NEW v3.0
-	ErrCodePlanRejected         = "PLAN_REJECTED"         // NEW m3 — user rejected the plan
-	ErrCodeApprovalTimeout      = "PLAN_APPROVAL_TIMEOUT" // NEW m3 — user did not respond in time
+	ErrCodePlanRejected            = "PLAN_REJECTED"            // NEW m3 — user rejected the plan
+	ErrCodeApprovalTimeout         = "PLAN_APPROVAL_TIMEOUT"    // NEW m3 — user did not respond in time
+	ErrCodeUserRejected            = "USER_REJECTED"            // NEW v3.1 — user explicitly rejected a subtask confirmation
+	ErrCodeConfirmationUnavailable = "CONFIRMATION_UNAVAILABLE" // NEW v3.1 — confirmation prompt could not be delivered
 )
 
 // PlanDecision is delivered by User I/O (via Gateway) when the user approves
@@ -168,8 +171,9 @@ type Subtask struct {
 	Action               string         `json:"action"`
 	Instructions         string         `json:"instructions"`
 	Params               map[string]any `json:"params,omitempty"`
-	DependsOn            []string       `json:"depends_on"`  // Empty = no dependencies; dispatch immediately
+	DependsOn            []string       `json:"depends_on"`           // Empty = no dependencies; dispatch immediately
 	TimeoutSeconds       int            `json:"timeout_seconds"`
+	RequiresConfirmation bool           `json:"requires_confirmation,omitempty"` // NEW v3.1 — pause and ask user before dispatch
 }
 
 // ExecutionPlan is the structured plan returned by the Planner Agent (§10.3).
@@ -219,4 +223,9 @@ func IsTerminalSubtaskState(state string) bool {
 		return true
 	}
 	return false
+}
+
+// IsAwaitingConfirmation returns true if the subtask is suspended pending user approval.
+func IsAwaitingConfirmation(state string) bool {
+	return state == SubtaskStateAwaitingConfirmation
 }

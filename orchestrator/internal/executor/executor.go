@@ -45,6 +45,7 @@ type Gateway interface {
 	PublishTaskSpec(ctx context.Context, spec types.TaskSpec) error
 	PublishCapabilityQuery(ctx context.Context, query types.CapabilityQuery) (*types.CapabilityResponse, error)
 	PublishStatusUpdate(ctx context.Context, userContextID string, status types.StatusResponse) error
+	PublishConfirmationRequest(ctx context.Context, req types.ConfirmationRequest) error
 }
 
 // PolicyEnforcer defines the credential revocation the Plan Executor needs from M3.
@@ -77,6 +78,10 @@ type planExecution struct {
 
 	// dispatchedCount tracks how many subtasks are currently in DISPATCHED/RUNNING.
 	dispatchedCount int32
+
+	// confirmedSubtasks tracks subtask IDs that have received explicit user approval.
+	// Once confirmed, a subtask is dispatched normally on the next ready-check.
+	confirmedSubtasks map[string]bool
 }
 
 // ── PlanExecutor ─────────────────────────────────────────────────────────────
@@ -133,10 +138,11 @@ func (e *PlanExecutor) Execute(ctx context.Context, plan types.ExecutionPlan, ts
 	log := observability.LogFromContext(ctx)
 
 	exec := &planExecution{
-		plan:         plan,
-		ts:           ts,
-		subtasks:     make(map[string]*types.SubtaskState, len(plan.Subtasks)),
-		orchRefIndex: make(map[string]string),
+		plan:              plan,
+		ts:                ts,
+		subtasks:          make(map[string]*types.SubtaskState, len(plan.Subtasks)),
+		orchRefIndex:      make(map[string]string),
+		confirmedSubtasks: make(map[string]bool),
 	}
 
 	now := time.Now().UTC()
@@ -245,6 +251,8 @@ func (e *PlanExecutor) HandleSubtaskResult(ctx context.Context, result types.Tas
 
 // dispatchReadySubtasks finds all PENDING subtasks whose dependencies are all COMPLETED
 // and dispatches them (subject to PLAN_EXECUTOR_MAX_PARALLEL limit).
+// Subtasks with requires_confirmation=true are suspended in AWAITING_CONFIRMATION
+// until HandleConfirmationResponse marks them confirmed.
 func (e *PlanExecutor) dispatchReadySubtasks(ctx context.Context, exec *planExecution) {
 	for _, st := range exec.plan.Subtasks {
 		sub := exec.subtasks[st.SubtaskID]
@@ -262,11 +270,97 @@ func (e *PlanExecutor) dispatchReadySubtasks(ctx context.Context, exec *planExec
 			continue
 		}
 
+		// If the subtask requires explicit user confirmation and hasn't received it yet,
+		// suspend it and send a confirmation request to the IO Component.
+		if st.RequiresConfirmation && !exec.confirmedSubtasks[st.SubtaskID] {
+			e.requestConfirmation(ctx, exec, st, sub)
+			continue
+		}
+
 		// Collect prior_results from completed dependencies.
 		sub.PriorResults = e.collectPriorResults(exec, sub.DependsOn)
 
 		e.dispatchSubtask(ctx, exec, st, sub)
 	}
+}
+
+// requestConfirmation transitions a subtask to AWAITING_CONFIRMATION and sends
+// a ConfirmationRequest to the IO Component via the Gateway.
+func (e *PlanExecutor) requestConfirmation(ctx context.Context, exec *planExecution, st types.Subtask, sub *types.SubtaskState) {
+	now := time.Now().UTC()
+	subCtx := observability.WithPlanID(ctx, exec.plan.PlanID)
+	subCtx = observability.WithSubtaskID(subCtx, sub.SubtaskID)
+	subCtx = observability.WithModule(subCtx, "plan_executor")
+	log := observability.LogFromContext(subCtx)
+
+	sub.State = types.SubtaskStateAwaitingConfirmation
+	e.persistSubtaskState(sub, exec.ts.OrchestratorTaskRef, now)
+
+	req := types.ConfirmationRequest{
+		PlanID:    exec.plan.PlanID,
+		SubtaskID: st.SubtaskID,
+		TaskID:    exec.ts.TaskID,
+		Action:    st.Action,
+		Prompt:    st.Instructions,
+		TraceID:   exec.ts.TraceID,
+	}
+	if err := e.gw.PublishConfirmationRequest(subCtx, req); err != nil {
+		log.Error("confirmation request publish failed", "error", err)
+		// Subtask stays in AWAITING_CONFIRMATION; will retry if the plan is re-triggered.
+	}
+	log.Info("subtask awaiting user confirmation", "action", st.Action)
+}
+
+// HandleConfirmationResponse processes a user's approval or rejection of a subtask.
+// Called by the Gateway when aegis.orchestrator.task.confirmation_response is received.
+// On approval the subtask is reset to PENDING and re-queued for dispatch.
+// On rejection it is marked FAILED and its dependents are blocked.
+func (e *PlanExecutor) HandleConfirmationResponse(ctx context.Context, resp types.ConfirmationResponse) error {
+	execVal, ok := e.activePlans.Load(resp.PlanID)
+	if !ok {
+		observability.LogFromContext(ctx).Debug("confirmation response for unknown/completed plan",
+			"plan_id", resp.PlanID, "subtask_id", resp.SubtaskID)
+		return nil
+	}
+	exec := execVal.(*planExecution)
+
+	exec.mu.Lock()
+	defer exec.mu.Unlock()
+
+	sub, ok := exec.subtasks[resp.SubtaskID]
+	if !ok || sub.State != types.SubtaskStateAwaitingConfirmation {
+		return nil
+	}
+
+	subCtx := observability.WithPlanID(ctx, resp.PlanID)
+	subCtx = observability.WithSubtaskID(subCtx, resp.SubtaskID)
+	subCtx = observability.WithModule(subCtx, "plan_executor")
+	log := observability.LogFromContext(subCtx)
+
+	now := time.Now().UTC()
+
+	if !resp.Confirmed {
+		// User rejected — treat as a terminal failure for this subtask.
+		sub.State = types.SubtaskStateFailed
+		sub.ErrorCode = types.ErrCodeUserRejected
+		sub.CompletedAt = &now
+		e.persistSubtaskState(sub, exec.ts.OrchestratorTaskRef, now)
+		log.Info("subtask rejected by user", "reason", resp.Reason)
+		e.blockDependents(exec, resp.SubtaskID, now)
+		e.checkPlanCompletion(exec)
+		return nil
+	}
+
+	// User confirmed — mark as approved and reset to PENDING so the normal
+	// dispatch path picks it up.
+	exec.confirmedSubtasks[resp.SubtaskID] = true
+	sub.State = types.SubtaskStatePending
+	e.persistSubtaskState(sub, exec.ts.OrchestratorTaskRef, now)
+	log.Info("subtask confirmed by user")
+
+	// Re-run the ready check to dispatch this subtask (and any others now unblocked).
+	e.dispatchReadySubtasks(subCtx, exec)
+	return nil
 }
 
 // dispatchSubtask sends a capability_query then publishes a task_spec for one subtask.
