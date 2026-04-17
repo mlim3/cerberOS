@@ -63,6 +63,7 @@ services:
       MEMORY_ENDPOINT: http://memory-api:8081
       IO_API_BASE: http://io:3001
       DECOMPOSITION_TIMEOUT_SECONDS: "120"
+      # Observability: gRPC OTLP ingest into Tempo, structured JSON logs scraped by Promtail → Loki.
       OTEL_EXPORTER_OTLP_ENDPOINT: tempo:4317
       LOG_LEVEL: info
       LOG_FORMAT: json
