@@ -69,7 +69,8 @@ func newHealthzHandler(db *storage.PostgresDB, logger *slog.Logger) http.Handler
 
 func main() {
 	// Initialize structured logging
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).
+		With("service", "memory", "component", "server")
 	slog.SetDefault(logger)
 
 	// Load .env file if it exists
