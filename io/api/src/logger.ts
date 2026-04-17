@@ -46,8 +46,8 @@ export function ioLog(
 ): void {
   if (!shouldEmit(level)) return
   const rec: Record<string, unknown> = {
-    ts: new Date().toISOString(),
-    level,
+    time: new Date().toISOString(),
+    level: level.toUpperCase(),
     service: SERVICE,
     component,
     msg,
