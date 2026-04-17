@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -26,9 +27,9 @@ type fakeDispatchRequest struct {
 func TestValidateAndScopeAllowWritesPolicyAllowEvent(t *testing.T) {
 	vault := &mocks.VaultMock{}
 	mem := mocks.NewMemoryMock()
-	enforcer := New(testConfig(), vault, mem, nil)
+	enforcer := New(testConfig(), vault, mem)
 
-	scope, err := enforcer.ValidateAndScope("task-1", "orch-1", "user-1", []string{"web", "data"}, 60)
+	scope, err := enforcer.ValidateAndScope(context.Background(), "task-1", "orch-1", "user-1", []string{"web", "data"}, 60)
 	if err != nil {
 		t.Fatalf("ValidateAndScope() error = %v", err)
 	}
@@ -81,9 +82,9 @@ func TestValidateAndScopeDenyWritesPolicyDenyEvent(t *testing.T) {
 		DenyReason: "domain storage not in user policy",
 	}
 	mem := mocks.NewMemoryMock()
-	enforcer := New(testConfig(), vault, mem, nil)
+	enforcer := New(testConfig(), vault, mem)
 
-	_, err := enforcer.ValidateAndScope("task-2", "orch-2", "user-2", []string{"storage"}, 60)
+	_, err := enforcer.ValidateAndScope(context.Background(), "task-2", "orch-2", "user-2", []string{"storage"}, 60)
 	if err == nil {
 		t.Fatal("ValidateAndScope() error = nil, want denial error")
 	}
@@ -130,9 +131,9 @@ func TestValidateAndScopeDenyWritesPolicyDenyEvent(t *testing.T) {
 func TestWriteAuditEventWritesPolicyEvent(t *testing.T) {
 	vault := &mocks.VaultMock{}
 	mem := mocks.NewMemoryMock()
-	enforcer := New(testConfig(), vault, mem, nil)
+	enforcer := New(testConfig(), vault, mem)
 
-	if err := enforcer.writeAuditEvent("task-1", "orch-1", "user-3", types.OutcomeDenied, "demo deny"); err != nil {
+	if err := enforcer.writeAuditEvent(context.Background(), "task-1", "orch-1", "user-3", types.OutcomeDenied, "demo deny"); err != nil {
 		t.Fatalf("writeAuditEvent() error = %v", err)
 	}
 
@@ -177,9 +178,9 @@ func TestWriteAuditEventReturnsErrorWhenMemoryWriteFails(t *testing.T) {
 	mem := mocks.NewMemoryMock()
 	mem.ShouldFailWrites = true
 
-	enforcer := New(testConfig(), vault, mem, nil)
+	enforcer := New(testConfig(), vault, mem)
 
-	err := enforcer.writeAuditEvent("task-9", "orch-9", "user-9", types.OutcomeDenied, "memory down")
+	err := enforcer.writeAuditEvent(context.Background(), "task-9", "orch-9", "user-9", types.OutcomeDenied, "memory down")
 	if err == nil {
 		t.Fatal("writeAuditEvent() error = nil, want non-nil")
 	}
@@ -197,9 +198,9 @@ func TestWriteAuditEventReturnsErrorWhenMemoryWriteFails(t *testing.T) {
 func TestValidateAndScopeCacheHitDoesNotCallVault(t *testing.T) {
 	vault := &mocks.VaultMock{}
 	mem := mocks.NewMemoryMock()
-	enforcer := New(testConfig(), vault, mem, nil)
+	enforcer := New(testConfig(), vault, mem)
 
-	scope1, err := enforcer.ValidateAndScope("task-1", "orch-1", "user-1", []string{"web", "data"}, 60)
+	scope1, err := enforcer.ValidateAndScope(context.Background(), "task-1", "orch-1", "user-1", []string{"web", "data"}, 60)
 	if err != nil {
 		t.Fatalf("first ValidateAndScope() error = %v", err)
 	}
@@ -209,7 +210,7 @@ func TestValidateAndScopeCacheHitDoesNotCallVault(t *testing.T) {
 
 	vault.ShouldBeUnreachable = true
 
-	scope2, err := enforcer.ValidateAndScope("task-2", "orch-2", "user-1", []string{"data", "web"}, 60)
+	scope2, err := enforcer.ValidateAndScope(context.Background(), "task-2", "orch-2", "user-1", []string{"data", "web"}, 60)
 	if err != nil {
 		t.Fatalf("second ValidateAndScope() error = %v, want cache hit success", err)
 	}
@@ -241,16 +242,16 @@ func TestValidateAndScopeVaultDownFailOpenUsesCache(t *testing.T) {
 
 	vault := &mocks.VaultMock{}
 	mem := mocks.NewMemoryMock()
-	enforcer := New(cfg, vault, mem, nil)
+	enforcer := New(cfg, vault, mem)
 
-	scope1, err := enforcer.ValidateAndScope("task-10", "orch-10", "user-10", []string{"web"}, 60)
+	scope1, err := enforcer.ValidateAndScope(context.Background(), "task-10", "orch-10", "user-10", []string{"web"}, 60)
 	if err != nil {
 		t.Fatalf("initial ValidateAndScope() error = %v", err)
 	}
 
 	vault.ShouldBeUnreachable = true
 
-	scope2, err := enforcer.ValidateAndScope("task-11", "orch-11", "user-10", []string{"web"}, 60)
+	scope2, err := enforcer.ValidateAndScope(context.Background(), "task-11", "orch-11", "user-10", []string{"web"}, 60)
 	if err != nil {
 		t.Fatalf("fail-open ValidateAndScope() error = %v, want cached scope", err)
 	}
@@ -268,16 +269,16 @@ func TestInvalidateCacheForPolicyClearsCache(t *testing.T) {
 
 	vault := &mocks.VaultMock{}
 	mem := mocks.NewMemoryMock()
-	enforcer := New(cfg, vault, mem, nil)
+	enforcer := New(cfg, vault, mem)
 
-	if _, err := enforcer.ValidateAndScope("task-20", "orch-20", "user-20", []string{"data"}, 60); err != nil {
+	if _, err := enforcer.ValidateAndScope(context.Background(), "task-20", "orch-20", "user-20", []string{"data"}, 60); err != nil {
 		t.Fatalf("initial ValidateAndScope() error = %v", err)
 	}
 
 	enforcer.InvalidateCacheForPolicy("any-policy")
 	vault.ShouldBeUnreachable = true
 
-	_, err := enforcer.ValidateAndScope("task-21", "orch-21", "user-20", []string{"data"}, 60)
+	_, err := enforcer.ValidateAndScope(context.Background(), "task-21", "orch-21", "user-20", []string{"data"}, 60)
 	if err == nil {
 		t.Fatal("ValidateAndScope() error = nil, want vault error after cache invalidation")
 	}
@@ -300,7 +301,7 @@ func TestPolicyWorkflowAllow(t *testing.T) {
 
 	vault := &mocks.VaultMock{}
 	mem := mocks.NewMemoryMock()
-	enforcer := New(testConfig(), vault, mem, nil)
+	enforcer := New(testConfig(), vault, mem)
 
 	t.Log("=== POLICY WORKFLOW ALLOW DEMO START ===")
 	t.Logf("Dispatcher received task: task_id=%s orch_ref=%s user_id=%s domains=%v timeout=%d",
@@ -376,7 +377,7 @@ func TestPolicyWorkflowDeny(t *testing.T) {
 		DenyReason: "domain storage not in user policy",
 	}
 	mem := mocks.NewMemoryMock()
-	enforcer := New(testConfig(), vault, mem, nil)
+	enforcer := New(testConfig(), vault, mem)
 
 	t.Log("=== POLICY WORKFLOW DENY DEMO START ===")
 	t.Logf("Dispatcher received task: task_id=%s orch_ref=%s user_id=%s domains=%v timeout=%d",
@@ -418,6 +419,7 @@ func TestPolicyWorkflowDeny(t *testing.T) {
 
 func simulateDispatcherPolicyStep(e *Enforcer, req fakeDispatchRequest) (types.PolicyScope, error) {
 	return e.ValidateAndScope(
+		context.Background(),
 		req.TaskID,
 		req.OrchestratorTaskRef,
 		req.UserID,
@@ -435,7 +437,7 @@ func TestPolicyWorkflowFailOpenCacheFallback(t *testing.T) {
 
 	vault := &mocks.VaultMock{}
 	mem := mocks.NewMemoryMock()
-	enforcer := New(cfg, vault, mem, nil)
+	enforcer := New(cfg, vault, mem)
 
 	seedReq := fakeDispatchRequest{
 		TaskID:               "task-300",

@@ -88,6 +88,39 @@ function parseEnvelopePayload(env: Record<string, unknown>): Record<string, unkn
 }
 
 /**
+ * Extract a clean human-readable string from the orchestrator's task_result payload.
+ * The result may be: a plain string, a JSON array of subtask results, or an object.
+ */
+function extractHumanResult(result: unknown): string {
+  if (!result) return 'Task completed.'
+  if (typeof result === 'string') {
+    try {
+      const parsed = JSON.parse(result)
+      return extractHumanResult(parsed)
+    } catch {
+      return result
+    }
+  }
+  if (Array.isArray(result)) {
+    const parts = result
+      .map((item: Record<string, unknown>) => {
+        const r = item.result ?? item.output ?? item.content
+        return typeof r === 'string' ? r : r ? JSON.stringify(r) : null
+      })
+      .filter(Boolean) as string[]
+    return parts.length > 0 ? parts.join('\n\n') : 'Task completed.'
+  }
+  if (typeof result === 'object') {
+    const obj = result as Record<string, unknown>
+    const text = obj.result ?? obj.output ?? obj.content ?? obj.answer
+    if (typeof text === 'string') return text
+    if (text) return extractHumanResult(text)
+    return JSON.stringify(result)
+  }
+  return String(result)
+}
+
+/**
  * Client task id for `pendingChatResponses` — usually `aegis.io.results.<taskId>` subject suffix.
  * For some payloads (e.g. task_accepted) only orchestrator_task_ref is inside payload; user task id
  * is only reliable from the subject, so we prefer subject when it matches.
@@ -126,12 +159,8 @@ if (natsClient) {
         ioLog('info', 'nats', 'task_accepted', { task_id: taskId })
       }
     } else if (msgType === 'task_result') {
-      const result = payload.result as string | Record<string, unknown> | undefined
-      const content = typeof result === 'string'
-        ? result
-        : result && typeof result === 'object'
-          ? JSON.stringify(result)
-          : 'Task completed.'
+      const result = payload.result as unknown
+      const content = extractHumanResult(result)
       if (taskId) {
         deliverChatResponse(taskId, content, true)
         ioLog('info', 'nats', 'task_result', { task_id: taskId })
@@ -390,15 +419,15 @@ app.post('/api/chat', async (c) => {
     history_len: conversationHistory?.length,
   })
 
-  // Log user message via memory client (uses in-memory when MEMORY_API_BASE is unset)
+  // Log user message via memory client — fire-and-forget so the SSE stream opens immediately.
   const sessionId = getOrCreateSessionId(taskId, '00000000-0000-0000-0000-000000000001')
-  await appendLogEntry({
+  appendLogEntry({
     sessionId,
     userId: '00000000-0000-0000-0000-000000000001',
     role: 'user',
     content,
     taskId,
-  })
+  }).catch(() => { /* best-effort */ })
 
   const workingStatus: StatusUpdate = {
     taskId,

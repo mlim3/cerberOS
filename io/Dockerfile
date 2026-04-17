@@ -40,12 +40,12 @@ WORKDIR /app
 # Set ENABLE_VOICE=true at build time for full transcription (slow image build).
 # Default false = smaller/faster builds; run with STT_PROVIDER=disabled (see docker-compose).
 RUN if [ "$ENABLE_VOICE" = "true" ]; then \
-    apt-get update && apt-get install -y ffmpeg \
-      python3 python3-pip python3-venv \
-      && rm -rf /var/lib/apt/lists/* \
-    && python3 -m venv /opt/venv \
-    && /opt/venv/bin/pip install --no-cache-dir faster-whisper \
-    && /opt/venv/bin/python3 -c "from faster_whisper import download_model; download_model('base.en', output_dir='/app/whisper-models')"; \
+  apt-get update && apt-get install -y ffmpeg \
+  python3 python3-pip python3-venv \
+  && rm -rf /var/lib/apt/lists/* \
+  && python3 -m venv /opt/venv \
+  && /opt/venv/bin/pip install --no-cache-dir faster-whisper \
+  && /opt/venv/bin/python3 -c "from faster_whisper import download_model; download_model('base.en', output_dir='/app/whisper-models')"; \
   fi
 
 # Copy the full Bun workspace (needed for @cerberos/io-core workspace dep)
