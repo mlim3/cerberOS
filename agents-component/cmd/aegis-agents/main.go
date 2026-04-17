@@ -25,7 +25,8 @@ import (
 )
 
 func main() {
-	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	log := slog.New(slog.NewJSONHandler(os.Stdout, nil)).
+		With("service", "agents", "component", "aegis-agents")
 
 	cfg, err := config.Load()
 	if err != nil {

@@ -88,7 +88,8 @@ type TaskOutput struct {
 }
 
 func main() {
-	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+	log := slog.New(slog.NewJSONHandler(os.Stderr, nil)).
+		With("service", "agents", "component", "agent-process")
 
 	spawnCtx, err := readSpawnContext(log)
 	if err != nil {
