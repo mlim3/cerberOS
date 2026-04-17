@@ -2,8 +2,8 @@
 # cerberOS bootstrap — bring the full stack up or tear it down.
 #
 # Usage:
-#   ./bootstrap.sh          # build, start, init + unseal OpenBao
-#   ./bootstrap.sh down     # stop stack, clean up OpenBao state
+#   ./bootstrap.sh                # build, start, init + unseal OpenBao
+#   ./bootstrap.sh down           # stop stack, clean up OpenBao state
 #   ./bootstrap.sh down --keep-db        # stop but keep openbao database
 #   ./bootstrap.sh down --delete-volumes # stop and remove Docker volumes
 
@@ -304,7 +304,7 @@ cmd_up() {
 # MAIN
 # =============================================================================
 case "${1:-up}" in
-  up)      cmd_up ;;
+  up)      shift; cmd_up "$@" ;;
   down)    shift; cmd_down "$@" ;;
   *)       die "usage: $0 [up|down] [options]" ;;
 esac

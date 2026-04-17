@@ -16,7 +16,7 @@
 package main
 
 import (
-	"fmt"
+	"context"
 	"log"
 	"net/http"
 	"os"
@@ -26,6 +26,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mlim3/cerberOS/orchestrator/internal/api"
 	"github.com/mlim3/cerberOS/orchestrator/internal/config"
 	"github.com/mlim3/cerberOS/orchestrator/internal/databusproxy"
 	"github.com/mlim3/cerberOS/orchestrator/internal/dispatcher"
@@ -38,6 +39,7 @@ import (
 	"github.com/mlim3/cerberOS/orchestrator/internal/mocks"
 	"github.com/mlim3/cerberOS/orchestrator/internal/monitor"
 	natsclient "github.com/mlim3/cerberOS/orchestrator/internal/nats"
+	"github.com/mlim3/cerberOS/orchestrator/internal/observability"
 	"github.com/mlim3/cerberOS/orchestrator/internal/policy"
 	"github.com/mlim3/cerberOS/orchestrator/internal/recovery"
 	"github.com/mlim3/cerberOS/orchestrator/internal/types"
@@ -49,48 +51,63 @@ func main() {
 		log.Fatalf("FATAL: load config failed: %v", err)
 	}
 
-	fmt.Printf("Aegis OS — Orchestrator starting | node_id=%s\n", cfg.NodeID)
+	// Initialize structured logging FIRST so all startup errors are captured.
+	observability.InitLogger(cfg.LogLevel, cfg.LogFormat, cfg.NodeID)
+
+	ctx := context.Background()
+	startLog := observability.LogFromContext(ctx)
+
+	// Initialize distributed tracing. The orchestrator starts even if Tempo is
+	// unreachable — the OTLP exporter retries in the background.
+	tracerShutdown, err := observability.InitTracer(ctx, cfg.OTELEndpoint, cfg.NodeID)
+	if err != nil {
+		startLog.Warn("tracer init failed — continuing without tracing", "error", err)
+		tracerShutdown = func(context.Context) error { return nil }
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := tracerShutdown(shutdownCtx); err != nil {
+			observability.LogFromContext(context.Background()).Error("tracer shutdown failed", "error", err)
+		}
+	}()
+
+	startLog.Info("orchestrator starting",
+		"node_id", cfg.NodeID,
+		"log_level", cfg.LogLevel,
+		"otel_endpoint", cfg.OTELEndpoint,
+	)
 
 	rt, err := buildRuntime(cfg)
 	if err != nil {
-		log.Fatalf("FATAL: build runtime failed: %v", err)
+		startLog.Error("build runtime failed", "error", err)
+		os.Exit(1)
 	}
 
 	rt.health.StartMonitorLoop(cfg.HealthCheckIntervalSeconds, cfg.HealthCheckIntervalSeconds)
 	go func() {
 		addr := ":8080"
-		mux := http.NewServeMux()
-		mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodGet {
-				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-				return
-			}
-			rt.health.ServeHTTP(w, r)
-		})
-		if isHTTPMemoryEndpoint(cfg.MemoryEndpoint) {
-			mux.Handle("/v1/databus/", databusproxy.New(cfg.MemoryEndpoint))
-			log.Printf("databus proxy enabled: /v1/databus/* -> %s/*", strings.TrimSuffix(cfg.MemoryEndpoint, "/"))
-		}
-		log.Printf("HTTP listening on %s", addr)
-		if err := http.ListenAndServe(addr, mux); err != nil {
-			log.Printf("HTTP server stopped: %v", err)
+		startLog.Info("HTTP server listening", "addr", addr)
+		if err := http.ListenAndServe(addr, rt.mux); err != nil {
+			observability.LogFromContext(context.Background()).Error("HTTP server stopped", "error", err)
 		}
 	}()
 
 	go emitMetrics(cfg, rt.gateway, rt.dispatcher, rt.health)
 
 	if err := rt.gateway.Start(); err != nil {
-		log.Fatalf("FATAL: gateway start failed: %v", err)
+		startLog.Error("gateway start failed", "error", err)
+		os.Exit(1)
 	}
 
-	fmt.Println("Orchestrator ready — waiting for tasks")
+	startLog.Info("orchestrator ready — waiting for tasks")
 
 	// Block until SIGINT or SIGTERM
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	fmt.Println("Orchestrator shutting down gracefully...")
+	startLog.Info("orchestrator shutting down gracefully")
 	rt.nats.Close()
 }
 
@@ -106,6 +123,7 @@ type runtime struct {
 	dispatcher *dispatcher.Dispatcher
 	executor   *executor.PlanExecutor
 	health     *health.Handler
+	mux        *http.ServeMux
 }
 
 func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
@@ -116,7 +134,7 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 	}
 
 	vaultClient := &mocks.VaultMock{}
-	policyEnforcer := policy.New(cfg, vaultClient, memClient, nil)
+	policyEnforcer := policy.New(cfg, vaultClient, memClient)
 
 	natsClient, mockNATS, err := buildNATSClient(cfg)
 	if err != nil {
@@ -156,7 +174,7 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 	// IO Component client — optional; no-op when IO_API_BASE is not set.
 	ioClient := ioclient.New(cfg.IOAPIBase)
 	if !ioClient.Disabled() {
-		log.Printf("IO Component integration enabled: %s", cfg.IOAPIBase)
+		observability.LogFromContext(context.Background()).Info("IO Component integration enabled", "base", cfg.IOAPIBase)
 	}
 
 	taskDispatcher = dispatcher.New(cfg, memClient, vaultClient, gw, policyEnforcer, taskMonitor, planExecutor, ioClient)
@@ -177,6 +195,19 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 
 	healthHandler := health.New(vaultClient, memClient, natsClient, taskMonitor, cfg.NodeID)
 
+	debugHandler := &api.DebugHandler{LokiURL: cfg.LokiURL}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", healthHandler.ServeHTTP)
+	mux.HandleFunc("GET /debug/trace/{trace_id}", debugHandler.GetTrace)
+
+	// Databus proxy: forward /v1/databus/* to Memory API if endpoint is HTTP-based.
+	if isHTTPMemoryEndpoint(cfg.MemoryEndpoint) {
+		mux.Handle("/v1/databus/", databusproxy.New(cfg.MemoryEndpoint))
+		observability.LogFromContext(context.Background()).Info("databus proxy enabled",
+			"path", "/v1/databus/*",
+			"target", strings.TrimSuffix(cfg.MemoryEndpoint, "/"))
+	}
+
 	return &runtime{
 		memory:     memClient,
 		vault:      vaultClient,
@@ -189,6 +220,7 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 		dispatcher: taskDispatcher,
 		executor:   planExecutor,
 		health:     healthHandler,
+		mux:        mux,
 	}, nil
 }
 
@@ -248,9 +280,9 @@ type recoveryProxy struct {
 	target *recovery.Manager
 }
 
-func (p *recoveryProxy) HandleRecovery(ts *types.TaskState, reason types.RecoveryReason) {
+func (p *recoveryProxy) HandleRecovery(ctx context.Context, ts *types.TaskState, reason types.RecoveryReason) {
 	if p.target != nil {
-		p.target.HandleRecovery(ts, reason)
+		p.target.HandleRecovery(ctx, ts, reason)
 	}
 }
 
@@ -277,7 +309,7 @@ func emitMetrics(cfg *config.OrchestratorConfig, gw *gateway.Gateway, d *dispatc
 			QueueDepth:            queueDepth,
 		}
 		if err := gw.PublishMetrics(metrics); err != nil {
-			log.Printf("metrics publish failed: %v", err)
+			observability.LogFromContext(context.Background()).Warn("metrics publish failed", "error", err)
 		}
 	}
 }

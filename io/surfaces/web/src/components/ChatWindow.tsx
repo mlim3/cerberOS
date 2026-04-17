@@ -1,10 +1,18 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useMemo } from 'react'
+import { marked } from 'marked'
 import type { Task, CredentialRequest, CredentialRequestStatus } from '@cerberos/io-core'
 import type { UISettings } from './SettingsPanel'
 import CredentialRequestCard from './CredentialRequestCard'
 import { VoiceRecorder } from './VoiceRecorder'
 import './ChatWindow.css'
 import './VoiceRecorder.css'
+
+marked.setOptions({ breaks: true, gfm: true })
+
+function MarkdownContent({ content }: { content: string }) {
+  const html = useMemo(() => marked.parse(content) as string, [content])
+  return <div className="message-text markdown-body" dangerouslySetInnerHTML={{ __html: html }} />
+}
 
 interface ChatWindowProps {
   task: Task
@@ -111,7 +119,10 @@ function ChatWindow({
                   <span className="redacted-badge">Secure</span>
                 )}
               </div>
-              <div className="message-text">{message.content}</div>
+              {message.role === 'agent'
+                ? <MarkdownContent content={message.content} />
+                : <div className="message-text">{message.content}</div>
+              }
             </div>
           </div>
         ))}

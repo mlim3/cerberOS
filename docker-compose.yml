@@ -15,6 +15,8 @@
 #   8200 → OpenBao
 #   8222 → NATS monitoring
 #   3100 → Loki
+#   3200 → Tempo (trace query)
+#   4317 → Tempo (OTLP gRPC ingest)
 #   9090 → Prometheus
 #   9091 → DataBus health/metrics
 #   9190 → agents metrics
@@ -61,6 +63,11 @@ services:
       MEMORY_ENDPOINT: http://memory-api:8081
       IO_API_BASE: http://io:3001
       DECOMPOSITION_TIMEOUT_SECONDS: "120"
+      # Observability: gRPC OTLP ingest into Tempo, structured JSON logs scraped by Promtail → Loki.
+      OTEL_EXPORTER_OTLP_ENDPOINT: tempo:4317
+      LOG_LEVEL: info
+      LOG_FORMAT: json
+      LOKI_URL: http://loki:3100
     ports:
       - "8080:8080"
     restart: unless-stopped
@@ -87,6 +94,8 @@ services:
       LOG_LEVEL: debug
       STT_PROVIDER: disabled
       MEMORY_API_BASE: http://memory-api:8081
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
+      OTEL_SERVICE_NAME: io-api
     restart: unless-stopped
     networks:
       - cerberos
@@ -258,11 +267,23 @@ services:
     depends_on:
       - prometheus
       - loki
+      - tempo
+    networks:
+      - cerberos
+
+  tempo:
+    image: grafana/tempo:2.4.1
+    command: -config.file=/etc/tempo/config.yaml
+    volumes:
+      - ./orchestrator/observability/tempo/config.yaml:/etc/tempo/config.yaml:ro
+    ports:
+      - "3200:3200"   # Tempo HTTP (query)
+      - "4317:4317"   # OTLP gRPC (trace ingest)
     networks:
       - cerberos
 
   loki:
-    image: grafana/loki:2.9.5
+    image: grafana/loki:3.4.2
     command: -config.file=/etc/loki/local-config.yaml
     ports:
       - "3100:3100"
@@ -270,7 +291,7 @@ services:
       - cerberos
 
   promtail:
-    image: grafana/promtail:2.9.5
+    image: grafana/promtail:3.4.2
     command: -config.file=/etc/promtail/config.yml
     volumes:
       - ./orchestrator/observability/promtail/config.yml:/etc/promtail/config.yml:ro

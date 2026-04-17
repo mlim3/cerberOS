@@ -49,6 +49,12 @@ type OrchestratorConfig struct {
 	// IO Component integration
 	IOAPIBase string // IO_API_BASE — IO component HTTP base URL (e.g. http://localhost:3001); optional
 
+	// Observability (§16)
+	LogLevel     string // LOG_LEVEL — default: "info"
+	LogFormat    string // LOG_FORMAT — default: "json"
+	OTELEndpoint string // OTEL_EXPORTER_OTLP_ENDPOINT — default: "tempo:4317"
+	LokiURL      string // LOKI_URL — default: "http://loki:3100"
+
 	// Identity
 	NodeID string // NODE_ID — default: os.Hostname()
 }
@@ -113,6 +119,12 @@ func Load() (*OrchestratorConfig, error) {
 	// ── IO Component integration ─────────────────────────────────────────────
 	cfg.IOAPIBase = os.Getenv("IO_API_BASE") // Optional — empty disables IO push
 
+	// ── Observability ────────────────────────────────────────────────────────
+	cfg.LogLevel = envString("LOG_LEVEL", "info")
+	cfg.LogFormat = envString("LOG_FORMAT", "json")
+	cfg.OTELEndpoint = envString("OTEL_EXPORTER_OTLP_ENDPOINT", "tempo:4317")
+	cfg.LokiURL = envString("LOKI_URL", "http://loki:3100")
+
 	// ── Identity ─────────────────────────────────────────────────────────────
 	cfg.NodeID = os.Getenv("NODE_ID")
 	if cfg.NodeID == "" {
@@ -125,6 +137,14 @@ func Load() (*OrchestratorConfig, error) {
 	}
 
 	return cfg, nil
+}
+
+// envString reads a string environment variable with a fallback default.
+func envString(key, defaultVal string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return defaultVal
 }
 
 // envInt reads an integer environment variable with a fallback default.
