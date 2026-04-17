@@ -82,7 +82,10 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).
 		With("service", "databus", "component", "server")
 	// Bridge for internal packages that still accept *log.Logger.
-	legacyLog := slog.NewLogLogger(slog.NewJSONHandler(os.Stdout, nil), slog.LevelInfo)
+	legacyLog := slog.NewLogLogger(
+		logger.Handler(),
+		slog.LevelInfo,
+	)
 	if telemetry.Enabled() {
 		logger.Info("OpenTelemetry OTLP export enabled")
 	}
