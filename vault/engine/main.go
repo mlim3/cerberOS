@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -38,13 +38,17 @@ func main() {
 	sigCtx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).
+		With("service", "vault", "component", "server")
+
 	go func() {
 		<-sigCtx.Done()
 		_ = httpSrv.Shutdown(context.Background())
 	}()
 
-	log.Println("vault listening on :8000")
+	logger.Info("vault listening", "addr", ":8000")
 	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("server error: %v", err)
+		logger.Error("server error", "error", err)
+		os.Exit(1)
 	}
 }
