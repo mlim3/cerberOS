@@ -3,7 +3,6 @@
 #
 # Usage:
 #   ./bootstrap.sh                # build, start, init + unseal OpenBao
-#   ./bootstrap.sh --fresh        # rebuild all images from scratch (no cache)
 #   ./bootstrap.sh down           # stop stack, clean up OpenBao state
 #   ./bootstrap.sh down --keep-db        # stop but keep openbao database
 #   ./bootstrap.sh down --delete-volumes # stop and remove Docker volumes
@@ -101,13 +100,6 @@ cmd_down() {
 # UP
 # =============================================================================
 cmd_up() {
-  local fresh=false
-  for arg in "$@"; do
-    case "$arg" in
-      --fresh) fresh=true ;;
-    esac
-  done
-
   # --- Prerequisites ---
   require_cmd docker
   docker info >/dev/null 2>&1 || die "Docker is not running or not accessible"
@@ -179,10 +171,6 @@ cmd_up() {
     -c "CREATE DATABASE openbao OWNER \"${POSTGRES_USER:-user}\""
 
   log "Starting remaining Docker services..."
-  if [[ "$fresh" == true ]]; then
-    log "(--fresh) Rebuilding all images without cache..."
-    docker compose build --no-cache
-  fi
   docker compose up --build --detach
 
   log "Waiting for OpenBao (localhost:8200)..."
@@ -317,7 +305,6 @@ cmd_up() {
 # =============================================================================
 case "${1:-up}" in
   up)      shift; cmd_up "$@" ;;
-  --fresh) cmd_up --fresh ;;
   down)    shift; cmd_down "$@" ;;
-  *)       die "usage: $0 [up|down|--fresh] [options]" ;;
+  *)       die "usage: $0 [up|down] [options]" ;;
 esac
