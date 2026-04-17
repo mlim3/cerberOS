@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -68,7 +68,10 @@ func main() {
 
 	shutdownTel, errInit := telemetry.Init(ctx)
 	if errInit != nil {
-		log.Fatalf("telemetry: %v", errInit)
+		slog.New(slog.NewJSONHandler(os.Stdout, nil)).
+			With("service", "databus", "component", "server").
+			Error("telemetry init failed", "error", errInit)
+		os.Exit(1)
 	}
 	defer func() {
 		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -76,9 +79,12 @@ func main() {
 		_ = shutdownTel(sctx)
 	}()
 
-	logger := log.New(os.Stdout, "databus ", log.LstdFlags)
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).
+		With("service", "databus", "component", "server")
+	// Bridge for internal packages that still accept *log.Logger.
+	legacyLog := slog.NewLogLogger(slog.NewJSONHandler(os.Stdout, nil), slog.LevelInfo)
 	if telemetry.Enabled() {
-		logger.Println("OpenTelemetry OTLP export enabled")
+		logger.Info("OpenTelemetry OTLP export enabled")
 	}
 
 	url := os.Getenv("AEGIS_NATS_URL")
@@ -93,12 +99,13 @@ func main() {
 	if seedErr == nil && seed != "" {
 		nc, err = security.NewConnectionWithNKeySeed(url, seed)
 		if err != nil {
-			logger.Fatalf("connect (NKey): %v", err)
+			logger.Error("connect failed (NKey)", "error", err)
+			os.Exit(1)
 		}
 		if os.Getenv("OPENBAO_ADDR") != "" {
-			logger.Println("connected with NKey from OpenBao (SR-DB-004)")
+			logger.Info("connected with NKey from OpenBao")
 		} else {
-			logger.Println("connected with NKey (Zero Trust)")
+			logger.Info("connected with NKey (Zero Trust)")
 		}
 	} else {
 		opts := []nats.Option{
@@ -112,7 +119,8 @@ func main() {
 		}
 		nc, err = nats.Connect(url, opts...)
 		if err != nil {
-			logger.Fatalf("connect: %v", err)
+			logger.Error("connect failed", "error", err)
+			os.Exit(1)
 		}
 	}
 	defer nc.Close()
@@ -162,13 +170,13 @@ func main() {
 	srv := &http.Server{Addr: metricsAddr, Handler: mux}
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Printf("metrics server: %v", err)
+			logger.Warn("metrics server error", "error", err)
 		}
 	}()
 	defer func() {
 		_ = srv.Shutdown(context.Background())
 	}()
-	logger.Println("HTTP listening on :9091 (healthz=503 until JetStream streams ready)")
+	logger.Info("HTTP listening", "addr", ":9091", "note", "healthz=503 until JetStream streams ready")
 
 	// Retry EnsureStreams — cluster may need time to form; JetStream Raft requires quorum.
 	// AEGIS_NATS_REPLICAS defaults to 1 (single-node); set to 3 for a NATS cluster.
@@ -181,15 +189,16 @@ func main() {
 	const ensureMaxAttempts = 25
 	for attempt := 1; attempt <= ensureMaxAttempts; attempt++ {
 		if err := streams.EnsureStreamsWithReplicas(nc, natsReplicas); err != nil {
-			logger.Printf("ensure streams (attempt %d/%d): %v", attempt, ensureMaxAttempts, err)
+			logger.Warn("ensure streams failed", "attempt", attempt, "max", ensureMaxAttempts, "error", err)
 			if attempt < ensureMaxAttempts {
 				time.Sleep(3 * time.Second)
 				continue
 			}
-			logger.Fatalf("ensure streams failed after %d attempts: %v", ensureMaxAttempts, err)
+			logger.Error("ensure streams failed after max attempts", "max", ensureMaxAttempts, "error", err)
+			os.Exit(1)
 		}
 		elapsed := time.Since(startTime)
-		logger.Printf("streams ready (startup %.2fs, NFR-DB-005 target < 3s)", elapsed.Seconds())
+		logger.Info("streams ready", "startup_s", elapsed.Seconds())
 		break
 	}
 	streamsReady.Store(true)
@@ -206,17 +215,17 @@ func main() {
 		fc := memory.NewFallbackClient(primary, mock)
 		fc.Init(ctx)
 		if fc.Degraded() {
-			logger.Println("Orchestrator proxy unavailable, DEGRADED-HOLD active (using mock)")
+			logger.Warn("orchestrator proxy unavailable, DEGRADED-HOLD active (using mock)")
 		}
 		fc.StartHealthCheck(ctx, memoryPingInterval)
 		mem = fc
-		logger.Println("storage via Orchestrator proxy (DataBus → Orchestrator → Memory)")
+		logger.Info("storage via orchestrator proxy")
 	} else if memURL := os.Getenv("AEGIS_MEMORY_URL"); memURL != "" {
 		primary := memory.NewHTTPClient(memURL)
 		fc := memory.NewFallbackClient(primary, mock)
 		fc.Init(ctx)
 		if fc.Degraded() {
-			logger.Println("Memory API unavailable, DEGRADED-HOLD active (using mock)")
+			logger.Warn("memory API unavailable, DEGRADED-HOLD active (using mock)")
 		}
 		fc.StartHealthCheck(ctx, memoryPingInterval)
 		mem = fc
@@ -227,7 +236,7 @@ func main() {
 	relay := &relay.OutboxRelay{
 		JS:           js,
 		MemoryClient: mem,
-		Logger:       logger,
+		Logger:       legacyLog,
 	}
 	go relay.Start(ctx)
 
@@ -237,21 +246,21 @@ func main() {
 		checker = c
 	}
 	if os.Getenv("AEGIS_DLQ_REPLAY_ENABLED") == "1" {
-		rh := &dlq.ReplayHandler{JS: js, Checker: checker, Logger: logger, Component: "aegis-databus"}
+		rh := &dlq.ReplayHandler{JS: js, Checker: checker, Logger: legacyLog, Component: "aegis-databus"}
 		go rh.Start(ctx)
-		logger.Println("DLQ replay handler started (idempotency check before republish)")
+		logger.Info("DLQ replay handler started")
 	}
 
 	// Health heartbeat
-	hb := health.NewHeartbeat(nc, logger)
+	hb := health.NewHeartbeat(nc, legacyLog)
 	go hb.Start(ctx)
 
 	// JetStream gauges for Grafana (stream messages, bytes, pending)
-	go jetstreammetrics.Start(ctx, nc, jetstreammetrics.DefaultPollInterval, logger)
+	go jetstreammetrics.Start(ctx, nc, jetstreammetrics.DefaultPollInterval, legacyLog)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	<-sig
-	logger.Println("shutting down")
+	logger.Info("shutting down")
 	cancel()
 }
