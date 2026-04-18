@@ -202,26 +202,59 @@ func (m *Monitor) GetActiveTaskCount() int {
 
 // monitorTaskTimeout enforces the per-task timeout deadline (§FR-SH-01, §17.3).
 // Runs as a goroutine per active task. Signals Recovery Manager on timeout.
+//
+// The task-level TimeoutAt is a runaway backstop, not a phase timer. Each
+// pipeline phase (planner LLM, user approval, per-subtask execution) has
+// its own dedicated timeout. The monitor therefore:
+//
+//   - Re-reads the task on fire so the latest TimeoutAt / State wins
+//     (TimeoutAt may be extended while the task is alive).
+//   - Skips termination when the task is in AWAITING_APPROVAL — that phase
+//     is governed by PlanApprovalTimeoutSeconds in the dispatcher; the
+//     wallclock must not double-count user review time or the user sees
+//     "Your task exceeded its time limit" while staring at the Approve
+//     button. Reschedules a short re-check so a post-approval overshoot
+//     is still caught.
+//   - Terminates only when TimeoutAt is in the past AND the task is in
+//     an active (non-terminal, non-approval) state.
 func (m *Monitor) monitorTaskTimeout(ts *types.TaskState) {
 	if ts == nil || ts.TimeoutAt == nil {
 		return
 	}
 
 	ctx := taskCtx(ts, "task_monitor")
+	const approvalRecheckInterval = 30 * time.Second
 
-	remaining := time.Until(*ts.TimeoutAt)
-	if remaining <= 0 {
-		if current := m.getTask(ts.TaskID); current != nil && !types.IsTerminalState(current.State) {
-			m.recovery.HandleRecovery(ctx, current, types.RecoveryReasonTimeout)
+	for {
+		current := m.getTask(ts.TaskID)
+		if current == nil || types.IsTerminalState(current.State) {
+			return
 		}
+		if current.TimeoutAt == nil {
+			return
+		}
+
+		remaining := time.Until(*current.TimeoutAt)
+		if remaining > 0 {
+			select {
+			case <-time.After(remaining):
+			}
+			continue
+		}
+
+		// Deadline passed. Give AWAITING_APPROVAL a reprieve — the approval
+		// timeout goroutine in the dispatcher is the authoritative clock
+		// for that phase. Re-check periodically so we still enforce the
+		// backstop once execution resumes.
+		if current.State == types.StateAwaitingApproval {
+			select {
+			case <-time.After(approvalRecheckInterval):
+			}
+			continue
+		}
+
+		m.recovery.HandleRecovery(ctx, current, types.RecoveryReasonTimeout)
 		return
-	}
-
-	select {
-	case <-time.After(remaining):
-		if current := m.getTask(ts.TaskID); current != nil && !types.IsTerminalState(current.State) {
-			m.recovery.HandleRecovery(ctx, current, types.RecoveryReasonTimeout)
-		}
 	}
 }
 

@@ -88,7 +88,7 @@ function ChatWindow({
           {task.status === 'completed' && (
             <>
               <span className="status-dot completed"></span>
-              <span>Task completed</span>
+              <span>Completed — ask anything to continue</span>
             </>
           )}
         </div>

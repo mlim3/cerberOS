@@ -81,6 +81,12 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 	c := anthropic.NewClient(clientOpts...)
 	client := &c
 
+	// LLM response cache (Assignment #9 — LLM caching: Personalization).
+	// Process-lifetime, TTL-bounded, user-scoped. Only end_turn responses are
+	// cached; tool-use responses are never cached because they depend on
+	// tool outputs that are not part of the cache key.
+	llmCache := NewLLMCache()
+
 	// Session log persists each turn to episodic memory (EDD §13.4).
 	// Created before tools so memory tools can capture sl in their closures.
 	// nil-safe: all methods are no-ops when sl is nil.
@@ -149,16 +155,40 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 
 		// --------------------------------------------------------------------
 		// Phase 1: Reason — call the LLM with the current context window.
+		// LLM cache: lookup first, fall back to Anthropic on miss. Only
+		// end_turn responses are cached on write (see llmcache.go).
 		// --------------------------------------------------------------------
-		resp, err := client.Messages.New(ctx, anthropic.MessageNewParams{
+		reqParams := anthropic.MessageNewParams{
 			Model:     anthropic.ModelClaudeHaiku4_5,
 			MaxTokens: int64(4096),
 			System:    []anthropic.TextBlockParam{{Text: systemPrompt}},
 			Tools:     toolDefs,
 			Messages:  history,
-		})
-		if err != nil {
-			return "", fmt.Errorf("react iter %d: API call: %w", iter, err)
+		}
+		var resp *anthropic.Message
+		cacheKey := ""
+		if llmCache.Enabled() {
+			cacheKey = llmCache.Key(spawnCtx.UserContextID, reqParams)
+			if cached := llmCache.Lookup(cacheKey); cached != nil {
+				log.Info("llm cache hit", "iter", iter, "key", cacheKey[:12])
+				if ve != nil {
+					ve.PublishMetricsEvent(types.MetricsEventLLMCacheHit, "", 0)
+				}
+				resp = cached
+			}
+		}
+		if resp == nil {
+			if llmCache.Enabled() && ve != nil {
+				ve.PublishMetricsEvent(types.MetricsEventLLMCacheMiss, "", 0)
+			}
+			apiResp, err := client.Messages.New(ctx, reqParams)
+			if err != nil {
+				return "", fmt.Errorf("react iter %d: API call: %w", iter, err)
+			}
+			resp = apiResp
+			if llmCache.Enabled() && cacheKey != "" && resp.StopReason == anthropic.StopReasonEndTurn {
+				llmCache.Store(cacheKey, resp)
+			}
 		}
 
 		totalTokens := resp.Usage.InputTokens + resp.Usage.OutputTokens

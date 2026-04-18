@@ -161,6 +161,10 @@ func newDispatcher(t *testing.T) (*dispatcher.Dispatcher, *gatewayMock, *policyM
 		DecompositionTimeoutSeconds: 30,
 		MaxSubtasksPerPlan:          20,
 		PlanExecutorMaxParallel:     5,
+		// All existing tests were written before the approval gate existed;
+		// opt them out by default. Approval-gate behaviour is exercised in
+		// its own test below.
+		PlanApprovalMode: "off",
 	}
 	d := dispatcher.New(cfg, mem, nil /* vault unused */, gw, pol, mon, exec, ioclient.New("") /* disabled */)
 	return d, gw, pol, mon, exec, mem
@@ -288,9 +292,13 @@ func TestHandleInboundTask_HappyPath_Decomposing(t *testing.T) {
 		t.Fatal("planner policy_scope.token_ref is empty — policy scope not attached")
 	}
 
-	// No task_accepted yet (only after plan is validated).
-	if len(gw.AcceptedCalls) != 0 {
-		t.Fatalf("task_accepted publishes = %d, want 0 before plan is received", len(gw.AcceptedCalls))
+	// task_accepted must fire early — right after policy + memory persist,
+	// so the user sees acknowledgement without waiting for the planner round-trip.
+	if len(gw.AcceptedCalls) != 1 {
+		t.Fatalf("task_accepted publishes = %d, want 1 (early ack after policy + memory persist)", len(gw.AcceptedCalls))
+	}
+	if gw.AcceptedCalls[0].OrchestratorTaskRef == "" {
+		t.Fatal("early task_accepted.orchestrator_task_ref is empty")
 	}
 
 	// Executor must NOT be called yet.
@@ -763,6 +771,62 @@ func TestHandleInboundTask_DuplicateTaskID_ReturnsCurrentStatus(t *testing.T) {
 	}
 }
 
+// TestHandleInboundTask_ReEntryAfterTerminalState verifies that once a prior
+// attempt for a given task_id has reached a terminal state (e.g. COMPLETED),
+// the same task_id is accepted again as a follow-up. The dedup check must
+// only reject while a prior attempt is still in flight. This is the
+// "ChatGPT-style follow-up" behaviour: a completed task never really blocks
+// further messages; it just gets a fresh orchestrator_task_ref.
+func TestHandleInboundTask_ReEntryAfterTerminalState(t *testing.T) {
+	d, gw, _, _, _, mem := newDispatcher(t)
+
+	task := validTask("550e8400-e29b-41d4-a716-446655440099")
+
+	if err := d.HandleInboundTask(context.Background(), task); err != nil {
+		t.Fatalf("first HandleInboundTask() error = %v, want nil", err)
+	}
+	if len(gw.TaskSpecCalls) != 1 {
+		t.Fatalf("after first inbound: planner task publishes = %d, want 1", len(gw.TaskSpecCalls))
+	}
+
+	// Simulate the prior attempt reaching COMPLETED by writing a terminal
+	// task_state record directly to memory. The next inbound with the same
+	// task_id should now be accepted (not rejected as DUPLICATE_TASK) because
+	// the prior attempt is no longer in flight.
+	terminalState := types.TaskState{
+		OrchestratorTaskRef: "orch-ref-prior",
+		TaskID:              task.TaskID,
+		UserID:              task.UserID,
+		State:               types.StateCompleted,
+	}
+	payload, err := json.Marshal(terminalState)
+	if err != nil {
+		t.Fatalf("marshal terminal state: %v", err)
+	}
+	if err := mem.Write(types.OrchestratorMemoryWritePayload{
+		OrchestratorTaskRef: terminalState.OrchestratorTaskRef,
+		TaskID:              task.TaskID,
+		DataType:            types.DataTypeTaskState,
+		Timestamp:           time.Now().UTC(),
+		Payload:             payload,
+	}); err != nil {
+		t.Fatalf("memory.Write terminal state: %v", err)
+	}
+
+	if err := d.HandleInboundTask(context.Background(), task); err != nil {
+		t.Fatalf("re-entry HandleInboundTask() error = %v, want nil", err)
+	}
+
+	if len(gw.TaskSpecCalls) != 2 {
+		t.Fatalf("after re-entry: planner task publishes = %d, want 2 (re-entry must reach planner)", len(gw.TaskSpecCalls))
+	}
+	for _, e := range gw.ErrorCalls {
+		if e.ErrorCode == types.ErrCodeDuplicateTask {
+			t.Fatalf("unexpected DUPLICATE_TASK error on re-entry after terminal state")
+		}
+	}
+}
+
 // ── Metrics ──────────────────────────────────────────────────────────────────
 
 func TestGetMetrics_CountersTrackPipeline(t *testing.T) {
@@ -866,6 +930,10 @@ func TestDispatcherDemoFlow_V3(t *testing.T) {
 		DecompositionTimeoutSeconds: 30,
 		MaxSubtasksPerPlan:          20,
 		PlanExecutorMaxParallel:     5,
+		// This flow asserts unattended plan execution; the approval gate
+		// (which would park the 3-subtask plan in AWAITING_APPROVAL) is
+		// exercised separately in TestPlanApprovalGate_ApproveAndReject.
+		PlanApprovalMode: "off",
 	}
 	d := dispatcher.New(cfg, mem, nil, gw, pol, mon, exec, ioclient.New("") /* disabled */)
 
@@ -908,10 +976,10 @@ func TestDispatcherDemoFlow_V3(t *testing.T) {
 	}
 	t.Log("step 1 complete: task persisted as DECOMPOSING, planner task sent to general agent ✓")
 
-	if len(gw.AcceptedCalls) != 0 {
-		t.Fatal("step 1: task_accepted must NOT be sent until after plan is validated")
+	if len(gw.AcceptedCalls) != 1 {
+		t.Fatalf("step 1: task_accepted must be sent early (after policy + memory persist); got %d", len(gw.AcceptedCalls))
 	}
-	t.Log("step 1: task_accepted deferred — waiting for Planner Agent response ✓")
+	t.Log("step 1: task_accepted published early (before Planner Agent round-trip) ✓")
 
 	t.Log("─────────────────────────────────────────────────────────────────────")
 	t.Log("step 2: Planner Agent responds with a 3-subtask plan")
@@ -1105,4 +1173,159 @@ func safeErrorCode(gw *gatewayMock) string {
 		return "<no error published>"
 	}
 	return gw.ErrorCalls[0].ErrorCode
+}
+
+// ── Multi-step prompting & confirmation (plan approval gate) ─────────────────
+
+// newDispatcherWithApproval is a variant of newDispatcher that enables the
+// approval gate in "always" mode for deterministic testing of the approve/
+// reject paths regardless of subtask count.
+func newDispatcherWithApproval(t *testing.T, mode string) (*dispatcher.Dispatcher, *gatewayMock, *executorMock, *mocks.MemoryMock) {
+	t.Helper()
+	gw := &gatewayMock{}
+	pol := &policyMock{}
+	mon := &monitorMock{}
+	exec := &executorMock{}
+	mem := mocks.NewMemoryMock()
+	cfg := &config.OrchestratorConfig{
+		NodeID:                      "test-node",
+		DecompositionTimeoutSeconds: 30,
+		MaxSubtasksPerPlan:          20,
+		PlanExecutorMaxParallel:     5,
+		PlanApprovalMode:            mode,
+		PlanApprovalTimeoutSeconds:  300,
+	}
+	d := dispatcher.New(cfg, mem, nil, gw, pol, mon, exec, ioclient.New(""))
+	return d, gw, exec, mem
+}
+
+func TestPlanApprovalGate_ApproveAndReject(t *testing.T) {
+	t.Run("approve transitions AWAITING_APPROVAL → PLAN_ACTIVE and starts executor", func(t *testing.T) {
+		d, _, exec, mem := newDispatcherWithApproval(t, "always")
+
+		task := validTask("550e8400-e29b-41d4-a716-446655440050")
+		if err := d.HandleInboundTask(context.Background(), task); err != nil {
+			t.Fatalf("HandleInboundTask() error = %v", err)
+		}
+
+		plan := validPlan(task.TaskID)
+		if err := d.HandleDecompositionResponse(context.Background(), decompositionResponse(task.TaskID, plan)); err != nil {
+			t.Fatalf("HandleDecompositionResponse() error = %v", err)
+		}
+
+		rec := latestTaskStateRecord(t, mem, task.TaskID)
+		if rec.State != types.StateAwaitingApproval {
+			t.Fatalf("state after plan = %q, want AWAITING_APPROVAL", rec.State)
+		}
+		if len(exec.ExecuteCalls) != 0 {
+			t.Fatalf("executor must not run before approval; got %d calls", len(exec.ExecuteCalls))
+		}
+
+		if err := d.HandlePlanDecision(context.Background(), types.PlanDecision{
+			OrchestratorTaskRef: rec.OrchestratorTaskRef,
+			TaskID:              task.TaskID,
+			Approved:            true,
+		}); err != nil {
+			t.Fatalf("HandlePlanDecision(approve) error = %v", err)
+		}
+
+		if len(exec.ExecuteCalls) != 1 {
+			t.Fatalf("executor.Execute calls after approval = %d, want 1", len(exec.ExecuteCalls))
+		}
+		after := latestTaskStateRecord(t, mem, task.TaskID)
+		if after.State != types.StatePlanActive {
+			t.Fatalf("state after approval = %q, want PLAN_ACTIVE", after.State)
+		}
+	})
+
+	t.Run("reject fails the task with PLAN_REJECTED", func(t *testing.T) {
+		d, gw, exec, mem := newDispatcherWithApproval(t, "always")
+
+		task := validTask("550e8400-e29b-41d4-a716-446655440051")
+		if err := d.HandleInboundTask(context.Background(), task); err != nil {
+			t.Fatalf("HandleInboundTask() error = %v", err)
+		}
+		plan := validPlan(task.TaskID)
+		if err := d.HandleDecompositionResponse(context.Background(), decompositionResponse(task.TaskID, plan)); err != nil {
+			t.Fatalf("HandleDecompositionResponse() error = %v", err)
+		}
+
+		rec := latestTaskStateRecord(t, mem, task.TaskID)
+		if rec.State != types.StateAwaitingApproval {
+			t.Fatalf("state = %q, want AWAITING_APPROVAL", rec.State)
+		}
+
+		if err := d.HandlePlanDecision(context.Background(), types.PlanDecision{
+			OrchestratorTaskRef: rec.OrchestratorTaskRef,
+			TaskID:              task.TaskID,
+			Approved:            false,
+			Reason:              "looks wrong",
+		}); err != nil {
+			t.Fatalf("HandlePlanDecision(reject) error = %v", err)
+		}
+		if len(exec.ExecuteCalls) != 0 {
+			t.Fatalf("executor must not run on reject; got %d calls", len(exec.ExecuteCalls))
+		}
+		after := latestTaskStateRecord(t, mem, task.TaskID)
+		if after.State != types.StateFailed {
+			t.Fatalf("state after reject = %q, want FAILED", after.State)
+		}
+		if after.ErrorCode != types.ErrCodePlanRejected {
+			t.Fatalf("error_code after reject = %q, want %q", after.ErrorCode, types.ErrCodePlanRejected)
+		}
+
+		found := false
+		for _, e := range gw.ErrorCalls {
+			if e.ErrorCode == types.ErrCodePlanRejected {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected PLAN_REJECTED error_response published to IO; got %v", gw.ErrorCalls)
+		}
+	})
+
+	t.Run("multi mode only gates plans with >1 subtask", func(t *testing.T) {
+		d, _, exec, mem := newDispatcherWithApproval(t, "multi")
+
+		// Single-subtask plan → proceeds immediately.
+		single := validTask("550e8400-e29b-41d4-a716-446655440052")
+		if err := d.HandleInboundTask(context.Background(), single); err != nil {
+			t.Fatalf("inbound: %v", err)
+		}
+		if err := d.HandleDecompositionResponse(context.Background(), decompositionResponse(single.TaskID, validPlan(single.TaskID))); err != nil {
+			t.Fatalf("decomp: %v", err)
+		}
+		if got := latestTaskStateRecord(t, mem, single.TaskID).State; got != types.StatePlanActive {
+			t.Fatalf("single-subtask plan state = %q, want PLAN_ACTIVE", got)
+		}
+		if len(exec.ExecuteCalls) != 1 {
+			t.Fatalf("executor must run for single-subtask plan; got %d calls", len(exec.ExecuteCalls))
+		}
+
+		// Multi-subtask plan → AWAITING_APPROVAL.
+		multi := validTask("550e8400-e29b-41d4-a716-446655440053")
+		if err := d.HandleInboundTask(context.Background(), multi); err != nil {
+			t.Fatalf("inbound (multi): %v", err)
+		}
+		multiPlan := types.ExecutionPlan{
+			PlanID:       "plan-multi",
+			ParentTaskID: multi.TaskID,
+			CreatedAt:    time.Now().UTC(),
+			Subtasks: []types.Subtask{
+				{SubtaskID: "s1", RequiredSkillDomains: []string{"web"}, Action: "a", Instructions: "a", DependsOn: []string{}, TimeoutSeconds: 30},
+				{SubtaskID: "s2", RequiredSkillDomains: []string{"web"}, Action: "b", Instructions: "b", DependsOn: []string{}, TimeoutSeconds: 30},
+			},
+		}
+		if err := d.HandleDecompositionResponse(context.Background(), decompositionResponse(multi.TaskID, multiPlan)); err != nil {
+			t.Fatalf("decomp (multi): %v", err)
+		}
+		if got := latestTaskStateRecord(t, mem, multi.TaskID).State; got != types.StateAwaitingApproval {
+			t.Fatalf("multi-subtask plan state = %q, want AWAITING_APPROVAL", got)
+		}
+		if len(exec.ExecuteCalls) != 1 {
+			t.Fatalf("executor must NOT run for multi-subtask plan yet; got %d calls (expected only the single-plan call)", len(exec.ExecuteCalls))
+		}
+	})
 }

@@ -416,6 +416,53 @@ func TestTrackTask_TimeoutTriggersRecoveryManager(t *testing.T) {
 	}
 }
 
+// The task-level TimeoutAt is a runaway backstop and must not cannibalize the
+// user's plan-approval window. When a task sits in AWAITING_APPROVAL past its
+// nominal TimeoutAt, the monitor must skip termination — the dispatcher's
+// PlanApprovalTimeoutSeconds is the authoritative clock for that phase. The
+// backstop resumes once the task leaves AWAITING_APPROVAL.
+func TestTrackTask_TimeoutSkippedDuringAwaitingApproval(t *testing.T) {
+	m, _, recMock := newMonitor(t)
+
+	now := time.Now().UTC()
+	timeoutAt := now.Add(50 * time.Millisecond)
+
+	ts := &types.TaskState{
+		OrchestratorTaskRef:  "orch-approval-timeout",
+		TaskID:               "task-approval-timeout",
+		UserID:               "user-1",
+		State:                types.StateAwaitingApproval,
+		RequiredSkillDomains: []string{"web"},
+		PolicyScope: types.PolicyScope{
+			Domains:   []string{"web"},
+			TokenRef:  "tok-approval",
+			IssuedAt:  now,
+			ExpiresAt: now.Add(1 * time.Hour),
+		},
+		TimeoutAt: &timeoutAt,
+		StateHistory: []types.StateEvent{
+			{
+				State:     types.StateAwaitingApproval,
+				Timestamp: now,
+				NodeID:    "test-node",
+			},
+		},
+		CallbackTopic:     "aegis.user-io.results.approval",
+		IdempotencyWindow: 300,
+	}
+
+	m.TrackTask(ts)
+
+	// Wait well past the nominal deadline. The monitor must NOT fire recovery
+	// because the task is in AWAITING_APPROVAL.
+	time.Sleep(150 * time.Millisecond)
+
+	if len(recMock.Calls) != 0 {
+		t.Fatalf("recovery calls = %d, want 0 while in AWAITING_APPROVAL (got %+v)",
+			len(recMock.Calls), recMock.Calls)
+	}
+}
+
 // TestMonitorDemoFlow is a demo-style workflow test for M4: Task Monitor.
 //
 // This test intentionally walks through the main monitor responsibilities in a

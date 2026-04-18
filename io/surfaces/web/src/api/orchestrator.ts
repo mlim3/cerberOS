@@ -98,6 +98,43 @@ export interface CredentialSubmitResult {
   error?: string
 }
 
+export interface PlanDecisionParams {
+  taskId: string
+  orchestratorTaskRef: string
+  approved: boolean
+  reason?: string
+}
+
+/**
+ * Forward the user's approve/reject decision on a proposed plan to the
+ * orchestrator (via the IO API → NATS bridge).
+ */
+export async function submitPlanDecision(
+  params: PlanDecisionParams,
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await fetch(buildApiUrl('/api/orchestrator/plan-decision'), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Surface-Key': 'dev',
+      },
+      body: JSON.stringify({
+        taskId: params.taskId,
+        orchestratorTaskRef: params.orchestratorTaskRef,
+        approved: params.approved,
+        reason: params.reason,
+      }),
+    })
+    if (!res.ok) {
+      return { ok: false, error: `${res.status} ${res.statusText}` }
+    }
+    return { ok: true }
+  } catch (err) {
+    return { ok: false, error: String(err) }
+  }
+}
+
 /**
  * Submit a credential through the dedicated secure channel.
  * The IO API server proxies this to Memory's vault endpoint.

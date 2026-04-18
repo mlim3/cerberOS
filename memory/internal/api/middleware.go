@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -55,11 +56,21 @@ func MetricsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// TraceIDMiddleware generates a TraceID for every request and adds it to the context.
-// It also logs an 'ACCESS_GRANTED' event to the system_events table if the request is for the Vault.
+// TraceIDMiddleware resolves a TraceID for every request and adds it to the
+// context. When the request carries a W3C `traceparent` header (from IO,
+// Orchestrator, or Agents via otelhttp) its 32-char trace_id is reused so
+// Memory spans nest under the upstream trace. When no `traceparent` is
+// present a fresh UUID is generated for backward compatibility with legacy
+// callers and direct curl requests.
+//
+// It also logs an 'ACCESS_GRANTED' event to the system_events table if the
+// request is for the Vault.
 func TraceIDMiddleware(logger *slog.Logger, logRepo *storage.LogRepository, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		traceID := uuid.New().String()
+		traceID := extractTraceparentID(r.Header.Get("traceparent"))
+		if traceID == "" {
+			traceID = uuid.New().String()
+		}
 		ctx := context.WithValue(r.Context(), TraceIDKey{}, traceID)
 		r = r.WithContext(ctx)
 
@@ -67,6 +78,28 @@ func TraceIDMiddleware(logger *slog.Logger, logRepo *storage.LogRepository, next
 		rw := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 		next.ServeHTTP(rw, r)
 	})
+}
+
+// extractTraceparentID returns the 32-char trace_id segment of a W3C
+// `traceparent` header (`00-<trace_id>-<span_id>-<flags>`) when it is
+// well-formed and non-zero. Returns "" when the header is absent, malformed,
+// or carries the all-zero trace_id which MUST be rejected per the spec.
+func extractTraceparentID(header string) string {
+	if header == "" {
+		return ""
+	}
+	parts := strings.Split(header, "-")
+	if len(parts) != 4 {
+		return ""
+	}
+	if len(parts[0]) != 2 || len(parts[1]) != 32 || len(parts[2]) != 16 || len(parts[3]) != 2 {
+		return ""
+	}
+	tid := parts[1]
+	if tid == "00000000000000000000000000000000" {
+		return ""
+	}
+	return tid
 }
 
 // RequireVaultKey is a middleware that checks for the X-API-KEY header
