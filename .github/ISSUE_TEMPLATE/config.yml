@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Agents Component Docs
+    url: https://github.com/mlim3/cerberOS/tree/main/agents-component/docs
+    about: Read the Agents Component architecture and specifications
+  - name: Vault Docs
+    url: https://github.com/mlim3/cerberOS/tree/main/vault
+    about: Credential Vault service documentation
+  - name: Architecture & Design
+    url: https://github.com/mlim3/cerberOS/tree/main/design_docs
+    about: Engineering design docs and decision records
