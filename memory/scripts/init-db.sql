@@ -27,12 +27,15 @@ CREATE TABLE chat_schema.messages (
     role VARCHAR(50) NOT NULL,
     content TEXT NOT NULL,
     token_count INT,
-    idempotency_key UUID UNIQUE,
+    idempotency_key UUID,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE INDEX idx_messages_session_id ON chat_schema.messages(session_id);
 CREATE INDEX idx_messages_user_id ON chat_schema.messages(user_id);
+CREATE UNIQUE INDEX idx_messages_session_idempotency
+    ON chat_schema.messages(session_id, idempotency_key)
+    WHERE idempotency_key IS NOT NULL;
 
 -- ==========================================
 -- personal_info_schema

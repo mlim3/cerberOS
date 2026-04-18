@@ -78,7 +78,7 @@ func RequireVaultKey(next http.Handler) http.Handler {
 			// If not set, deny everything to be safe
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(ErrorResponse("INTERNAL_ERROR", "Internal server configuration error", nil))
+			json.NewEncoder(w).Encode(ErrorResponse("internal", "Internal server configuration error", nil))
 			return
 		}
 
@@ -86,7 +86,7 @@ func RequireVaultKey(next http.Handler) http.Handler {
 		if apiKey != expectedKey {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
-			json.NewEncoder(w).Encode(ErrorResponse("UNAUTHORIZED", "Invalid or missing API Key", nil))
+			json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "Invalid or missing API Key", nil))
 			return
 		}
 
