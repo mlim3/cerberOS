@@ -7,6 +7,7 @@
 import { spawn } from 'child_process'
 import { writeFileSync, unlinkSync, mkdtempSync } from 'fs'
 import { randomUUID } from 'crypto'
+import { ioLog } from '../logger'
 
 const VENV_PYTHON = '/opt/venv/bin/python3'
 const SCRIPT_PATH = new URL('./cli.py', import.meta.url).pathname
@@ -40,11 +41,11 @@ function getProc(): ReturnType<typeof spawn> {
     })
 
     proc.stderr?.on('data', (d) => {
-      console.error('[Transcription] Python:', d.toString().trim())
+      ioLog('error', 'transcription', 'Python stderr', { line: d.toString().trim() })
     })
 
     proc.on('close', (code) => {
-      console.warn(`[Transcription] Python process exited with code ${code}`)
+      ioLog('warn', 'transcription', 'Python process exited', { code })
       proc = null
       ready = false
       // Reject any pending request
@@ -195,7 +196,7 @@ export async function transcribe(options: TranscriptionOptions): Promise<Transcr
   } catch (localErr) {
     // Local failed — try cloud fallback
     if (STT_PROVIDER === 'local' && OPENAI_API_KEY) {
-      console.warn(`[Transcription] Local STT failed (${localErr}), trying cloud fallback...`)
+      ioLog('warn', 'transcription', 'local STT failed, trying cloud fallback', { error: String(localErr) })
       return transcribeViaCloud(options)
     }
     // No fallback available, surface the original error
@@ -209,23 +210,23 @@ export async function transcribe(options: TranscriptionOptions): Promise<Transcr
  */
 export async function warmupTranscription(): Promise<void> {
   if (isSttDisabled()) {
-    console.log('[Transcription] STT disabled — skipping model warmup')
+    ioLog('info', 'transcription', 'STT disabled, skipping model warmup')
     return
   }
 
   if (STT_PROVIDER === 'cloud') {
-    console.log('[Transcription] Cloud-only mode — skipping model warmup')
+    ioLog('info', 'transcription', 'cloud-only mode, skipping model warmup')
     return
   }
 
-  console.log('[Transcription] Warming up faster-whisper model...')
+  ioLog('info', 'transcription', 'warming up faster-whisper model')
   try {
     await ensureReady()
-    console.log('[Transcription] Model ready')
+    ioLog('info', 'transcription', 'model ready')
   } catch (err) {
-    console.warn('[Transcription] Warmup failed, will retry on first request:', err)
+    ioLog('warn', 'transcription', 'warmup failed, will retry on first request', { error: String(err) })
     if (OPENAI_API_KEY) {
-      console.warn('[Transcription] Cloud fallback is configured and will be used on first request')
+      ioLog('info', 'transcription', 'cloud fallback configured, will be used on first request')
     }
   }
 }

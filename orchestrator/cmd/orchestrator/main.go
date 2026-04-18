@@ -17,7 +17,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -48,7 +48,10 @@ import (
 func main() {
 	cfg, err := loadRuntimeConfig()
 	if err != nil {
-		log.Fatalf("FATAL: load config failed: %v", err)
+		slog.New(slog.NewJSONHandler(os.Stdout, nil)).
+			With("service", "orchestrator", "component", "main").
+			Error("config load failed", "error", err)
+		os.Exit(1)
 	}
 
 	// Initialize structured logging FIRST so all startup errors are captured.
@@ -228,7 +231,9 @@ func loadRuntimeConfig() (*config.OrchestratorConfig, error) {
 	cfg, err := config.Load()
 	if err != nil {
 		cfg = demoConfig()
-		log.Printf("config incomplete, starting from demo defaults: %v", err)
+		slog.New(slog.NewJSONHandler(os.Stdout, nil)).
+			With("service", "orchestrator", "component", "main").
+			Warn("config incomplete, starting from demo defaults", "error", err)
 	}
 	applyEnvOverrides(cfg)
 	return cfg, nil
