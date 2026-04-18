@@ -880,6 +880,13 @@ func ctxFromTaskState(ts *types.TaskState, module string) context.Context {
 
 // validatePlan checks an execution plan for structural validity (§FR-TD-04, §FR-TD-07).
 func (d *Dispatcher) validatePlan(plan types.ExecutionPlan, ts *types.TaskState) error {
+	if plan.PlanID == "" {
+		return fmt.Errorf("%s: plan_id is required", types.ErrCodeInvalidPlan)
+	}
+	if plan.ParentTaskID != ts.TaskID {
+		return fmt.Errorf("%s: parent_task_id %q does not match task_id %q",
+			types.ErrCodeInvalidPlan, plan.ParentTaskID, ts.TaskID)
+	}
 	if len(plan.Subtasks) == 0 {
 		return fmt.Errorf("%s: plan has no subtasks", types.ErrCodeEmptyPlan)
 	}
@@ -891,6 +898,9 @@ func (d *Dispatcher) validatePlan(plan types.ExecutionPlan, ts *types.TaskState)
 	// Build a set of subtask IDs for dependency validation.
 	subtaskIDs := make(map[string]bool, len(plan.Subtasks))
 	for _, st := range plan.Subtasks {
+		if st.SubtaskID == "" {
+			return fmt.Errorf("%s: subtask_id is required", types.ErrCodeInvalidPlan)
+		}
 		if subtaskIDs[st.SubtaskID] {
 			return fmt.Errorf("%s: duplicate subtask_id %q", types.ErrCodeInvalidPlan, st.SubtaskID)
 		}
@@ -904,6 +914,15 @@ func (d *Dispatcher) validatePlan(plan types.ExecutionPlan, ts *types.TaskState)
 	}
 
 	for _, st := range plan.Subtasks {
+		if strings.TrimSpace(st.Action) == "" {
+			return fmt.Errorf("%s: subtask %q action is required", types.ErrCodeInvalidPlan, st.SubtaskID)
+		}
+		if strings.TrimSpace(st.Instructions) == "" {
+			return fmt.Errorf("%s: subtask %q instructions are required", types.ErrCodeInvalidPlan, st.SubtaskID)
+		}
+		if st.TimeoutSeconds <= 0 {
+			return fmt.Errorf("%s: subtask %q timeout_seconds must be positive", types.ErrCodeInvalidPlan, st.SubtaskID)
+		}
 		for _, dep := range st.DependsOn {
 			if !subtaskIDs[dep] {
 				return fmt.Errorf("%s: subtask %q depends on unknown subtask_id %q",
@@ -1096,12 +1115,14 @@ func buildDecompositionInstructionsWithFacts(taskID, rawInput string, scope type
 		"Decompose the user's task into a JSON execution plan for downstream agents.\n"+
 			"Return JSON only. Do not wrap the result in markdown fences. Do not include commentary.\n"+
 			"The JSON schema is:\n"+
-			"{\"plan_id\":\"string\",\"parent_task_id\":\"%s\",\"created_at\":\"RFC3339 timestamp\",\"subtasks\":[{\"subtask_id\":\"string\",\"required_skill_domains\":[\"domain\"],\"action\":\"string\",\"instructions\":\"string\",\"params\":{},\"depends_on\":[\"subtask_id\"],\"timeout_seconds\":30}]}\n"+
+			"{\"plan_id\":\"string\",\"parent_task_id\":\"%s\",\"created_at\":\"RFC3339 timestamp\",\"subtasks\":[{\"subtask_id\":\"string\",\"required_skill_domains\":[\"domain\"],\"action\":\"string\",\"instructions\":\"string\",\"params\":{},\"depends_on\":[\"subtask_id\"],\"timeout_seconds\":30,\"requires_confirmation\":false}]}\n"+
 			"Rules:\n"+
 			"- parent_task_id must equal %q\n"+
 			"- required_skill_domains for every subtask must be a subset of %s\n"+
 			"- Do not invent new skill domain names outside the allowed list\n"+
 			"- Use an empty array for depends_on when a subtask has no dependencies\n"+
+			"- Set requires_confirmation=true for actions that send messages, spend money, mutate external systems, delete data, book reservations, or expose sensitive information\n"+
+			"- Set requires_confirmation=false or omit it for read-only research, summarization, extraction, and local analysis\n"+
 			"- Keep the plan concise and executable\n"+
 			"Ambiguity handling (CRITICAL):\n"+
 			"- You MUST return a valid execution plan JSON object. NEVER reply with a clarifying question, free-form text, an apology, or anything that is not JSON matching the schema above.\n"+
@@ -1223,6 +1244,8 @@ func humanReadableError(code string) string {
 		return "Maximum recovery attempts exceeded. Task could not complete."
 	case types.ErrCodeTimedOut:
 		return "Task exceeded its maximum allowed time."
+	case types.ErrCodeConfirmationUnavailable:
+		return "A required confirmation prompt could not be delivered. Please retry."
 	default:
 		return "Task failed. Please retry or contact support."
 	}

@@ -13,9 +13,9 @@ const (
 	StatePolicyCheck         = "POLICY_CHECK"
 	StateDispatchPending     = "DISPATCH_PENDING"
 	StateDispatched          = "DISPATCHED"
-	StateDecomposing         = "DECOMPOSING"          // NEW v3.0 — awaiting Planner Agent response
-	StateAwaitingApproval    = "AWAITING_APPROVAL"    // NEW m3 — plan produced, waiting on user approve/reject
-	StatePlanActive          = "PLAN_ACTIVE"          // NEW v3.0 — Plan Executor dispatching subtasks
+	StateDecomposing      = "DECOMPOSING"       // NEW v3.0 — awaiting Planner Agent response
+	StateAwaitingApproval = "AWAITING_APPROVAL" // NEW m3 — plan produced, waiting on user approve/reject
+	StatePlanActive       = "PLAN_ACTIVE"       // NEW v3.0 — Plan Executor dispatching subtasks
 	StateRunning             = "RUNNING"
 	StateRecovering          = "RECOVERING"
 	StateCompleted           = "COMPLETED"
@@ -48,22 +48,22 @@ const (
 // Returned in error responses to User I/O Component (§14).
 
 const (
-	ErrCodePolicyViolation      = "POLICY_VIOLATION"
-	ErrCodeMaxRetriesExceeded   = "MAX_RETRIES_EXCEEDED"
-	ErrCodeVaultUnavailable     = "VAULT_UNAVAILABLE"
-	ErrCodeInvalidTaskSpec      = "INVALID_TASK_SPEC"
-	ErrCodeStorageUnavailable   = "STORAGE_UNAVAILABLE"
-	ErrCodeDuplicateTask        = "DUPLICATE_TASK"
-	ErrCodeAgentsUnavailable    = "AGENTS_UNAVAILABLE"
-	ErrCodeScopeViolation       = "SCOPE_VIOLATION"
-	ErrCodeScopeExpired         = "SCOPE_EXPIRED"
-	ErrCodeStateRecoveryFailed  = "STATE_RECOVERY_FAILED"
-	ErrCodeProvisioningFailed   = "PROVISIONING_FAILED"
-	ErrCodeTimedOut             = "TIMED_OUT"
-	ErrCodeDecompositionTimeout = "DECOMPOSITION_TIMEOUT" // NEW v3.0
-	ErrCodeInvalidPlan          = "INVALID_PLAN"          // NEW v3.0
-	ErrCodeEmptyPlan            = "EMPTY_PLAN"            // NEW v3.0
-	ErrCodePlanTooLarge         = "PLAN_TOO_LARGE"        // NEW v3.0
+	ErrCodePolicyViolation         = "POLICY_VIOLATION"
+	ErrCodeMaxRetriesExceeded      = "MAX_RETRIES_EXCEEDED"
+	ErrCodeVaultUnavailable        = "VAULT_UNAVAILABLE"
+	ErrCodeInvalidTaskSpec         = "INVALID_TASK_SPEC"
+	ErrCodeStorageUnavailable      = "STORAGE_UNAVAILABLE"
+	ErrCodeDuplicateTask           = "DUPLICATE_TASK"
+	ErrCodeAgentsUnavailable       = "AGENTS_UNAVAILABLE"
+	ErrCodeScopeViolation          = "SCOPE_VIOLATION"
+	ErrCodeScopeExpired            = "SCOPE_EXPIRED"
+	ErrCodeStateRecoveryFailed     = "STATE_RECOVERY_FAILED"
+	ErrCodeProvisioningFailed      = "PROVISIONING_FAILED"
+	ErrCodeTimedOut                = "TIMED_OUT"
+	ErrCodeDecompositionTimeout    = "DECOMPOSITION_TIMEOUT"    // NEW v3.0
+	ErrCodeInvalidPlan             = "INVALID_PLAN"             // NEW v3.0
+	ErrCodeEmptyPlan               = "EMPTY_PLAN"               // NEW v3.0
+	ErrCodePlanTooLarge            = "PLAN_TOO_LARGE"           // NEW v3.0
 	ErrCodePlanRejected            = "PLAN_REJECTED"            // NEW m3 — user rejected the plan
 	ErrCodeApprovalTimeout         = "PLAN_APPROVAL_TIMEOUT"    // NEW m3 — user did not respond in time
 	ErrCodeUserRejected            = "USER_REJECTED"            // NEW v3.1 — user explicitly rejected a subtask confirmation
@@ -121,19 +121,19 @@ type TaskState struct {
 	OrchestratorTaskRef  string          `json:"orchestrator_task_ref"` // UUID — Orchestrator-internal, distinct from task_id
 	TaskID               string          `json:"task_id"`               // User-provided deduplication key
 	UserID               string          `json:"user_id"`
-	TraceID              string          `json:"trace_id,omitempty"`    // Distributed trace ID from inbound envelope
+	TraceID              string          `json:"trace_id,omitempty"` // Distributed trace ID from inbound envelope
 	State                string          `json:"state"`
 	RequiredSkillDomains []string        `json:"required_skill_domains,omitempty"`
 	PolicyScope          PolicyScope     `json:"policy_scope"`
-	PlanID               string          `json:"plan_id,omitempty"`              // NEW v3.0 — set when PLAN_ACTIVE
-	AgentID              string          `json:"agent_id,omitempty"`             // Null until DISPATCHED (single-agent legacy path)
+	PlanID               string          `json:"plan_id,omitempty"`  // NEW v3.0 — set when PLAN_ACTIVE
+	AgentID              string          `json:"agent_id,omitempty"` // Null until DISPATCHED (single-agent legacy path)
 	RetryCount           int             `json:"retry_count"`
 	DispatchedAt         *time.Time      `json:"dispatched_at,omitempty"`
 	TimeoutAt            *time.Time      `json:"timeout_at,omitempty"`   // received_at + timeout_seconds
 	CompletedAt          *time.Time      `json:"completed_at,omitempty"` // Null while in progress
 	ErrorCode            string          `json:"error_code,omitempty"`
-	StateHistory         []StateEvent    `json:"state_history"`       // Append-only
-	Payload              json.RawMessage `json:"payload,omitempty"`   // Opaque — passed verbatim to Planner Agent
+	StateHistory         []StateEvent    `json:"state_history"`     // Append-only
+	Payload              json.RawMessage `json:"payload,omitempty"` // Opaque — passed verbatim to Planner Agent
 	CallbackTopic        string          `json:"callback_topic"`
 	UserContextID        string          `json:"user_context_id,omitempty"`
 	IdempotencyWindow    int             `json:"idempotency_window_seconds"`
@@ -143,13 +143,13 @@ type TaskState struct {
 // Inbound message schema from User I/O Component (§10.2).
 
 type UserTask struct {
-	TaskID               string          `json:"task_id"`                              // UUID, required — deduplication key
-	UserID               string          `json:"user_id"`                              // Required
-	RequiredSkillDomains []string        `json:"required_skill_domains,omitempty"`     // OPTIONAL in v3.0 (FR-TRK-04)
-	Priority             int             `json:"priority"`                             // 1 (lowest) to 10 (highest)
-	TimeoutSeconds       int             `json:"timeout_seconds"`                      // Min 30, max 86400
-	Payload              json.RawMessage `json:"payload"`                              // Max 1MB; must contain raw_input for NL tasks
-	CallbackTopic        string          `json:"callback_topic"`                       // Valid NATS topic
+	TaskID               string          `json:"task_id"`                          // UUID, required — deduplication key
+	UserID               string          `json:"user_id"`                          // Required
+	RequiredSkillDomains []string        `json:"required_skill_domains,omitempty"` // OPTIONAL in v3.0 (FR-TRK-04)
+	Priority             int             `json:"priority"`                         // 1 (lowest) to 10 (highest)
+	TimeoutSeconds       int             `json:"timeout_seconds"`                  // Min 30, max 86400
+	Payload              json.RawMessage `json:"payload"`                          // Max 1MB; must contain raw_input for NL tasks
+	CallbackTopic        string          `json:"callback_topic"`                   // Valid NATS topic
 	UserContextID        string          `json:"user_context_id,omitempty"`
 	IdempotencyWindow    int             `json:"idempotency_window_seconds,omitempty"` // Default 300
 	// TraceID is W3C trace_id (32 hex) from I/O; also accepted on the inbound MessageEnvelope.trace_id.
@@ -171,7 +171,7 @@ type Subtask struct {
 	Action               string         `json:"action"`
 	Instructions         string         `json:"instructions"`
 	Params               map[string]any `json:"params,omitempty"`
-	DependsOn            []string       `json:"depends_on"`           // Empty = no dependencies; dispatch immediately
+	DependsOn            []string       `json:"depends_on"` // Empty = no dependencies; dispatch immediately
 	TimeoutSeconds       int            `json:"timeout_seconds"`
 	RequiresConfirmation bool           `json:"requires_confirmation,omitempty"` // NEW v3.1 — pause and ask user before dispatch
 }

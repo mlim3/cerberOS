@@ -51,9 +51,9 @@ Four core concerns define the Orchestrator's responsibility:
 - **Task Authority:** The Orchestrator is the exclusive entry point for all tasks from the User I/O Component. No agent can be provisioned without an Orchestrator-issued `task_spec`.
 - **Policy Enforcement:** Before any task is dispatched, the Orchestrator validates it against Vault-held security policies and enforces permission boundaries. Tasks that fail policy checks are rejected — not silently dropped.
 - **Task Decomposition Coordination:** The Orchestrator routes every incoming task to the Agents Component as a standard `task.inbound` request targeting the `general` skill domain with planner-specific instructions. The planner task returns a structured execution plan with subtasks, agent assignments, and dependencies. The Orchestrator then executes the plan by dispatching subtasks to the Agents Component.
-- **Lifecycle Coordination:** The Orchestrator tracks every active task and subtask, monitors agent health via the Agents Component, and drives recovery when agents fail. It is the authority on whether a task is RUNNING, RECOVERING, COMPLETED, or FAILED.
+- **Lifecycle Coordination:** The Orchestrator tracks every active parent task and delegates per-subtask state ownership to the Plan Executor. It monitors agent health via the Agents Component, drives parent-task recovery when agents fail, and remains the authority on whether a task is RUNNING, RECOVERING, COMPLETED, PARTIAL_COMPLETE, or FAILED.
 
-> **ℹ NOTE:** The Orchestrator is a stateless coordinator. All task state, plan state, subtask state, and agent state is persisted via the Memory Component. This enables horizontal scaling, crash recovery, and node migration without data loss.
+> **ℹ NOTE:** The Orchestrator persists task state, plan state, and subtask state via the Memory Component. Current implementation rehydrates active parent tasks on startup. Plan/subtask records are persisted for audit, observability, and future restart-resume support; in-flight plan execution is currently kept in process memory.
 
 ---
 
@@ -75,7 +75,7 @@ Every task dispatched by the Orchestrator carries a validated policy scope. This
 
 ### 2.3 Stateless Component Design
 
-The Orchestrator is stateless by design. Any state it needs persisted is immediately written to the Memory Component. This enables horizontal scaling and crash recovery. On restart, the Orchestrator rehydrates its active task list and in-flight plan state from the Memory Component and resumes monitoring.
+The Orchestrator persists all durable task records through the Memory Component. On restart, the current implementation rehydrates its active parent task list and resumes parent-task timeout monitoring. In-flight plan/subtask execution state is written to Memory, but active `PlanExecutor` instances are not yet reconstructed after process restart.
 
 ### 2.4 Idempotency and At-Least-Once Safety
 
@@ -158,7 +158,7 @@ The Orchestrator consists of **seven internal modules**. Each module has a singl
 
 | | |
 |---|---|
-| **Responsibilities** | Responds to all non-nominal task and subtask events: agent failure, timeout, policy violation, decomposition failure, Vault/Memory unavailability. On subtask agent failure: determines recovery strategy based on failure count and failure type. If an agent is in `RECOVERING`, the Recovery Manager does not immediately re-dispatch; it trusts the existing agent to self-heal and relies on timeout or a later `TERMINATED` event as the safety net. If an agent is `TERMINATED`, coordinates with Memory Component to retrieve last valid subtask state before recovery attempt. Issues `agent_terminate` or `task_cancel` instructions to Communications Gateway. Escalates irrecoverable failures as `task_failed` messages. Manages retry budget: tracks per-subtask retry count; does not exceed configurable `max_retries`. Ensures credential revocation is triggered on Vault for any terminated agent. |
+| **Responsibilities** | Responds to non-nominal parent task events: agent failure, parent-task timeout, policy violation, decomposition failure, Vault/Memory unavailability. If an agent is in `RECOVERING`, the Recovery Manager does not immediately re-dispatch; it trusts the existing agent to self-heal and relies on timeout or a later `TERMINATED` event as the safety net. If an agent is `TERMINATED`, coordinates with Memory Component to retrieve the latest parent `TaskState` before recovery attempt. Issues `agent_terminate`, `task_cancel`, or recovery `task_spec` instructions through Communications Gateway. Escalates irrecoverable failures as `task_failed` messages. Manages retry budget using parent task `retry_count`; does not exceed configurable `max_retries`. Ensures credential revocation is triggered on Vault for terminal recovery outcomes. |
 | **Inputs** | `timeout_signal` from Task Monitor; `agent_status_update` (RECOVERING/TERMINATED) from Comms Gateway; `component_failure` event from Memory Interface or Policy Enforcer; `decomposition_timeout` from Task Dispatcher |
 | **Outputs** | `agent_terminate`/`task_cancel` to Comms Gateway; `task_failed` to Comms Gateway (for User I/O); `revoke_credentials` to Policy Enforcer; `recovery_audit_event` to Memory Interface |
 | **Interfaces With** | Task Monitor, Communications Gateway, Policy Enforcer, Memory Interface |
@@ -167,8 +167,8 @@ The Orchestrator consists of **seven internal modules**. Each module has a singl
 
 | | |
 |---|---|
-| **Responsibilities** | Disciplined persistence gateway — the only module that writes to or reads from the Memory Component. Enforces structured, tagged write payloads: untagged writes are rejected with an error. Serves task state, plan state, and subtask state read requests for deduplication, recovery, and on-startup rehydration. Never accepts raw session transcripts — only structured, extracted state is persisted. Manages write retries (up to 3 attempts with exponential backoff) and escalates to Recovery Manager on persistent failure. |
-| **Inputs** | Tagged write payloads from: Task Dispatcher, Plan Executor, Policy Enforcer, Task Monitor, Recovery Manager; read requests from: Task Dispatcher (dedup), Plan Executor (plan restore), Recovery Manager (state restore), Task Monitor (startup rehydration) |
+| **Responsibilities** | Disciplined persistence gateway — the only module that writes to or reads from the Memory Component. Enforces structured, tagged write payloads: untagged writes are rejected with an error. Serves task state, plan state, and subtask state read requests for deduplication, audit, recovery, and parent-task startup rehydration. Never accepts raw session transcripts — only structured, extracted state is persisted. Manages write retries (up to 3 attempts with exponential backoff) and escalates to Recovery Manager on persistent failure. |
+| **Inputs** | Tagged write payloads from: Task Dispatcher, Plan Executor, Policy Enforcer, Task Monitor, Recovery Manager; read requests from: Task Dispatcher (dedup), Recovery Manager (parent task state restore), Task Monitor (parent task startup rehydration), observability/debug surfaces |
 | **Outputs** | Persisted state to Memory Component via the Memory Component API/adapter; retrieved state slices to requesting modules; `write_failure` event to Recovery Manager |
 | **Interfaces With** | Task Dispatcher, Plan Executor, Policy Enforcer, Task Monitor, Recovery Manager, Memory Component |
 
@@ -177,8 +177,8 @@ The Orchestrator consists of **seven internal modules**. Each module has a singl
 | | |
 |---|---|
 | **Responsibilities** | Manages execution of structured plans returned by the Planner Agent. Receives an execution plan from the Task Dispatcher. Validates the plan's dependency graph (rejects circular dependencies and empty plans). Resolves subtask dependencies (DAG-based). Dispatches subtasks to the Agents Component in correct topological order via Communications Gateway. Tracks each subtask's state independently (`PENDING`, `DISPATCHED`, `RUNNING`, `COMPLETED`, `FAILED`, `BLOCKED`, `AWAITING_CONFIRMATION`). Passes subtask output as input to dependent subtasks via `prior_results[]` injection. Aggregates final results when all subtasks complete. Signals Task Dispatcher on plan completion or failure. Supports up to `PLAN_EXECUTOR_MAX_PARALLEL` concurrent subtasks. **Multi-step confirmation (NEW v3.3):** When a subtask has `requires_confirmation=true` and its dependencies are met, the Plan Executor transitions it to `AWAITING_CONFIRMATION` and calls `PublishConfirmationRequest` on the Communications Gateway instead of dispatching it. Dispatch is suspended until `HandleConfirmationResponse` receives an explicit user approval via `aegis.orchestrator.task.confirmation_response`. On approval the subtask is reset to `PENDING` and dispatched normally. On rejection it is marked `FAILED` and its dependents are `BLOCKED`. |
-| **Inputs** | `execution_plan` from Task Dispatcher; `task_result`/`task_failed` events from Communications Gateway (per subtask); `agent_status_update` events from Communications Gateway (per subtask agent); `confirmation_response` events from Communications Gateway (per awaiting subtask) |
-| **Outputs** | `task_spec` per subtask to Communications Gateway (for Agents Component); `confirmation_request` to Communications Gateway (for IO Component); `plan_completed`/`plan_failed` to Task Dispatcher; `subtask_state_write` and `plan_state_write` to Memory Interface; `plan_progress` to Communications Gateway (for User I/O progress streaming) |
+| **Inputs** | `execution_plan` from Task Dispatcher; `task_result`/`task_failed` events from Communications Gateway (per subtask); `confirmation_response` events from Communications Gateway (per awaiting subtask) |
+| **Outputs** | `task_spec` per subtask to Communications Gateway (for Agents Component); `confirmation_request` to Communications Gateway (for IO Component); `plan_completed`/`plan_failed` to Task Dispatcher; `subtask_state_write` to Memory Interface |
 | **Interfaces With** | Task Dispatcher, Communications Gateway, Task Monitor, Memory Interface |
 
 **Key Design Decisions for M7:**
@@ -186,7 +186,7 @@ The Orchestrator consists of **seven internal modules**. Each module has a singl
 1. **DAG-based dependency resolution:** Subtasks are ordered by `depends_on[]` fields. Subtasks with no dependencies start immediately. Subtasks with dependencies wait until all predecessors complete.
 2. **Output piping:** When a subtask completes, its result is injected into dependent subtasks' `task_spec.payload` as `prior_results[]` before those subtasks are dispatched.
 3. **Partial failure handling:** If a subtask fails and has no dependents, the plan may continue. If a failed subtask has dependents, those dependents are marked `BLOCKED` and the plan reports partial completion.
-4. **Crash recovery:** Plan state is persisted to Memory Interface on every subtask transition. On Orchestrator restart, in-flight plans are rehydrated and execution resumes.
+4. **Crash recovery boundary:** Plan and subtask state are persisted to Memory Interface on every transition. Current code does not yet rehydrate active `PlanExecutor` instances after restart; persisted records are used for audit/debugging and are the basis for future restart-resume support.
 5. **Parallel dispatch:** Up to `PLAN_EXECUTOR_MAX_PARALLEL` subtasks may be dispatched simultaneously when their dependencies are satisfied.
 6. **Multi-step confirmation:** Subtasks flagged `requires_confirmation=true` are suspended before dispatch, not before dependency resolution. Dependencies still execute in parallel; the confirmation gate applies only to the individual subtask that requires it.
 
@@ -211,8 +211,8 @@ The Orchestrator consists of **seven internal modules**. Each module has a singl
 
 | ID | Requirement | Priority |
 |---|---|---|
-| FR-PE-01 | Every task SHALL be validated against the Vault (OpenBao) policy set before the decomposition request is sent to the Planner Agent. Tasks that fail policy validation SHALL be returned as `POLICY_VIOLATION` with a human-readable reason. | MUST |
-| FR-PE-02 | The Policy Enforcer SHALL derive a `policy_scope` from the Vault response. This scope defines the ceiling for all subtask dispatches during plan execution and SHALL be attached to the `task_decomposition_request` sent to the Planner Agent and to every `task_spec` sent to the Agents Component. | MUST |
+| FR-PE-01 | Every task SHALL be validated against the Vault (OpenBao) policy set before the planner `task.inbound` message is sent to the Planner Agent. Tasks that fail policy validation SHALL be returned as `POLICY_VIOLATION` with a human-readable reason. | MUST |
+| FR-PE-02 | The Policy Enforcer SHALL derive a `policy_scope` from the Vault response. This scope defines the ceiling for all subtask dispatches during plan execution and SHALL be attached to the planner `task.inbound` request and to every `task_spec` sent to the Agents Component. | MUST |
 | FR-PE-03 | Every policy decision — ALLOW or DENY — SHALL be written to the Memory Component as an `audit_event` with: `user_id`, `task_id`, outcome, timestamp, and `vault_policy_version`. | MUST |
 | FR-PE-04 | If the Vault is unreachable and `vault_failure_mode` is `FAIL_CLOSED` (default), the Policy Enforcer SHALL deny the task and return `VAULT_UNAVAILABLE`. If `FAIL_OPEN`, it SHALL proceed with a cached policy (if within `cache_ttl_seconds`) or deny if no cache exists. | MUST |
 | FR-PE-05 | The Policy Enforcer SHALL maintain a policy cache with a configurable TTL. Cached policies SHALL be invalidated on any Vault policy update event received via NATS. | SHOULD |
@@ -239,6 +239,7 @@ The Orchestrator consists of **seven internal modules**. Each module has a singl
 | FR-MS-04 | When the user rejects, the IO Component SHALL publish a `ConfirmationResponse` (`confirmed=false`, optional `reason`). The Plan Executor SHALL mark the subtask `FAILED` with error code `USER_REJECTED` and block all dependents. | MUST |
 | FR-MS-05 | A subtask in `AWAITING_CONFIRMATION` SHALL NOT count toward the `PLAN_EXECUTOR_MAX_PARALLEL` active dispatch limit. | MUST |
 | FR-MS-06 | The `AWAITING_CONFIRMATION` state is **not a terminal state**. The task pipeline continues for subtasks that do not require confirmation. The parent task state remains `PLAN_ACTIVE` while any subtask is awaiting confirmation. | MUST |
+| FR-MS-07 | If a confirmation request cannot be delivered because the IO bridge is disabled or the HTTP call fails, the Plan Executor SHALL mark that subtask `FAILED` with error code `CONFIRMATION_UNAVAILABLE` and block all dependents. | MUST |
 
 ### 5.3.2 Plan Approval Requirements (NEW in m3)
 
@@ -258,19 +259,19 @@ The Orchestrator consists of **seven internal modules**. Each module has a singl
 | FR-ALC-01 | Before dispatching each subtask, the Plan Executor SHALL query the Agents Component's capability endpoint to determine if a capable agent exists, before requesting provisioning. | MUST |
 | FR-ALC-02 | The Orchestrator SHALL NOT dictate how the Agents Component provisions agents. It SHALL only send a fully-formed `task_spec` (including `policy_scope`) and wait for a `task_accepted` or `provisioning_error` response. | MUST |
 | FR-ALC-03 | The Orchestrator SHALL confirm `task_accepted` to the User I/O Component within **5 seconds** (existing agent path) or within **35 seconds** (new agent, full provisioning path, including decomposition). Confirmed tasks receive an `estimated_completion_at` field. | MUST |
-| FR-ALC-04 | The Orchestrator SHALL respond to `capability_query` from the Agents Component on the `aegis.orchestrator.capability.query` topic within **500ms p99**. | MUST |
-| FR-ALC-05 | The Orchestrator SHALL forward intermediate agent progress updates (per subtask) to the User I/O Component if a `user_context_id` is associated with the task. | SHOULD |
+| FR-ALC-04 | The Orchestrator SHALL publish `capability_query` requests to the Agents Component on `aegis.agents.capability.query` and wait for responses on `aegis.orchestrator.capability.response` before dispatching subtasks. | MUST |
+| FR-ALC-05 | The Orchestrator SHOULD forward intermediate agent progress updates (per subtask) to the User I/O Component if a `user_context_id` is associated with the task. Current implementation pushes parent-task milestone status updates; per-subtask progress streaming is future work. | SHOULD |
 
 ### 5.5 Self-Healing & Recovery
 
 | ID | Requirement | Priority |
 |---|---|---|
-| FR-SH-01 | The Task Monitor SHALL enforce a per-task timeout and per-subtask timeouts. When the parent task's `timeout_seconds` is exceeded, the Task Monitor SHALL signal the Recovery Manager to terminate all running subtask agents and return `TIMED_OUT` to the User I/O Component. | MUST |
-| FR-SH-02 | On receiving an `agent_status_update` with `state=RECOVERING`, the Recovery Manager SHALL retrieve the last persisted subtask state from the Memory Component and re-submit the task context to the Agents Component for agent respawn. | MUST |
-| FR-SH-03 | The Recovery Manager SHALL enforce a configurable `max_task_retries` (default: 3) per subtask. If retries are exhausted for a subtask, it SHALL be marked `FAILED`. If the failed subtask has dependents, those dependents are marked `BLOCKED`. | MUST |
-| FR-SH-04 | On any terminal subtask outcome (COMPLETED, FAILED, TIMED_OUT) the Recovery Manager SHALL trigger credential revocation via the Policy Enforcer for the associated agent. | MUST |
-| FR-SH-05 | On Orchestrator startup, the Task Monitor SHALL rehydrate its active task map, plan state, and subtask state map from the Memory Component and resume monitoring any tasks that were DECOMPOSING, RUNNING, or RECOVERING at the time of shutdown. | MUST |
-| FR-SH-06 | Recovery decisions SHALL be policy-checked with the Vault before re-dispatching. A re-dispatched subtask cannot receive a broader scope than the original `policy_scope`. | MUST |
+| FR-SH-01 | The Task Monitor SHALL enforce the parent task timeout. When the parent task's `timeout_seconds` is exceeded, the Task Monitor SHALL signal the Recovery Manager and the task SHALL be returned as `TIMED_OUT` when recovery terminates it. | MUST |
+| FR-SH-02 | On receiving an `agent_status_update` with `state=RECOVERING`, the Recovery Manager SHALL keep monitoring the existing agent rather than immediately provisioning a duplicate agent. A later timeout or TERMINATED event is the safety net. | MUST |
+| FR-SH-03 | On receiving an `agent_status_update` with `state=TERMINATED`, the Recovery Manager SHALL retrieve the latest parent `TaskState` from Memory, verify the original scope is still valid, increment parent `retry_count`, and re-dispatch within `max_task_retries` (default: 3). | MUST |
+| FR-SH-04 | On terminal recovery outcomes, the Recovery Manager SHALL trigger credential revocation via the Policy Enforcer for the associated task. | MUST |
+| FR-SH-05 | On Orchestrator startup, the Task Monitor SHALL rehydrate its active parent task map from `task_state` records in the Memory Component and resume parent-task timeout monitoring. Plan/subtask restart-resume is not implemented in the current code. | MUST |
+| FR-SH-06 | Recovery decisions SHALL be policy-checked with the Vault before re-dispatching. A re-dispatched task cannot receive a broader scope than the original `policy_scope`. | MUST |
 
 ### 5.6 Observability & Audit
 
@@ -291,7 +292,7 @@ The Orchestrator consists of **seven internal modules**. Each module has a singl
 | NFR-01 | Performance | Task receipt to `task_accepted` (existing agent path, after decomposition) | < 5 seconds |
 | NFR-02 | Performance | Task receipt to `task_accepted` (new agent, full provisioning + decomposition) | < 35 seconds |
 | NFR-03 | Performance | Policy validation round-trip (Vault available) | < 200ms p99 |
-| NFR-04 | Performance | Capability query response to Agents Component | < 500ms p99 |
+| NFR-04 | Performance | Capability query round-trip with Agents Component | Bounded by `CapabilityQueryTimeout` (3s in current code) |
 | NFR-05 | Performance | Decomposition round-trip to Planner Agent | < 30 seconds |
 | NFR-06 | Reliability | Task state must survive Orchestrator node failure without data loss | Zero data loss |
 | NFR-07 | Reliability | Startup rehydration from Memory must complete before accepting new tasks | < 10 seconds |
@@ -300,7 +301,7 @@ The Orchestrator consists of **seven internal modules**. Each module has a singl
 | NFR-10 | Security | Vault unreachable: default behavior | FAIL_CLOSED (no task dispatched) |
 | NFR-11 | Security | The Orchestrator SHALL NOT contain any LLM or inference engine | 100% LLM-free |
 | NFR-12 | Scalability | Concurrent tasks managed without race conditions | 1 to 10,000+ tasks |
-| NFR-13 | Scalability | Orchestrator horizontal scale-out without coordination protocol | Stateless; N instances |
+| NFR-13 | Scalability | Orchestrator horizontal scale-out | Durable task records are persisted externally; active plan execution is process-local in current code and requires external routing/ownership before true multi-instance active-active operation |
 | NFR-14 | Observability | All task, plan, and subtask state transitions produce structured audit events | 100% coverage |
 
 ---
@@ -331,10 +332,10 @@ The Orchestrator consists of **seven internal modules**. Each module has a singl
 ### Flow 3.5: Task Decomposition (NEW in v3.0)
 1. Policy validation completes with ALLOW. Task Dispatcher has the validated `policy_scope`.
 2. Task Dispatcher persists task state as `DECOMPOSING` to Memory Interface.
-3. Task Dispatcher publishes a standard `task.inbound` message to `aegis.agents.task.inbound` via the Communications Gateway. The payload uses `required_skills: ["general"]`, planner-specific `instructions`, and `trace_id = orchestrator_task_ref`.
+3. Task Dispatcher publishes a standard `task.inbound` message to `aegis.agents.task.inbound` via the Communications Gateway. The payload uses `required_skills: ["general"]`, planner-specific `instructions`, and the `trace_id` carried from the inbound envelope/context.
 4. The Agents Component provisions or reuses a general-purpose agent and runs the planner task.
 5. The planner agent decomposes the task and returns the execution plan through the normal `aegis.orchestrator.task.result` subject. On provisioning / execution failure it returns `aegis.orchestrator.task.failed`.
-6. Task Dispatcher parses the planner result into `ExecutionPlan` JSON, then validates the plan: checks for circular dependencies, empty plan, plan size, and subtask scope violations.
+6. Task Dispatcher parses the planner result into `ExecutionPlan` JSON, then validates the plan: required `plan_id`, matching `parent_task_id`, non-empty/size-bounded subtask list, unique and non-empty `subtask_id`, required `action`, required `instructions`, positive `timeout_seconds`, valid `depends_on[]` references, circular dependencies, and subtask scope violations.
 7. If the plan is invalid, Task Dispatcher returns `DECOMPOSITION_FAILED` or `INVALID_PLAN` to User I/O.
 8. If the plan is valid, Task Dispatcher passes it to the Plan Executor (M7) and persists the plan state (`PLAN_ACTIVE`) to Memory Interface.
 
@@ -347,12 +348,12 @@ The Orchestrator consists of **seven internal modules**. Each module has a singl
 6. Plan Executor persists subtask state (`DISPATCH_PENDING`) to Memory Interface **before** publishing `task_spec`. After successful publish, it persists `DISPATCHED`. If publish fails, it persists `DELIVERY_FAILED` for that subtask.
 
 ### Flow 5: Subtask Monitoring, Result Piping, and Completion
-1. Task Monitor subscribes to `agent.status` events on `aegis.orchestrator.agent.status`.
-2. As agents progress, intermediate updates are forwarded to User I/O Component if `user_context_id` is present.
+1. Communications Gateway subscribes to `agent.status` events on `aegis.orchestrator.agent.status` and routes them to Task Monitor for parent-task recovery decisions.
+2. Per-subtask result handling is owned by Plan Executor. Status pushes to IO are emitted at parent-task milestones; fine-grained streaming of every intermediate agent progress update is not implemented in the current code.
 3. On `task_result` from Agents Component for a subtask: Plan Executor writes COMPLETED state for that subtask to Memory, checks if any dependent subtasks are now ready, and injects the result into their `prior_results[]` before dispatching them.
 4. When all subtasks reach terminal states, Plan Executor aggregates results and signals `plan_completed` to Task Dispatcher.
-5. Task Dispatcher writes COMPLETED state for the parent task, delivers aggregated result to User I/O via `callback_topic`. Recovery Manager triggers credential revocation for all subtask agents.
-6. On parent task timeout: Task Monitor signals Recovery Manager → `agent_terminate` issued for all running subtask agents → TIMED_OUT returned to User I/O.
+5. Task Dispatcher writes COMPLETED, PARTIAL_COMPLETE, or FAILED state for the parent task and delivers the aggregated result or error to User I/O via `callback_topic`.
+6. On parent task timeout: Task Monitor signals Recovery Manager, which terminates/reports the parent task as `TIMED_OUT` through the existing recovery path.
 
 ### Flow 6.5: IO Component Status Push (NEW in v3.1)
 
@@ -415,14 +416,14 @@ When the Planner Agent marks a subtask `requires_confirmation=true`, the Plan Ex
 }
 ```
 
-### Flow 6: Subtask Recovery Flow
-1. Agent RECOVERING event received from Agents Component for a specific subtask.
+### Flow 6: Parent Task Recovery Flow
+1. Agent RECOVERING event received from Agents Component for a task.
 2. Recovery Manager treats `RECOVERING` as a self-healing signal and does not immediately re-dispatch. The existing agent may return to `ACTIVE`; otherwise timeout remains the safety net.
 3. If the agent later reports `TERMINATED`, Recovery Manager checks retry count. If count < `max_task_retries`:
-   - Memory Interface read for last subtask state snapshot.
+   - Memory Interface read for the latest parent `TaskState`.
    - Vault checked (policy still valid for recovery scope).
-   - Updated `task_spec` re-dispatched to Agents Component (same `policy_scope`, same `prior_results[]`).
-4. If count >= `max_task_retries`: subtask marked FAILED. If the subtask has dependents, those dependents are marked BLOCKED. Plan Executor reports partial completion or plan_failed as appropriate.
+   - Recovery `task_spec` re-dispatched to Agents Component using the same `policy_scope`.
+4. If count >= `max_task_retries`: parent task is marked FAILED and an error is delivered to User I/O.
 
 ---
 
@@ -494,25 +495,25 @@ Steps 1–15 identical to 8.1 (schema validation, dedup, policy check, decomposi
 19. Plan Executor → Task Dispatcher: `plan_completed`.
 20. Task Dispatcher → User I/O: `task_result` delivered. End-to-end < 10 seconds including decomposition.
 
-### 8.3 Self-Healing Recovery Flow (Per Subtask)
+### 8.3 Self-Healing Recovery Flow (Parent Task)
 
-*Triggered when: `agent_status_update {state: RECOVERING}` or later `agent_status_update {state: TERMINATED}` is received from Agents Component for a subtask's agent*
+*Triggered when: `agent_status_update {state: RECOVERING}` or later `agent_status_update {state: TERMINATED}` is received from Agents Component for an agent associated with the task*
 
-1. Task Monitor receives `agent_status_update {agent_id, state: RECOVERING, task_id, subtask_id}`
-2. Task Monitor → Recovery Manager: `recovery_signal {task_id, subtask_id, retry_count, policy_scope, reason: AGENT_RECOVERING}`
+1. Task Monitor receives `agent_status_update {agent_id, state: RECOVERING, task_id}`
+2. Task Monitor → Recovery Manager: `recovery_signal {task_id, retry_count, policy_scope, reason: AGENT_RECOVERING}`
 3. Recovery Manager logs the self-healing condition and does not immediately re-dispatch.
-4. If the agent later reports `TERMINATED`, Task Monitor → Recovery Manager: `recovery_signal {task_id, subtask_id, retry_count, policy_scope, reason: AGENT_TERMINATED}`
-5. Recovery Manager checks `retry_count` for the subtask: if < `max_task_retries` → proceed; else → FAIL the subtask
-6. Recovery Manager → Memory Interface: read `subtask_state` snapshot `{subtask_id, latest}`
-7. Memory Interface → Recovery Manager: `subtask_state {progress_summary, policy_scope, original_task_spec, prior_results}`
+4. If the agent later reports `TERMINATED`, Task Monitor → Recovery Manager: `recovery_signal {task_id, retry_count, policy_scope, reason: AGENT_TERMINATED}`
+5. Recovery Manager checks parent `retry_count`: if < `max_task_retries` → proceed; else → FAIL the parent task
+6. Recovery Manager → Memory Interface: read latest `task_state` snapshot `{task_id, latest}`
+7. Memory Interface → Recovery Manager: `task_state {policy_scope, retry_count, task payload metadata}`
 8. Recovery Manager → Policy Enforcer: re-validate policy scope `{task_id, policy_scope}`
 9. Policy Enforcer → OpenBao: verify scope still valid
 10. OpenBao → Policy Enforcer: VALID (or EXPIRED → Recovery Manager escalates to FAIL)
-11. Recovery Manager → Comms Gateway: re-dispatch `task_spec` for subtask to `aegis.agents.tasks.inbound`
-12. Recovery Manager → Memory Interface: write `recovery_event {subtask_id, attempt_n, timestamp}`
+11. Recovery Manager → Comms Gateway: re-dispatch recovery `task_spec` to `aegis.agents.task.inbound`
+12. Recovery Manager → Memory Interface: write `recovery_event {task_id, attempt_n, timestamp}`
 13. Agents Component responds with `task_accepted` — monitoring resumes at Task Monitor
 
-> **🔴 CRITICAL:** On `max_retries` exceeded for a subtask: Recovery Manager issues `agent_terminate`, writes FAILED state for the subtask, triggers credential revocation. If the failed subtask has dependents, those are marked BLOCKED. Plan Executor reports partial completion or `plan_failed` to Task Dispatcher.
+> **🔴 CRITICAL:** On `max_retries` exceeded for the parent task: Recovery Manager issues termination/cancel as needed, writes FAILED state for the task, triggers credential revocation, and delivers a terminal error response.
 
 ### 8.4 Policy Violation Flow
 
@@ -532,16 +533,16 @@ Steps 1–15 identical to 8.1 (schema validation, dedup, policy check, decomposi
 
 *Triggered when: Planner Agent does not respond within `DECOMPOSITION_TIMEOUT_SECONDS`, OR Planner Agent returns an invalid plan*
 
-1. Task Dispatcher publishes `task_decomposition_request` at T=0.
+1. Task Dispatcher publishes planner `task.inbound` at T=0.
 2. Task Dispatcher starts timer for `DECOMPOSITION_TIMEOUT_SECONDS` (default 30s).
-3. Timer fires without `task_decomposition_response` received.
+3. Timer fires without planner `task.result` received.
 4. Task Dispatcher → Memory Interface: write `task_state {DECOMPOSITION_FAILED, reason: TIMEOUT}`
 5. Task Dispatcher → Comms Gateway: `task_failed {task_id, error_code: DECOMPOSITION_TIMEOUT, user_message: '...'}`
 6. Comms Gateway → User I/O: `task_failed` delivered to `callback_topic`
 
 **Alternative path:** Planner Agent responds but plan is invalid:
 
-4. Task Dispatcher receives `task_decomposition_response`.
+4. Task Dispatcher receives planner `task.result`.
 5. Plan validation detects circular deps / empty plan / scope violation.
 6. Task Dispatcher → Memory Interface: write `task_state {DECOMPOSITION_FAILED, reason: INVALID_PLAN}`
 7. Task Dispatcher → Comms Gateway: `task_failed {task_id, error_code: INVALID_PLAN, user_message: '...'}`
@@ -552,7 +553,7 @@ Steps 1–15 identical to 8.1 (schema validation, dedup, policy check, decomposi
 
 ## 9. Task Lifecycle State Machine
 
-The Task Monitor is the **sole authority** for task and subtask state transitions.
+The Task Monitor owns parent task monitoring and parent task state transitions it performs. The Plan Executor owns subtask state transitions.
 
 ### 9.1 Top-Level Task States
 
@@ -575,7 +576,7 @@ The Task Monitor is the **sole authority** for task and subtask state transition
 | State | Description | Entry Condition | Valid Transitions |
 |---|---|---|---|
 | PENDING | Subtask waiting for dependencies to complete | Subtask has unmet `depends_on[]` | → AWAITING_CONFIRMATION (requires_confirmation=true, deps met) → DISPATCH_PENDING (deps met, no confirmation needed) → BLOCKED (dep failed) |
-| AWAITING_CONFIRMATION | Subtask suspended pending explicit user approval | `requires_confirmation=true` and all dependencies are COMPLETED | → PENDING (user confirms) → FAILED (user rejects, `USER_REJECTED`) |
+| AWAITING_CONFIRMATION | Subtask suspended pending explicit user approval | `requires_confirmation=true` and all dependencies are COMPLETED | → PENDING (user confirms) → FAILED (user rejects, `USER_REJECTED`; request delivery fails, `CONFIRMATION_UNAVAILABLE`) |
 | DISPATCH_PENDING | Subtask state persisted before agent publish | Dependencies met (and confirmed if required); pre-dispatch persistence succeeded | → DISPATCHED → DELIVERY_FAILED |
 | DISPATCHED | `task_spec` successfully published; `task_accepted` confirmed | Agent publish succeeded | → RUNNING → RECOVERING → TIMED_OUT |
 | RUNNING | Agent actively executing the subtask | Agent ACTIVE confirmed by Agents Component | → COMPLETED → RECOVERING → TIMED_OUT |
@@ -626,7 +627,7 @@ Stored in the Memory Component via Memory Interface. One record per top-level ta
 
 ### 10.3 Execution Plan Schema (NEW in v3.0)
 
-Returned by the Planner Agent in `task_decomposition_response`. Stored as `plan_state` in Memory Component.
+Returned by the Planner Agent in the normal `task.result` payload. Stored as `plan_state` in Memory Component.
 
 #### ExecutionPlan
 
@@ -748,7 +749,7 @@ The planner call uses the same agents-component wire schema as every other task:
 | `required_skills` | string[] | Always `["general"]` for decomposition. |
 | `instructions` | string | Planner-specific prompt containing the raw user task, the required `ExecutionPlan` JSON schema, and scope constraints. |
 | `metadata` | object | Optional flat string map. Includes `orchestrator_task_ref`, `user_id`, `callback_topic`, and planner markers. |
-| `trace_id` | UUID | Set to the top-level `orchestrator_task_ref` for correlation. |
+| `trace_id` | string | Distributed trace ID propagated from the inbound envelope/context. The gateway prefers explicit `TaskSpec.TraceID`; otherwise it uses the trace ID already present on the context. |
 | `user_context_id` | UUID \| null | Optional user context identifier. |
 
 ### 11.5 Planner Result Handling
@@ -762,7 +763,9 @@ The planner returns through the normal agents-component terminal subjects:
 
 ### 11.6 Outbound: Orchestrator → IO Component (NEW in v3.1)
 
-The Orchestrator pushes events to the IO Component over HTTP when `IO_API_BASE` is configured. When `IO_API_BASE` is not set, all IO client methods are no-ops and the Orchestrator operates normally without a connected UI.
+The Orchestrator pushes events to the IO Component over HTTP when `IO_API_BASE` is configured. Status updates and credential requests are best-effort: when `IO_API_BASE` is not set, those calls are no-ops and the Orchestrator continues without a connected UI.
+
+Confirmation requests are different because they gate whether a subtask may be dispatched. If a subtask requires confirmation and the IO bridge is disabled or the HTTP call fails, the Plan Executor marks that subtask `FAILED` with `error_code=CONFIRMATION_UNAVAILABLE` and blocks dependents.
 
 **Endpoint:** `POST {IO_API_BASE}/api/orchestrator/stream-events`
 
@@ -814,7 +817,7 @@ The Orchestrator pushes events to the IO Component over HTTP when `IO_API_BASE` 
 
 When this event is received, the IO Component MUST display a confirmation modal with an **Approve** and a **Reject** button. On decision, the IO Component publishes the response to NATS (see §11.3 and §11.9).
 
-**Error handling:** HTTP errors and network failures are **logged but not propagated**. The task pipeline continues regardless of IO Component availability. The 5-second HTTP timeout prevents IO unavailability from blocking dispatch.
+**Error handling:** Status and credential HTTP errors are logged but not propagated. Confirmation-request HTTP errors are propagated to Plan Executor because the user decision is required before dispatch. The 5-second HTTP timeout prevents IO unavailability from blocking indefinitely.
 
 **Credential routing rule:** Only `credential.request` messages from the Agents Component with `operation: "user_input"` are forwarded to IO. Vault pre-authorization (`authorize`) and revocation (`revoke`) operations are handled internally and never surface in the IO UI.
 
@@ -930,7 +933,7 @@ All messages published by the Orchestrator include a signed envelope:
 ```json
 {
   "message_id": "uuid",
-  "message_type": "task_decomposition_request",
+  "message_type": "task.inbound",
   "source_component": "orchestrator",
   "correlation_id": "task_uuid",
   "timestamp": "ISO8601",
@@ -967,7 +970,7 @@ The planner task receives the parent task's effective scope constraints in its g
 | Vault unavailable at policy check | HTTP timeout or 503 | `FAIL_CLOSED`: return `VAULT_UNAVAILABLE`. `FAIL_OPEN`: use cached policy if within TTL. Log `vault_unavailable` event. |
 | Planner Agent timeout | `DECOMPOSITION_TIMEOUT_SECONDS` elapsed | Return `DECOMPOSITION_TIMEOUT` to User I/O. Log event. |
 | Planner Agent returns invalid plan | Plan validation fails (circular deps, empty, scope violation, too large) | Return `INVALID_PLAN` to User I/O. Log validation failure details. |
-| Agents Component unreachable | NATS timeout on `capability_query` or `task_decomposition_request` | Retry up to 3 times with 1s backoff. On persistent failure, return `AGENTS_UNAVAILABLE`. |
+| Agents Component unreachable | NATS publish failure or timeout on `capability_query` / planner task response | Current implementation makes a single request and returns `AGENTS_UNAVAILABLE` / decomposition failure on timeout or publish error. Retry/backoff is not implemented for these paths. |
 | Memory write fails on dispatch | Memory Interface returns error | Retry up to 3 times. On persistent failure: abort dispatch, return `STORAGE_UNAVAILABLE`. Ensure no orphaned agent exists. |
 | `user_task` schema invalid | JSON schema validation | Return `INVALID_TASK_SPEC` immediately. No Vault query, no decomposition, no agent interaction. |
 | Duplicate `task_id` received | Dedup check in Memory Interface | Return `DUPLICATE_TASK` with current task status. Do not spawn agent. |
@@ -980,11 +983,11 @@ The planner task receives the parent task's effective scope constraints in its g
 
 | Failure Scenario | Detection | Response |
 |---|---|---|
-| Parent task timeout exceeded | Task Monitor `timeout_at` tick | Signal Recovery Manager → terminate all running subtask agents → credentials revoked → `TIMED_OUT` returned to User I/O. |
-| Subtask timeout exceeded | Task Monitor per-subtask `timeout_at` | Signal Recovery Manager → terminate subtask agent → mark subtask TIMED_OUT → BLOCK dependent subtasks → report plan status. |
-| Subtask agent enters RECOVERING | `agent_status_update` event | Recovery Manager: check retries → retrieve state from Memory → re-validate Vault scope → re-dispatch. Increment `retry_count`. |
-| Subtask agent TERMINATED | `agent_status_update` event | Recovery Manager: if retry_count < max, re-dispatch; else mark subtask FAILED, BLOCK dependents. |
-| Orchestrator node crash | Process termination | On restart: Memory Interface rehydrates active task map, plan state, subtask state. Task Monitor resumes timeout tracking. In-flight agents continue via Agents Component. |
+| Parent task timeout exceeded | Task Monitor `timeout_at` tick | Signal Recovery Manager → terminate/report parent task → credentials revoked on terminal recovery path → `TIMED_OUT` returned to User I/O. |
+| Subtask timeout exceeded | Subtask `timeout_at` persisted by Plan Executor | Per-subtask timeout enforcement is not implemented in the current Task Monitor. Parent task timeout remains the active safety net. |
+| Agent enters RECOVERING | `agent_status_update` event | Recovery Manager trusts existing agent self-healing and keeps monitoring. A later TERMINATED event or parent timeout triggers recovery/termination. |
+| Agent TERMINATED | `agent_status_update` event | Recovery Manager reads latest parent `TaskState`, verifies scope, increments parent `retry_count`, and re-dispatches if below `max_task_retries`; otherwise marks the parent task FAILED. |
+| Orchestrator node crash | Process termination | On restart: Task Monitor rehydrates active parent tasks from Memory and resumes parent timeout tracking. Persisted plan/subtask records remain available for audit/debugging, but active plan execution is not reconstructed in current code. |
 | Vault revocation fails | Revocation HTTP error | Log `REVOCATION_FAILED` critical event. Schedule retry with exponential backoff (max 5 attempts). Do not block task termination. |
 | NATS message delivery failure | Comms Gateway NACK or timeout | Apply NATS at-least-once retry. Deduplicate on receiver side using `message_id`. Dead-letter after `max_redelivery`. |
 
@@ -1032,7 +1035,7 @@ All context fields are injected via `observability.LogFromContext(ctx)`, which r
 | `orchestrator_subtasks_completed_total` | Counter | Subtasks that reached COMPLETED state. |
 | `orchestrator_subtasks_blocked_total` | Counter | Subtasks that reached BLOCKED state. |
 | `orchestrator_task_latency_seconds` | Histogram | End-to-end task duration from receipt to terminal outcome. |
-| `orchestrator_decomposition_latency_seconds` | Histogram | Time from `task_decomposition_request` sent to response received. |
+| `orchestrator_decomposition_latency_seconds` | Histogram | Time from planner `task.inbound` sent to response received. |
 | `orchestrator_policy_check_latency_ms` | Histogram | Vault round-trip time per policy check. |
 | `orchestrator_active_tasks` | Gauge | Current number of tasks in non-terminal states. |
 | `orchestrator_active_plans` | Gauge | Current number of plans being executed. |
@@ -1053,7 +1056,7 @@ task_received          (Gateway — root span, created on inbound task receipt)
   plan_execution       (Executor — parent span for full plan)
     subtask_dispatch   (Executor — one child span per subtask dispatched)
   result_delivery      (Dispatcher — final result push to User I/O / IO Component)
-  recovery_attempt     (Recovery Manager — child span when a subtask is re-dispatched)
+  recovery_attempt     (Recovery Manager — child span when a task recovery re-dispatch is attempted)
 ```
 
 **Span attributes set on key spans:**
@@ -1075,20 +1078,20 @@ The `InitTracer` function in `internal/observability/tracing.go` configures the 
 
 ### 15.4 Observability Stack
 
-The following services are included in `docker-compose.yml` and start alongside the Orchestrator:
+The following services are included in the repository root `docker-compose.yml` and start alongside the Orchestrator:
 
 | Service | Image | Port | Role |
 |---|---|---|---|
-| Loki | `grafana/loki:2.9.0` | 3100 | Log aggregation backend |
-| Promtail | `grafana/promtail:2.9.0` | 9080 | Scrapes Docker container stdout → Loki |
-| Tempo | `grafana/tempo:2.3.0` | 4317 (OTLP gRPC), 3200 (HTTP) | Distributed trace backend |
-| Grafana | `grafana/grafana:10.2.0` | 3000 | Unified UI — Loki + Tempo with log→trace linking |
+| Loki | `grafana/loki:3.4.2` | 3100 | Log aggregation backend |
+| Promtail | `grafana/promtail:3.4.2` | no host port; container scrapes Docker stdout | Scrapes Docker container stdout → Loki |
+| Tempo | `grafana/tempo:2.4.1` | 4317 (OTLP gRPC), 3200 (HTTP) | Distributed trace backend |
+| Grafana | `grafana/grafana:latest` | 3000 | Unified UI — Loki + Tempo with log→trace linking |
 
 Grafana is auto-provisioned (no manual configuration required) with:
 - Loki data source as default, with a derived field that links `trace_id` values in log lines to the matching Tempo trace waterfall.
 - Tempo data source with traces-to-logs linking (±5 min window around each span).
 
-Promtail uses Docker service discovery and a JSON pipeline stage that promotes `level`, `component`, `module`, `trace_id`, and `task_id` as Loki label dimensions for efficient querying.
+Promtail uses Docker service discovery and a JSON pipeline stage that promotes orchestrator log fields such as `level`, `component`, `module`, `trace_id`, and `task_id` for querying in Loki/Grafana.
 
 ### 15.5 Debug Trace Endpoint
 
@@ -1125,7 +1128,7 @@ All Orchestrator configuration is injected via environment variables. No configu
 | `NATS_URL` | URL | Required | NATS JetStream server URL. |
 | `NATS_CREDS_PATH` | path | _(empty)_ | Path to NATS credentials file. Optional — omit when NATS does not require authentication. |
 | `MEMORY_ENDPOINT` | URL | Required | Memory Component write/read API. |
-| `MAX_TASK_RETRIES` | integer | 3 | Max recovery re-dispatches per subtask. |
+| `MAX_TASK_RETRIES` | integer | 3 | Max recovery re-dispatches per parent task. |
 | `TASK_DEDUP_WINDOW_SECONDS` | integer | 300 | Deduplication window for `task_id` reuse detection. |
 | `DECOMPOSITION_TIMEOUT_SECONDS` | integer | 30 | Max time to wait for Planner Agent's decomposition response. |
 | `MAX_SUBTASKS_PER_PLAN` | integer | 20 | Maximum subtasks allowed in a single execution plan. |
@@ -1135,7 +1138,7 @@ All Orchestrator configuration is injected via environment variables. No configu
 | `QUEUE_HIGH_WATER_MARK` | integer | 500 | Pending task queue depth that triggers `queue_pressure` metric. |
 | `MEMORY_WRITE_BUFFER_SECONDS` | integer | 30 | How long to buffer writes locally if Memory Component is unreachable. |
 | `NODE_ID` | string | hostname | Unique identifier for this Orchestrator instance. Included in all audit events. |
-| `IO_API_BASE` | URL | _(empty — disabled)_ | Base URL of the IO Component HTTP server (e.g. `http://localhost:3001`). When set, the Orchestrator pushes real-time status, credential requests, plan previews, and confirmation prompts to the IO dashboard. When empty, the IO client is a no-op and the Orchestrator runs normally without a connected UI. |
+| `IO_API_BASE` | URL | _(empty — disabled)_ | Base URL of the IO Component HTTP server (e.g. `http://localhost:3001`). When set, the Orchestrator pushes real-time status, credential requests, plan previews, and confirmation prompts to the IO dashboard. When empty, status and credential pushes are no-ops; confirmation-gated subtasks and approval-gated plans fail immediately with `CONFIRMATION_UNAVAILABLE` / `PLAN_REJECTED`. |
 | `PLAN_APPROVAL_MODE` | enum | `multi` | Controls when the Dispatcher gates plan execution on user approval. `off` — never require approval; `multi` (default) — require approval only for plans with more than one subtask; `always` — require approval for every plan. |
 | `PLAN_APPROVAL_TIMEOUT_SECONDS` | integer | 300 | How long the Dispatcher waits for a user approve/reject decision before failing the task with `PLAN_APPROVAL_TIMEOUT`. |
 | `LOG_LEVEL` | enum | `info` | Log verbosity: `debug`, `info`, `warn`, `error`. |
@@ -1153,20 +1156,22 @@ The PoC demonstrates the Orchestrator's four hardest behaviors in a minimal but 
 
 1. **Policy-first task dispatch:** a task that fails policy validation never reaches the Planner Agent or any other agent.
 2. **Task decomposition via Planner Agent:** a multi-step natural-language task is sent to the Planner Agent, which returns a structured plan. The Orchestrator executes the plan's subtasks in dependency order with result piping.
-3. **Self-healing recovery:** when a subtask agent is killed mid-task, the Orchestrator detects the failure, retrieves state from Memory, and re-dispatches to a fresh agent without user intervention.
+3. **Self-healing recovery:** when an agent reports TERMINATED for a parent task, the Orchestrator retrieves the latest parent task state from Memory, verifies scope, and re-dispatches within the configured retry budget.
 4. **Heartbeat-based failure detection:** the Orchestrator's health monitoring detects Vault or Memory unavailability and responds per configured policy.
 
 ### 17.2 PoC Scope
 
 - A single Orchestrator instance (no clustering required for PoC).
-- Mock Agents Component that accepts `task_decomposition_request` and `task_spec`, and returns simulated events.
+- Mock Agents Component that accepts planner and subtask `task.inbound` messages, and returns simulated events.
 - A mock Planner Agent (can be a scripted stub returning predefined plans, OR a real LLM-backed agent).
 - A **real** OpenBao (dev mode) instance for policy validation.
 - A **real** Memory Component instance (backed by its team-selected database) or a contract-compatible mock adapter for PoC.
 - NATS in standalone mode.
-- Task: *"Book a flight from NYC to LA for next Friday, returning Sunday, and find a hotel near the airport with a pool."* The Planner Agent should return a 3-subtask plan (search_flights → find_hotels → present_options). A subtask agent is manually killed at T+2 minutes to trigger the recovery flow.
+- Task: *"Book a flight from NYC to LA for next Friday, returning Sunday, and find a hotel near the airport with a pool."* The Planner Agent should return a 3-subtask plan (search_flights → find_hotels → present_options). A task agent can be manually terminated to trigger the current parent-task recovery flow.
 
-### 17.3 Implementation: Core Orchestrator Loop (Go)
+### 17.3 Historical Implementation Sketch (Go)
+
+> **NOTE:** This section is retained as an early design sketch, not literal current source code. The current implementation is split across `internal/gateway`, `internal/dispatcher`, `internal/executor`, `internal/monitor`, `internal/recovery`, `internal/memory`, and `internal/io`. Important differences from this sketch: active plan/subtask execution is not reconstructed on restart; Task Monitor rehydrates parent tasks only; Recovery Manager retries parent tasks, while Plan Executor owns subtask state and dependency blocking.
 
 ```go
 // ─── Orchestrator: Main Structures ───────────────────────────────────────────
@@ -1370,7 +1375,7 @@ func (o *Orchestrator) dispatchReadySubtasks(plan ExecutionPlan, ts *TaskState) 
 
         // Dispatch subtask as a task_spec
         spec := o.buildTaskSpec(st, sub, ts.PolicyScope, priorResults)
-        o.publishToAgents("aegis.agents.tasks.inbound", spec)
+        o.publishToAgents("aegis.agents.task.inbound", spec)
 
         sub.State = "DISPATCHED"
         o.memory.Write(subtaskStatePayload(sub))
@@ -1433,7 +1438,7 @@ func (o *Orchestrator) HandleSubtaskAgentRecovering(agentID, planID, subtaskID s
     plan := o.loadPlan(sub.PlanID)
     st := o.findSubtaskInPlan(plan, sub.SubtaskID)
     spec := o.buildTaskSpec(st, sub, ts.PolicyScope, sub.PriorResults)
-    o.publishToAgents("aegis.agents.tasks.inbound", spec)
+    o.publishToAgents("aegis.agents.task.inbound", spec)
 }
 
 // ─── Timeout enforcement ─────────────────────────────────────────────────────
@@ -1481,12 +1486,12 @@ func (o *Orchestrator) failTask(ts *TaskState, reason string) {
 | Submit task with skill domain not in user policy | `POLICY_VIOLATION` returned. No decomposition request sent, no agent touched. | Vault audit log shows DENY before any decomposition event. |
 | Submit duplicate `task_id` within dedup window | `DUPLICATE_TASK` returned with current status. No second decomposition, no second agent. | `activeTasks` map has 1 entry. |
 | Planner Agent timeout | If Planner doesn't respond within `DECOMPOSITION_TIMEOUT_SECONDS`, task marked `DECOMPOSITION_FAILED`. | User I/O receives error within 35s. |
-| Kill subtask agent process manually | Recovery detects failure, retrieves state from Memory, re-dispatches within 10s. | Subtask resumes, `retry_count=1`. |
-| Kill subtask agent 3 times (max retries) | Subtask marked FAILED. Dependent subtasks marked BLOCKED. Credentials revoked. | Plan reports partial or failed. |
+| Agent reports TERMINATED for a task | Recovery reads latest parent `TaskState`, verifies scope, increments `retry_count`, and re-dispatches if under the retry budget. | Parent task recovery attempted and `recovery_event` written. |
+| Agent reports TERMINATED after max retries | Parent task marked FAILED. Credentials revoked. | User I/O receives terminal failure. |
 | Subtask failure mid-plan | If s1 fails, s2 and s3 are marked `BLOCKED`. User I/O notified with partial results. | No orphaned agents. Credentials revoked. |
-| Task `timeout_seconds=30`, task takes 45s | `TIMED_OUT` at T+30. All running subtask agents terminated. | Timeout fires within ±2s. |
+| Task `timeout_seconds=30`, task takes 45s | Parent task timeout triggers Recovery Manager and terminal `TIMED_OUT` handling. | Timeout fires within ±2s. |
 | Take Vault offline mid-operation | `VAULT_UNAVAILABLE` (FAIL_CLOSED). No new tasks dispatched. | In-flight tasks continue; new tasks rejected. |
-| Orchestrator crash and restart | On restart: active tasks, plans, and subtasks rehydrated from Memory. Monitoring resumes. | No task state lost. |
+| Orchestrator crash and restart | On restart: active parent tasks are rehydrated from Memory and timeout monitoring resumes. Persisted plan/subtask records remain queryable, but active plan execution is not reconstructed. | Parent task state is not lost; plan restart-resume remains future work. |
 
 ---
 
@@ -1494,7 +1499,7 @@ func (o *Orchestrator) failTask(ts *TaskState, reason string) {
 
 | ID | Question | Impact | Owner |
 |---|---|---|---|
-| OQ-01 | When the Orchestrator re-dispatches a recovering subtask, should it prefer the same agent (if recovered) or always request a new agent? | Affects recovery latency vs. agent warmth | Orchestrator + Agents Component teams |
+| OQ-01 | When the Orchestrator re-dispatches a recovering task, should it prefer the same agent (if recovered) or always request a new agent? | Affects recovery latency vs. agent warmth | Orchestrator + Agents Component teams |
 | OQ-02 | Should the Orchestrator support task priority queue with preemption? | Significant design impact on Task Monitor and Agents Component coordination | Platform team |
 | OQ-03 | What is the correct behavior when the Memory Component is down and a task reaches its terminal state? | Data loss risk on Memory unavailability | Orchestrator + Memory teams |
 | OQ-04 | Should the Orchestrator expose a query API for task status (`GET /tasks/{task_id}/status`), or should all status delivery be push-based via NATS? | User I/O integration complexity | Orchestrator + User I/O teams |
@@ -1512,7 +1517,7 @@ func (o *Orchestrator) failTask(ts *TaskState, reason string) {
 | 1.0 | February 2026 | Junyu Ding | Initial draft. High-level concepts. Missing NFRs, security detail, and PoC rigor. |
 | 2.0 | February 2026 | Junyu Ding | Full EDD. Added: module inventory, full requirements (FR + NFR), complete sequence diagrams, data models, interface specs, heartbeat design, security model, error handling, observability, configuration table, complete PoC with Go implementation, and open questions. |
 | 3.4 | April 2026 | Junyu Ding | **Plan Approval Gate & Personalization (Milestone 3 — continued).** Added: `AWAITING_APPROVAL` task state — after plan validation the Dispatcher optionally gates execution on explicit user approve/reject before handing off to the Plan Executor; `plan_preview` HTTP event pushed to IO Component with full subtask summary and expiry; `aegis.orchestrator.plan.decision` NATS inbound topic for user decisions; `HandlePlanDecision` on Task Dispatcher; `PLAN_REJECTED` and `PLAN_APPROVAL_TIMEOUT` error codes; `PLAN_APPROVAL_MODE` (`off`/`multi`/`always`) and `PLAN_APPROVAL_TIMEOUT_SECONDS` config vars; Task Monitor `AWAITING_APPROVAL` reprieve (approval phase is governed by Dispatcher timer, not global task timeout). Also: personalization client fetches user facts from Memory `personal_info` and prepends to planner prompt (best-effort); early `task_accepted` published right after policy check; dedup re-entry from terminal states allowed for follow-up tasks; `CONFIRMATION_UNAVAILABLE` error replaces silent hang on IO-down confirmation delivery failure. §3.1, §4.1 M1/M2/M4, §5.3.2 (new FR-PA-01–06), §9.1, §14.1, §16 updated. |
-| 3.3 | April 2026 | Junyu Ding | **Multi-step Prompting & Confirmation (Milestone 3).** Added: `requires_confirmation` flag on `Subtask` — when `true`, Plan Executor (M7) suspends dispatch and transitions subtask to new `AWAITING_CONFIRMATION` state; `PublishConfirmationRequest` on Communications Gateway (M1) forwards prompt to IO Component via HTTP; new NATS inbound topic `aegis.orchestrator.task.confirmation_response` for user approval/rejection; `HandleConfirmationResponse` on Plan Executor resumes (confirm) or fails+blocks (reject) the waiting subtask; `ErrCodeUserRejected` error code; IO Component contract documented in new §11.3.1 and §6.6; §3.1, §4.1 M1/M7, §5.3, §9.2, §10.3, §11.6, §11.9, §14.1 all updated to reflect confirmation flow. |
+| 3.3 | April 2026 | Junyu Ding | **Multi-step Prompting & Confirmation (Milestone 3).** Added: `requires_confirmation` flag on `Subtask` — when `true`, Plan Executor (M7) suspends dispatch and transitions subtask to new `AWAITING_CONFIRMATION` state; `PublishConfirmationRequest` on Communications Gateway (M1) forwards prompt to IO Component via HTTP; new NATS inbound topic `aegis.orchestrator.task.confirmation_response` for user approval/rejection; `HandleConfirmationResponse` on Plan Executor resumes (confirm) or fails+blocks (reject) the waiting subtask; `ErrCodeUserRejected` and `ErrCodeConfirmationUnavailable` error codes; IO Component contract documented in new §11.3.1 and §11.6; §3.1, §4.1 M1/M7, §5.3, §9.2, §10.3, §11.6, §11.9, §14.1 all updated to reflect confirmation flow and current implementation boundaries. |
 | 3.2 | April 2026 | Junyu Ding | **Centralized Logging & Distributed Tracing (Milestone 2).** Added: `internal/observability` package (`logger.go`, `context.go`, `tracing.go`) — structured JSON logging via `log/slog` with context-propagated `trace_id`/`task_id`/`plan_id`/`subtask_id`/`module` fields; `trace_id` generated at Gateway entry point and stamped on every outbound `MessageEnvelope`; extracted from every inbound envelope to continue traces across component boundaries; OpenTelemetry span tree (`task_received` → `dedup_check` → `policy_validation` → `decomposition` → `plan_execution` → `subtask_dispatch` / `result_delivery` / `recovery_attempt`) exported via OTLP gRPC to Tempo; Grafana observability stack (Loki + Promtail + Tempo + Grafana) added to `docker-compose.yml` with auto-provisioned log→trace linking; `GET /debug/trace/{trace_id}` HTTP endpoint; §15 fully rewritten to reflect implementation; four new env vars added to §16 (`LOG_LEVEL`, `LOG_FORMAT`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `LOKI_URL`); `NATS_CREDS_PATH` corrected to optional. |
 | 3.1 | April 2026 | Junyu Ding | **IO Component Integration.** Added: IO Component to system context (§3.1); M1 now subscribes to `aegis.orchestrator.credential.request` and routes `user_input` operations to IO (vault authorize/revoke filtered out); M2 now pushes real-time status updates to IO at DECOMPOSING, PLAN_ACTIVE, COMPLETED, and FAILED transitions; new `internal/io/client.go` package (HTTP client, disabled when `IO_API_BASE` unset); new data flow §6.5 (IO Component Status Push) with state→status mapping table; new interface spec §11.6 (Orchestrator → IO Component HTTP bridge) with full event envelope schemas and error-handling contract; `aegis.orchestrator.credential.request` added to NATS topic table (§11.9); `IO_API_BASE` added to configuration table (§16). |
 | 3.0 | April 2026 | Junyu Ding | **Task Decomposition via Planner Agent.** Added: M7 Plan Executor module; LLM-Free Orchestrator Principle (§2.5); task decomposition coordination as 4th core concern; new functional requirements FR-TD-01 through FR-TD-07; new task states DECOMPOSING, PLAN_ACTIVE, DECOMPOSITION_FAILED, PARTIAL_COMPLETE; new subtask state machine (§9.2); Execution Plan Schema (§10.3); Subtask State Record Schema (§10.4); new NATS topics for decomposition; Flow 3.5 (Task Decomposition); Sequence Diagram 8.5 (Decomposition Failure); new env vars (DECOMPOSITION_TIMEOUT_SECONDS, MAX_SUBTASKS_PER_PLAN, PLAN_EXECUTOR_MAX_PARALLEL); updated PoC with decomposition scenarios; subtask-level metrics; Planner Agent scope enforcement. FR-TRK-04 updated to accept empty `required_skill_domains[]`. Resolved OQ-05. New OQ-06 through OQ-08. Design rationale based on Conductor/Superset/Netflix Conductor research: the Orchestrator remains LLM-free; intelligence lives in the Planner Agent. |

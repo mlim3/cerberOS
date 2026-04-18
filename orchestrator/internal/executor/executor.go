@@ -306,7 +306,13 @@ func (e *PlanExecutor) requestConfirmation(ctx context.Context, exec *planExecut
 	}
 	if err := e.gw.PublishConfirmationRequest(subCtx, req); err != nil {
 		log.Error("confirmation request publish failed", "error", err)
-		// Subtask stays in AWAITING_CONFIRMATION; will retry if the plan is re-triggered.
+		sub.State = types.SubtaskStateFailed
+		sub.ErrorCode = types.ErrCodeConfirmationUnavailable
+		sub.CompletedAt = &now
+		e.persistSubtaskState(sub, exec.ts.OrchestratorTaskRef, now)
+		e.blockDependents(exec, sub.SubtaskID, now)
+		e.checkPlanCompletion(exec)
+		return
 	}
 	log.Info("subtask awaiting user confirmation", "action", st.Action)
 }
@@ -323,6 +329,9 @@ func (e *PlanExecutor) HandleConfirmationResponse(ctx context.Context, resp type
 		return nil
 	}
 	exec := execVal.(*planExecution)
+	if resp.TaskID != "" && resp.TaskID != exec.ts.TaskID {
+		return fmt.Errorf("confirmation response task_id %q does not match active task %q", resp.TaskID, exec.ts.TaskID)
+	}
 
 	exec.mu.Lock()
 	defer exec.mu.Unlock()
@@ -485,6 +494,7 @@ func (e *PlanExecutor) checkPlanCompletion(exec *planExecution) {
 	allTerminal := true
 	anyFailed := false
 	anyBlocked := false
+	failureCode := ""
 	var completedResults []types.PriorResult
 
 	for _, sub := range exec.subtasks {
@@ -501,6 +511,9 @@ func (e *PlanExecutor) checkPlanCompletion(exec *planExecution) {
 		if sub.State == types.SubtaskStateFailed || sub.State == types.SubtaskStateDeliveryFailed ||
 			sub.State == types.SubtaskStateTimedOut {
 			anyFailed = true
+			if failureCode == "" && sub.ErrorCode != "" {
+				failureCode = sub.ErrorCode
+			}
 		}
 		if sub.State == types.SubtaskStateBlocked {
 			anyBlocked = true
@@ -536,7 +549,9 @@ func (e *PlanExecutor) checkPlanCompletion(exec *planExecution) {
 	// Some subtasks failed or were blocked.
 	partial := len(completedResults) > 0
 	errorCode := types.ErrCodeMaxRetriesExceeded
-	if anyBlocked && !anyFailed {
+	if failureCode != "" {
+		errorCode = failureCode
+	} else if anyBlocked && !anyFailed {
 		errorCode = types.ErrCodeInvalidPlan // all failures are blocked deps
 	}
 

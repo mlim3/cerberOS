@@ -288,6 +288,9 @@ func TestHandleInboundTask_HappyPath_Decomposing(t *testing.T) {
 	if !strings.Contains(req.Instructions, "book a flight from NYC to LA") {
 		t.Fatalf("planner instructions = %q, want raw_input included", req.Instructions)
 	}
+	if !strings.Contains(req.Instructions, "requires_confirmation") {
+		t.Fatalf("planner instructions = %q, want requires_confirmation schema/rules included", req.Instructions)
+	}
 	if req.PolicyScope.TokenRef == "" {
 		t.Fatal("planner policy_scope.token_ref is empty — policy scope not attached")
 	}
@@ -420,6 +423,29 @@ func TestHandleDecompositionResponse_EmptyPlan_DecompositionFailed(t *testing.T)
 	rec := latestTaskStateRecord(t, mem, task.TaskID)
 	if rec.State != types.StateDecompositionFailed {
 		t.Fatalf("persisted state = %q, want DECOMPOSITION_FAILED", rec.State)
+	}
+}
+
+func TestHandleDecompositionResponse_ParentTaskMismatch_DecompositionFailed(t *testing.T) {
+	d, gw, _, _, exec, _ := newDispatcher(t)
+
+	task := validTask("550e8400-e29b-41d4-a716-446655440013")
+	_ = d.HandleInboundTask(context.Background(), task)
+
+	plan := validPlan("550e8400-e29b-41d4-a716-446655440999")
+	plan.PlanID = "plan-parent-mismatch"
+	err := d.HandleDecompositionResponse(context.Background(), decompositionResponse(task.TaskID, plan))
+	if err == nil {
+		t.Fatal("HandleDecompositionResponse() error = nil, want parent_task_id mismatch")
+	}
+	if len(gw.ErrorCalls) == 0 {
+		t.Fatal("expected error for parent_task_id mismatch")
+	}
+	if gw.ErrorCalls[0].ErrorCode != types.ErrCodeInvalidPlan {
+		t.Fatalf("error_code = %q, want INVALID_PLAN", gw.ErrorCalls[0].ErrorCode)
+	}
+	if len(exec.ExecuteCalls) != 0 {
+		t.Fatal("executor called for invalid parent_task_id")
 	}
 }
 

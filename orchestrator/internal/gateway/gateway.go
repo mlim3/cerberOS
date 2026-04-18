@@ -113,13 +113,13 @@ type Gateway struct {
 	nats   interfaces.NATSClient
 	nodeID string
 
-	taskHandler                  TaskHandler
-	agentStatusHandler           AgentStatusHandler
-	taskResultHandler            TaskResultHandler
-	credentialRequestHandler     CredentialRequestHandler
-	confirmationRequestHandler   ConfirmationRequestHandler
-	confirmationResponseHandler  ConfirmationResponseHandler
-	planDecisionHandler      PlanDecisionHandler
+	taskHandler                 TaskHandler
+	agentStatusHandler          AgentStatusHandler
+	taskResultHandler           TaskResultHandler
+	credentialRequestHandler    CredentialRequestHandler
+	planDecisionHandler         PlanDecisionHandler
+	confirmationRequestHandler  ConfirmationRequestHandler
+	confirmationResponseHandler ConfirmationResponseHandler
 
 	// pendingCapabilityQueries tracks in-flight capability query requests.
 	// key: query_id, value: chan *types.CapabilityResponse
@@ -309,6 +309,7 @@ func (g *Gateway) handleCapabilityResponse(subject string, data []byte) error {
 		QueryID  string   `json:"query_id"`
 		Domains  []string `json:"domains"`
 		HasMatch bool     `json:"has_match"`
+		AgentID  string   `json:"agent_id"`
 		TraceID  string   `json:"trace_id"`
 	}
 	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
@@ -324,6 +325,7 @@ func (g *Gateway) handleCapabilityResponse(subject string, data []byte) error {
 		ch.(chan *types.CapabilityResponse) <- &types.CapabilityResponse{
 			OrchestratorTaskRef: queryID,
 			Match:               match,
+			AgentID:             payload.AgentID,
 		}
 	}
 	return nil
@@ -440,7 +442,7 @@ func (g *Gateway) handleRawTaskFailed(subject string, data []byte) error {
 	})
 }
 
-/// handleRawCredentialRequest handles aegis.orchestrator.credential.request.
+// handleRawCredentialRequest handles aegis.orchestrator.credential.request.
 // Vault pre-authorization requests (operation: "authorize"/"revoke") are routed
 // to the Vault via the orchestrator's policy flow — those are NOT forwarded to IO.
 // Requests with operation "user_input" ask the user to supply a secret via IO.
@@ -495,6 +497,9 @@ func (g *Gateway) handleRawConfirmationResponse(subject string, data []byte) err
 	var resp types.ConfirmationResponse
 	if err := json.Unmarshal(envelope.Payload, &resp); err != nil {
 		return fmt.Errorf("deserialize confirmation.response: %w", err)
+	}
+	if resp.PlanID == "" || resp.SubtaskID == "" || resp.TaskID == "" {
+		return fmt.Errorf("confirmation.response missing plan_id, subtask_id, or task_id")
 	}
 
 	ctx := extractOrCreateCtx(envelope, "comms_gateway")
@@ -578,7 +583,7 @@ func (g *Gateway) PublishConfirmationRequest(ctx context.Context, req types.Conf
 	if g.confirmationRequestHandler == nil {
 		observability.LogFromContext(ctx).Warn("confirmation request dropped — no IO handler registered",
 			"plan_id", req.PlanID, "subtask_id", req.SubtaskID)
-		return nil
+		return fmt.Errorf("confirmation request handler not registered")
 	}
 	return g.confirmationRequestHandler(req)
 }
@@ -588,6 +593,10 @@ func (g *Gateway) PublishConfirmationRequest(ctx context.Context, req types.Conf
 // PublishTaskSpec dispatches a validated task.inbound request to the Agents
 // Component. The internal TaskSpec is adapted to the agents-component schema.
 func (g *Gateway) PublishTaskSpec(ctx context.Context, spec types.TaskSpec) error {
+	traceID := firstNonEmpty(spec.TraceID, observability.TraceIDFrom(ctx))
+	if traceID != "" {
+		ctx = observability.WithTraceID(ctx, traceID)
+	}
 	wire := struct {
 		TaskID         string            `json:"task_id"`
 		RequiredSkills []string          `json:"required_skills"`
@@ -600,7 +609,7 @@ func (g *Gateway) PublishTaskSpec(ctx context.Context, spec types.TaskSpec) erro
 		RequiredSkills: spec.RequiredSkillDomains,
 		Instructions:   buildAgentInstructions(spec),
 		Metadata:       buildAgentMetadata(spec),
-		TraceID:        observability.TraceIDFrom(ctx),
+		TraceID:        traceID,
 		UserContextID:  spec.UserContextID,
 	}
 	return g.publishEnvelope(ctx, TopicAgentTasksInbound, "task.inbound", spec.OrchestratorTaskRef, wire)
@@ -609,6 +618,10 @@ func (g *Gateway) PublishTaskSpec(ctx context.Context, spec types.TaskSpec) erro
 // PublishCapabilityQuery sends a capability query and waits for the response.
 // Blocks up to CapabilityQueryTimeout. Returns error on timeout (§FR-ALC-01).
 func (g *Gateway) PublishCapabilityQuery(ctx context.Context, query types.CapabilityQuery) (*types.CapabilityResponse, error) {
+	traceID := firstNonEmpty(query.TraceID, observability.TraceIDFrom(ctx))
+	if traceID != "" {
+		ctx = observability.WithTraceID(ctx, traceID)
+	}
 	responseCh := make(chan *types.CapabilityResponse, 1)
 	queryID := query.OrchestratorTaskRef
 	g.pendingCapabilityQueries.Store(queryID, responseCh)
@@ -621,7 +634,7 @@ func (g *Gateway) PublishCapabilityQuery(ctx context.Context, query types.Capabi
 	}{
 		QueryID: queryID,
 		Domains: query.RequiredSkillDomains,
-		TraceID: observability.TraceIDFrom(ctx),
+		TraceID: traceID,
 	}
 
 	if err := g.publishEnvelope(ctx, TopicCapabilityQuery, "capability.query", queryID, wire); err != nil {

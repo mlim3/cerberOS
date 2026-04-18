@@ -55,8 +55,8 @@ func newGateway(t *testing.T) (*gateway.Gateway, *mocks.NATSMock) {
 func TestGatewayStart_SubscribesToInboundTopics(t *testing.T) {
 	_, nats := newGateway(t)
 
-	if nats.SubscribeCallCount != 7 {
-		t.Fatalf("SubscribeCallCount = %d, want 7 (tasks.inbound, agent.status, capability.response, task.accepted, task.result, task.failed, credential.request)", nats.SubscribeCallCount)
+	if nats.SubscribeCallCount != 8 {
+		t.Fatalf("SubscribeCallCount = %d, want 8 (tasks.inbound, agent.status, capability.response, task.accepted, task.result, task.failed, credential.request, confirmation_response)", nats.SubscribeCallCount)
 	}
 }
 
@@ -149,12 +149,13 @@ func TestHandleInboundTask_ValidEnvelope_CallsTaskHandler(t *testing.T) {
 	}
 }
 
-func TestHandleInboundTask_EnvelopeTraceID_MergedIntoUserTask(t *testing.T) {
+func TestHandleInboundTask_EnvelopeTraceID_AddedToContext(t *testing.T) {
 	gw, nats := newGateway(t)
 
-	var received types.UserTask
-	gw.RegisterTaskHandler(func(task types.UserTask) error {
-		received = task
+	var receivedTrace string
+	gw.RegisterTaskHandler(func(ctx context.Context, task types.UserTask) error {
+		_ = task
+		receivedTrace = observability.TraceIDFrom(ctx)
 		return nil
 	})
 
@@ -189,8 +190,8 @@ func TestHandleInboundTask_EnvelopeTraceID_MergedIntoUserTask(t *testing.T) {
 		t.Fatalf("Deliver() error = %v", err)
 	}
 
-	if received.TraceID != "aabbccddeeff00112233445566778899" {
-		t.Fatalf("received.TraceID = %q, want W3C trace from envelope", received.TraceID)
+	if receivedTrace != "aabbccddeeff00112233445566778899" {
+		t.Fatalf("received trace_id = %q, want W3C trace from envelope", receivedTrace)
 	}
 }
 
@@ -343,7 +344,8 @@ func TestPublishTaskSpec_WirePrefersW3CTraceID(t *testing.T) {
 		TraceID:              "0123456789abcdef0123456789abcdef",
 	}
 
-	if err := gw.PublishTaskSpec(spec); err != nil {
+	specCtx := observability.WithTraceID(context.Background(), "ffffffffffffffffffffffffffffffff")
+	if err := gw.PublishTaskSpec(specCtx, spec); err != nil {
 		t.Fatalf("PublishTaskSpec() error = %v", err)
 	}
 
@@ -389,7 +391,8 @@ func TestPublishCapabilityQuery_MessageEnvelopeTraceID(t *testing.T) {
 		RequiredSkillDomains: []string{"web"},
 		TraceID:              traceID,
 	}
-	if _, err := gw.PublishCapabilityQuery(query); err != nil {
+	queryCtx := observability.WithTraceID(context.Background(), "ffffffffffffffffffffffffffffffff")
+	if _, err := gw.PublishCapabilityQuery(queryCtx, query); err != nil {
 		t.Fatalf("PublishCapabilityQuery() error = %v", err)
 	}
 
@@ -454,6 +457,7 @@ func TestPublishCapabilityQuery_ReceivesResponse(t *testing.T) {
 			"query_id":  "orch-1",
 			"domains":   []string{"web"},
 			"has_match": true,
+			"agent_id":  "agent-42",
 			"trace_id":  "orch-1",
 		}
 		data := newEnvelopedMessage(t, "capability.response", "orch-1", resp)
@@ -471,6 +475,9 @@ func TestPublishCapabilityQuery_ReceivesResponse(t *testing.T) {
 	}
 	if result.Match != types.CapabilityMatch_Match {
 		t.Fatalf("result.Match = %q, want match", result.Match)
+	}
+	if result.AgentID != "agent-42" {
+		t.Fatalf("result.AgentID = %q, want agent-42", result.AgentID)
 	}
 }
 
@@ -564,8 +571,8 @@ func TestGatewayDemoFlow(t *testing.T) {
 	if err := gw.Start(); err != nil {
 		t.Fatalf("step 1: Start() error = %v", err)
 	}
-	if nats.SubscribeCallCount != 7 {
-		t.Fatalf("step 1: SubscribeCallCount = %d, want 7", nats.SubscribeCallCount)
+	if nats.SubscribeCallCount != 8 {
+		t.Fatalf("step 1: SubscribeCallCount = %d, want 8", nats.SubscribeCallCount)
 	}
 	if !gw.IsConnected() {
 		t.Fatal("step 1: IsConnected() = false, want true")

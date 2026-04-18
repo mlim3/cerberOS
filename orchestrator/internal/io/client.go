@@ -22,9 +22,9 @@ import (
 
 // TaskStatus values match the IO component's TaskStatus type.
 const (
-	StatusWorking         = "working"
+	StatusWorking          = "working"
 	StatusAwaitingFeedback = "awaiting_feedback"
-	StatusCompleted       = "completed"
+	StatusCompleted        = "completed"
 )
 
 // streamEventsPath is the IO endpoint that accepts orchestrator-pushed events.
@@ -38,18 +38,18 @@ type statusEvent struct {
 }
 
 type statusPayload struct {
-	TaskID                   string  `json:"taskId"`
-	Status                   string  `json:"status"`
-	LastUpdate               string  `json:"lastUpdate"`
-	ExpectedNextInputMinutes *int    `json:"expectedNextInputMinutes"`
-	Timestamp                int64   `json:"timestamp"` // Unix ms
+	TaskID                   string `json:"taskId"`
+	Status                   string `json:"status"`
+	LastUpdate               string `json:"lastUpdate"`
+	ExpectedNextInputMinutes *int   `json:"expectedNextInputMinutes"`
+	Timestamp                int64  `json:"timestamp"` // Unix ms
 }
 
 // credentialRequestEvent is the envelope for a credential request pushed to IO.
 // Matches: { type: 'credential_request', payload: CredentialRequest } in io/core/src/types.ts
 type credentialRequestEvent struct {
-	Type    string                    `json:"type"`
-	Payload CredentialRequestPayload  `json:"payload"`
+	Type    string                   `json:"type"`
+	Payload CredentialRequestPayload `json:"payload"`
 }
 
 // planPreviewEvent is the envelope for a plan preview pushed to IO.
@@ -151,7 +151,7 @@ func (c *Client) PushStatus(taskID, status, lastUpdate string, expectedNextInput
 			Timestamp:                time.Now().UnixMilli(),
 		},
 	}
-	return c.post(evt)
+	return c.postBestEffort(evt)
 }
 
 // PushPlanPreview asks the IO Component to show the user a plan preview card
@@ -175,7 +175,7 @@ func (c *Client) PushCredentialRequest(req CredentialRequestPayload) error {
 		Type:    "credential_request",
 		Payload: req,
 	}
-	return c.post(evt)
+	return c.postBestEffort(evt)
 }
 
 // PushConfirmationRequest asks the IO Component to display a confirmation modal
@@ -184,13 +184,21 @@ func (c *Client) PushCredentialRequest(req CredentialRequestPayload) error {
 // (aegis.orchestrator.task.confirmation_response).
 func (c *Client) PushConfirmationRequest(req ConfirmationRequestPayload) error {
 	if c.Disabled() {
-		return nil
+		return fmt.Errorf("io-client: IO_API_BASE is not configured")
 	}
 	evt := confirmationRequestEvent{
 		Type:    "confirmation_request",
 		Payload: req,
 	}
 	return c.post(evt)
+}
+
+// postBestEffort sends non-blocking UI updates without failing the task if IO is down.
+func (c *Client) postBestEffort(body any) error {
+	if err := c.post(body); err != nil {
+		c.logger.Printf("%v", err)
+	}
+	return nil
 }
 
 // post marshals body as JSON and POSTs it to the IO stream-events endpoint.
@@ -203,14 +211,12 @@ func (c *Client) post(body any) error {
 	url := c.baseURL + streamEventsPath
 	resp, err := c.httpClient.Post(url, "application/json", bytes.NewReader(data))
 	if err != nil {
-		// IO may be down — log but do not return an error that would fail the task.
-		c.logger.Printf("POST %s failed (IO may be down): %v", url, err)
-		return nil
+		return fmt.Errorf("io-client: POST %s failed: %w", url, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		c.logger.Printf("POST %s returned %d", url, resp.StatusCode)
+		return fmt.Errorf("io-client: POST %s returned %d", url, resp.StatusCode)
 	}
 	return nil
 }
