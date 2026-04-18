@@ -2,6 +2,7 @@ package factory_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -377,6 +378,241 @@ func TestCompleteTaskLeavesAgentIdleWhenSuspensionEnabled(t *testing.T) {
 	}
 	if agent.State != registry.StateIdle {
 		t.Errorf("state: want %q, got %q", registry.StateIdle, agent.State)
+	}
+}
+
+// TestCompleteTaskKeepsLiveProcessWhenReuseEnabled asserts the cold-start-tax
+// elimination contract: when reuse is enabled, CompleteTask must not call
+// lifecycle.Terminate — the agent-process has to stay alive so the next
+// matching task can hit the warm Priority 1 Deliver path.
+func TestCompleteTaskKeepsLiveProcessWhenReuseEnabled(t *testing.T) {
+	sm := skills.New()
+	sm.RegisterDomain(webDomain())
+	reg := registry.New()
+
+	lc := &recordingLifecycle{Manager: lifecycle.New()}
+	f, err := factory.New(factory.Config{
+		Registry:           reg,
+		Skills:             sm,
+		Credentials:        credentials.New(map[string]string{"web.credential": "tok"}),
+		Lifecycle:          lc,
+		Memory:             memory.New(),
+		Comms:              comms.NewStubClient(),
+		GenerateID:         func() string { return "agent-reuse-keep" },
+		IdleSuspendTimeout: 30 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("factory.New: %v", err)
+	}
+
+	if err := f.HandleTaskSpec(&types.TaskSpec{
+		TaskID:         "task-keep-1",
+		RequiredSkills: []string{"web"},
+		TraceID:        "trace-keep-1",
+	}); err != nil {
+		t.Fatalf("HandleTaskSpec: %v", err)
+	}
+	if err := f.CompleteTask("agent-reuse-keep", "session-keep-1", "trace-keep-1", "done", nil); err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+
+	if lc.terminateCount != 0 {
+		t.Errorf("Terminate must not be called on CompleteTask when reuse is enabled; got %d calls", lc.terminateCount)
+	}
+}
+
+// TestHandleTaskSpecDeliversOnReuse verifies the warm-path: after CompleteTask
+// leaves the agent IDLE with a live process, a follow-up HandleTaskSpec must
+// go through lifecycle.Deliver rather than a second Spawn — that is the
+// cold-start-tax elimination in action.
+func TestHandleTaskSpecDeliversOnReuse(t *testing.T) {
+	sm := skills.New()
+	sm.RegisterDomain(webDomain())
+	reg := registry.New()
+
+	lc := &recordingLifecycle{Manager: lifecycle.New()}
+	f, err := factory.New(factory.Config{
+		Registry:           reg,
+		Skills:             sm,
+		Credentials:        credentials.New(map[string]string{"web.credential": "tok"}),
+		Lifecycle:          lc,
+		Memory:             memory.New(),
+		Comms:              comms.NewStubClient(),
+		GenerateID:         func() string { return "agent-reuse-deliver" },
+		IdleSuspendTimeout: 30 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("factory.New: %v", err)
+	}
+
+	// First task: full provision (cold).
+	if err := f.HandleTaskSpec(&types.TaskSpec{
+		TaskID:         "task-deliver-1",
+		RequiredSkills: []string{"web"},
+		TraceID:        "trace-deliver-1",
+	}); err != nil {
+		t.Fatalf("HandleTaskSpec (first): %v", err)
+	}
+	if err := f.CompleteTask("agent-reuse-deliver", "session-deliver-1", "trace-deliver-1", "done", nil); err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+
+	spawnsBeforeReuse := lc.spawnCount
+	deliversBeforeReuse := lc.deliverCount
+
+	// Second task: warm reuse — must Deliver, must NOT Spawn.
+	if err := f.HandleTaskSpec(&types.TaskSpec{
+		TaskID:         "task-deliver-2",
+		RequiredSkills: []string{"web"},
+		TraceID:        "trace-deliver-2",
+	}); err != nil {
+		t.Fatalf("HandleTaskSpec (reuse): %v", err)
+	}
+
+	if got := lc.spawnCount - spawnsBeforeReuse; got != 0 {
+		t.Errorf("reuse path must not Spawn; got %d extra spawn calls", got)
+	}
+	if got := lc.deliverCount - deliversBeforeReuse; got != 1 {
+		t.Errorf("reuse path must Deliver exactly once; got %d delivers", got)
+	}
+
+	agent, err := reg.Get("agent-reuse-deliver")
+	if err != nil {
+		t.Fatalf("registry.Get: %v", err)
+	}
+	if agent.State != registry.StateActive {
+		t.Errorf("state after reuse: want %q, got %q", registry.StateActive, agent.State)
+	}
+	if agent.AssignedTask != "task-deliver-2" {
+		t.Errorf("AssignedTask: want %q, got %q", "task-deliver-2", agent.AssignedTask)
+	}
+}
+
+// recordingLifecycle wraps a Manager and counts Spawn, Deliver, and Terminate
+// calls so warm-path / cold-path behaviour can be asserted in factory tests.
+// When deliverErr is non-nil, Deliver returns that error without calling the
+// underlying Manager — used to simulate live-process reuse failure (stale
+// stdin pipe, dead process, pending callback race) so the factory's fallback
+// to fresh provision can be asserted.
+type recordingLifecycle struct {
+	lifecycle.Manager
+	spawnCount     int
+	deliverCount   int
+	terminateCount int
+	deliverErr     error
+}
+
+func (r *recordingLifecycle) Spawn(cfg lifecycle.VMConfig) error {
+	r.spawnCount++
+	return r.Manager.Spawn(cfg)
+}
+
+func (r *recordingLifecycle) Deliver(agentID string, cfg lifecycle.VMConfig) error {
+	r.deliverCount++
+	if r.deliverErr != nil {
+		return r.deliverErr
+	}
+	return r.Manager.Deliver(agentID, cfg)
+}
+
+func (r *recordingLifecycle) Terminate(agentID string) error {
+	r.terminateCount++
+	return r.Manager.Terminate(agentID)
+}
+
+// TestHandleTaskSpecFallsBackToSpawnWhenDeliverFails verifies that a failing
+// Deliver on the reuse path does not surface AGENT_REUSE_FAILED to the user:
+// the factory must tear down the zombie entry, provision a fresh agent, and
+// the task completes successfully. This is the "reuse is an optimization"
+// contract — any failure degrades gracefully to a cold-start, never a hard
+// user-visible error.
+func TestHandleTaskSpecFallsBackToSpawnWhenDeliverFails(t *testing.T) {
+	sm := skills.New()
+	sm.RegisterDomain(webDomain())
+	reg := registry.New()
+
+	lc := &recordingLifecycle{Manager: lifecycle.New()}
+	idSeq := 0
+	f, err := factory.New(factory.Config{
+		Registry:    reg,
+		Skills:      sm,
+		Credentials: credentials.New(map[string]string{"web.credential": "tok"}),
+		Lifecycle:   lc,
+		Memory:      memory.New(),
+		Comms:       comms.NewStubClient(),
+		GenerateID: func() string {
+			idSeq++
+			return fmt.Sprintf("agent-fallback-%d", idSeq)
+		},
+		IdleSuspendTimeout: 30 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("factory.New: %v", err)
+	}
+
+	// First task: full provision, then CompleteTask → IDLE, live process kept.
+	if err := f.HandleTaskSpec(&types.TaskSpec{
+		TaskID:         "task-fallback-1",
+		RequiredSkills: []string{"web"},
+		TraceID:        "trace-fallback-1",
+	}); err != nil {
+		t.Fatalf("HandleTaskSpec (first): %v", err)
+	}
+	if err := f.CompleteTask("agent-fallback-1", "sess-1", "trace-fallback-1", "done", nil); err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+
+	spawnsBeforeReuse := lc.spawnCount
+	terminatesBeforeReuse := lc.terminateCount
+
+	// Second task: simulate a stale live process by making Deliver fail.
+	// The factory must not surface AGENT_REUSE_FAILED; it must Terminate the
+	// zombie, publish TERMINATED, and Spawn a fresh agent for this task.
+	lc.deliverErr = fmt.Errorf("simulated stale stdin pipe")
+	if err := f.HandleTaskSpec(&types.TaskSpec{
+		TaskID:         "task-fallback-2",
+		RequiredSkills: []string{"web"},
+		TraceID:        "trace-fallback-2",
+	}); err != nil {
+		t.Fatalf("HandleTaskSpec (fallback): %v", err)
+	}
+
+	if got := lc.deliverCount; got == 0 {
+		t.Errorf("expected Deliver to be attempted on reuse path; got %d", got)
+	}
+	if got := lc.spawnCount - spawnsBeforeReuse; got != 1 {
+		t.Errorf("fallback must Spawn exactly one fresh agent; got %d extra spawns", got)
+	}
+	if got := lc.terminateCount - terminatesBeforeReuse; got < 1 {
+		t.Errorf("fallback must Terminate the zombie agent; got %d extra terminates", got)
+	}
+
+	// The zombie entry must be TERMINATED, not IDLE (otherwise a later task
+	// could match it again and loop on the same failure).
+	zombie, err := reg.Get("agent-fallback-1")
+	if err != nil {
+		t.Fatalf("registry.Get zombie: %v", err)
+	}
+	if zombie.State != registry.StateTerminated {
+		t.Errorf("zombie state: want %q, got %q", registry.StateTerminated, zombie.State)
+	}
+
+	// A fresh agent must exist in ACTIVE state for this task. We find it by
+	// scanning the registry rather than hard-coding the ID because the ID
+	// generator is also used for VM IDs internally, so the exact next value
+	// depends on factory implementation details.
+	var fresh *types.AgentRecord
+	for _, a := range reg.List() {
+		if a.AssignedTask == "task-fallback-2" && a.State == registry.StateActive {
+			fresh = a
+			break
+		}
+	}
+	if fresh == nil {
+		t.Fatalf("expected an ACTIVE agent assigned to task-fallback-2; registry: %+v", reg.List())
+	}
+	if fresh.AgentID == "agent-fallback-1" {
+		t.Errorf("fresh agent must have a new ID; got zombie ID %q", fresh.AgentID)
 	}
 }
 

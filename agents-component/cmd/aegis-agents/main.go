@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/cerberOS/agents-component/internal/registry"
 	"github.com/cerberOS/agents-component/internal/skills"
 	"github.com/cerberOS/agents-component/internal/skillsconfig"
+	"github.com/cerberOS/agents-component/internal/telemetry"
 	"github.com/cerberOS/agents-component/pkg/types"
 )
 
@@ -41,6 +43,21 @@ func main() {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+
+	// OTLP tracing — no-op when OTEL_EXPORTER_OTLP_ENDPOINT is unset so local
+	// dev without Tempo is unaffected. When enabled, spans started from
+	// incoming TaskSpec.TraceID continue the trace from IO / Orchestrator.
+	traceShutdown, err := telemetry.Init(ctx)
+	if err != nil {
+		log.Warn("telemetry init failed — continuing without traces", "error", err)
+	} else if telemetry.Enabled() {
+		log.Info("telemetry initialized", "endpoint", os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+	}
+	defer func() {
+		if traceShutdown != nil {
+			_ = traceShutdown(context.Background())
+		}
+	}()
 
 	// SIGHUP triggers a hot-reload of the skill configuration. The reload runs
 	// in a dedicated goroutine so the signal is never missed even if a previous
@@ -260,6 +277,29 @@ func main() {
 
 	f.StartIdleSweep(ctx)
 
+	// Bounded-concurrency worker pool for inbound task dispatch. Without this,
+	// the JetStream durable subscriber runs HandleTaskSpec (which includes
+	// Firecracker provisioning — several seconds) inline before Ack'ing,
+	// serializing planner dispatches across tasks. Under load the second
+	// user's task sits in the consumer's pending queue long enough to hit
+	// the overall task timeout, producing "Your task exceeded its time limit"
+	// even though the orchestrator already published task_accepted.
+	//
+	// The semaphore caps concurrent provisions (each of which owns a
+	// Firecracker VM) so we do not exhaust host resources. Tune with
+	// AEGIS_AGENTS_MAX_CONCURRENT_TASKS (default 8). The NATS callback
+	// blocks on the semaphore when all workers are busy — that is the
+	// intended back-pressure path; JetStream holds the pending messages
+	// until a slot frees up.
+	maxConcurrentTasks := 8
+	if v := strings.TrimSpace(os.Getenv("AEGIS_AGENTS_MAX_CONCURRENT_TASKS")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			maxConcurrentTasks = n
+		}
+	}
+	taskWorkerSlots := make(chan struct{}, maxConcurrentTasks)
+	log.Info("task.inbound worker pool configured", "max_concurrent_tasks", maxConcurrentTasks)
+
 	// Subscribe to inbound task assignments from the Orchestrator (at-least-once).
 	// Handlers MUST call msg.Ack() on success or msg.Nak() on failure.
 	if err := commsClient.SubscribeDurable(
@@ -284,15 +324,30 @@ func main() {
 				"trace_id", spec.TraceID,
 			)
 
-			if err := f.HandleTaskSpec(&spec); err != nil {
-				log.Error("HandleTaskSpec failed",
-					"task_id", spec.TaskID,
-					"error", err,
-				)
-				_ = msg.Nak()
-				return
-			}
-			_ = msg.Ack()
+			// Acquire a worker slot. Blocks when the pool is saturated,
+			// which exerts back-pressure on JetStream without dropping work.
+			taskWorkerSlots <- struct{}{}
+
+			go func() {
+				defer func() { <-taskWorkerSlots }()
+
+				// Continue the incoming trace seeded on the NATS envelope. When
+				// telemetry is disabled the span is a no-op. Span is created
+				// inside the worker so concurrent tasks get distinct spans.
+				spanCtx := telemetry.ContextWithTraceID(context.Background(), spec.TraceID)
+				_, span := telemetry.Tracer().Start(spanCtx, "task.inbound")
+				defer span.End()
+
+				if err := f.HandleTaskSpec(&spec); err != nil {
+					log.Error("HandleTaskSpec failed",
+						"task_id", spec.TaskID,
+						"error", err,
+					)
+					_ = msg.Nak()
+					return
+				}
+				_ = msg.Ack()
+			}()
 		},
 	); err != nil {
 		log.Error("subscribe task.inbound failed", "error", err)
@@ -410,6 +465,10 @@ func main() {
 				rec.IncCompactionTriggered()
 			case types.MetricsEventContextOverflow:
 				rec.IncContextOverflow()
+			case types.MetricsEventLLMCacheHit:
+				rec.IncLLMCacheHit()
+			case types.MetricsEventLLMCacheMiss:
+				rec.IncLLMCacheMiss()
 			}
 		},
 	); err != nil {

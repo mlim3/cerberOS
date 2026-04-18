@@ -301,6 +301,17 @@ func (m *firecrackerManager) Health(agentID string) (HealthStatus, error) {
 	}
 }
 
+// Deliver is not supported by the Firecracker manager: each VM is one-shot —
+// the MMDS payload is read exactly once at VM start, and there is no stable
+// channel for the host to deliver additional SpawnContexts post-boot. Callers
+// receive ErrReuseUnsupported and are expected to fall back to Spawn.
+func (m *firecrackerManager) Deliver(_ string, _ VMConfig) error {
+	return ErrReuseUnsupported
+}
+
+// SupportsReuse always reports false — each Firecracker VM handles one task.
+func (m *firecrackerManager) SupportsReuse() bool { return false }
+
 // ─── VM configuration ─────────────────────────────────────────────────────────
 
 // configureAndBoot drives the Firecracker API call sequence that sets up and

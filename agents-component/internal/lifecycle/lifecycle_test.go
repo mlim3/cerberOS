@@ -1,6 +1,7 @@
 package lifecycle_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"testing"
@@ -25,12 +26,15 @@ func TestMain(m *testing.M) {
 }
 
 func agentHelper() {
+	dec := json.NewDecoder(os.Stdin)
+	enc := json.NewEncoder(os.Stdout)
+
 	var sc struct {
 		TaskID       string `json:"task_id"`
 		TraceID      string `json:"trace_id"`
 		Instructions string `json:"instructions"`
 	}
-	if err := json.NewDecoder(os.Stdin).Decode(&sc); err != nil {
+	if err := dec.Decode(&sc); err != nil {
 		os.Exit(1)
 	}
 
@@ -45,8 +49,27 @@ func agentHelper() {
 		Success bool   `json:"success"`
 		Result  string `json:"result"`
 	}{TaskID: sc.TaskID, TraceID: sc.TraceID, Success: true, Result: "helper ok"}
+	_ = enc.Encode(out)
 
-	_ = json.NewEncoder(os.Stdout).Encode(out)
+	if sc.Instructions != "loop" {
+		// One-shot contract — the classic behaviour expected by the stdin-
+		// stream tests that drove a single SpawnContext to a bytes.Reader.
+		return
+	}
+
+	// Loop mode: mimic the real agent-process lifetime. Keep reading fresh
+	// SpawnContexts from stdin and emitting one newline-delimited TaskOutput
+	// per request. Exit cleanly on EOF so Terminate() can drive the process
+	// down by simply closing its stdin.
+	for {
+		if err := dec.Decode(&sc); err != nil {
+			return
+		}
+		out.TaskID = sc.TaskID
+		out.TraceID = sc.TraceID
+		out.Result = "helper ok: " + sc.Instructions
+		_ = enc.Encode(out)
+	}
 }
 
 // ─── Stub manager tests ──────────────────────────────────────────────────────
@@ -224,5 +247,103 @@ func TestProcessManagerUnknownAgent(t *testing.T) {
 	}
 	if h.State != lifecycle.StateUnknown {
 		t.Errorf("got state %q, want %q", h.State, lifecycle.StateUnknown)
+	}
+}
+
+// TestProcessManagerDeliverReusesProcess verifies the core cold-start-tax
+// elimination contract: Spawn launches one long-lived agent-process, the
+// initial SpawnContext's OnComplete fires with the first TaskOutput, and
+// Deliver then hands a second SpawnContext to the SAME process and receives a
+// second TaskOutput via the swapped OnComplete callback — without ever forking
+// a new subprocess. This is the warm-path that Priority 1 IDLE reuse depends
+// on.
+func TestProcessManagerDeliverReusesProcess(t *testing.T) {
+	t.Setenv("TEST_LIFECYCLE_AGENT_HELPER", "1")
+
+	m := lifecycle.NewProcess(os.Args[0])
+
+	first := make(chan []byte, 1)
+	cfg := lifecycle.VMConfig{
+		AgentID:      "pm-reuse",
+		TaskID:       "task-a",
+		SkillDomain:  "web",
+		Instructions: "loop",
+		TraceID:      "tr-a",
+		OnComplete: func(_ string, output []byte, exitErr error) {
+			if exitErr != nil {
+				t.Errorf("unexpected exitErr on first task: %v", exitErr)
+			}
+			first <- output
+		},
+	}
+	if err := m.Spawn(cfg); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	t.Cleanup(func() { _ = m.Terminate("pm-reuse") })
+
+	select {
+	case raw := <-first:
+		if !bytes.Contains(raw, []byte("task-a")) {
+			t.Errorf("first TaskOutput missing task_id=task-a: %s", raw)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for first TaskOutput")
+	}
+
+	second := make(chan []byte, 1)
+	deliverCfg := lifecycle.VMConfig{
+		AgentID:      "pm-reuse",
+		TaskID:       "task-b",
+		SkillDomain:  "web",
+		Instructions: "second",
+		TraceID:      "tr-b",
+		OnComplete: func(_ string, output []byte, exitErr error) {
+			if exitErr != nil {
+				t.Errorf("unexpected exitErr on second task: %v", exitErr)
+			}
+			second <- output
+		},
+	}
+	if err := m.Deliver("pm-reuse", deliverCfg); err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+
+	select {
+	case raw := <-second:
+		if !bytes.Contains(raw, []byte("task-b")) {
+			t.Errorf("second TaskOutput missing task_id=task-b: %s", raw)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for second TaskOutput")
+	}
+
+	// Confirm the process is still alive between tasks.
+	if h, _ := m.Health("pm-reuse"); h.State != lifecycle.StateRunning {
+		t.Errorf("want StateRunning between tasks, got %q", h.State)
+	}
+}
+
+// TestProcessManagerDeliverUnknownAgent confirms Deliver fails cleanly when
+// asked about an agent the manager has no record of.
+func TestProcessManagerDeliverUnknownAgent(t *testing.T) {
+	m := lifecycle.NewProcess(os.Args[0])
+	err := m.Deliver("ghost", lifecycle.VMConfig{AgentID: "ghost", TaskID: "t", TraceID: "tr"})
+	if err == nil {
+		t.Error("expected error from Deliver on unknown agent, got nil")
+	}
+}
+
+// TestFirecrackerReuseUnsupported guards the fallback contract: lifecycle
+// callers that ask Firecracker to reuse a VM must get ErrReuseUnsupported so
+// they can fall back to Spawn.
+func TestStubSupportsReuse(t *testing.T) {
+	if !lifecycle.New().SupportsReuse() {
+		t.Error("stub manager should report SupportsReuse=true for factory tests")
+	}
+}
+
+func TestProcessSupportsReuse(t *testing.T) {
+	if !lifecycle.NewProcess(os.Args[0]).SupportsReuse() {
+		t.Error("process manager must report SupportsReuse=true")
 	}
 }

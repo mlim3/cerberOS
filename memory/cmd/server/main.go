@@ -28,6 +28,7 @@ import (
 	"github.com/mlim3/cerberOS/memory/internal/api"
 	"github.com/mlim3/cerberOS/memory/internal/logic"
 	"github.com/mlim3/cerberOS/memory/internal/storage"
+	"github.com/mlim3/cerberOS/memory/internal/telemetry"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	httpSwagger "github.com/swaggo/http-swagger"
 )
@@ -91,6 +92,19 @@ func main() {
 	// 1. Initialize Database root context that listens for signals
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+
+	// OTLP tracing — no-op when OTEL_EXPORTER_OTLP_ENDPOINT is unset.
+	traceShutdown, err := telemetry.Init(ctx)
+	if err != nil {
+		logger.Warn("telemetry init failed — continuing without traces", "error", err)
+	} else if telemetry.Enabled() {
+		logger.Info("telemetry initialized", "endpoint", os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+	}
+	defer func() {
+		if traceShutdown != nil {
+			_ = traceShutdown(context.Background())
+		}
+	}()
 
 	// 1. Initialize the Postgres connection pool
 	// In a real application, these would be loaded from environment variables
@@ -196,11 +210,14 @@ func main() {
 		httpSwagger.URL("/swagger/doc.json"), //The url pointing to API definition
 	))
 
-	// 4. Start the HTTP server
+	// 4. Start the HTTP server. otelhttp.NewHandler is the outermost wrapper
+	// so server spans start before the trace-id middleware runs; the middleware
+	// then reconciles the span's trace_id with the incoming `traceparent`.
 	port := getEnvOrDefault("PORT", "8080")
+	handler := api.TraceIDMiddleware(logger, logRepo, loggingMiddleware(logger, api.MetricsMiddleware(mux)))
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%s", port),
-		Handler: api.TraceIDMiddleware(logger, logRepo, loggingMiddleware(logger, api.MetricsMiddleware(mux))),
+		Handler: telemetry.WrapHandler(handler, "memory-api"),
 	}
 
 	// Start server in a goroutine
