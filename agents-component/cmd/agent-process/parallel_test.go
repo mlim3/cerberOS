@@ -151,7 +151,7 @@ func TestParallel_ResultsInOriginalOrder(t *testing.T) {
 		Instructions: "run parallel data transforms",
 	}
 
-	result, err := RunLoop(ctx, log, spawnCtx, nil, nil, nil, nil, option.WithBaseURL(srv.URL))
+	result, _, err := RunLoop(ctx, log, spawnCtx, nil, nil, nil, nil, nil, option.WithBaseURL(srv.URL))
 	if err != nil {
 		t.Fatalf("RunLoop error: %v", err)
 	}
@@ -247,7 +247,7 @@ func TestParallel_ConcurrentExecutionFasterThanSequential(t *testing.T) {
 	// RunLoop is called including the Reason phase overhead, so we give a generous
 	// overall budget and focus the assertion on the Act phase.
 	actStart := time.Now()
-	result, err := RunLoop(ctx, log, spawnCtx, nil, nil, nil, nil, option.WithBaseURL(apiSrv.URL))
+	result, _, err := RunLoop(ctx, log, spawnCtx, nil, nil, nil, nil, nil, option.WithBaseURL(apiSrv.URL))
 	actElapsed := time.Since(actStart)
 
 	if err != nil {
@@ -360,7 +360,7 @@ func TestParallel_SteeringInterruptCancelsAllConcurrentCalls(t *testing.T) {
 	}
 
 	start := time.Now()
-	_, err := RunLoop(ctx, log, spawnCtx, nil, steerer, nil, nil, option.WithBaseURL(apiSrv.URL))
+	_, _, err := RunLoop(ctx, log, spawnCtx, nil, steerer, nil, nil, nil, option.WithBaseURL(apiSrv.URL))
 	elapsed := time.Since(start)
 
 	if err == nil {

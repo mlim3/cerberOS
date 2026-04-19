@@ -60,6 +60,10 @@ export interface UserTaskPayload {
   callback_topic?: string
   required_skill_domains?: string[]
   user_context_id?: string
+  /** Stable ID linking follow-up messages in the same conversation. When set,
+   *  the orchestrator threads it to agents so they can fetch prior turns from
+   *  their ConversationSnapshot rather than relying on the raw_input history block. */
+  conversation_id?: string
   /** W3C trace_id (32 hex) — forwarded on the wire envelope for orchestrator logs */
   trace_id?: string
 }
@@ -237,6 +241,7 @@ export function createNatsClient(config: NatsConfig): IONatsClient | null {
         payload: task.payload ?? { raw_input: task.content },
         callback_topic: task.callback_topic ?? callbackTopicForTask(task.task_id),
         user_context_id: task.user_context_id,
+        ...(task.conversation_id ? { conversation_id: task.conversation_id } : {}),
       }
       const envelope = buildEnvelope('user_task', task.task_id, natsPayload, task.trace_id)
       const data = new TextEncoder().encode(JSON.stringify(envelope))

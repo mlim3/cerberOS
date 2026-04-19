@@ -304,7 +304,7 @@ cmd_up() {
 # MAIN
 # =============================================================================
 case "${1:-up}" in
-  up)      shift; cmd_up "$@" ;;
-  down)    shift; cmd_down "$@" ;;
+  up)      [[ $# -gt 0 ]] && shift; cmd_up "$@" ;;
+  down)    [[ $# -gt 0 ]] && shift; cmd_down "$@" ;;
   *)       die "usage: $0 [up|down] [options]" ;;
 esac
