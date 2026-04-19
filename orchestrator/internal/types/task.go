@@ -65,6 +65,11 @@ const (
 	ErrCodePlanTooLarge         = "PLAN_TOO_LARGE"        // NEW v3.0
 	ErrCodePlanRejected         = "PLAN_REJECTED"         // NEW m3 — user rejected the plan
 	ErrCodeApprovalTimeout      = "PLAN_APPROVAL_TIMEOUT" // NEW m3 — user did not respond in time
+	// ErrCodeSubtaskFailed is the aggregate error code used at the plan level
+	// when one or more subtasks fail and no more specific code can be derived
+	// from the underlying failure. Prefer to propagate the real subtask
+	// ErrorCode when it is a known constant — this is the generic fallback.
+	ErrCodeSubtaskFailed = "SUBTASK_FAILED"
 )
 
 // PlanDecision is delivered by User I/O (via Gateway) when the user approves

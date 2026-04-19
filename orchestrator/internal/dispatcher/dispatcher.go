@@ -1238,6 +1238,8 @@ func humanReadableError(code string) string {
 		return "The Planner Agent requested capabilities outside your authorized scope."
 	case types.ErrCodeMaxRetriesExceeded:
 		return "Maximum recovery attempts exceeded. Task could not complete."
+	case types.ErrCodeSubtaskFailed:
+		return "A subtask failed. Please retry or rephrase your request."
 	case types.ErrCodeTimedOut:
 		return "Task exceeded its maximum allowed time."
 	default:

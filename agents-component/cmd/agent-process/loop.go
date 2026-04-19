@@ -35,6 +35,27 @@ const (
 
 	// maxIterations is a safety cap that prevents infinite loops on misbehaving models.
 	maxIterations = 50
+
+	// maxOutputTokens caps the per-turn Anthropic output.
+	//
+	// Trade-offs considered:
+	//   * Latency: non-streaming responses block the caller for the full
+	//     generation. Haiku 4.5 tops out around ~120 tok/s server-side, so
+	//     16K tokens is ≤ ~2 minutes worst case — within our task deadlines.
+	//   * Cost: output tokens are ~5× input; bounding per-turn output keeps
+	//     a runaway prompt from minting an unreasonable bill.
+	//   * Repetition-loop containment: a hard cap is our last line of
+	//     defence if the model gets stuck.
+	//   * Long-form writing tasks ("expand this business plan", "write a
+	//     detailed itinerary") legitimately need several thousand tokens.
+	//     4K was far too tight for that class of prompt — it truncated
+	//     mid-response and the error surfaced as the confusing
+	//     "Maximum recovery attempts exceeded" message.
+	//
+	// 16K is a deliberate compromise: enough headroom for long-form content
+	// while keeping latency and cost bounded. Going higher (32K/64K) would
+	// need streaming + incremental UI rendering to stay tolerable.
+	maxOutputTokens = 16_384
 )
 
 // pendingToolCall is one tool_use block extracted from an assistant response,
@@ -171,7 +192,7 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 		// --------------------------------------------------------------------
 		reqParams := anthropic.MessageNewParams{
 			Model:     anthropic.ModelClaudeHaiku4_5,
-			MaxTokens: int64(4096),
+			MaxTokens: int64(maxOutputTokens),
 			System:    []anthropic.TextBlockParam{{Text: systemPrompt}},
 			Tools:     toolDefs,
 			Messages:  history,
@@ -239,6 +260,32 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 				}
 			}
 			return "", nil, fmt.Errorf("end_turn received with no text content in response")
+		}
+
+		// max_tokens: the model hit maxOutputTokens mid-generation. Rather
+		// than discarding the partial text and failing the task, return
+		// whatever content was produced with a truncation notice. The next
+		// user turn (a follow-up) can ask the model to continue from here.
+		//
+		// Persist the snapshot the same way as end_turn so the conversation
+		// state stays well-formed for the next task in this conversation.
+		if resp.StopReason == anthropic.StopReasonMaxTokens {
+			for _, block := range resp.Content {
+				if block.Type == "text" && block.Text != "" {
+					log.Warn("response truncated by max_tokens",
+						"max_tokens", maxOutputTokens,
+						"output_tokens", resp.Usage.OutputTokens,
+					)
+					attemptSkillSynthesis(ctx, client, log, spawnCtx, sl, history, toolCallCount)
+					history = append(history, resp.ToParam())
+					if err := sl.WriteConversationSnapshot(spawnCtx.ConversationID, spawnCtx.TaskID, history, totalTokens); err != nil {
+						log.Warn("conversation snapshot write failed", "error", err, "conversation_id", spawnCtx.ConversationID)
+					}
+					const truncationNotice = "\n\n_[Response truncated — output token limit reached. Send a follow-up message to continue.]_"
+					return block.Text + truncationNotice, history, nil
+				}
+			}
+			return "", nil, fmt.Errorf("max_tokens stop with no text content in response")
 		}
 
 		if resp.StopReason != anthropic.StopReasonToolUse {
