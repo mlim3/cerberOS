@@ -108,6 +108,12 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
+  /* `min-width: 0` is required for flex children whose content (long URLs,
+     JSON error payloads) would otherwise push the column wider than the
+     parent .message max-width. Without this the wrap rules on .message-text
+     cannot take effect. */
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .message.user .message-content {
@@ -140,6 +146,16 @@
   border-radius: 12px;
   font-size: 14px;
   line-height: 1.5;
+  /* Force-wrap arbitrarily long unbroken strings (URLs, JSON error payloads,
+     stack traces) so they stay inside the message bubble instead of blowing
+     out the layout. `overflow-wrap: anywhere` breaks on any character when
+     no whitespace boundary is available; `word-break: break-word` is the
+     Safari-compatible alias. `min-width: 0` lets this flex child actually
+     shrink below its intrinsic content size. */
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .message.user .message-text {
