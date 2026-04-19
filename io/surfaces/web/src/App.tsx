@@ -5,10 +5,13 @@ import type {
   CredentialRequest,
   CredentialRequestStatus,
   OrchestratorStreamEvent,
+  PlanPreview,
+  PlanDecisionStatus,
 } from '@cerberos/io-core'
 import TaskSidebar from './components/TaskSidebar'
 import ChatWindow from './components/ChatWindow'
 import CredentialModal from './components/CredentialModal'
+import PlanPreviewCard from './components/PlanPreviewCard'
 import SettingsButton from './components/SettingsButton'
 import SettingsPanel, { defaultUISettings } from './components/SettingsPanel'
 import type { UISettings } from './components/SettingsPanel'
@@ -17,6 +20,7 @@ import type { LogEntry } from './components/ActivityLog'
 import {
   streamOrchestratorReply,
   submitCredential,
+  submitPlanDecision,
   subscribeOrchestratorTaskStream,
   orchestratorSseEnabled,
   formatExpectedNextInput,
@@ -248,6 +252,12 @@ function App() {
   const [showCredentialModal, setShowCredentialModal] = useState(false)
   const [activeCredentialTaskId, setActiveCredentialTaskId] = useState<string | null>(null)
 
+  // Plan-preview state — populated by orchestrator 'plan_preview' SSE events.
+  // Key is the user-facing task_id (not the orchestrator_task_ref).
+  const [planPreviews, setPlanPreviews] = useState<
+    Record<string, { preview: PlanPreview; status: PlanDecisionStatus; error?: string }>
+  >({})
+
   const selectedTask = tasks.find(t => t.id === selectedTaskId)
 
   const addLogEntry = useCallback((entry: Omit<LogEntry, 'id' | 'timestamp'>) => {
@@ -305,6 +315,12 @@ function App() {
             [ev.payload.taskId]: { request: ev.payload, status: 'pending' },
           }
         })
+      } else if (ev.type === 'plan_preview') {
+        const p = ev.payload
+        setPlanPreviews(prev => ({
+          ...prev,
+          [p.taskId]: { preview: p, status: 'pending' },
+        }))
       }
     }
 
@@ -778,6 +794,35 @@ function App() {
     setActiveCredentialTaskId(null)
   }, [])
 
+  const handlePlanDecision = useCallback(
+    async (taskId: string, approved: boolean, reason?: string) => {
+      const entry = planPreviews[taskId]
+      if (!entry) return
+      setPlanPreviews(prev => ({
+        ...prev,
+        [taskId]: { ...prev[taskId], status: 'submitting', error: undefined },
+      }))
+      const result = await submitPlanDecision({
+        taskId,
+        orchestratorTaskRef: entry.preview.orchestratorTaskRef,
+        approved,
+        reason,
+      })
+      setPlanPreviews(prev => ({
+        ...prev,
+        [taskId]: {
+          ...prev[taskId],
+          status: result.ok ? (approved ? 'approved' : 'rejected') : 'error',
+          error: result.ok ? undefined : result.error,
+        },
+      }))
+    },
+    [planPreviews],
+  )
+
+  const selectedPlanPreview =
+    selectedTask && planPreviews[selectedTask.id] ? planPreviews[selectedTask.id] : null
+
   return (
     <div className="app">
       <TaskSidebar
@@ -802,14 +847,14 @@ function App() {
                   )}
                   {selectedTask.status === 'awaiting_feedback' && 'Awaiting feedback'}
                   {selectedTask.status === 'working' && 'In progress'}
-                  {selectedTask.status === 'completed' && 'Completed'}
+                  {selectedTask.status === 'completed' && 'Completed — ask anything to continue'}
                 </span>
                 <span className="header-eta">
                   ETA: {selectedTask.expectedNextInput}
                 </span>
               </div>
             )}
-            {selectedTask && selectedTask.status !== 'completed' && (
+            {selectedTask && (
               <p className="header-last-update">{selectedTask.lastUpdate}</p>
             )}
           </div>
@@ -819,16 +864,27 @@ function App() {
           />
         </header>
         {selectedTask ? (
-          <ChatWindow
-            task={selectedTask}
-            onSendMessage={onSendMessage}
-            isStreaming={streamingForTaskId === selectedTask.id}
-            streamingContent={streamingForTaskId === selectedTask.id ? streamingContent : ''}
-            settings={uiSettings}
-            credentialRequest={selectedTaskCredential?.request}
-            credentialStatus={selectedTaskCredential?.status}
-            onProvideCredential={handleOpenCredentialModal}
-          />
+          <>
+            {selectedPlanPreview && (
+              <PlanPreviewCard
+                preview={selectedPlanPreview.preview}
+                status={selectedPlanPreview.status}
+                error={selectedPlanPreview.error}
+                onApprove={() => handlePlanDecision(selectedTask.id, true)}
+                onReject={reason => handlePlanDecision(selectedTask.id, false, reason)}
+              />
+            )}
+            <ChatWindow
+              task={selectedTask}
+              onSendMessage={onSendMessage}
+              isStreaming={streamingForTaskId === selectedTask.id}
+              streamingContent={streamingForTaskId === selectedTask.id ? streamingContent : ''}
+              settings={uiSettings}
+              credentialRequest={selectedTaskCredential?.request}
+              credentialStatus={selectedTaskCredential?.status}
+              onProvideCredential={handleOpenCredentialModal}
+            />
+          </>
         ) : (
           <div className="empty-state">
             <pre className="empty-state-ascii">{`

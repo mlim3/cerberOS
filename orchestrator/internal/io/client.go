@@ -52,6 +52,34 @@ type credentialRequestEvent struct {
 	Payload CredentialRequestPayload  `json:"payload"`
 }
 
+// planPreviewEvent is the envelope for a plan preview pushed to IO.
+// Matches: { type: 'plan_preview', payload: PlanPreview } in io/core/src/types.ts.
+type planPreviewEvent struct {
+	Type    string             `json:"type"`
+	Payload PlanPreviewPayload `json:"payload"`
+}
+
+// PlanPreviewSubtask is a summary of a single subtask shown to the user while
+// they decide whether to approve the plan. Only information relevant for the
+// human decision is exposed (no internal IDs beyond SubtaskID).
+type PlanPreviewSubtask struct {
+	SubtaskID    string   `json:"subtaskId"`
+	Action       string   `json:"action"`
+	Instructions string   `json:"instructions"`
+	DependsOn    []string `json:"dependsOn"`
+	Domains      []string `json:"domains"`
+}
+
+// PlanPreviewPayload is the data shown on the IO dashboard when the user
+// must approve/reject a plan.
+type PlanPreviewPayload struct {
+	TaskID              string               `json:"taskId"`
+	OrchestratorTaskRef string               `json:"orchestratorTaskRef"`
+	PlanID              string               `json:"planId"`
+	Subtasks            []PlanPreviewSubtask `json:"subtasks"`
+	ExpiresInSeconds    int                  `json:"expiresInSeconds"`
+}
+
 // CredentialRequestPayload is the data the orchestrator sends when it needs
 // the user to supply a secret (e.g. API key, password) via the IO dashboard.
 type CredentialRequestPayload struct {
@@ -107,6 +135,16 @@ func (c *Client) PushStatus(taskID, status, lastUpdate string, expectedNextInput
 		},
 	}
 	return c.post(evt)
+}
+
+// PushPlanPreview asks the IO Component to show the user a plan preview card
+// with Approve/Reject buttons. IO forwards the user's decision back to the
+// orchestrator on the `aegis.orchestrator.plan.decision` NATS subject.
+func (c *Client) PushPlanPreview(payload PlanPreviewPayload) error {
+	if c.Disabled() {
+		return nil
+	}
+	return c.post(planPreviewEvent{Type: "plan_preview", Payload: payload})
 }
 
 // PushCredentialRequest asks the IO Component to surface a credential-input

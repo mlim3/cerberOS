@@ -105,11 +105,46 @@ export interface ChatResponsePayload {
   done: boolean;
 }
 
+// ============================================
+// Plan preview (multi-step prompting & confirmation)
+// ============================================
+
+/** One subtask inside a plan preview — just enough detail for the user to
+ *  decide whether to approve the plan. */
+export interface PlanPreviewSubtask {
+  subtaskId: string;
+  action: string;
+  instructions: string;
+  dependsOn: string[];
+  domains: string[];
+}
+
+/** Orchestrator → IO: a proposed execution plan awaiting the user's approval. */
+export interface PlanPreview {
+  taskId: string;
+  orchestratorTaskRef: string;
+  planId: string;
+  subtasks: PlanPreviewSubtask[];
+  /** How many seconds until the orchestrator times out waiting for a decision. */
+  expiresInSeconds: number;
+}
+
+export type PlanDecisionStatus = 'pending' | 'submitting' | 'approved' | 'rejected' | 'error';
+
+/** IO → Orchestrator: user's decision on a plan preview. */
+export interface PlanDecisionSubmission {
+  taskId: string;
+  orchestratorTaskRef: string;
+  approved: boolean;
+  reason?: string;
+}
+
 /** One frame on the orchestrator→IO push channel (per task stream). */
 export type OrchestratorStreamEvent =
   | { type: 'status'; payload: StatusUpdate }
   | { type: 'credential_request'; payload: CredentialRequest }
-  | { type: 'chat_response'; payload: ChatResponsePayload };
+  | { type: 'chat_response'; payload: ChatResponsePayload }
+  | { type: 'plan_preview'; payload: PlanPreview };
 
 function isRecord(x: unknown): x is Record<string, unknown> {
   return typeof x === 'object' && x !== null;
@@ -160,6 +195,40 @@ export function parseOrchestratorStreamEvent(raw: unknown): OrchestratorStreamEv
           taskId: p.taskId as string,
           content: p.content as string,
           done: p.done === true,
+        },
+      };
+    }
+    return null;
+  }
+
+  if (raw.type === 'plan_preview' && isRecord(raw.payload)) {
+    const p = raw.payload;
+    if (
+      typeof p.taskId === 'string' &&
+      typeof p.orchestratorTaskRef === 'string' &&
+      typeof p.planId === 'string' &&
+      Array.isArray(p.subtasks)
+    ) {
+      const subtasks: PlanPreviewSubtask[] = [];
+      for (const s of p.subtasks) {
+        if (!isRecord(s)) continue;
+        if (typeof s.subtaskId !== 'string') continue;
+        subtasks.push({
+          subtaskId: s.subtaskId as string,
+          action: typeof s.action === 'string' ? s.action : '',
+          instructions: typeof s.instructions === 'string' ? s.instructions : '',
+          dependsOn: Array.isArray(s.dependsOn) ? (s.dependsOn as unknown[]).filter((x): x is string => typeof x === 'string') : [],
+          domains: Array.isArray(s.domains) ? (s.domains as unknown[]).filter((x): x is string => typeof x === 'string') : [],
+        });
+      }
+      return {
+        type: 'plan_preview',
+        payload: {
+          taskId: p.taskId as string,
+          orchestratorTaskRef: p.orchestratorTaskRef as string,
+          planId: p.planId as string,
+          subtasks,
+          expiresInSeconds: typeof p.expiresInSeconds === 'number' ? p.expiresInSeconds : 0,
         },
       };
     }

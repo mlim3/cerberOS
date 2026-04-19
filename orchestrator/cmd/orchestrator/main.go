@@ -37,6 +37,7 @@ import (
 	ioclient "github.com/mlim3/cerberOS/orchestrator/internal/io"
 	memoryiface "github.com/mlim3/cerberOS/orchestrator/internal/memory"
 	"github.com/mlim3/cerberOS/orchestrator/internal/mocks"
+	"github.com/mlim3/cerberOS/orchestrator/internal/personalization"
 	"github.com/mlim3/cerberOS/orchestrator/internal/monitor"
 	natsclient "github.com/mlim3/cerberOS/orchestrator/internal/nats"
 	"github.com/mlim3/cerberOS/orchestrator/internal/observability"
@@ -182,9 +183,20 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 
 	taskDispatcher = dispatcher.New(cfg, memClient, vaultClient, gw, policyEnforcer, taskMonitor, planExecutor, ioClient)
 
+	// Wire personalization (optional, best-effort). When MEMORY_ENDPOINT is
+	// HTTP-based we inject a small client that reads user facts from Memory
+	// and prepends them to the planner prompt. Failures are never fatal.
+	if isHTTPMemoryEndpoint(cfg.MemoryEndpoint) {
+		if pc := personalization.New(cfg.MemoryEndpoint); pc != nil {
+			taskDispatcher.SetPersonalization(pc)
+			observability.LogFromContext(context.Background()).Info("personalization enabled", "endpoint", cfg.MemoryEndpoint)
+		}
+	}
+
 	gw.RegisterTaskHandler(taskDispatcher.HandleInboundTask)
 	gw.RegisterAgentStatusHandler(taskMonitor.HandleAgentStatusUpdate)
 	gw.RegisterTaskResultHandler(taskDispatcher.HandleTaskResult)
+	gw.RegisterPlanDecisionHandler(taskDispatcher.HandlePlanDecision)
 
 	// Forward agent user_input credential requests to the IO Component.
 	gw.RegisterCredentialRequestHandler(func(agentID, taskID, requestID, keyName, label string) error {
@@ -199,9 +211,11 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 	healthHandler := health.New(vaultClient, memClient, natsClient, taskMonitor, cfg.NodeID)
 
 	debugHandler := &api.DebugHandler{LokiURL: cfg.LokiURL}
+	metricsHandler := &api.MetricsHandler{Provider: taskDispatcher}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler.ServeHTTP)
 	mux.HandleFunc("GET /debug/trace/{trace_id}", debugHandler.GetTrace)
+	mux.Handle("GET /metrics", metricsHandler)
 
 	// Databus proxy: forward /v1/databus/* to Memory API if endpoint is HTTP-based.
 	if isHTTPMemoryEndpoint(cfg.MemoryEndpoint) {

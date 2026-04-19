@@ -40,6 +40,11 @@ type Recorder struct {
 	// Context management event counters.
 	compactionTriggeredTotal prometheus.Counter
 	contextOverflowTotal     prometheus.Counter
+
+	// LLM response cache counters — per Assignment #9 "LLM caching:
+	// Personalization". Incremented via MetricsEvent from agent-process.
+	llmCacheHitsTotal   prometheus.Counter
+	llmCacheMissesTotal prometheus.Counter
 }
 
 // NewRecorder creates and registers all metrics in a fresh Prometheus registry.
@@ -100,6 +105,18 @@ func NewRecorder() *Recorder {
 			Name:      "context_overflow_total",
 			Help:      "Total CONTEXT_OVERFLOW hard aborts across all agent processes.",
 		}),
+
+		llmCacheHitsTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "llm_cache_hits_total",
+			Help:      "Total LLM response cache hits across all agent processes.",
+		}),
+
+		llmCacheMissesTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "llm_cache_misses_total",
+			Help:      "Total LLM response cache misses across all agent processes.",
+		}),
 	}
 
 	reg.MustRegister(
@@ -111,6 +128,8 @@ func NewRecorder() *Recorder {
 		r.natsConsumeDurationMs,
 		r.compactionTriggeredTotal,
 		r.contextOverflowTotal,
+		r.llmCacheHitsTotal,
+		r.llmCacheMissesTotal,
 	)
 
 	// Pre-initialise all state label values so every state appears in the
@@ -186,6 +205,16 @@ func (r *Recorder) IncCompactionTriggered() {
 // IncContextOverflow increments the context_overflow_total counter.
 func (r *Recorder) IncContextOverflow() {
 	r.contextOverflowTotal.Inc()
+}
+
+// IncLLMCacheHit increments the llm_cache_hits_total counter.
+func (r *Recorder) IncLLMCacheHit() {
+	r.llmCacheHitsTotal.Inc()
+}
+
+// IncLLMCacheMiss increments the llm_cache_misses_total counter.
+func (r *Recorder) IncLLMCacheMiss() {
+	r.llmCacheMissesTotal.Inc()
 }
 
 // — Instrumented comms.Client wrapper ————————————————————————————————————————

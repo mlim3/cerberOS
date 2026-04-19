@@ -32,6 +32,14 @@ type OrchestratorConfig struct {
 	MaxSubtasksPerPlan          int // MAX_SUBTASKS_PER_PLAN — default: 20
 	PlanExecutorMaxParallel     int // PLAN_EXECUTOR_MAX_PARALLEL — default: 5
 
+	// Multi-step prompting / plan confirmation (NEW in milestone 3).
+	// PLAN_APPROVAL_MODE: off | multi (default) | always
+	//   off    — execute every plan without asking the user.
+	//   multi  — ask the user only for plans with >1 subtask.
+	//   always — ask for every plan.
+	PlanApprovalMode           string
+	PlanApprovalTimeoutSeconds int // PLAN_APPROVAL_TIMEOUT_SECONDS — default: 300
+
 	// Task lifecycle
 	MaxTaskRetries         int // MAX_TASK_RETRIES — default: 3
 	TaskDedupWindowSeconds int // TASK_DEDUP_WINDOW_SECONDS — default: 300
@@ -101,6 +109,14 @@ func Load() (*OrchestratorConfig, error) {
 	cfg.DecompositionTimeoutSeconds = envInt("DECOMPOSITION_TIMEOUT_SECONDS", 30)
 	cfg.MaxSubtasksPerPlan = envInt("MAX_SUBTASKS_PER_PLAN", 20)
 	cfg.PlanExecutorMaxParallel = envInt("PLAN_EXECUTOR_MAX_PARALLEL", 5)
+
+	switch os.Getenv("PLAN_APPROVAL_MODE") {
+	case "off", "always", "multi":
+		cfg.PlanApprovalMode = os.Getenv("PLAN_APPROVAL_MODE")
+	default:
+		cfg.PlanApprovalMode = "multi"
+	}
+	cfg.PlanApprovalTimeoutSeconds = envInt("PLAN_APPROVAL_TIMEOUT_SECONDS", 300)
 
 	// ── Task lifecycle ───────────────────────────────────────────────────────
 	cfg.MaxTaskRetries = envInt("MAX_TASK_RETRIES", 3)
