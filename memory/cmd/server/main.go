@@ -118,6 +118,7 @@ func main() {
 	logRepo := storage.NewLogRepository(pool)
 	vaultRepo := storage.NewVaultRepository(pool)
 	agentLogsRepo := storage.NewAgentLogsRepository(pool)
+	scheduledJobsRepo := storage.NewScheduledJobsRepository(pool)
 
 	// Initialize Vault Manager
 	vaultManager, err := logic.NewVaultManager()
@@ -145,6 +146,7 @@ func main() {
 	piHandler := api.NewPersonalInfoHandler(piProcessor, piRepo)
 	vaultHandler := api.NewVaultHandler(vaultRepo, vaultManager, logRepo)
 	agentHandler := api.NewAgentHandler(agentLogsRepo)
+	scheduledJobsHandler := api.NewScheduledJobsHandler(scheduledJobsRepo)
 
 	// Set up the router using Go 1.22's enhanced mux
 	mux := http.NewServeMux()
@@ -172,6 +174,11 @@ func main() {
 	// System Log endpoints
 	mux.HandleFunc("POST /api/v1/system/events", logHandler.HandleCreateSystemEvent)
 	mux.HandleFunc("GET /api/v1/system/events", logHandler.HandleListSystemEvents)
+
+	// Scheduled jobs (cron runner calls run_due; trace id from middleware per request)
+	mux.HandleFunc("POST /api/v1/scheduled_jobs", scheduledJobsHandler.HandleCreateScheduledJob)
+	mux.HandleFunc("POST /api/v1/scheduled_jobs/run_due", scheduledJobsHandler.HandleRunDue)
+	mux.HandleFunc("GET /api/v1/scheduled_jobs/{id}/runs", scheduledJobsHandler.HandleListRuns)
 
 	// Vault endpoints (Internal Only)
 	vaultMux := http.NewServeMux()

@@ -90,7 +90,7 @@ type TaskResultHandler func(ctx context.Context, result types.TaskResult) error
 // CredentialRequestHandler is called when an agent publishes a credential.request
 // that requires user input (operation: "user_input"). Registered by main.go to
 // forward the request to the IO Component.
-type CredentialRequestHandler func(agentID, taskID, requestID, keyName, label string) error
+type CredentialRequestHandler func(agentID, taskID, requestID, keyName, label, traceID string) error
 
 // ── Gateway ───────────────────────────────────────────────────────────────────
 
@@ -435,6 +435,7 @@ func (g *Gateway) handleRawCredentialRequest(subject string, data []byte) error 
 	}
 	return g.credentialRequestHandler(
 		payload.AgentID, payload.TaskID, payload.RequestID, payload.KeyName, payload.Label,
+		envelope.TraceID,
 	)
 }
 
@@ -655,7 +656,7 @@ func validateEnvelope(data []byte) (*types.MessageEnvelope, error) {
 func extractOrCreateCtx(envelope *types.MessageEnvelope, module string) context.Context {
 	traceID := envelope.TraceID
 	if traceID == "" {
-		traceID = newUUID()
+		traceID = observability.NewRandomTraceID()
 	}
 	ctx := context.Background()
 	ctx = observability.WithTraceID(ctx, traceID)

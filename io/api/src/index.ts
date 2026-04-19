@@ -413,6 +413,7 @@ app.post('/api/orchestrator/stream-events', async (c) => {
 app.post('/api/chat', async (c) => {
   const body = (await c.req.json()) as SendMessageRequest;
   const { taskId, content, conversationHistory } = body;
+  const traceId = c.get('traceId') as string | undefined;
   logFromContext(c, 'info', 'http', 'POST /api/chat', {
     task_id: taskId,
     content_len: content.length,
@@ -427,6 +428,7 @@ app.post('/api/chat', async (c) => {
     role: 'user',
     content,
     taskId,
+    traceId,
   }).catch(() => { /* best-effort */ })
 
   const workingStatus: StatusUpdate = {
@@ -459,7 +461,7 @@ app.post('/api/chat', async (c) => {
         content,
         payload: { raw_input: content },
         callback_topic: callbackTopicForTask(taskId),
-        trace_id: c.get('traceId'),
+        trace_id: traceId,
       })
       awaitingOrchestratorChat = true
       logFromContext(c, 'info', 'nats', 'published user_task', { task_id: taskId })
@@ -480,7 +482,7 @@ app.post('/api/chat', async (c) => {
         controller.enqueue(encoder.encode(`data: ${JSON.stringify({ chunk: fallbackMsg })}\n\n`));
         controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true })}\n\n`));
         controller.close();
-        appendLogEntry({ sessionId, userId, role: 'assistant', content: fallbackMsg, taskId })
+        appendLogEntry({ sessionId, userId, role: 'assistant', content: fallbackMsg, taskId, traceId })
         return;
       }
 
@@ -491,7 +493,7 @@ app.post('/api/chat', async (c) => {
         controller.enqueue(encoder.encode(`data: ${JSON.stringify({ chunk: errMsg })}\n\n`))
         controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true })}\n\n`))
         controller.close()
-        appendLogEntry({ sessionId, userId, role: 'assistant', content: errMsg, taskId })
+        appendLogEntry({ sessionId, userId, role: 'assistant', content: errMsg, taskId, traceId })
         return
       }
 
@@ -540,7 +542,7 @@ app.post('/api/chat', async (c) => {
           }
           safeEnqueue(`data: ${JSON.stringify({ done: true })}\n\n`)
           safeClose()
-          appendLogEntry({ sessionId, userId, role: 'assistant', content: msg, taskId })
+          appendLogEntry({ sessionId, userId, role: 'assistant', content: msg, taskId, traceId })
         }, TIMEOUT_MS)
 
         cleanupChatStream = () => {
@@ -562,7 +564,7 @@ app.post('/api/chat', async (c) => {
             if (streamDone) return
             safeEnqueue(`data: ${JSON.stringify({ done: true })}\n\n`)
             safeClose()
-            appendLogEntry({ sessionId, userId, role: 'assistant', content: accumulated, taskId })
+            appendLogEntry({ sessionId, userId, role: 'assistant', content: accumulated, taskId, traceId })
             const doneStatus: StatusUpdate = {
               taskId,
               status: 'awaiting_feedback',
@@ -580,7 +582,7 @@ app.post('/api/chat', async (c) => {
             safeEnqueue(`data: ${JSON.stringify({ chunk: errContent })}\n\n`)
             safeEnqueue(`data: ${JSON.stringify({ done: true })}\n\n`)
             safeClose()
-            appendLogEntry({ sessionId, userId, role: 'assistant', content: errContent, taskId })
+            appendLogEntry({ sessionId, userId, role: 'assistant', content: errContent, taskId, traceId })
           },
         })
         // Flush so clients/proxies see a non-empty body immediately; avoids 0-byte files until NATS callbacks.
@@ -607,7 +609,7 @@ app.post('/api/chat', async (c) => {
         }
         controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true })}\n\n`));
         controller.close();
-        await appendLogEntry({ sessionId, userId, role: 'assistant', content: accumulated, taskId })
+        await appendLogEntry({ sessionId, userId, role: 'assistant', content: accumulated, taskId, traceId })
         const doneStatus: StatusUpdate = {
           taskId, status: 'awaiting_feedback', lastUpdate: 'Response complete',
           expectedNextInputMinutes: 0, timestamp: Date.now(),
@@ -637,9 +639,10 @@ app.post('/api/chat', async (c) => {
 // Get logs for a task
 app.get('/api/logs/:taskId', async (c) => {
   const taskId = c.req.param('taskId');
+  const traceId = c.get('traceId') as string | undefined;
   logFromContext(c, 'info', 'http', 'GET /api/logs/:taskId', { task_id: taskId })
   const sessionId = getOrCreateSessionId(taskId, '00000000-0000-0000-0000-000000000001')
-  const memoryLogs = await getSessionLogs(sessionId, { taskId })
+  const memoryLogs = await getSessionLogs(sessionId, { taskId, traceId })
   const logs = memoryLogs.map(memoryToLogEntry)
   return c.json({ logs });
 });

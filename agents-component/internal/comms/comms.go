@@ -31,6 +31,13 @@ type PublishOptions struct {
 	// query_id as appropriate. For vault.execute.request it MUST be the request_id.
 	CorrelationID string
 
+	// TraceID propagates the W3C trace_id across the NATS envelope so distributed
+	// trace continuity is preserved. Callers SHOULD set this to the trace_id of
+	// the inbound message they are reacting to (msg.TraceID), or — for messages
+	// that originate a new task — the trace_id assigned by the originating
+	// component. When empty, downstream consumers will mint a fresh trace_id.
+	TraceID string
+
 	// Transient uses at-most-once core NATS publish instead of JetStream.
 	// Use only for explicitly at-most-once subjects (e.g. capability.response).
 	Transient bool
@@ -43,7 +50,8 @@ type outboundEnvelope struct {
 	MessageType     string      `json:"message_type"`
 	SourceComponent string      `json:"source_component"`
 	CorrelationID   string      `json:"correlation_id,omitempty"`
-	Timestamp       string      `json:"timestamp"` // ISO 8601
+	TraceID         string      `json:"trace_id,omitempty"` // W3C trace_id for distributed trace continuity
+	Timestamp       string      `json:"timestamp"`          // ISO 8601
 	SchemaVersion   string      `json:"schema_version"`
 	Payload         interface{} `json:"payload"`
 }
@@ -53,6 +61,7 @@ type inboundEnvelope struct {
 	MessageID     string          `json:"message_id"`
 	MessageType   string          `json:"message_type"`
 	CorrelationID string          `json:"correlation_id,omitempty"`
+	TraceID       string          `json:"trace_id,omitempty"`
 	Payload       json.RawMessage `json:"payload"`
 }
 
@@ -62,6 +71,7 @@ type Message struct {
 	Subject       string
 	MessageType   string
 	CorrelationID string
+	TraceID       string
 	Data          []byte
 
 	// Ack acknowledges successful processing (JetStream at-least-once subjects).
@@ -195,6 +205,7 @@ func (c *natsClient) Publish(subject string, opts PublishOptions, payload interf
 		MessageType:     opts.MessageType,
 		SourceComponent: c.componentID,
 		CorrelationID:   opts.CorrelationID,
+		TraceID:         opts.TraceID,
 		Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
 		SchemaVersion:   "1.0",
 		Payload:         payload,
@@ -398,10 +409,13 @@ func (c *stubClient) Publish(subject string, opts PublishOptions, payload interf
 	c.mu.RUnlock()
 
 	msg := &Message{
-		Subject: subject,
-		Data:    data,
-		Ack:     noop,
-		Nak:     noop,
+		Subject:       subject,
+		MessageType:   opts.MessageType,
+		CorrelationID: opts.CorrelationID,
+		TraceID:       opts.TraceID,
+		Data:          data,
+		Ack:           noop,
+		Nak:           noop,
 	}
 	for _, h := range handlers {
 		h(msg)
@@ -445,6 +459,7 @@ func unwrapOrRaw(data []byte) *Message {
 	return &Message{
 		MessageType:   env.MessageType,
 		CorrelationID: env.CorrelationID,
+		TraceID:       env.TraceID,
 		Data:          []byte(env.Payload),
 	}
 }

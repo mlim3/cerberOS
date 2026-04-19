@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -36,6 +37,11 @@ var (
 
 type TraceIDKey struct{}
 
+const (
+	traceIDHeader     = "X-Trace-ID"
+	traceparentHeader = "traceparent"
+)
+
 // MetricsMiddleware records HTTP request metrics
 func MetricsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -59,14 +65,54 @@ func MetricsMiddleware(next http.Handler) http.Handler {
 // It also logs an 'ACCESS_GRANTED' event to the system_events table if the request is for the Vault.
 func TraceIDMiddleware(logger *slog.Logger, logRepo *storage.LogRepository, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		traceID := uuid.New().String()
-		ctx := context.WithValue(r.Context(), TraceIDKey{}, traceID)
+		traceID := resolveRequestTraceID(r)
+		ctx := context.WithValue(r.Context(), TraceIDKey{}, traceID.String())
 		r = r.WithContext(ctx)
+		w.Header().Set(traceIDHeader, traceID.String())
 
 		// Create a custom response writer to capture status code
 		rw := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 		next.ServeHTTP(rw, r)
 	})
+}
+
+func resolveRequestTraceID(r *http.Request) uuid.UUID {
+	if fromTraceID, ok := normalizeTraceID(r.Header.Get(traceIDHeader)); ok {
+		return fromTraceID
+	}
+	if fromTraceparent, ok := traceIDFromTraceparent(r.Header.Get(traceparentHeader)); ok {
+		return fromTraceparent
+	}
+	return uuid.New()
+}
+
+func traceIDFromContext(ctx context.Context) (uuid.UUID, bool) {
+	traceIDStr, ok := ctx.Value(TraceIDKey{}).(string)
+	if !ok {
+		return uuid.UUID{}, false
+	}
+	return normalizeTraceID(traceIDStr)
+}
+
+func normalizeTraceID(raw string) (uuid.UUID, bool) {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return uuid.UUID{}, false
+	}
+	id, err := uuid.Parse(v)
+	if err != nil {
+		return uuid.UUID{}, false
+	}
+	return id, true
+}
+
+// traceparent format: version-traceid-parentid-flags
+func traceIDFromTraceparent(header string) (uuid.UUID, bool) {
+	parts := strings.Split(strings.TrimSpace(header), "-")
+	if len(parts) != 4 {
+		return uuid.UUID{}, false
+	}
+	return normalizeTraceID(parts[1])
 }
 
 // RequireVaultKey is a middleware that checks for the X-API-KEY header

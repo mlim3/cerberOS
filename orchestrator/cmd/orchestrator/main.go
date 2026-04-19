@@ -187,13 +187,13 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 	gw.RegisterTaskResultHandler(taskDispatcher.HandleTaskResult)
 
 	// Forward agent user_input credential requests to the IO Component.
-	gw.RegisterCredentialRequestHandler(func(agentID, taskID, requestID, keyName, label string) error {
+	gw.RegisterCredentialRequestHandler(func(_, taskID, requestID, keyName, label, traceID string) error {
 		return ioClient.PushCredentialRequest(ioclient.CredentialRequestPayload{
 			TaskID:    taskID,
 			RequestID: requestID,
 			KeyName:   keyName,
 			Label:     label,
-		})
+		}, traceID)
 	})
 
 	healthHandler := health.New(vaultClient, memClient, natsClient, taskMonitor, cfg.NodeID)

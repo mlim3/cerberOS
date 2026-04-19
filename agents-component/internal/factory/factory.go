@@ -193,7 +193,7 @@ const (
 // requires its parent domain to be registered first. Individual registration failures
 // are logged and skipped; they do not abort the startup sequence.
 func (f *Factory) LoadSynthesizedSkills(ctx context.Context) error {
-	records, err := f.memory.ReadAllByType("skill_cache")
+	records, err := f.memory.ReadAllByType("skill_cache", "")
 	if err != nil {
 		return fmt.Errorf("factory: load synthesized skills: read: %w", err)
 	}
@@ -539,12 +539,13 @@ func (f *Factory) CompleteTask(agentID, sessionID, traceID string, output interf
 
 	// Publish tagged output via Memory Interface. The Orchestrator routes it to the Memory Component.
 	mw := &types.MemoryWrite{
-		AgentID:   agentID,
-		SessionID: sessionID,
-		DataType:  "task_result",
-		TTLHint:   86400,
-		Payload:   output,
-		Tags:      map[string]string{"context": "result", "task_id": agent.AssignedTask},
+		AgentID:     agentID,
+		SessionID:   sessionID,
+		DataType:    "task_result",
+		TTLHint:     86400,
+		Payload:     output,
+		Tags:        map[string]string{"context": "result", "task_id": agent.AssignedTask},
+		WireTraceID: traceID,
 	}
 	if err := f.memory.Write(mw); err != nil {
 		return fmt.Errorf("factory: memory.Write: %w", err)
@@ -579,7 +580,7 @@ func (f *Factory) CompleteTask(agentID, sessionID, traceID string, output interf
 	})
 	if err := f.comms.Publish(
 		comms.SubjectTaskResult,
-		comms.PublishOptions{MessageType: comms.MsgTypeTaskResult, CorrelationID: agent.AssignedTask},
+		comms.PublishOptions{MessageType: comms.MsgTypeTaskResult, CorrelationID: agent.AssignedTask, TraceID: traceID},
 		result,
 	); err != nil {
 		return fmt.Errorf("factory: comms.Publish task.result: %w", err)
@@ -686,11 +687,12 @@ func (f *Factory) HandleCrash(agentID string) error {
 		CrashedAt:              time.Now().UTC(),
 	}
 	mw := &types.MemoryWrite{
-		AgentID:   agentID,
-		SessionID: agent.AssignedTask, // task ID serves as session scope for crash snapshots
-		DataType:  "snapshot",
-		TTLHint:   86400,
-		Payload:   snapshot,
+		AgentID:     agentID,
+		SessionID:   agent.AssignedTask, // task ID serves as session scope for crash snapshots
+		DataType:    "snapshot",
+		TTLHint:     86400,
+		Payload:     snapshot,
+		WireTraceID: agent.TraceID,
 		Tags: map[string]string{
 			"context": "crash_snapshot",
 			"task_id": agent.AssignedTask,
@@ -937,7 +939,7 @@ func (f *Factory) publishStatus(agentID, taskID, state, traceID string) error {
 	}
 	if err := f.comms.Publish(
 		comms.SubjectAgentStatus,
-		comms.PublishOptions{MessageType: comms.MsgTypeAgentStatus, CorrelationID: taskID},
+		comms.PublishOptions{MessageType: comms.MsgTypeAgentStatus, CorrelationID: taskID, TraceID: traceID},
 		update,
 	); err != nil {
 		return fmt.Errorf("factory: comms.Publish agent.status: %w", err)
@@ -988,7 +990,7 @@ func (f *Factory) publishFailed(agentID, taskID, errorCode, errorMessage, traceI
 	}
 	if err := f.comms.Publish(
 		comms.SubjectTaskFailed,
-		comms.PublishOptions{MessageType: comms.MsgTypeTaskFailed, CorrelationID: taskID},
+		comms.PublishOptions{MessageType: comms.MsgTypeTaskFailed, CorrelationID: taskID, TraceID: traceID},
 		failed,
 	); err != nil {
 		return fmt.Errorf("factory: comms.Publish task.failed: %w", err)
@@ -1032,7 +1034,7 @@ func (f *Factory) publishAccepted(agentID, agentType string, spec *types.TaskSpe
 	}
 	if err := f.comms.Publish(
 		comms.SubjectTaskAccepted,
-		comms.PublishOptions{MessageType: comms.MsgTypeTaskAccepted, CorrelationID: spec.TaskID},
+		comms.PublishOptions{MessageType: comms.MsgTypeTaskAccepted, CorrelationID: spec.TaskID, TraceID: spec.TraceID},
 		accepted,
 	); err != nil {
 		return fmt.Errorf("factory: comms.Publish task.accepted: %w", err)
@@ -1121,7 +1123,7 @@ func (f *Factory) fetchAgentMemory(domain, traceID string) string {
 	if domain == "" {
 		return ""
 	}
-	records, err := f.memory.Read("domain:"+domain, "agent_memory")
+	records, err := f.memory.Read("domain:"+domain, "agent_memory", traceID)
 	if err != nil || len(records) == 0 {
 		if err != nil {
 			f.log.Warn("factory: fetchAgentMemory failed", "domain", domain, "error", err, "trace_id", traceID)
@@ -1141,7 +1143,7 @@ func (f *Factory) fetchUserProfile(userContextID, traceID string) string {
 	if userContextID == "" {
 		return ""
 	}
-	records, err := f.memory.Read("user:"+userContextID, "user_profile")
+	records, err := f.memory.Read("user:"+userContextID, "user_profile", traceID)
 	if err != nil || len(records) == 0 {
 		if err != nil {
 			f.log.Warn("factory: fetchUserProfile failed", "user_context_id", userContextID, "error", err, "trace_id", traceID)

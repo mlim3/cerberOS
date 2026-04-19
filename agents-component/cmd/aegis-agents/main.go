@@ -368,6 +368,7 @@ func main() {
 				comms.PublishOptions{
 					MessageType:   comms.MsgTypeCapabilityResponse,
 					CorrelationID: query.QueryID,
+					TraceID:       query.TraceID,
 					Transient:     true, // at-most-once
 				},
 				resp,

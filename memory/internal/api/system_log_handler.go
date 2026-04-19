@@ -97,6 +97,8 @@ func (h *SystemLogHandler) HandleCreateSystemEvent(w http.ResponseWriter, r *htt
 
 	if req.TraceID != nil {
 		params.TraceID = pgtype.UUID{Bytes: *req.TraceID, Valid: true}
+	} else if traceID, ok := traceIDFromContext(ctx); ok {
+		params.TraceID = pgtype.UUID{Bytes: traceID, Valid: true}
 	}
 
 	if req.ServiceName != nil {

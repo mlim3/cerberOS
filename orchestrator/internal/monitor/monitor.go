@@ -265,6 +265,16 @@ func isValidTransition(currentState, newState string) bool {
 		return newState == types.StateRunning || types.IsTerminalState(newState)
 	case types.StateReceived, types.StatePolicyCheck:
 		return newState == types.StateDispatchPending || types.IsTerminalState(newState)
+	case types.StateDecomposing:
+		// Planner phase: recovery may terminate with TIMED_OUT while still DECOMPOSING (parallel with decomposition timeout).
+		if newState == types.StatePlanActive {
+			return true
+		}
+		if !types.IsTerminalState(newState) {
+			return false
+		}
+		// Nominal completion still goes through PLAN_ACTIVE / executor, not directly to COMPLETED.
+		return newState != types.StateCompleted
 	default:
 		return false
 	}

@@ -262,7 +262,7 @@ func (d *Dispatcher) HandleInboundTask(ctx context.Context, task types.UserTask)
 
 	// ── Notify IO: task received, planning underway ────────────────────────
 	expectedMins := 2
-	_ = d.io.PushStatus(task.TaskID, ioclient.StatusWorking, "Planning your task...", &expectedMins)
+	_ = d.io.PushStatus(task.TaskID, ioclient.StatusWorking, "Planning your task...", &expectedMins, observability.TraceIDFrom(ctx))
 
 	// ── Step 6: Publish planner task via standard task.inbound ─────────────
 	rawInput := extractRawInput(task.Payload)
@@ -399,7 +399,7 @@ func (d *Dispatcher) HandleDecompositionResponse(ctx context.Context, resp types
 		expectedMins = 1
 	}
 	_ = d.io.PushStatus(ts.TaskID, ioclient.StatusWorking,
-		fmt.Sprintf("Executing %d subtasks...", subtaskCount), &expectedMins)
+		fmt.Sprintf("Executing %d subtasks...", subtaskCount), &expectedMins, ts.TraceID)
 
 	// ── Hand off to Plan Executor ──────────────────────────────────────────
 	planCtx := observability.WithPlanID(ctx, resp.Plan.PlanID)
@@ -472,7 +472,7 @@ func (d *Dispatcher) HandlePlanComplete(ts *types.TaskState, aggregatedResults [
 
 	// Notify IO: task complete.
 	zero := 0
-	_ = d.io.PushStatus(ts.TaskID, ioclient.StatusCompleted, "Task complete", &zero)
+	_ = d.io.PushStatus(ts.TaskID, ioclient.StatusCompleted, "Task complete", &zero, ts.TraceID)
 
 	if err := d.policy.RevokeCredentials(ctx, ts.OrchestratorTaskRef); err != nil {
 		log.Error("credential revocation failed", "error", err)
@@ -537,7 +537,7 @@ func (d *Dispatcher) HandlePlanFailed(ts *types.TaskState, errorCode string, par
 	if partial {
 		lastUpdate = "Partially completed — some subtasks failed"
 	}
-	_ = d.io.PushStatus(ts.TaskID, ioclient.StatusCompleted, lastUpdate, &zero)
+	_ = d.io.PushStatus(ts.TaskID, ioclient.StatusCompleted, lastUpdate, &zero, ts.TraceID)
 
 	if err := d.policy.RevokeCredentials(ctx, ts.OrchestratorTaskRef); err != nil {
 		log.Error("credential revocation failed", "error", err)
@@ -628,7 +628,7 @@ func (d *Dispatcher) failTask(ctx context.Context, ts *types.TaskState, errorCod
 
 	// Notify IO: task failed during decomposition.
 	zero := 0
-	_ = d.io.PushStatus(ts.TaskID, ioclient.StatusCompleted, userMessage, &zero)
+	_ = d.io.PushStatus(ts.TaskID, ioclient.StatusCompleted, userMessage, &zero, ts.TraceID)
 
 	d.activeTasks.Delete(ts.TaskID)
 	d.monitor.UntrackTask(ts.TaskID)

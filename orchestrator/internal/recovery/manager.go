@@ -302,6 +302,15 @@ func (m *Manager) terminateTask(ctx context.Context, ts *types.TaskState, errorC
 		"error_code", errorCode,
 	)
 
+	// Another path may have already finished the task (e.g. decomposition timeout vs global task timeout).
+	if types.IsTerminalState(ts.State) {
+		logger.Info("terminateTask skipped — task already terminal",
+			"task_id", ts.TaskID,
+			"current_state", ts.State,
+		)
+		return
+	}
+
 	// ── Step 1: Revoke credentials (NON-OPTIONAL, §FR-SH-04, §13.3) ───────
 	if err := m.policy.RevokeCredentials(ctx, ts.OrchestratorTaskRef); err != nil {
 		logger.Error("REVOCATION_FAILED — scheduling retry",

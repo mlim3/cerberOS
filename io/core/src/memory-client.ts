@@ -48,6 +48,8 @@ export interface AppendLogParams {
   content: string
   taskId?: string
   idempotencyKey?: string
+  /** W3C trace_id (32 hex) — same as HTTP / NATS user_task; keeps Memory rows aligned with IO + orchestrator */
+  traceId?: string
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────────
@@ -91,12 +93,17 @@ export async function appendLogEntry(params: AppendLogParams): Promise<MemoryLog
   if (params.idempotencyKey) body['idempotencyKey'] = params.idempotencyKey
 
   try {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'X-API-KEY': MEMORY_API_KEY,
+    }
+    if (params.traceId) {
+      headers['X-Trace-ID'] = params.traceId
+    }
+
     const res = await fetch(`${MEMORY_API_BASE}/api/v1/chat/${params.sessionId}/messages`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-API-KEY': MEMORY_API_KEY,
-      },
+      headers,
       body: JSON.stringify(body),
     })
 
@@ -122,7 +129,7 @@ export async function appendLogEntry(params: AppendLogParams): Promise<MemoryLog
  */
 export async function getSessionLogs(
   sessionId: string,
-  options?: { taskId?: string; limit?: number }
+  options?: { taskId?: string; limit?: number; traceId?: string }
 ): Promise<MemoryLogEntry[]> {
   if (DEMO_MODE) {
     let entries = demoLogs.filter(m => m.sessionId === sessionId)
@@ -139,10 +146,15 @@ export async function getSessionLogs(
     const url = new URL(`${MEMORY_API_BASE}/api/v1/chat/${sessionId}/messages`)
     if (options?.limit) url.searchParams.set('limit', String(options.limit))
 
+    const headers: Record<string, string> = {
+      'X-API-KEY': MEMORY_API_KEY,
+    }
+    if (options?.traceId) {
+      headers['X-Trace-ID'] = options.traceId
+    }
+
     const res = await fetch(url.toString(), {
-      headers: {
-        'X-API-KEY': MEMORY_API_KEY,
-      },
+      headers,
     })
 
     if (!res.ok) {

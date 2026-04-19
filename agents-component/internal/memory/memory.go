@@ -25,10 +25,12 @@ package memory
 import (
 	"context"
 	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -44,12 +46,14 @@ type Client interface {
 
 	// Read retrieves filtered slices by agent ID and context tag.
 	// Never returns full agent history.
-	Read(agentID, contextTag string) ([]types.MemoryWrite, error)
+	// traceID is the W3C trace_id to propagate on the NATS envelope; if empty, a new id is minted.
+	Read(agentID, contextTag, traceID string) ([]types.MemoryWrite, error)
 
 	// ReadAllByType returns all persisted records with the given DataType across
 	// all agents. Used exclusively for component startup recovery; never call
 	// this during normal agent operation.
-	ReadAllByType(dataType string) ([]types.MemoryWrite, error)
+	// traceID is propagated on the NATS envelope; if empty, a new id is minted.
+	ReadAllByType(dataType, traceID string) ([]types.MemoryWrite, error)
 }
 
 // ── In-process stub (unit tests) ──────────────────────────────────────────────
@@ -77,7 +81,7 @@ func (c *stubClient) Write(payload *types.MemoryWrite) error {
 	return nil
 }
 
-func (c *stubClient) Read(agentID, contextTag string) ([]types.MemoryWrite, error) {
+func (c *stubClient) Read(agentID, contextTag, _ string) ([]types.MemoryWrite, error) {
 	if agentID == "" {
 		return nil, fmt.Errorf("memory: agentID must not be empty")
 	}
@@ -99,7 +103,7 @@ func (c *stubClient) Read(agentID, contextTag string) ([]types.MemoryWrite, erro
 	return filtered, nil
 }
 
-func (c *stubClient) ReadAllByType(dataType string) ([]types.MemoryWrite, error) {
+func (c *stubClient) ReadAllByType(dataType, _ string) ([]types.MemoryWrite, error) {
 	if dataType == "" {
 		return nil, fmt.Errorf("memory: dataType must not be empty")
 	}
@@ -279,11 +283,12 @@ func (c *natsClient) Write(payload *types.MemoryWrite) error {
 
 	requestID := newMemoryID()
 	payload.RequestID = requestID
+	envelopeTrace := strings.TrimSpace(payload.WireTraceID)
 
 	switch policyFor(payload.DataType) {
 	case policyRequired:
 		payload.RequireAck = true
-		if err := c.writeWithAck(payload, requestID); err != nil {
+		if err := c.writeWithAck(payload, requestID, envelopeTrace); err != nil {
 			if c.onUnavailable != nil {
 				c.onUnavailable(payload.DataType, requestID, err.Error())
 			}
@@ -296,7 +301,7 @@ func (c *natsClient) Write(payload *types.MemoryWrite) error {
 		payload.RequireAck = false
 		if err := c.comms.Publish(
 			comms.SubjectStateWrite,
-			comms.PublishOptions{MessageType: comms.MsgTypeStateWrite, CorrelationID: requestID},
+			comms.PublishOptions{MessageType: comms.MsgTypeStateWrite, CorrelationID: requestID, TraceID: envelopeTrace},
 			payload,
 		); err != nil {
 			c.appendBuffer(*payload)
@@ -317,7 +322,7 @@ func (c *natsClient) Write(payload *types.MemoryWrite) error {
 		payload.RequireAck = false
 		_ = c.comms.Publish(
 			comms.SubjectStateWrite,
-			comms.PublishOptions{MessageType: comms.MsgTypeStateWrite, CorrelationID: requestID},
+			comms.PublishOptions{MessageType: comms.MsgTypeStateWrite, CorrelationID: requestID, TraceID: envelopeTrace},
 			payload,
 		)
 		return nil
@@ -327,29 +332,35 @@ func (c *natsClient) Write(payload *types.MemoryWrite) error {
 // Read publishes a state.read.request to the Orchestrator and blocks until the
 // matching state.read.response arrives, retrying up to memReadMaxAttempts on
 // timeout. Returns filtered records for the given agentID and contextTag.
-func (c *natsClient) Read(agentID, contextTag string) ([]types.MemoryWrite, error) {
+func (c *natsClient) Read(agentID, contextTag, traceID string) ([]types.MemoryWrite, error) {
 	if agentID == "" {
 		return nil, fmt.Errorf("memory: agentID must not be empty")
 	}
-	traceID := newMemoryID()
+	tid := strings.TrimSpace(traceID)
+	if tid == "" {
+		tid = newMemoryID()
+	}
 	return c.sendReadRequest(types.MemoryReadRequest{
 		AgentID:    agentID,
 		ContextTag: contextTag,
-		TraceID:    traceID,
-	}, traceID)
+		TraceID:    tid,
+	}, tid)
 }
 
 // ReadAllByType publishes a state.read.request filtered by DataType with no
 // AgentID constraint. Intended only for startup recovery.
-func (c *natsClient) ReadAllByType(dataType string) ([]types.MemoryWrite, error) {
+func (c *natsClient) ReadAllByType(dataType, traceID string) ([]types.MemoryWrite, error) {
 	if dataType == "" {
 		return nil, fmt.Errorf("memory: dataType must not be empty")
 	}
-	traceID := newMemoryID()
+	tid := strings.TrimSpace(traceID)
+	if tid == "" {
+		tid = newMemoryID()
+	}
 	return c.sendReadRequest(types.MemoryReadRequest{
 		DataType: dataType,
-		TraceID:  traceID,
-	}, traceID)
+		TraceID:  tid,
+	}, tid)
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -358,7 +369,7 @@ func (c *natsClient) ReadAllByType(dataType string) ([]types.MemoryWrite, error)
 // waits for acknowledgement from the Orchestrator with exponential back-off.
 // The channel must be registered BEFORE publishing to avoid the race where
 // a fast ack arrives before the select is reached.
-func (c *natsClient) writeWithAck(payload *types.MemoryWrite, requestID string) error {
+func (c *natsClient) writeWithAck(payload *types.MemoryWrite, requestID, envelopeTrace string) error {
 	resultCh := make(chan writeResult, 1)
 	c.pendingWriteMu.Lock()
 	c.pendingWrites[requestID] = resultCh
@@ -378,7 +389,7 @@ func (c *natsClient) writeWithAck(payload *types.MemoryWrite, requestID string) 
 
 		if err := c.comms.Publish(
 			comms.SubjectStateWrite,
-			comms.PublishOptions{MessageType: comms.MsgTypeStateWrite, CorrelationID: requestID},
+			comms.PublishOptions{MessageType: comms.MsgTypeStateWrite, CorrelationID: requestID, TraceID: envelopeTrace},
 			payload,
 		); err != nil {
 			lastErr = fmt.Errorf("publish state.write (attempt %d/%d): %w",
@@ -453,9 +464,10 @@ func (c *natsClient) flushBufferedWrites() {
 		// Assign a fresh request_id for the retry publish so a stale ack from
 		// the original attempt does not confuse in-flight tracking.
 		w.RequestID = newMemoryID()
+		envelopeTrace := strings.TrimSpace(w.WireTraceID)
 		if err := c.comms.Publish(
 			comms.SubjectStateWrite,
-			comms.PublishOptions{MessageType: comms.MsgTypeStateWrite, CorrelationID: w.RequestID},
+			comms.PublishOptions{MessageType: comms.MsgTypeStateWrite, CorrelationID: w.RequestID, TraceID: envelopeTrace},
 			&w,
 		); err != nil {
 			failed = append(failed, snapshot[i]) // retain original requestID
@@ -501,6 +513,7 @@ func (c *natsClient) sendReadRequest(req types.MemoryReadRequest, traceID string
 			comms.PublishOptions{
 				MessageType:   comms.MsgTypeStateReadRequest,
 				CorrelationID: traceID,
+				TraceID:       traceID,
 			},
 			req,
 		); err != nil {
@@ -638,11 +651,9 @@ func validateWrite(payload *types.MemoryWrite) error {
 	return nil
 }
 
-// newMemoryID returns a UUID v4 string using crypto/rand.
+// newMemoryID returns a W3C-style trace_id: 32 lowercase hex chars (16 random bytes).
 func newMemoryID() string {
 	var b [16]byte
 	_, _ = io.ReadFull(rand.Reader, b[:])
-	b[6] = (b[6] & 0x0f) | 0x40 // version 4
-	b[8] = (b[8] & 0x3f) | 0x80 // variant bits
-	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
+	return hex.EncodeToString(b[:])
 }

@@ -87,6 +87,8 @@ services:
     depends_on:
       nats-1:
         condition: service_healthy
+      orchestrator:
+        condition: service_started
     environment:
       NODE_ENV: production
       DEMO_MODE: "false"
@@ -200,7 +202,10 @@ services:
       AEGIS_NATS_HTTP_URL: http://nats-1:8222
       AEGIS_NATS_REPLICAS: "1"
       AEGIS_ORCHESTRATOR_URL: http://orchestrator:8080
-      AEGIS_MEMORY_URL: http://memory-api:8081/v1/memory
+      # Route DataBus → Orchestrator → Memory (Option 1 in aegis-databus/docs/DESIGN.md).
+      # Setting AEGIS_MEMORY_URL would use the direct-Memory path, but memory-api exposes
+      # /api/v1/... not /v1/memory/outbox|ping|audit|processed — causing DEGRADED-HOLD.
+      # AEGIS_MEMORY_URL: http://memory-api:8081/v1/memory
     ports:
       - "9091:9091"
     healthcheck:
@@ -340,8 +345,9 @@ services:
 # NETWORKS
 # =============================================================================
 networks:
+  # No explicit `name:` — Compose uses `{project}_{network}` so we never clash with a
+  # manually created or legacy Docker network also called `cerberos`.
   cerberos:
-    name: cerberos
 
 # =============================================================================
 # VOLUMES
