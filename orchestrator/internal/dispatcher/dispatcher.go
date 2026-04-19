@@ -803,6 +803,15 @@ func (d *Dispatcher) GetMetrics() (received, completed, failed, violations, deco
 
 // watchDecompositionTimeout fires DECOMPOSITION_TIMEOUT if task is still DECOMPOSING
 // after DecompositionTimeoutSeconds (§FR-TD-02, §8.5).
+//
+// ChatGPT-style follow-ups reuse the same TaskID across distinct attempts
+// (each attempt gets a fresh OrchestratorTaskRef — see handleUserTask step 2).
+// A completed prior attempt leaves its watcher goroutine still sleeping for
+// the remainder of the 120 s window. When the user sends a follow-up that
+// happens to be in StateDecomposing at the moment the stale timer wakes,
+// a TaskID-only lookup would find the NEW attempt and incorrectly mark it
+// as timed out. The guard below compares the per-attempt
+// OrchestratorTaskRef so each timer can only ever fail its own attempt.
 func (d *Dispatcher) watchDecompositionTimeout(ctx context.Context, ts *types.TaskState) {
 	timeout := time.Duration(d.cfg.DecompositionTimeoutSeconds) * time.Second
 	<-time.After(timeout)
@@ -812,6 +821,12 @@ func (d *Dispatcher) watchDecompositionTimeout(ctx context.Context, ts *types.Ta
 		return // Task already completed or was cleaned up.
 	}
 	current := tsVal.(*types.TaskState)
+	if current.OrchestratorTaskRef != ts.OrchestratorTaskRef {
+		// A follow-up on the same TaskID replaced the attempt this timer
+		// was watching. The new attempt has its own watchDecompositionTimeout
+		// goroutine; this stale timer must not fail it.
+		return
+	}
 	if current.State != types.StateDecomposing {
 		return // Task has moved on (plan received).
 	}
