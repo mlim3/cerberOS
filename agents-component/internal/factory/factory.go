@@ -1374,6 +1374,43 @@ func (f *Factory) fetchPriorTurns(conversationID, traceID string) ([]anthropic.M
 		turns = append(turns, msg)
 	}
 
+	// Defensive sanitization: strip trailing assistant turns that contain
+	// tool_use blocks without a matching tool_result user turn after them.
+	// Anthropic rejects such histories with "tool_use ids were found without
+	// tool_result blocks immediately after". This defends against snapshots
+	// written by older agent-process builds that wrote the snapshot before
+	// appending the final tool_result user turn (see agent-process/loop.go
+	// taskDone path). Once all clients are upgraded this is a no-op.
+	droppedTrailing := 0
+	for len(turns) > 0 {
+		last := turns[len(turns)-1]
+		if last.Role != anthropic.MessageParamRoleAssistant {
+			break
+		}
+		hasToolUse := false
+		for _, b := range last.Content {
+			if b.OfToolUse != nil {
+				hasToolUse = true
+				break
+			}
+		}
+		if !hasToolUse {
+			break
+		}
+		turns = turns[:len(turns)-1]
+		droppedTrailing++
+	}
+	if droppedTrailing > 0 {
+		f.log.Warn("factory: fetchPriorTurns: dropped trailing assistant turns with unmatched tool_use",
+			"conversation_id", conversationID,
+			"dropped_count", droppedTrailing,
+			"trace_id", traceID,
+		)
+	}
+	if len(turns) == 0 {
+		return nil, 0
+	}
+
 	// Token guard: drop oldest turns until the snapshot fits within the
 	// compaction budget. This prevents a long conversation from arriving
 	// already over the 80% threshold before the new Instructions are added.

@@ -13,29 +13,21 @@ interface TaskSidebarProps {
   onCreateTask: () => void
 }
 
-function parseETA(eta: string): number {
-  if (eta === 'Now' || eta === 'Done') return eta === 'Now' ? 0 : Infinity
-  const match = eta.match(/~?(\d+)\s*min/)
-  if (match) return parseInt(match[1], 10)
-  return 999
-}
-
 function TaskSidebar({ tasks, selectedTaskId, onSelectTask, settings, taskHeartbeats, onCreateTask }: TaskSidebarProps) {
-  const [showFinishedOnly, setShowFinishedOnly] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [tick, setTick] = useState(() => Date.now())
 
-  const filteredByToggle = showFinishedOnly
-    ? tasks.filter(t => t.status === 'completed')
-    : tasks.filter(t => t.status !== 'completed')
-
   const searchLower = searchQuery.trim().toLowerCase()
   const filteredTasks = searchLower
-    ? filteredByToggle.filter(t => t.title.toLowerCase().includes(searchLower))
-    : filteredByToggle
+    ? tasks.filter(t => t.title.toLowerCase().includes(searchLower))
+    : tasks
 
   const hasUrgentTasks = tasks.some(t => t.status === 'awaiting_feedback')
 
+  // Single chronological list (ChatGPT-style). Awaiting-feedback tasks float
+  // to the top when the user has opted into that highlight in settings;
+  // otherwise preserve insertion order so the newest task lands at the top
+  // and completed tasks drift down naturally as new ones are created.
   const sortedTasks = [...filteredTasks].sort((a, b) => {
     if (settings.highlightAwaitingFeedback) {
       const priority = { awaiting_feedback: 0, working: 1, completed: 2 }
@@ -43,7 +35,7 @@ function TaskSidebar({ tasks, selectedTaskId, onSelectTask, settings, taskHeartb
       const pB = priority[b.status] ?? 1
       if (pA !== pB) return pA - pB
     }
-    return parseETA(a.expectedNextInput) - parseETA(b.expectedNextInput)
+    return 0
   })
 
   useEffect(() => {
@@ -65,15 +57,6 @@ function TaskSidebar({ tasks, selectedTaskId, onSelectTask, settings, taskHeartb
       </div>
       <div className="sidebar-controls">
         <div className="sidebar-controls-row">
-          <label className="toggle-label">
-            <input
-              type="checkbox"
-              checked={showFinishedOnly}
-              onChange={() => setShowFinishedOnly(!showFinishedOnly)}
-              className="toggle-input"
-            />
-            <span className="toggle-text">Finished only</span>
-          </label>
           <button
             type="button"
             className="new-task-button"

@@ -420,13 +420,28 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 		if taskDone {
 			log.Info("task_complete called", "result_len", len(finalResult))
 			attemptSkillSynthesis(ctx, client, log, spawnCtx, sl, history, toolCallCount)
+
+			// Close the tool_use → tool_result turn pair BEFORE snapshotting so
+			// the persisted history always ends on a well-formed boundary.
+			// Without this the final assistant turn contains tool_use blocks
+			// (task_complete and any sibling parallel tool calls) with no
+			// matching tool_result user turn after them; replaying that
+			// snapshot as prior_turns on the next task in this conversation
+			// is rejected by Anthropic with:
+			//   "tool_use ids were found without tool_result blocks
+			//    immediately after: toolu_…".
+			if len(toolResults) > 0 {
+				history = append(history, anthropic.NewUserMessage(toolResults...))
+			}
+
 			if err := sl.WriteConversationSnapshot(spawnCtx.ConversationID, spawnCtx.TaskID, history, totalTokens); err != nil {
 				log.Warn("conversation snapshot write failed", "error", err, "conversation_id", spawnCtx.ConversationID)
 			}
 			return finalResult, history, nil
 		}
 
-		// Add tool results as the next user turn in history.
+		// Not done yet — add tool results as the next user turn in history
+		// so the next Reason iteration sees them.
 		if len(toolResults) > 0 {
 			history = append(history, anthropic.NewUserMessage(toolResults...))
 		}
