@@ -54,10 +54,14 @@ const (
 	TopicTaskFailed              = "aegis.orchestrator.task.failed"
 	TopicCredentialRequest       = "aegis.orchestrator.credential.request"
 	TopicPlanDecision            = "aegis.orchestrator.plan.decision"
+	TopicAgentStateWrite         = "aegis.orchestrator.state.write"
+	TopicAgentStateReadRequest   = "aegis.orchestrator.state.read.request"
 	TopicAgentTasksInbound       = "aegis.agents.task.inbound"
 	TopicCapabilityQuery         = "aegis.agents.capability.query"
 	TopicAgentTerminate          = "aegis.agents.lifecycle.terminate"
 	TopicTaskCancel              = "aegis.agents.tasks.cancel"
+	TopicAgentStateWriteAck      = "aegis.agents.state.write.ack"
+	TopicAgentStateReadResponse  = "aegis.agents.state.read.response"
 	TopicOrchestratorErrors      = "aegis.orchestrator.errors"
 	TopicAuditEvents             = "aegis.orchestrator.audit.events"
 	TopicMetrics                 = "aegis.orchestrator.metrics"
@@ -113,13 +117,21 @@ type Gateway struct {
 	// pendingCapabilityQueries tracks in-flight capability query requests.
 	// key: query_id, value: chan *types.CapabilityResponse
 	pendingCapabilityQueries sync.Map
+
+	// agentStore is an in-process agent memory store used to bridge
+	// aegis.orchestrator.state.write and aegis.orchestrator.state.read.request
+	// until the full Memory Component integration is wired up.
+	// key: agentID, value: slice of raw MemoryWrite JSON objects.
+	agentStore   map[string][]json.RawMessage
+	agentStoreMu sync.RWMutex
 }
 
 // New creates a new Gateway. Call RegisterHandlers then Start() before use.
 func New(nats interfaces.NATSClient, nodeID string) *Gateway {
 	return &Gateway{
-		nats:   nats,
-		nodeID: nodeID,
+		nats:       nats,
+		nodeID:     nodeID,
+		agentStore: make(map[string][]json.RawMessage),
 	}
 }
 
@@ -182,6 +194,12 @@ func (g *Gateway) Start() error {
 	}
 	if err := g.nats.Subscribe(TopicPlanDecision, g.handleRawPlanDecision); err != nil {
 		return fmt.Errorf("subscribe %s: %w", TopicPlanDecision, err)
+	}
+	if err := g.nats.Subscribe(TopicAgentStateWrite, g.handleRawStateWrite); err != nil {
+		return fmt.Errorf("subscribe %s: %w", TopicAgentStateWrite, err)
+	}
+	if err := g.nats.Subscribe(TopicAgentStateReadRequest, g.handleRawStateReadRequest); err != nil {
+		return fmt.Errorf("subscribe %s: %w", TopicAgentStateReadRequest, err)
 	}
 	observability.LogFromContext(observability.WithModule(context.Background(), "comms_gateway")).
 		Info("gateway started — subscribed to inbound topics", "node_id", g.nodeID)
@@ -413,7 +431,7 @@ func (g *Gateway) handleRawTaskFailed(subject string, data []byte) error {
 	})
 }
 
-/// handleRawCredentialRequest handles aegis.orchestrator.credential.request.
+// / handleRawCredentialRequest handles aegis.orchestrator.credential.request.
 // Vault pre-authorization requests (operation: "authorize"/"revoke") are routed
 // to the Vault via the orchestrator's policy flow — those are NOT forwarded to IO.
 // Requests with operation "user_input" ask the user to supply a secret via IO.
@@ -492,6 +510,117 @@ func (g *Gateway) handleRawPlanDecision(subject string, data []byte) error {
 	return g.planDecisionHandler(ctx, payload)
 }
 
+// ── Agent Memory Bridge ───────────────────────────────────────────────────────
+//
+// handleRawStateWrite receives aegis.orchestrator.state.write messages published
+// by the Agents Component and stores them in the in-process agentStore. For writes
+// with require_ack=true it publishes a state.write.ack back on
+// aegis.agents.state.write.ack. Fire-and-forget writes (require_ack=false) are
+// stored silently.
+func (g *Gateway) handleRawStateWrite(subject string, data []byte) error {
+	envelope, err := validateEnvelope(data)
+	if err != nil {
+		return nil // tolerate malformed writes; don't crash the handler
+	}
+
+	// Keep a copy of the raw payload to return verbatim on reads.
+	raw := json.RawMessage(envelope.Payload)
+
+	// Peek at agentID and require_ack without full deserialization.
+	var peek struct {
+		AgentID    string `json:"agent_id"`
+		RequireAck bool   `json:"require_ack"`
+		RequestID  string `json:"request_id"`
+	}
+	if err := json.Unmarshal(envelope.Payload, &peek); err != nil || peek.AgentID == "" {
+		return nil
+	}
+
+	g.agentStoreMu.Lock()
+	g.agentStore[peek.AgentID] = append(g.agentStore[peek.AgentID], raw)
+	g.agentStoreMu.Unlock()
+
+	if peek.RequireAck {
+		ack := struct {
+			RequestID string `json:"request_id"`
+			AgentID   string `json:"agent_id"`
+			Status    string `json:"status"`
+		}{
+			RequestID: firstNonEmpty(peek.RequestID, envelope.CorrelationID),
+			AgentID:   peek.AgentID,
+			Status:    "accepted",
+		}
+		ctx := extractOrCreateCtx(envelope, "comms_gateway")
+		correlationID := firstNonEmpty(peek.RequestID, envelope.CorrelationID)
+		_ = g.publishEnvelope(ctx, TopicAgentStateWriteAck, "state.write.ack", correlationID, ack)
+	}
+	return nil
+}
+
+// handleRawStateReadRequest receives aegis.orchestrator.state.read.request messages
+// published by the Agents Component, queries the in-process agentStore, and
+// publishes matching records back on aegis.agents.state.read.response.
+func (g *Gateway) handleRawStateReadRequest(subject string, data []byte) error {
+	envelope, err := validateEnvelope(data)
+	if err != nil {
+		return nil
+	}
+
+	var req struct {
+		AgentID    string `json:"agent_id"`
+		DataType   string `json:"data_type"`
+		ContextTag string `json:"context_tag"`
+		TraceID    string `json:"trace_id"`
+	}
+	if err := json.Unmarshal(envelope.Payload, &req); err != nil {
+		return nil
+	}
+
+	traceID := firstNonEmpty(req.TraceID, envelope.CorrelationID)
+
+	g.agentStoreMu.RLock()
+	all := g.agentStore[req.AgentID]
+	g.agentStoreMu.RUnlock()
+
+	// Filter by contextTag (tags["context"]) and DataType if specified.
+	var matched []json.RawMessage
+	for _, rec := range all {
+		var r struct {
+			DataType string            `json:"data_type"`
+			Tags     map[string]string `json:"tags"`
+		}
+		if err := json.Unmarshal(rec, &r); err != nil {
+			continue
+		}
+		if req.DataType != "" && r.DataType != req.DataType {
+			continue
+		}
+		if req.ContextTag != "" {
+			if v, ok := r.Tags["context"]; !ok || v != req.ContextTag {
+				continue
+			}
+		}
+		matched = append(matched, rec)
+	}
+
+	resp := struct {
+		AgentID string            `json:"agent_id"`
+		Records []json.RawMessage `json:"records"`
+		TraceID string            `json:"trace_id"`
+	}{
+		AgentID: req.AgentID,
+		Records: matched,
+		TraceID: traceID,
+	}
+	if resp.Records == nil {
+		resp.Records = []json.RawMessage{} // never send null
+	}
+
+	ctx := extractOrCreateCtx(envelope, "comms_gateway")
+	_ = g.publishEnvelope(ctx, TopicAgentStateReadResponse, "state.read.response", traceID, resp)
+	return nil
+}
+
 // ── Outbound: to User I/O Component ──────────────────────────────────────────
 
 // PublishTaskAccepted notifies User I/O that a task was accepted (§FR-ALC-03).
@@ -526,6 +655,7 @@ func (g *Gateway) PublishTaskSpec(ctx context.Context, spec types.TaskSpec) erro
 		Metadata       map[string]string `json:"metadata,omitempty"`
 		TraceID        string            `json:"trace_id"`
 		UserContextID  string            `json:"user_context_id,omitempty"`
+		ConversationID string            `json:"conversation_id,omitempty"`
 	}{
 		TaskID:         spec.TaskID,
 		RequiredSkills: spec.RequiredSkillDomains,
@@ -533,6 +663,7 @@ func (g *Gateway) PublishTaskSpec(ctx context.Context, spec types.TaskSpec) erro
 		Metadata:       buildAgentMetadata(spec),
 		TraceID:        observability.TraceIDFrom(ctx),
 		UserContextID:  spec.UserContextID,
+		ConversationID: spec.ConversationID,
 	}
 	return g.publishEnvelope(ctx, TopicAgentTasksInbound, "task.inbound", spec.OrchestratorTaskRef, wire)
 }

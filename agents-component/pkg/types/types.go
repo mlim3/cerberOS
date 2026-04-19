@@ -15,6 +15,14 @@ type HeartbeatEvent struct {
 	Timestamp time.Time `json:"timestamp"`
 }
 
+// Model context window and compaction threshold constants. Exported so the
+// factory can apply the token guard when reconstructing prior-turn history
+// without duplicating the values defined in cmd/agent-process/loop.go.
+const (
+	ModelContextWindow = 200_000 // Claude Haiku 4.5 context window size in tokens
+	CompactThreshold   = 0.80    // fraction of ModelContextWindow at which compaction triggers
+)
+
 // TaskSpec is received from the Orchestrator via the Comms Interface.
 type TaskSpec struct {
 	TaskID         string            `json:"task_id"`
@@ -23,6 +31,24 @@ type TaskSpec struct {
 	Metadata       map[string]string `json:"metadata"`
 	TraceID        string            `json:"trace_id"`
 	UserContextID  string            `json:"user_context_id,omitempty"` // echoed in all outbound events
+	ConversationID string            `json:"conversation_id,omitempty"` // empty = standalone task; non-empty = continuation of a prior conversation
+}
+
+// ConversationSnapshot is written by the agent process at task completion when
+// ConversationID is set. It captures the final (already-compacted) conversation
+// history and the token count at that point so the factory can reconstruct and
+// inject prior turns into the next task in the same conversation without an
+// additional LLM compaction call.
+//
+// Written with DataType "conversation_snapshot" and AgentID
+// "conversation:<ConversationID>" — the same synthetic-key convention used by
+// agent_memory and user_profile records.
+type ConversationSnapshot struct {
+	ConversationID string            `json:"conversation_id"`
+	Turns          []json.RawMessage `json:"turns"`        // serialised []anthropic.MessageParam; already compacted
+	TotalTokens    int64             `json:"total_tokens"` // token count at task completion; used by factory for budget guard
+	TaskID         string            `json:"task_id"`      // task that produced this snapshot
+	WrittenAt      time.Time         `json:"written_at"`   // set by WriteConversationSnapshot; used by factory to select the most recent snapshot
 }
 
 // TaskAccepted is published to aegis.orchestrator.task.accepted immediately on

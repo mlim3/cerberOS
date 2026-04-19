@@ -334,9 +334,10 @@ func (e *PlanExecutor) dispatchSubtask(ctx context.Context, exec *planExecution,
 			"subtask_id":     sub.SubtaskID,
 			"action":         st.Action,
 		},
-		CallbackTopic: exec.ts.CallbackTopic,
-		UserContextID: exec.ts.UserContextID,
-		TraceID:       exec.ts.TraceID,
+		CallbackTopic:  exec.ts.CallbackTopic,
+		UserContextID:  exec.ts.UserContextID,
+		ConversationID: exec.ts.ConversationID,
+		TraceID:        exec.ts.TraceID,
 	}
 
 	if err := e.gw.PublishTaskSpec(ctx, spec); err != nil {

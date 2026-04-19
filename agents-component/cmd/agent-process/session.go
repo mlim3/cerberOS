@@ -22,12 +22,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"time"
 
+	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/cerberOS/agents-component/internal/comms"
 	"github.com/cerberOS/agents-component/pkg/types"
-	"log/slog"
-
 	nats "github.com/nats-io/nats.go"
 )
 
@@ -304,6 +304,75 @@ func (sl *SessionLog) publishStateReadRequest(traceID string) error {
 	if _, err := sl.js.Publish(comms.SubjectStateReadRequest, data); err != nil {
 		return fmt.Errorf("publish state.read.request: %w", err)
 	}
+	return nil
+}
+
+// WriteConversationSnapshot persists the final (already-compacted) history
+// slice for the current task to the Memory Component under the synthetic agent
+// ID "conversation:<conversationID>". The factory reads this record at the
+// start of the next task in the same conversation and injects the turns as
+// prior context, enabling multi-turn prompting without a per-spawn LLM call.
+//
+// WriteConversationSnapshot is a no-op when sl is nil or conversationID is empty.
+func (sl *SessionLog) WriteConversationSnapshot(conversationID, taskID string, history []anthropic.MessageParam, totalTokens int64) error {
+	if sl == nil || conversationID == "" {
+		return nil
+	}
+
+	turns := make([]json.RawMessage, 0, len(history))
+	for _, msg := range history {
+		raw, err := json.Marshal(msg)
+		if err != nil {
+			return fmt.Errorf("session log: conversation snapshot: marshal turn: %w", err)
+		}
+		turns = append(turns, raw)
+	}
+
+	snapshot := types.ConversationSnapshot{
+		ConversationID: conversationID,
+		Turns:          turns,
+		TotalTokens:    totalTokens,
+		TaskID:         taskID,
+		WrittenAt:      time.Now().UTC(),
+	}
+	syntheticAgentID := "conversation:" + conversationID
+	mw := types.MemoryWrite{
+		AgentID:   syntheticAgentID,
+		SessionID: taskID,
+		DataType:  "conversation_snapshot",
+		TTLHint:   0,
+		Payload:   snapshot,
+		// "context" must match the contextTag passed to memory.Read() — the
+		// memory client stub and natsClient both filter on Tags["context"].
+		// "conversation_id" is carried as a secondary tag for discoverability.
+		Tags: map[string]string{
+			"context":         "conversation_snapshot",
+			"conversation_id": conversationID,
+		},
+		RequireAck: false,
+	}
+	env := agentEnvelope{
+		MessageID:       newUUID(),
+		MessageType:     comms.MsgTypeStateWrite,
+		SourceComponent: "agents",
+		CorrelationID:   taskID,
+		TraceID:         sl.traceID,
+		Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
+		SchemaVersion:   "1.0",
+		Payload:         mw,
+	}
+	data, err := json.Marshal(env)
+	if err != nil {
+		return fmt.Errorf("session log: conversation snapshot: marshal envelope: %w", err)
+	}
+	if _, err := sl.js.Publish(comms.SubjectStateWrite, data); err != nil {
+		return fmt.Errorf("session log: conversation snapshot: publish: %w", err)
+	}
+	sl.log.Info("session log: conversation snapshot written",
+		"conversation_id", conversationID,
+		"turn_count", len(turns),
+		"total_tokens", totalTokens,
+	)
 	return nil
 }
 

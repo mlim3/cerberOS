@@ -3,10 +3,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/anthropics/anthropic-sdk-go"
+	nats "github.com/nats-io/nats.go"
 
 	"github.com/cerberOS/agents-component/pkg/types"
 )
@@ -261,6 +265,161 @@ func TestSessionLog_NilReceiver_PersistSkill(t *testing.T) {
 	node := &types.SkillNode{Name: "web_fetch", Level: "command"}
 	if err := sl.PersistSkill("web", node); err != nil {
 		t.Errorf("nil receiver PersistSkill: want nil error, got %v", err)
+	}
+}
+
+// ---- WriteConversationSnapshot tests ----
+
+// stubJetStream implements the minimal surface of nats.JetStreamContext needed
+// by WriteConversationSnapshot (only Publish is called).  All other interface
+// methods are provided by the embedded nil nats.JetStreamContext and will panic
+// if accidentally invoked — which is the desired fail-fast behaviour for tests.
+type stubJetStream struct {
+	nats.JetStreamContext
+	published  [][]byte
+	publishErr error
+}
+
+func (s *stubJetStream) Publish(_ string, data []byte, _ ...nats.PubOpt) (*nats.PubAck, error) {
+	if s.publishErr != nil {
+		return nil, s.publishErr
+	}
+	s.published = append(s.published, data)
+	return &nats.PubAck{}, nil
+}
+
+func newSessionLogWithStub(t *testing.T) (*SessionLog, *stubJetStream) {
+	t.Helper()
+	stub := &stubJetStream{}
+	sl := &SessionLog{
+		agentID: "agent-1",
+		taskID:  "task-1",
+		traceID: "trace-1",
+		log:     slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		js:      stub,
+	}
+	return sl, stub
+}
+
+func TestWriteConversationSnapshot_NilReceiver_IsNoop(t *testing.T) {
+	var sl *SessionLog
+	if err := sl.WriteConversationSnapshot("conv-1", "task-1", nil, 0); err != nil {
+		t.Errorf("nil receiver: want nil error, got %v", err)
+	}
+}
+
+func TestWriteConversationSnapshot_EmptyConversationID_IsNoop(t *testing.T) {
+	sl, stub := newSessionLogWithStub(t)
+	if err := sl.WriteConversationSnapshot("", "task-1", nil, 0); err != nil {
+		t.Errorf("empty conversationID: want nil error, got %v", err)
+	}
+	if len(stub.published) != 0 {
+		t.Errorf("empty conversationID: want no publish, got %d", len(stub.published))
+	}
+}
+
+func TestWriteConversationSnapshot_PublishesOneEnvelope(t *testing.T) {
+	sl, stub := newSessionLogWithStub(t)
+	history := []anthropic.MessageParam{
+		anthropic.NewUserMessage(anthropic.NewTextBlock("hello")),
+	}
+	if err := sl.WriteConversationSnapshot("conv-abc", "task-1", history, 500); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(stub.published) != 1 {
+		t.Fatalf("want 1 published message, got %d", len(stub.published))
+	}
+}
+
+func TestWriteConversationSnapshot_SnapshotPayload(t *testing.T) {
+	sl, stub := newSessionLogWithStub(t)
+	history := []anthropic.MessageParam{
+		anthropic.NewUserMessage(anthropic.NewTextBlock("first")),
+		anthropic.NewUserMessage(anthropic.NewTextBlock("second")),
+	}
+	if err := sl.WriteConversationSnapshot("conv-xyz", "task-99", history, 1234); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Decode the published envelope and unwrap the MemoryWrite payload.
+	var env struct {
+		Payload json.RawMessage `json:"payload"`
+	}
+	if err := json.Unmarshal(stub.published[0], &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	var mw types.MemoryWrite
+	if err := json.Unmarshal(env.Payload, &mw); err != nil {
+		t.Fatalf("unmarshal MemoryWrite: %v", err)
+	}
+
+	if mw.AgentID != "conversation:conv-xyz" {
+		t.Errorf("AgentID: want %q, got %q", "conversation:conv-xyz", mw.AgentID)
+	}
+	if mw.DataType != "conversation_snapshot" {
+		t.Errorf("DataType: want %q, got %q", "conversation_snapshot", mw.DataType)
+	}
+	if mw.Tags["context"] != "conversation_snapshot" {
+		t.Errorf("Tags[context]: want %q, got %q", "conversation_snapshot", mw.Tags["context"])
+	}
+	if mw.Tags["conversation_id"] != "conv-xyz" {
+		t.Errorf("Tags[conversation_id]: want %q, got %q", "conv-xyz", mw.Tags["conversation_id"])
+	}
+
+	// Unmarshal the inner ConversationSnapshot from the Payload field.
+	raw, err := json.Marshal(mw.Payload)
+	if err != nil {
+		t.Fatalf("re-marshal payload: %v", err)
+	}
+	var snap types.ConversationSnapshot
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		t.Fatalf("unmarshal ConversationSnapshot: %v", err)
+	}
+	if snap.ConversationID != "conv-xyz" {
+		t.Errorf("ConversationID: want %q, got %q", "conv-xyz", snap.ConversationID)
+	}
+	if snap.TaskID != "task-99" {
+		t.Errorf("TaskID: want %q, got %q", "task-99", snap.TaskID)
+	}
+	if snap.TotalTokens != 1234 {
+		t.Errorf("TotalTokens: want 1234, got %d", snap.TotalTokens)
+	}
+	if len(snap.Turns) != 2 {
+		t.Errorf("Turns: want 2, got %d", len(snap.Turns))
+	}
+	if snap.WrittenAt.IsZero() {
+		t.Error("WrittenAt must be set (non-zero)")
+	}
+}
+
+func TestWriteConversationSnapshot_PublishError_Returned(t *testing.T) {
+	sl, stub := newSessionLogWithStub(t)
+	stub.publishErr = errors.New("nats unavailable")
+	err := sl.WriteConversationSnapshot("conv-1", "task-1", nil, 0)
+	if err == nil {
+		t.Error("publish error must be propagated, got nil")
+	}
+}
+
+func TestWriteConversationSnapshot_EmptyHistory_WritesZeroTurns(t *testing.T) {
+	sl, stub := newSessionLogWithStub(t)
+	if err := sl.WriteConversationSnapshot("conv-1", "task-1", nil, 0); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(stub.published) != 1 {
+		t.Fatalf("want 1 published message, got %d", len(stub.published))
+	}
+	var env struct {
+		Payload json.RawMessage `json:"payload"`
+	}
+	_ = json.Unmarshal(stub.published[0], &env)
+	var mw types.MemoryWrite
+	_ = json.Unmarshal(env.Payload, &mw)
+	raw, _ := json.Marshal(mw.Payload)
+	var snap types.ConversationSnapshot
+	_ = json.Unmarshal(raw, &snap)
+	if len(snap.Turns) != 0 {
+		t.Errorf("empty history: want 0 turns, got %d", len(snap.Turns))
 	}
 }
 

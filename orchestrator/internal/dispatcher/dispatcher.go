@@ -271,6 +271,7 @@ func (d *Dispatcher) HandleInboundTask(ctx context.Context, task types.UserTask)
 		TimeoutAt:            &timeoutAt,
 		CallbackTopic:        task.CallbackTopic,
 		UserContextID:        task.UserContextID,
+		ConversationID:       task.ConversationID,
 		IdempotencyWindow:    idempotencyWindow,
 		Payload:              task.Payload,
 		StateHistory: []types.StateEvent{
@@ -343,6 +344,7 @@ func (d *Dispatcher) HandleInboundTask(ctx context.Context, task types.UserTask)
 		},
 		CallbackTopic:   task.CallbackTopic,
 		UserContextID:   task.UserContextID,
+		ConversationID:  task.ConversationID,
 		ProgressSummary: "Generating execution plan",
 		TraceID:         ts.TraceID,
 	}
