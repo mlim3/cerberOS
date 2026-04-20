@@ -35,6 +35,27 @@ const (
 
 	// maxIterations is a safety cap that prevents infinite loops on misbehaving models.
 	maxIterations = 50
+
+	// maxOutputTokens caps the per-turn Anthropic output.
+	//
+	// Trade-offs considered:
+	//   * Latency: non-streaming responses block the caller for the full
+	//     generation. Haiku 4.5 tops out around ~120 tok/s server-side, so
+	//     16K tokens is ≤ ~2 minutes worst case — within our task deadlines.
+	//   * Cost: output tokens are ~5× input; bounding per-turn output keeps
+	//     a runaway prompt from minting an unreasonable bill.
+	//   * Repetition-loop containment: a hard cap is our last line of
+	//     defence if the model gets stuck.
+	//   * Long-form writing tasks ("expand this business plan", "write a
+	//     detailed itinerary") legitimately need several thousand tokens.
+	//     4K was far too tight for that class of prompt — it truncated
+	//     mid-response and the error surfaced as the confusing
+	//     "Maximum recovery attempts exceeded" message.
+	//
+	// 16K is a deliberate compromise: enough headroom for long-form content
+	// while keeping latency and cost bounded. Going higher (32K/64K) would
+	// need streaming + incremental UI rendering to stay tolerable.
+	maxOutputTokens = 16_384
 )
 
 // pendingToolCall is one tool_use block extracted from an assistant response,
@@ -70,12 +91,20 @@ type toolOutcome struct {
 // When non-nil, applySpecBudget filters tools to those that fit within the
 // ceiling (LRU eviction). Pass nil to disable budget enforcement.
 //
+// priorTurns is the reconstructed conversation history from a previous task in
+// the same conversation. When non-nil the turns are prepended to history before
+// the new Instructions user message, enabling multi-turn conversation continuity.
+// Pass nil for standalone (single-task) usage.
+//
 // opts are forwarded to the Anthropic client constructor after the API key
 // option. Tests use this to inject option.WithBaseURL pointing at a mock server.
-func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *VaultExecutor, steerer *Steerer, as *AgentSpawner, budget *skills.SpecBudget, opts ...option.RequestOption) (string, error) {
+//
+// RunLoop returns the final task result, the final history slice (for the caller
+// to thread through the warm process-reuse loop), and any error.
+func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *VaultExecutor, steerer *Steerer, as *AgentSpawner, budget *skills.SpecBudget, priorTurns []anthropic.MessageParam, opts ...option.RequestOption) (string, []anthropic.MessageParam, error) {
 	apiKey := os.Getenv("ANTHROPIC_API_KEY")
 	if apiKey == "" {
-		return "", fmt.Errorf("ANTHROPIC_API_KEY environment variable is not set")
+		return "", nil, fmt.Errorf("ANTHROPIC_API_KEY environment variable is not set")
 	}
 	clientOpts := append([]option.RequestOption{option.WithAPIKey(apiKey)}, opts...)
 	c := anthropic.NewClient(clientOpts...)
@@ -104,9 +133,12 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 	toolDefs := toolDefinitions(tools)
 	systemPrompt := buildSystemPrompt(spawnCtx.SkillDomain, spawnCtx.CommandManifest, spawnCtx.AgentMemory, spawnCtx.UserProfile)
 
-	history := []anthropic.MessageParam{
-		anthropic.NewUserMessage(anthropic.NewTextBlock(spawnCtx.Instructions)),
-	}
+	// Build conversation history. When priorTurns is non-nil the turns from the
+	// previous task in this conversation are prepended so the LLM sees the full
+	// multi-turn context. The new Instructions user message is always appended last.
+	history := make([]anthropic.MessageParam, 0, len(priorTurns)+1)
+	history = append(history, priorTurns...)
+	history = append(history, anthropic.NewUserMessage(anthropic.NewTextBlock(spawnCtx.Instructions)))
 
 	// Write root user_message entry — parent_entry_id is "" for the tree root.
 	currentParentID := sl.Write(turnTypeUserMessage, spawnCtx.Instructions, "", "")
@@ -160,7 +192,7 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 		// --------------------------------------------------------------------
 		reqParams := anthropic.MessageNewParams{
 			Model:     anthropic.ModelClaudeHaiku4_5,
-			MaxTokens: int64(4096),
+			MaxTokens: int64(maxOutputTokens),
 			System:    []anthropic.TextBlockParam{{Text: systemPrompt}},
 			Tools:     toolDefs,
 			Messages:  history,
@@ -183,7 +215,7 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 			}
 			apiResp, err := client.Messages.New(ctx, reqParams)
 			if err != nil {
-				return "", fmt.Errorf("react iter %d: API call: %w", iter, err)
+				return "", nil, fmt.Errorf("react iter %d: API call: %w", iter, err)
 			}
 			resp = apiResp
 			if llmCache.Enabled() && cacheKey != "" && resp.StopReason == anthropic.StopReasonEndTurn {
@@ -218,14 +250,46 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 			for _, block := range resp.Content {
 				if block.Type == "text" && block.Text != "" {
 					attemptSkillSynthesis(ctx, client, log, spawnCtx, sl, history, toolCallCount)
-					return block.Text, nil
+					// Append the final assistant turn to history before snapshotting
+					// so the next task in this conversation includes the full exchange.
+					history = append(history, resp.ToParam())
+					if err := sl.WriteConversationSnapshot(spawnCtx.ConversationID, spawnCtx.TaskID, history, totalTokens); err != nil {
+						log.Warn("conversation snapshot write failed", "error", err, "conversation_id", spawnCtx.ConversationID)
+					}
+					return block.Text, history, nil
 				}
 			}
-			return "", fmt.Errorf("end_turn received with no text content in response")
+			return "", nil, fmt.Errorf("end_turn received with no text content in response")
+		}
+
+		// max_tokens: the model hit maxOutputTokens mid-generation. Rather
+		// than discarding the partial text and failing the task, return
+		// whatever content was produced with a truncation notice. The next
+		// user turn (a follow-up) can ask the model to continue from here.
+		//
+		// Persist the snapshot the same way as end_turn so the conversation
+		// state stays well-formed for the next task in this conversation.
+		if resp.StopReason == anthropic.StopReasonMaxTokens {
+			for _, block := range resp.Content {
+				if block.Type == "text" && block.Text != "" {
+					log.Warn("response truncated by max_tokens",
+						"max_tokens", maxOutputTokens,
+						"output_tokens", resp.Usage.OutputTokens,
+					)
+					attemptSkillSynthesis(ctx, client, log, spawnCtx, sl, history, toolCallCount)
+					history = append(history, resp.ToParam())
+					if err := sl.WriteConversationSnapshot(spawnCtx.ConversationID, spawnCtx.TaskID, history, totalTokens); err != nil {
+						log.Warn("conversation snapshot write failed", "error", err, "conversation_id", spawnCtx.ConversationID)
+					}
+					const truncationNotice = "\n\n_[Response truncated — output token limit reached. Send a follow-up message to continue.]_"
+					return block.Text + truncationNotice, history, nil
+				}
+			}
+			return "", nil, fmt.Errorf("max_tokens stop with no text content in response")
 		}
 
 		if resp.StopReason != anthropic.StopReasonToolUse {
-			return "", fmt.Errorf("unexpected stop reason: %s", resp.StopReason)
+			return "", nil, fmt.Errorf("unexpected stop reason: %s", resp.StopReason)
 		}
 
 		// Append assistant message to history before processing its tool calls.
@@ -403,10 +467,28 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 		if taskDone {
 			log.Info("task_complete called", "result_len", len(finalResult))
 			attemptSkillSynthesis(ctx, client, log, spawnCtx, sl, history, toolCallCount)
-			return finalResult, nil
+
+			// Close the tool_use → tool_result turn pair BEFORE snapshotting so
+			// the persisted history always ends on a well-formed boundary.
+			// Without this the final assistant turn contains tool_use blocks
+			// (task_complete and any sibling parallel tool calls) with no
+			// matching tool_result user turn after them; replaying that
+			// snapshot as prior_turns on the next task in this conversation
+			// is rejected by Anthropic with:
+			//   "tool_use ids were found without tool_result blocks
+			//    immediately after: toolu_…".
+			if len(toolResults) > 0 {
+				history = append(history, anthropic.NewUserMessage(toolResults...))
+			}
+
+			if err := sl.WriteConversationSnapshot(spawnCtx.ConversationID, spawnCtx.TaskID, history, totalTokens); err != nil {
+				log.Warn("conversation snapshot write failed", "error", err, "conversation_id", spawnCtx.ConversationID)
+			}
+			return finalResult, history, nil
 		}
 
-		// Add tool results as the next user turn in history.
+		// Not done yet — add tool results as the next user turn in history
+		// so the next Reason iteration sees them.
 		if len(toolResults) > 0 {
 			history = append(history, anthropic.NewUserMessage(toolResults...))
 		}
@@ -441,7 +523,7 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 
 			// cancel directive: terminate the task (partial results are acceptable).
 			if capturedDirective.Type == "cancel" {
-				return "", fmt.Errorf("task cancelled by steering directive: %s", capturedDirective.Instructions)
+				return "", nil, fmt.Errorf("task cancelled by steering directive: %s", capturedDirective.Instructions)
 			}
 		}
 
@@ -465,7 +547,7 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 					spawnCtx.TraceID,
 				)
 			}
-			return "", fmt.Errorf("CONTEXT_OVERFLOW: token count %d exceeds %.0f%% of context window",
+			return "", nil, fmt.Errorf("CONTEXT_OVERFLOW: token count %d exceeds %.0f%% of context window",
 				totalTokens, hardAbortThreshold*100)
 		case contextActionCompactPending:
 			log.Info("compaction pending: token threshold reached",
@@ -476,7 +558,7 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 		}
 	}
 
-	return "", fmt.Errorf("max iterations (%d) reached without task completion", maxIterations)
+	return "", nil, fmt.Errorf("max iterations (%d) reached without task completion", maxIterations)
 }
 
 // contextAction enumerates the token-budget decisions made by contextWindowAction.

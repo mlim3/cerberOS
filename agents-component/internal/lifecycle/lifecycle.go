@@ -16,6 +16,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/anthropics/anthropic-sdk-go"
 )
 
 // State represents the runtime state of a managed agent process.
@@ -40,7 +42,9 @@ type VMConfig struct {
 	AgentMemory      string // distilled facts from past tasks in this domain; injected into system prompt
 	UserProfile      string // user preference observations; injected into system prompt
 	TraceID          string
-	UserContextID    string // propagated from TaskSpec; echoed in all outbound events (issue #67)
+	UserContextID    string                   // propagated from TaskSpec; echoed in all outbound events (issue #67)
+	ConversationID   string                   // non-empty when this task continues a prior conversation
+	PriorTurns       []anthropic.MessageParam // reconstructed conversation history from prior task; nil for standalone tasks
 
 	// OnComplete is called by the process manager when the agent process exits.
 	// output holds the raw TaskOutput JSON written to stdout; exitErr is non-nil
@@ -99,16 +103,18 @@ var ErrReuseUnsupported = fmt.Errorf("lifecycle: live-process reuse not supporte
 // stdin at launch. It mirrors cmd/agent-process.SpawnContext; the struct is
 // defined here to avoid importing a main package.
 type agentSpawnContext struct {
-	TaskID           string `json:"task_id"`
-	SkillDomain      string `json:"skill_domain"`
-	PermissionToken  string `json:"permission_token"` // opaque vault reference — never a raw credential
-	Instructions     string `json:"instructions"`
-	CommandManifest  string `json:"command_manifest,omitempty"`  // "- name: description" list; injected into system prompt
-	RecoveredContext string `json:"recovered_context,omitempty"` // non-empty on respawn; contains crash snapshot for checkpoint resume
-	AgentMemory      string `json:"agent_memory,omitempty"`      // distilled facts from past tasks in this domain
-	UserProfile      string `json:"user_profile,omitempty"`      // user preference observations
-	TraceID          string `json:"trace_id"`
-	UserContextID    string `json:"user_context_id,omitempty"` // propagated from TaskSpec; echoed in all child agent events (issue #67)
+	TaskID           string            `json:"task_id"`
+	SkillDomain      string            `json:"skill_domain"`
+	PermissionToken  string            `json:"permission_token"` // opaque vault reference — never a raw credential
+	Instructions     string            `json:"instructions"`
+	CommandManifest  string            `json:"command_manifest,omitempty"`  // "- name: description" list; injected into system prompt
+	RecoveredContext string            `json:"recovered_context,omitempty"` // non-empty on respawn; contains crash snapshot for checkpoint resume
+	AgentMemory      string            `json:"agent_memory,omitempty"`      // distilled facts from past tasks in this domain
+	UserProfile      string            `json:"user_profile,omitempty"`      // user preference observations
+	TraceID          string            `json:"trace_id"`
+	UserContextID    string            `json:"user_context_id,omitempty"` // propagated from TaskSpec; echoed in all child agent events (issue #67)
+	ConversationID   string            `json:"conversation_id,omitempty"` // non-empty when this task continues a prior conversation
+	PriorTurns       []json.RawMessage `json:"prior_turns,omitempty"`     // per-element serialised anthropic.MessageParam; stable across SDK versions
 }
 
 // processEntry tracks a single running agent-process subprocess. The process
@@ -172,6 +178,21 @@ func NewProcess(binaryPath string) Manager {
 // The encoded form is suffixed with a newline so the receiving process, which
 // decodes a stream of JSON objects, can flush cleanly between tasks.
 func encodeSpawnContext(config VMConfig) ([]byte, error) {
+	// Serialise PriorTurns per-element to []json.RawMessage so the wire format
+	// is stable regardless of anthropic SDK struct changes. The receiving process
+	// deserialises directly into []anthropic.MessageParam.
+	var priorTurnsRaw []json.RawMessage
+	if len(config.PriorTurns) > 0 {
+		priorTurnsRaw = make([]json.RawMessage, 0, len(config.PriorTurns))
+		for _, turn := range config.PriorTurns {
+			raw, err := json.Marshal(turn)
+			if err != nil {
+				return nil, fmt.Errorf("lifecycle: marshal prior turn: %w", err)
+			}
+			priorTurnsRaw = append(priorTurnsRaw, raw)
+		}
+	}
+
 	payload, err := json.Marshal(agentSpawnContext{
 		TaskID:           config.TaskID,
 		SkillDomain:      config.SkillDomain,
@@ -183,6 +204,8 @@ func encodeSpawnContext(config VMConfig) ([]byte, error) {
 		UserProfile:      config.UserProfile,
 		TraceID:          config.TraceID,
 		UserContextID:    config.UserContextID,
+		ConversationID:   config.ConversationID,
+		PriorTurns:       priorTurnsRaw,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("lifecycle: marshal spawn context: %w", err)

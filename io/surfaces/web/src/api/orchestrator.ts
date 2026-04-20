@@ -187,6 +187,11 @@ export async function* streamOrchestratorReply(
       taskId,
       content: userContent,
       conversationHistory,
+      // The task ID is stable across all follow-up messages in the same chat
+      // window, making it the natural conversation identifier.  The IO API uses
+      // this to suppress text-based history injection and instead lets the agent
+      // fetch its ConversationSnapshot from memory for native multi-turn context.
+      conversationId: taskId,
     }),
   })
 

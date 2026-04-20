@@ -4,10 +4,14 @@ package factory
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"os"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/anthropics/anthropic-sdk-go"
 
 	"github.com/cerberOS/agents-component/internal/comms"
 	"github.com/cerberOS/agents-component/internal/credentials"
@@ -422,6 +426,157 @@ func TestLoadSynthesizedSkills_MemoryReadError_ReturnedAsError(t *testing.T) {
 	err := f.LoadSynthesizedSkills(context.Background())
 	if err == nil {
 		t.Error("read error must be propagated as an error")
+	}
+}
+
+// ─── fetchPriorTurns ──────────────────────────────────────────────────────────
+
+// writeConversationSnapshot seeds the in-process memory stub with a
+// ConversationSnapshot record, mirroring what WriteConversationSnapshot writes.
+func writeConversationSnapshot(t *testing.T, mem memory.Client, snap types.ConversationSnapshot) {
+	t.Helper()
+	if err := mem.Write(&types.MemoryWrite{
+		AgentID:  "conversation:" + snap.ConversationID,
+		DataType: "conversation_snapshot",
+		Payload:  snap,
+		Tags: map[string]string{
+			"context":         "conversation_snapshot",
+			"conversation_id": snap.ConversationID,
+		},
+	}); err != nil {
+		t.Fatalf("writeConversationSnapshot: %v", err)
+	}
+}
+
+// marshalTurns builds a []json.RawMessage from a slice of user messages.
+func marshalTurns(t *testing.T, contents []string) []json.RawMessage {
+	t.Helper()
+	out := make([]json.RawMessage, 0, len(contents))
+	for _, c := range contents {
+		msg := anthropic.NewUserMessage(anthropic.NewTextBlock(c))
+		raw, err := json.Marshal(msg)
+		if err != nil {
+			t.Fatalf("marshalTurns: %v", err)
+		}
+		out = append(out, raw)
+	}
+	return out
+}
+
+func TestFetchPriorTurns_EmptyConversationID_ReturnsNil(t *testing.T) {
+	f := newTestFactory(t, nil, nil)
+	turns, tokens := f.fetchPriorTurns("", "trace-1")
+	if turns != nil || tokens != 0 {
+		t.Errorf("empty conversationID: want nil, 0; got %v, %d", turns, tokens)
+	}
+}
+
+func TestFetchPriorTurns_NoRecords_ReturnsNil(t *testing.T) {
+	f := newTestFactory(t, nil, nil)
+	turns, tokens := f.fetchPriorTurns("conv-unknown", "trace-1")
+	if turns != nil || tokens != 0 {
+		t.Errorf("no records: want nil, 0; got %v, %d", turns, tokens)
+	}
+}
+
+func TestFetchPriorTurns_ValidSnapshot_ReturnsTurns(t *testing.T) {
+	mem := memory.New()
+	snap := types.ConversationSnapshot{
+		ConversationID: "conv-1",
+		Turns:          marshalTurns(t, []string{"hello", "world"}),
+		TotalTokens:    400,
+		TaskID:         "task-1",
+		WrittenAt:      time.Now(),
+	}
+	writeConversationSnapshot(t, mem, snap)
+	f := newTestFactory(t, mem, nil)
+
+	turns, tokens := f.fetchPriorTurns("conv-1", "trace-1")
+	if len(turns) != 2 {
+		t.Errorf("want 2 turns, got %d", len(turns))
+	}
+	if tokens != 400 {
+		t.Errorf("want 400 tokens, got %d", tokens)
+	}
+}
+
+func TestFetchPriorTurns_MultipleSnapshots_ReturnsMostRecent(t *testing.T) {
+	mem := memory.New()
+
+	older := types.ConversationSnapshot{
+		ConversationID: "conv-2",
+		Turns:          marshalTurns(t, []string{"old-turn"}),
+		TotalTokens:    100,
+		TaskID:         "task-old",
+		WrittenAt:      time.Now().Add(-10 * time.Minute),
+	}
+	newer := types.ConversationSnapshot{
+		ConversationID: "conv-2",
+		Turns:          marshalTurns(t, []string{"new-turn-a", "new-turn-b"}),
+		TotalTokens:    200,
+		TaskID:         "task-new",
+		WrittenAt:      time.Now(),
+	}
+	// Seed in reverse order to confirm sorting by WrittenAt, not insertion order.
+	writeConversationSnapshot(t, mem, newer)
+	writeConversationSnapshot(t, mem, older)
+	f := newTestFactory(t, mem, nil)
+
+	turns, tokens := f.fetchPriorTurns("conv-2", "trace-1")
+	if len(turns) != 2 {
+		t.Errorf("want 2 turns from newer snapshot, got %d", len(turns))
+	}
+	if tokens != 200 {
+		t.Errorf("want 200 tokens from newer snapshot, got %d", tokens)
+	}
+}
+
+func TestFetchPriorTurns_TokenGuard_DropsOldestTurns(t *testing.T) {
+	mem := memory.New()
+	// 6 turns, token count set above the 80% budget so the guard must drop some.
+	budget := int64(float64(types.ModelContextWindow) * types.CompactThreshold)
+	snap := types.ConversationSnapshot{
+		ConversationID: "conv-3",
+		Turns:          marshalTurns(t, []string{"t1", "t2", "t3", "t4", "t5", "t6"}),
+		TotalTokens:    budget + 10_000, // deliberately over-budget
+		TaskID:         "task-1",
+		WrittenAt:      time.Now(),
+	}
+	writeConversationSnapshot(t, mem, snap)
+	f := newTestFactory(t, mem, nil)
+
+	turns, _ := f.fetchPriorTurns("conv-3", "trace-1")
+	if len(turns) >= 6 {
+		t.Errorf("token guard must drop oldest turns; want < 6, got %d", len(turns))
+	}
+	if len(turns) == 0 {
+		t.Error("token guard must keep at least one turn")
+	}
+}
+
+func TestFetchPriorTurns_ConversationIsolation(t *testing.T) {
+	mem := memory.New()
+	writeConversationSnapshot(t, mem, types.ConversationSnapshot{
+		ConversationID: "conv-a",
+		Turns:          marshalTurns(t, []string{"conv-a-turn"}),
+		TotalTokens:    100,
+		WrittenAt:      time.Now(),
+	})
+	writeConversationSnapshot(t, mem, types.ConversationSnapshot{
+		ConversationID: "conv-b",
+		Turns:          marshalTurns(t, []string{"conv-b-turn-1", "conv-b-turn-2"}),
+		TotalTokens:    200,
+		WrittenAt:      time.Now(),
+	})
+	f := newTestFactory(t, mem, nil)
+
+	turnsA, _ := f.fetchPriorTurns("conv-a", "trace-1")
+	if len(turnsA) != 1 {
+		t.Errorf("conv-a: want 1 turn, got %d", len(turnsA))
+	}
+	turnsB, _ := f.fetchPriorTurns("conv-b", "trace-1")
+	if len(turnsB) != 2 {
+		t.Errorf("conv-b: want 2 turns, got %d", len(turnsB))
 	}
 }
 

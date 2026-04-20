@@ -288,7 +288,7 @@ func TestLoop_CancelDirectiveTerminatesTask(t *testing.T) {
 		Instructions: "transform data and complete",
 	}
 
-	_, err := RunLoop(ctx, log, spawnCtx, nil, steerer, nil, nil, option.WithBaseURL(srv.URL))
+	_, _, err := RunLoop(ctx, log, spawnCtx, nil, steerer, nil, nil, nil, option.WithBaseURL(srv.URL))
 	if err == nil {
 		t.Fatal("expected RunLoop to return error on cancel directive, got nil")
 	}
@@ -370,7 +370,7 @@ func TestLoop_RedirectDirectiveInjectedIntoHistory(t *testing.T) {
 		Instructions: "transform data and complete",
 	}
 
-	result, err := RunLoop(ctx, log, spawnCtx, nil, steerer, nil, nil, option.WithBaseURL(srv.URL))
+	result, _, err := RunLoop(ctx, log, spawnCtx, nil, steerer, nil, nil, nil, option.WithBaseURL(srv.URL))
 	if err != nil {
 		t.Fatalf("RunLoop returned unexpected error: %v", err)
 	}

@@ -535,7 +535,7 @@ app.post('/api/orchestrator/plan-decision', async (c) => {
 // Send a message (returns streaming response)
 app.post('/api/chat', async (c) => {
   const body = (await c.req.json()) as SendMessageRequest;
-  const { taskId, content, conversationHistory } = body;
+  const { taskId, content, conversationHistory, conversationId } = body;
   const traceId = c.get('traceId') as string | undefined;
   logFromContext(c, 'info', 'http', 'POST /api/chat', {
     task_id: taskId,
@@ -578,8 +578,12 @@ app.post('/api/chat', async (c) => {
   // Publish user message to orchestrator via NATS
   if (useRealOrchestrator) {
     try {
-      const rawInput = buildRawInputWithHistory(content, conversationHistory)
-      const isFollowUp = rawInput !== content
+      // When conversationId is set the agent fetches prior turns natively from
+      // its ConversationSnapshot; skip text injection to avoid double-context.
+      const rawInput = conversationId
+        ? content
+        : buildRawInputWithHistory(content, conversationHistory)
+      const isFollowUp = !conversationId && rawInput !== content
       await natsClient!.publishUserTask({
         task_id: taskId,
         user_id: userId,
@@ -587,11 +591,13 @@ app.post('/api/chat', async (c) => {
         payload: { raw_input: rawInput },
         callback_topic: callbackTopicForTask(taskId),
         trace_id: traceId,
+        conversation_id: conversationId,
       })
       awaitingOrchestratorChat = true
       logFromContext(c, 'info', 'nats', 'published user_task', {
         task_id: taskId,
         is_follow_up: isFollowUp,
+        has_conversation_id: !!conversationId,
         history_turns: conversationHistory?.length ?? 0,
         raw_input_len: rawInput.length,
       })

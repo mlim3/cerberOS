@@ -80,6 +80,10 @@ export interface SendMessageRequest {
   taskId: string;
   content: string;
   conversationHistory?: ConversationHistoryItem[];
+  /** Stable ID linking follow-up messages in the same conversation. When present,
+   *  the agent fetches its ConversationSnapshot from memory and injects prior turns
+   *  natively — buildRawInputWithHistory is suppressed to avoid double-injection. */
+  conversationId?: string;
 }
 
 // ============================================
