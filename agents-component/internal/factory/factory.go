@@ -1334,7 +1334,7 @@ func (f *Factory) fetchPriorTurns(conversationID, traceID string) ([]anthropic.M
 	if conversationID == "" {
 		return nil, 0
 	}
-	records, err := f.memory.Read("conversation:"+conversationID, "conversation_snapshot")
+	records, err := f.memory.Read("conversation:"+conversationID, "conversation_snapshot", traceID)
 	if err != nil || len(records) == 0 {
 		if err != nil {
 			f.log.Warn("factory: fetchPriorTurns failed", "conversation_id", conversationID, "error", err, "trace_id", traceID)
