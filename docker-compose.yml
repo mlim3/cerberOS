@@ -62,6 +62,12 @@ services:
       VAULT_ADDR: http://openbao:8200
       MEMORY_ENDPOINT: http://memory-api:8081
       IO_API_BASE: http://io:3001
+      # Planner task timeout. The FIRST planner task on a fresh aegis-agents
+      # process pays full cold start (Vault pre-authorize + process fork +
+      # agent-process init + cold TLS handshake to Anthropic ≈ 30–90s) and
+      # needs 120s of headroom. Subsequent planner tasks reuse the warm
+      # agent-process via lifecycle.Deliver (see aegis-agents comments) and
+      # typically complete in 2–10s; the high ceiling is harmless on those.
       DECOMPOSITION_TIMEOUT_SECONDS: "120"
       # Observability: gRPC OTLP ingest into Tempo, structured JSON logs scraped by Promtail → Loki.
       OTEL_EXPORTER_OTLP_ENDPOINT: tempo:4317
@@ -144,6 +150,9 @@ services:
       PORT: "8081"
       VAULT_MASTER_KEY: ${VAULT_MASTER_KEY:?Set VAULT_MASTER_KEY in .env (exactly 32 ASCII chars)}
       INTERNAL_VAULT_API_KEY: ${INTERNAL_VAULT_API_KEY:?Set INTERNAL_VAULT_API_KEY in .env}
+      # Observability: OTLP HTTP trace export to Tempo (same pattern as io-api).
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
+      OTEL_SERVICE_NAME: memory-api
     ports:
       - "8081:8081"
     restart: unless-stopped
@@ -202,10 +211,10 @@ services:
       AEGIS_NATS_HTTP_URL: http://nats-1:8222
       AEGIS_NATS_REPLICAS: "1"
       AEGIS_ORCHESTRATOR_URL: http://orchestrator:8080
-      # Route DataBus → Orchestrator → Memory (Option 1 in aegis-databus/docs/DESIGN.md).
-      # Setting AEGIS_MEMORY_URL would use the direct-Memory path, but memory-api exposes
-      # /api/v1/... not /v1/memory/outbox|ping|audit|processed — causing DEGRADED-HOLD.
-      # AEGIS_MEMORY_URL: http://memory-api:8081/v1/memory
+      AEGIS_MEMORY_URL: http://memory-api:8081/v1/memory
+      # Observability: OTLP HTTP export (databus uses otlptracehttp in pkg/telemetry).
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
+      OTEL_SERVICE_NAME: aegis-databus
     ports:
       - "9091:9091"
     healthcheck:
@@ -319,6 +328,9 @@ services:
         condition: service_healthy
     environment:
       AEGIS_NATS_URL: nats://nats:4222
+      # Observability: OTLP HTTP trace export (safe no-op if not using tracing here).
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
+      OTEL_SERVICE_NAME: aegis-simulator
     restart: unless-stopped
     networks:
       - cerberos
@@ -335,6 +347,28 @@ services:
       AEGIS_NATS_URL: nats://nats:4222
       AEGIS_AGENT_PROCESS_PATH: /app/agent-process
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Concurrency cap for inbound task dispatch. Without parallel workers,
+      # JetStream delivers task.inbound serially and each HandleTaskSpec
+      # (Firecracker provision) blocks subsequent tasks — two back-to-back
+      # user tasks then hit the overall timeout.
+      AEGIS_AGENTS_MAX_CONCURRENT_TASKS: "8"
+      # Live-process reuse (cold-start-tax elimination). The factory's
+      # CompleteTask leaves the agent-process alive and the registry entry in
+      # IDLE when this timeout is > 0; the next matching task enters the warm
+      # Priority 1 path in HandleTaskSpec and calls lifecycle.Deliver to hand
+      # the running process a fresh SpawnContext — skipping Vault
+      # pre-authorize + process fork + agent-process boot. A live process that
+      # stays idle past AEGIS_IDLE_SUSPEND_TIMEOUT is SUSPENDED by the idle
+      # sweep (OQ-03): the process is torn down and the registry entry is
+      # parked so the next task pays only a warm-VM respawn, not a full
+      # provision. Safe only because the process-manager lifecycle's
+      # Manager.Deliver is implemented; Firecracker still reports
+      # SupportsReuse=false and the factory auto-falls-back to Spawn.
+      AEGIS_IDLE_SUSPEND_TIMEOUT: "10m"
+      # Observability: OTLP HTTP export continues the trace from Orchestrator
+      # via TaskSpec.TraceID. Disabled automatically when endpoint is unset.
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
+      OTEL_SERVICE_NAME: aegis-agents
     ports:
       - "9190:9090"
     restart: unless-stopped

@@ -53,6 +53,7 @@ const (
 	TopicTaskResult              = "aegis.orchestrator.task.result"
 	TopicTaskFailed              = "aegis.orchestrator.task.failed"
 	TopicCredentialRequest       = "aegis.orchestrator.credential.request"
+	TopicPlanDecision            = "aegis.orchestrator.plan.decision"
 	TopicAgentTasksInbound       = "aegis.agents.task.inbound"
 	TopicCapabilityQuery         = "aegis.agents.capability.query"
 	TopicAgentTerminate          = "aegis.agents.lifecycle.terminate"
@@ -92,6 +93,10 @@ type TaskResultHandler func(ctx context.Context, result types.TaskResult) error
 // forward the request to the IO Component.
 type CredentialRequestHandler func(agentID, taskID, requestID, keyName, label, traceID string) error
 
+// PlanDecisionHandler is called when User I/O forwards the user's approve/reject
+// decision for a proposed execution plan. Registered by main.go → Dispatcher.
+type PlanDecisionHandler func(ctx context.Context, decision types.PlanDecision) error
+
 // ── Gateway ───────────────────────────────────────────────────────────────────
 
 // Gateway is M1: Communications Gateway.
@@ -103,6 +108,7 @@ type Gateway struct {
 	agentStatusHandler       AgentStatusHandler
 	taskResultHandler        TaskResultHandler
 	credentialRequestHandler CredentialRequestHandler
+	planDecisionHandler      PlanDecisionHandler
 
 	// pendingCapabilityQueries tracks in-flight capability query requests.
 	// key: query_id, value: chan *types.CapabilityResponse
@@ -142,6 +148,14 @@ func (g *Gateway) RegisterCredentialRequestHandler(h CredentialRequestHandler) {
 	g.credentialRequestHandler = h
 }
 
+// RegisterPlanDecisionHandler registers the callback for user approve/reject
+// decisions on a proposed execution plan. Optional — if unset, incoming
+// decisions are logged and dropped, and plan execution proceeds (or doesn't)
+// based on the orchestrator's approval-timeout path.
+func (g *Gateway) RegisterPlanDecisionHandler(h PlanDecisionHandler) {
+	g.planDecisionHandler = h
+}
+
 // Start subscribes to all inbound NATS topics and begins message processing.
 // Must be called after all handlers are registered.
 func (g *Gateway) Start() error {
@@ -165,6 +179,9 @@ func (g *Gateway) Start() error {
 	}
 	if err := g.nats.Subscribe(TopicCredentialRequest, g.handleRawCredentialRequest); err != nil {
 		return fmt.Errorf("subscribe %s: %w", TopicCredentialRequest, err)
+	}
+	if err := g.nats.Subscribe(TopicPlanDecision, g.handleRawPlanDecision); err != nil {
+		return fmt.Errorf("subscribe %s: %w", TopicPlanDecision, err)
 	}
 	observability.LogFromContext(observability.WithModule(context.Background(), "comms_gateway")).
 		Info("gateway started — subscribed to inbound topics", "node_id", g.nodeID)
@@ -437,6 +454,43 @@ func (g *Gateway) handleRawCredentialRequest(subject string, data []byte) error 
 		payload.AgentID, payload.TaskID, payload.RequestID, payload.KeyName, payload.Label,
 		envelope.TraceID,
 	)
+}
+
+// handleRawPlanDecision handles aegis.orchestrator.plan.decision. User I/O
+// publishes these when the user clicks Approve or Reject on a plan preview.
+func (g *Gateway) handleRawPlanDecision(subject string, data []byte) error {
+	envelope, err := validateEnvelope(data)
+	if err != nil {
+		observability.LogFromContext(observability.WithModule(context.Background(), "comms_gateway")).
+			Warn("rejected malformed plan_decision envelope", "error", err)
+		return err
+	}
+
+	var payload types.PlanDecision
+	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
+		return fmt.Errorf("deserialize plan.decision: %w", err)
+	}
+	// Fallback: correlation_id carries the orchestrator_task_ref on most
+	// outbound envelopes we emit; accept it as a default if the payload
+	// omits the field so IO clients have some leeway.
+	if payload.OrchestratorTaskRef == "" {
+		payload.OrchestratorTaskRef = envelope.CorrelationID
+	}
+
+	ctx := extractOrCreateCtx(envelope, "task_dispatcher")
+	if payload.TaskID != "" {
+		ctx = observability.WithTaskID(ctx, payload.TaskID)
+	}
+	observability.LogFromContext(ctx).Info("plan_decision received",
+		"task_id", payload.TaskID,
+		"approved", payload.Approved,
+	)
+
+	if g.planDecisionHandler == nil {
+		observability.LogFromContext(ctx).Warn("plan_decision received but no handler registered")
+		return nil
+	}
+	return g.planDecisionHandler(ctx, payload)
 }
 
 // ── Outbound: to User I/O Component ──────────────────────────────────────────

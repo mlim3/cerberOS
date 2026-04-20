@@ -7,9 +7,10 @@
 package lifecycle
 
 import (
-	"bytes"
+	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"sync"
@@ -66,7 +67,31 @@ type Manager interface {
 
 	// Health returns the current health status of the agent process.
 	Health(agentID string) (HealthStatus, error)
+
+	// Deliver hands a fresh SpawnContext to an already-running agent process,
+	// enabling live-process reuse so subsequent tasks on the same agent skip
+	// the Vault pre-authorize + fork + agent-process boot cold-start tax.
+	//
+	// Implementations that do not support reuse (Firecracker) must return
+	// ErrReuseUnsupported. Callers are expected to fall back to Spawn in that
+	// case.
+	//
+	// On success the caller's previous VMConfig.OnComplete is replaced by
+	// config.OnComplete; the next TaskOutput produced by the agent process
+	// will fire config.OnComplete with the decoded JSON line.
+	Deliver(agentID string, config VMConfig) error
+
+	// SupportsReuse reports whether Deliver is expected to succeed on this
+	// manager. It is a cheap capability probe callers can use to decide
+	// between the reuse-enabled flow (Priority 1 IDLE reuse) and the classic
+	// provision-per-task flow. Implementations must return a stable value for
+	// the lifetime of the manager.
+	SupportsReuse() bool
 }
+
+// ErrReuseUnsupported is returned by Manager.Deliver implementations that do
+// not support live-process reuse (firecracker manager, in-process stub).
+var ErrReuseUnsupported = fmt.Errorf("lifecycle: live-process reuse not supported by this manager")
 
 // ─── Process manager (M2 implementation) ────────────────────────────────────
 
@@ -86,12 +111,37 @@ type agentSpawnContext struct {
 	UserContextID    string `json:"user_context_id,omitempty"` // propagated from TaskSpec; echoed in all child agent events (issue #67)
 }
 
-// processEntry tracks a single running agent-process subprocess.
+// processEntry tracks a single running agent-process subprocess. The process
+// is long-lived: each task is delivered as a JSON SpawnContext on stdin and
+// each TaskOutput is consumed as a newline-delimited JSON object on stdout.
+// One processEntry therefore corresponds to many task completions, not one.
 type processEntry struct {
 	cmd     *exec.Cmd
-	stdout  bytes.Buffer  // captures TaskOutput JSON from stdout; read by factory on exit
-	done    chan struct{} // closed when the process has exited
-	exitErr error         // non-nil if the process exited with an error
+	stdin   io.WriteCloser // write side of the persistent stdin pipe
+	done    chan struct{}  // closed when the process has exited
+	exitErr error          // non-nil if the process exited with an error
+
+	mu              sync.Mutex
+	pendingComplete func(agentID string, output []byte, exitErr error)
+}
+
+// setPending swaps the callback invoked on the next TaskOutput line. Returns
+// the previous callback so callers can detect a lost completion signal.
+func (e *processEntry) setPending(cb func(string, []byte, error)) func(string, []byte, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	prev := e.pendingComplete
+	e.pendingComplete = cb
+	return prev
+}
+
+// consumePending returns and clears the current pending callback atomically.
+func (e *processEntry) consumePending() func(string, []byte, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	cb := e.pendingComplete
+	e.pendingComplete = nil
+	return cb
 }
 
 // processManager launches a real agent-process binary for each agent.
@@ -107,6 +157,10 @@ type processManager struct {
 //
 // The spawned process inherits the parent's environment so that
 // ANTHROPIC_API_KEY and any other required variables are available.
+//
+// The stdin pipe is kept open after launch so the Lifecycle Manager can deliver
+// subsequent SpawnContexts to the same process on IDLE-agent reuse. The process
+// terminates cleanly when Terminate closes stdin or when the caller signals it.
 func NewProcess(binaryPath string) Manager {
 	return &processManager{
 		binaryPath: binaryPath,
@@ -114,11 +168,10 @@ func NewProcess(binaryPath string) Manager {
 	}
 }
 
-func (m *processManager) Spawn(config VMConfig) error {
-	if config.AgentID == "" {
-		return fmt.Errorf("lifecycle: AgentID must not be empty")
-	}
-
+// encodeSpawnContext serialises a VMConfig into the agent-process wire format.
+// The encoded form is suffixed with a newline so the receiving process, which
+// decodes a stream of JSON objects, can flush cleanly between tasks.
+func encodeSpawnContext(config VMConfig) ([]byte, error) {
 	payload, err := json.Marshal(agentSpawnContext{
 		TaskID:           config.TaskID,
 		SkillDomain:      config.SkillDomain,
@@ -132,7 +185,19 @@ func (m *processManager) Spawn(config VMConfig) error {
 		UserContextID:    config.UserContextID,
 	})
 	if err != nil {
-		return fmt.Errorf("lifecycle: marshal spawn context: %w", err)
+		return nil, fmt.Errorf("lifecycle: marshal spawn context: %w", err)
+	}
+	return append(payload, '\n'), nil
+}
+
+func (m *processManager) Spawn(config VMConfig) error {
+	if config.AgentID == "" {
+		return fmt.Errorf("lifecycle: AgentID must not be empty")
+	}
+
+	payload, err := encodeSpawnContext(config)
+	if err != nil {
+		return err
 	}
 
 	m.mu.Lock()
@@ -142,12 +207,19 @@ func (m *processManager) Spawn(config VMConfig) error {
 		return fmt.Errorf("lifecycle: process for agent %q is already running", config.AgentID)
 	}
 
-	entry := &processEntry{done: make(chan struct{})}
-
 	cmd := exec.Command(m.binaryPath) //nolint:gosec // path comes from operator config
-	cmd.Stdin = bytes.NewReader(payload)
-	cmd.Stdout = &entry.stdout
+
+	stdinPipe, err := cmd.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("lifecycle: open stdin pipe: %w", err)
+	}
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		_ = stdinPipe.Close()
+		return fmt.Errorf("lifecycle: open stdout pipe: %w", err)
+	}
 	cmd.Stderr = os.Stderr // agent logs flow to parent stderr
+
 	// Inherit parent env (for ANTHROPIC_API_KEY etc.) then overlay agent-specific
 	// variables so the agent process can identify itself and publish heartbeats.
 	cmd.Env = append(os.Environ(),
@@ -157,20 +229,90 @@ func (m *processManager) Spawn(config VMConfig) error {
 	)
 
 	if err := cmd.Start(); err != nil {
+		_ = stdinPipe.Close()
+		_ = stdoutPipe.Close()
 		return fmt.Errorf("lifecycle: start agent process: %w", err)
 	}
 
-	entry.cmd = cmd
+	entry := &processEntry{
+		cmd:             cmd,
+		stdin:           stdinPipe,
+		done:            make(chan struct{}),
+		pendingComplete: config.OnComplete,
+	}
 	m.procs[config.AgentID] = entry
 
+	// Stdout reader: one newline-delimited JSON object per task completion.
+	// We fire the current pending callback for each line; callers swap the
+	// callback via Deliver before pushing a new SpawnContext.
 	go func() {
-		entry.exitErr = cmd.Wait()
-		close(entry.done)
-		if config.OnComplete != nil {
-			config.OnComplete(config.AgentID, entry.stdout.Bytes(), entry.exitErr)
+		scanner := bufio.NewScanner(stdoutPipe)
+		// Allow large JSON outputs — the default bufio.MaxScanTokenSize (64 KiB)
+		// is too tight for multi-step planner results with full argument lists.
+		scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+		for scanner.Scan() {
+			line := append([]byte(nil), scanner.Bytes()...)
+			if cb := entry.consumePending(); cb != nil {
+				cb(config.AgentID, line, nil)
+			}
+			// If no callback was pending we drop the line. This should not
+			// happen in normal operation because Deliver always sets a fresh
+			// pending callback before writing a new SpawnContext.
 		}
 	}()
 
+	// Wait watcher: fires the still-pending callback (if any) with the exit
+	// error so an unexpected process death does not leave the caller waiting
+	// indefinitely.
+	go func() {
+		entry.exitErr = cmd.Wait()
+		close(entry.done)
+		if cb := entry.consumePending(); cb != nil {
+			cb(config.AgentID, nil, entry.exitErr)
+		}
+	}()
+
+	if _, err := entry.stdin.Write(payload); err != nil {
+		_ = m.Terminate(config.AgentID)
+		return fmt.Errorf("lifecycle: write initial spawn context: %w", err)
+	}
+
+	return nil
+}
+
+func (m *processManager) Deliver(agentID string, config VMConfig) error {
+	m.mu.RLock()
+	entry, ok := m.procs[agentID]
+	m.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("lifecycle: no process found for agent %q", agentID)
+	}
+	select {
+	case <-entry.done:
+		return fmt.Errorf("lifecycle: agent %q process has exited", agentID)
+	default:
+	}
+
+	payload, err := encodeSpawnContext(config)
+	if err != nil {
+		return err
+	}
+
+	// Install the new completion callback *before* writing the payload so the
+	// stdout reader sees it in place when the agent emits its TaskOutput.
+	if prev := entry.setPending(config.OnComplete); prev != nil {
+		// A previous task's completion callback was never invoked — this
+		// indicates a logic bug (Deliver called before the prior task finished).
+		// Returning an error keeps the runtime honest; the previous callback is
+		// left un-invoked because we cannot fabricate an output for it.
+		entry.setPending(prev)
+		return fmt.Errorf("lifecycle: agent %q has a pending task completion; refusing to deliver", agentID)
+	}
+	if _, err := entry.stdin.Write(payload); err != nil {
+		// On write failure, clear the callback so a Deliver retry is possible.
+		entry.consumePending()
+		return fmt.Errorf("lifecycle: write spawn context: %w", err)
+	}
 	return nil
 }
 
@@ -188,7 +330,15 @@ func (m *processManager) Terminate(agentID string) error {
 		return nil
 	}
 
-	// Attempt graceful shutdown; escalate to SIGKILL after 5 s.
+	// Closing stdin signals the agent-process loop to exit cleanly after the
+	// current task (if any) completes. Fall back to SIGTERM/SIGKILL if it does
+	// not exit within the deadline.
+	_ = entry.stdin.Close()
+	select {
+	case <-entry.done:
+		return nil
+	case <-time.After(5 * time.Second):
+	}
 	if err := entry.cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		_ = entry.cmd.Process.Kill()
 		return nil
@@ -216,6 +366,8 @@ func (m *processManager) Health(agentID string) (HealthStatus, error) {
 		return HealthStatus{AgentID: agentID, State: StateRunning}, nil
 	}
 }
+
+func (m *processManager) SupportsReuse() bool { return true }
 
 // ─── Stub manager (used in unit tests that do not need a real binary) ────────
 
@@ -270,3 +422,31 @@ func (m *stubManager) Health(agentID string) (HealthStatus, error) {
 	}
 	return HealthStatus{AgentID: agentID, State: state}, nil
 }
+
+// Deliver on the stub manager emulates a successful task completion by
+// invoking the supplied OnComplete with a synthesised TaskOutput envelope.
+// This keeps factory-level reuse tests realistic without spinning up a real
+// agent binary.
+func (m *stubManager) Deliver(agentID string, config VMConfig) error {
+	m.mu.RLock()
+	state, ok := m.vms[agentID]
+	m.mu.RUnlock()
+	if !ok || state != StateRunning {
+		return fmt.Errorf("lifecycle: no running process for agent %q", agentID)
+	}
+	if config.OnComplete != nil {
+		out, _ := json.Marshal(map[string]any{
+			"task_id":  config.TaskID,
+			"trace_id": config.TraceID,
+			"success":  true,
+			"result":   "stub delivery",
+		})
+		go config.OnComplete(agentID, out, nil)
+	}
+	return nil
+}
+
+// SupportsReuse reports true for the in-process stub so factory-level tests
+// exercise the reuse code path. The real gating in production happens via the
+// factory's idleSuspendTimeout configuration.
+func (m *stubManager) SupportsReuse() bool { return true }

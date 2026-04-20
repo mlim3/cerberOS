@@ -352,6 +352,8 @@ const (
 	MetricsEventVaultExecuteComplete = "vault_execute_complete"
 	MetricsEventCompactionTriggered  = "compaction_triggered"
 	MetricsEventContextOverflow      = "context_overflow"
+	MetricsEventLLMCacheHit          = "llm_cache_hit"
+	MetricsEventLLMCacheMiss         = "llm_cache_miss"
 )
 
 // MetricsEvent is the payload published by agent-process subprocesses to

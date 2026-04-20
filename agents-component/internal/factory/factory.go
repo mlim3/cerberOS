@@ -72,6 +72,15 @@ type Factory struct {
 	// sweep transitions it to SUSPENDED (OQ-03). 0 = disabled (immediate teardown).
 	idleSuspendTimeout time.Duration
 
+	// reuseEnabled is the computed gate for live-process reuse: true when
+	// IdleSuspendTimeout > 0 AND the configured lifecycle Manager reports
+	// SupportsReuse() = true. When enabled, CompleteTask leaves the agent
+	// process alive and the Priority 1 IDLE reuse path in HandleTaskSpec
+	// delivers a fresh SpawnContext (Vault re-auth + manifest + memory) to the
+	// running process instead of spawning a new VM. When disabled, behaviour
+	// matches the historical provision-per-task flow.
+	reuseEnabled bool
+
 	// suspendWakeLatencyTarget is the documented SLA budget for SUSPENDED → ACTIVE.
 	// Informational only — logged at startup and on each wake for observability (OQ-06).
 	suspendWakeLatencyTarget time.Duration
@@ -154,6 +163,12 @@ func New(cfg Config) (*Factory, error) {
 	if maxRetries <= 0 {
 		maxRetries = 3
 	}
+	reuseEnabled := cfg.IdleSuspendTimeout > 0 && cfg.Lifecycle.SupportsReuse()
+	if reuseEnabled {
+		log.Info("live-process reuse enabled",
+			"idle_suspend_timeout", cfg.IdleSuspendTimeout,
+		)
+	}
 	return &Factory{
 		registry:                 cfg.Registry,
 		skills:                   cfg.Skills,
@@ -170,6 +185,7 @@ func New(cfg Config) (*Factory, error) {
 		policy:                   cfg.Policy,
 		inFlightRequests:         make(map[string][]string),
 		idleSuspendTimeout:       cfg.IdleSuspendTimeout,
+		reuseEnabled:             reuseEnabled,
 		suspendWakeLatencyTarget: cfg.SuspendWakeLatencyTarget,
 		onSpawn:                  cfg.OnSpawn,
 		onTerminate:              cfg.OnTerminate,
@@ -485,12 +501,151 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 	return f.publishStatus(agentID, spec.TaskID, registry.StateActive, spec.TraceID)
 }
 
-// assignTask links an existing idle/suspended agent to a task.
-// registry.AssignTask enforces the transition to ACTIVE.
+// assignTask links an existing idle agent (Priority 1 path) to a new task.
+// When live-process reuse is enabled, it drives the full warm-path sequence:
+// fresh credential pre-authorization, fresh memory / user-profile fetches, and
+// lifecycle.Deliver of a new SpawnContext to the still-running agent process.
+// When reuse is disabled, it performs only the minimal registry transition —
+// the historical behaviour used by unit tests that set IDLE state manually.
 func (f *Factory) assignTask(agentID string, spec *types.TaskSpec) error {
+	if !f.reuseEnabled {
+		if err := f.registry.AssignTask(agentID, spec.TaskID); err != nil {
+			return fmt.Errorf("factory: registry.AssignTask: %w", err)
+		}
+		return f.publishStatus(agentID, spec.TaskID, registry.StateActive, spec.TraceID)
+	}
+
+	// ── Warm path: deliver a fresh SpawnContext to the live process. ──────
+	if len(spec.RequiredSkills) == 0 {
+		return fmt.Errorf("factory: assignTask: TaskSpec has no required skills")
+	}
+
+	// Fresh credential pre-authorization is mandatory: the previous task's
+	// token was revoked in CompleteTask and credentials must stay task-scoped.
+	token, err := f.credentials.PreAuthorize(agentID, spec.TaskID, spec.TraceID, spec.RequiredSkills)
+	if err != nil {
+		f.log.Warn("credential.event",
+			"operation_type", "authorize",
+			"agent_id", agentID,
+			"outcome", "failed",
+			"trace_id", spec.TraceID,
+			"reuse_path", true,
+		)
+		if credDenied(err) {
+			f.emit(types.AuditEvent{
+				EventType: types.AuditEventCredentialDeny,
+				AgentID:   agentID,
+				TaskID:    spec.TaskID,
+				TraceID:   spec.TraceID,
+				Details:   map[string]string{"operation_type": "authorize", "error_code": credErrorCode(err)},
+			})
+		}
+		_ = f.publishFailed(agentID, spec.TaskID, credErrorCode(err),
+			"agent credential re-authorization failed on reuse", spec.TraceID, "reuse")
+		return fmt.Errorf("factory: assignTask: credentials.PreAuthorize: %w", err)
+	}
+	f.log.Info("credential.event",
+		"operation_type", "authorize",
+		"agent_id", agentID,
+		"outcome", "granted",
+		"trace_id", spec.TraceID,
+		"reuse_path", true,
+	)
+	f.emit(types.AuditEvent{
+		EventType: types.AuditEventCredentialGrant,
+		AgentID:   agentID,
+		TaskID:    spec.TaskID,
+		TraceID:   spec.TraceID,
+		Details: map[string]string{
+			"operation_type": "authorize",
+			"skill_domains":  strings.Join(spec.RequiredSkills, ","),
+			"reuse_path":     "true",
+		},
+	})
+
+	entryDomain := spec.RequiredSkills[0]
+	commands, err := f.skills.GetCommands(entryDomain)
+	if err != nil {
+		_ = f.credentials.Revoke(agentID)
+		return fmt.Errorf("factory: assignTask: skills.GetCommands %q: %w", entryDomain, err)
+	}
+	manifest := buildManifestText(commands)
+	agentMemory := f.fetchAgentMemory(entryDomain, spec.TraceID)
+	userProfile := f.fetchUserProfile(spec.UserContextID, spec.TraceID)
+
+	vmCfg := lifecycle.VMConfig{
+		AgentID:         agentID,
+		TaskID:          spec.TaskID,
+		SkillDomain:     entryDomain,
+		CredentialPtr:   token,
+		Instructions:    spec.Instructions,
+		CommandManifest: manifest,
+		AgentMemory:     agentMemory,
+		UserProfile:     userProfile,
+		TraceID:         spec.TraceID,
+		UserContextID:   spec.UserContextID,
+		OnComplete:      f.processCompletionHandler(agentID),
+	}
+
+	if err := f.lifecycle.Deliver(agentID, vmCfg); err != nil {
+		// Delivery failed — the live process is gone, its stdin is closed, or
+		// a previous completion callback is still pending. Reuse is an
+		// optimization and must never surface as a user-visible task failure:
+		// tear down the zombie entry and fall back to Priority 3 (fresh
+		// provision). The user sees a slightly longer first task but no error.
+		f.log.Warn("lifecycle.Deliver failed — falling back to fresh provision",
+			"agent_id", agentID,
+			"task_id", spec.TaskID,
+			"trace_id", spec.TraceID,
+			"error", err,
+		)
+		// Revoke the just-issued token (Deliver never reached the agent so the
+		// token was never consumed) and force-terminate the zombie process so
+		// its registry slot cannot be matched again.
+		_ = f.credentials.Revoke(agentID)
+		_ = f.lifecycle.Terminate(agentID)
+		if err := f.registry.UpdateState(agentID, registry.StateTerminated,
+			"lifecycle.Deliver failed: "+err.Error()); err != nil {
+			f.log.Warn("reuse fallback: registry.UpdateState terminated failed",
+				"agent_id", agentID, "error", err)
+		}
+		_ = f.publishStatus(agentID, spec.TaskID, registry.StateTerminated, spec.TraceID)
+		// Provision a fresh agent with a new ID. publishAccepted was already
+		// emitted under the zombie agent_id; the new provision emits its own
+		// status stream rooted at the new ID, which is what the IO dashboard
+		// consumes for progress updates.
+		newAgentID := f.generateID()
+		f.log.Info("reuse fallback: provisioning fresh agent",
+			"zombie_agent_id", agentID,
+			"new_agent_id", newAgentID,
+			"task_id", spec.TaskID,
+			"trace_id", spec.TraceID,
+		)
+		if err := f.provision(newAgentID, spec); err != nil {
+			_ = f.publishFailed(newAgentID, spec.TaskID, "AGENT_PROVISION_FAILED",
+				"fresh provision after reuse fallback failed: "+err.Error(),
+				spec.TraceID, "reuse-fallback")
+			return fmt.Errorf("factory: reuse fallback provision: %w", err)
+		}
+		return nil
+	}
+
 	if err := f.registry.AssignTask(agentID, spec.TaskID); err != nil {
 		return fmt.Errorf("factory: registry.AssignTask: %w", err)
 	}
+
+	// Re-arm crash monitoring: CompleteTask called Unwatch when the previous
+	// task finished, leaving the live process un-monitored until now.
+	if f.crashDetector != nil {
+		f.crashDetector.Watch(agentID)
+	}
+
+	f.log.Info("task delivered to reused agent",
+		"agent_id", agentID,
+		"task_id", spec.TaskID,
+		"trace_id", spec.TraceID,
+		"skill_domain", entryDomain,
+	)
 	return f.publishStatus(agentID, spec.TaskID, registry.StateActive, spec.TraceID)
 }
 
@@ -596,20 +751,14 @@ func (f *Factory) CompleteTask(agentID, sessionID, traceID string, output interf
 	}
 
 	// Stop crash monitoring — task is done; the agent is no longer executing.
+	// When reuse is enabled, assignTask re-arms the detector on the next task.
 	if f.crashDetector != nil {
 		f.crashDetector.Unwatch(agentID)
 	}
 
-	// Terminate the VM and revoke credentials. Both steps are always performed
-	// on task completion: the agent process has exited, and credentials must not
-	// persist beyond their owning task. A fresh PreAuthorize is required if the
-	// agent is woken from SUSPENDED for a subsequent task (OQ-03).
-	if err := f.lifecycle.Terminate(agentID); err != nil {
-		return fmt.Errorf("factory: lifecycle.Terminate: %w", err)
-	}
-	if f.onTerminate != nil {
-		f.onTerminate(agentID)
-	}
+	// Revoke the task's credential token. Credentials are always task-scoped —
+	// whether or not we keep the underlying process alive for reuse, the token
+	// itself must not outlive its task (CLAUDE.md §5; EDD §6.2).
 	if err := f.credentials.Revoke(agentID); err != nil {
 		f.log.Warn("credential.event",
 			"operation_type", "revoke",
@@ -633,17 +782,28 @@ func (f *Factory) CompleteTask(agentID, sessionID, traceID string, output interf
 		Details:   map[string]string{"operation_type": "revoke"},
 	})
 
-	// When IdleSuspendTimeout > 0 (OQ-03 enabled), leave the agent in IDLE so
-	// the idle sweep can suspend it. The registry entry is preserved with its
-	// skill domains, allowing reuse without full re-provisioning.
-	// When disabled (default), terminate immediately: current behaviour.
-	if f.idleSuspendTimeout > 0 {
-		f.log.Info("agent left in idle for suspension",
+	// ── Reuse-enabled path ────────────────────────────────────────────────
+	// Keep the agent-process alive so the next matching task can hit the
+	// warm Priority 1 path in HandleTaskSpec and skip the cold-start tax.
+	// Registry stays IDLE; the idle sweep (OQ-03) will SUSPEND it after
+	// idleSuspendTimeout of inactivity if no new task arrives.
+	if f.reuseEnabled {
+		f.log.Info("agent kept alive for reuse",
 			"agent_id", agentID,
 			"idle_suspend_timeout", f.idleSuspendTimeout,
 			"trace_id", traceID,
 		)
 		return nil
+	}
+
+	// ── Classic path ───────────────────────────────────────────────────────
+	// Reuse disabled or unsupported by this lifecycle: terminate the VM and
+	// mark the registry entry TERMINATED. Next matching task provisions fresh.
+	if err := f.lifecycle.Terminate(agentID); err != nil {
+		return fmt.Errorf("factory: lifecycle.Terminate: %w", err)
+	}
+	if f.onTerminate != nil {
+		f.onTerminate(agentID)
 	}
 
 	if err := f.registry.UpdateState(agentID, registry.StateTerminated, "VM terminated, credentials revoked"); err != nil {
@@ -1253,10 +1413,13 @@ func (f *Factory) sweepIdleAgents() {
 // SuspendAgent transitions an IDLE agent to SUSPENDED, preserving its registry
 // entry for future reuse while freeing it from crash monitoring (OQ-03).
 //
-// The VM is already terminated and credentials already revoked by CompleteTask
-// before the agent entered IDLE — no additional teardown is needed here.
-// A fresh credential.authorize will be issued when the agent is woken for a
-// subsequent task (OQ-06, see wakeAgent).
+// When live-process reuse is enabled, CompleteTask leaves the agent-process
+// alive in IDLE so Priority 1 reuse can deliver a fresh SpawnContext without
+// paying the cold-start tax. Suspension is the resource-reclamation fallback:
+// if the process stays idle past IdleSuspendTimeout, we tear it down here so
+// a future task reaches Priority 2 wake (fresh VM, fresh credentials). When
+// reuse is disabled CompleteTask already terminated the VM, so this call is a
+// no-op on the lifecycle side.
 //
 // Returns an error if the agent is not IDLE or does not exist.
 func (f *Factory) SuspendAgent(agentID, traceID string) error {
@@ -1267,6 +1430,19 @@ func (f *Factory) SuspendAgent(agentID, traceID string) error {
 	if agent.State != registry.StateIdle {
 		return fmt.Errorf("factory: SuspendAgent: agent %q is %s (want %s)",
 			agentID, agent.State, registry.StateIdle)
+	}
+
+	// Tear down the live agent-process, if any. On the reuse-disabled path
+	// CompleteTask already called Terminate; the no-such-agent error returned
+	// by the Manager in that case is expected and swallowed.
+	if f.reuseEnabled {
+		if err := f.lifecycle.Terminate(agentID); err != nil {
+			f.log.Warn("SuspendAgent: lifecycle.Terminate failed — continuing",
+				"agent_id", agentID,
+				"trace_id", traceID,
+				"error", err,
+			)
+		}
 	}
 
 	if err := f.registry.UpdateState(agentID, registry.StateSuspended, "idle timeout"); err != nil {

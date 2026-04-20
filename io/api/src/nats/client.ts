@@ -33,6 +33,18 @@ export const SUBJECT_CREDENTIAL_REQUEST = 'aegis.orchestrator.credential.request
 /** Orchestrator publishes errors here. */
 export const SUBJECT_ERROR = 'aegis.orchestrator.error'
 
+/** IO publishes the user's approve/reject decision for a proposed plan here. */
+export const SUBJECT_PLAN_DECISION = 'aegis.orchestrator.plan.decision'
+
+export interface PlanDecisionPayload {
+  orchestrator_task_ref: string
+  task_id: string
+  approved: boolean
+  reason?: string
+  /** W3C trace_id (32 hex) — forwarded on the wire envelope for orchestrator logs */
+  trace_id?: string
+}
+
 export interface NatsConfig {
   url: string
   credsPath?: string
@@ -55,6 +67,7 @@ export interface UserTaskPayload {
 export interface IONatsClient {
   connected: boolean
   publishUserTask(task: UserTaskPayload): Promise<void>
+  publishPlanDecision(decision: PlanDecisionPayload): Promise<void>
   subscribe(channel: string, handler: (msg: unknown) => void): () => void
   close(): void
 }
@@ -208,7 +221,17 @@ export function createNatsClient(config: NatsConfig): IONatsClient | null {
         user_id: task.user_id,
         required_skill_domains: task.required_skill_domains ?? ['general'],
         priority: task.priority ?? 5,
-        timeout_seconds: task.timeout_seconds ?? 120,
+        // Runaway backstop for a whole task. Individual phases are already
+        // bounded by tighter timers in the orchestrator:
+        //   - DecompositionTimeoutSeconds (30s) — planner LLM call
+        //   - PlanApprovalTimeoutSeconds (300s) — user review of the plan
+        //   - per-subtask timeout_seconds in the plan itself (~30s each)
+        // The old 120s default was shorter than the approval window alone,
+        // so a task sitting in AWAITING_APPROVAL would be killed before the
+        // user could click "Approve". 30 minutes gives realistic headroom
+        // for approval + multi-subtask execution without sacrificing the
+        // backstop semantics.
+        timeout_seconds: task.timeout_seconds ?? 1800,
         payload: task.payload ?? { raw_input: task.content },
         callback_topic: task.callback_topic ?? callbackTopicForTask(task.task_id),
         user_context_id: task.user_context_id,
@@ -219,6 +242,26 @@ export function createNatsClient(config: NatsConfig): IONatsClient | null {
       // js.publish() can miss core subscribers in some broker configurations.
       nc.publish(SUBJECT_TASK_INBOUND, data)
       await nc.flush()
+    },
+
+    async publishPlanDecision(decision: PlanDecisionPayload) {
+      if (!js) throw new Error('NATS JetStream not connected')
+      const payload = {
+        orchestrator_task_ref: decision.orchestrator_task_ref,
+        task_id: decision.task_id,
+        approved: decision.approved,
+        reason: decision.reason ?? '',
+      }
+      // correlation_id = orchestrator_task_ref so orchestrator can fall back
+      // to envelope.correlation_id if the payload is stripped somewhere.
+      const envelope = buildEnvelope(
+        'plan_decision',
+        decision.orchestrator_task_ref,
+        payload,
+        decision.trace_id,
+      )
+      const data = new TextEncoder().encode(JSON.stringify(envelope))
+      await js.publish(SUBJECT_PLAN_DECISION, data)
     },
 
     subscribe(channel: string, handler: (msg: unknown) => void): () => void {

@@ -61,8 +61,15 @@ func MetricsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// TraceIDMiddleware generates a TraceID for every request and adds it to the context.
-// It also logs an 'ACCESS_GRANTED' event to the system_events table if the request is for the Vault.
+// TraceIDMiddleware resolves a TraceID for every request and adds it to the
+// context. When the request carries a W3C `traceparent` header (from IO,
+// Orchestrator, or Agents via otelhttp) its 32-char trace_id is reused so
+// Memory spans nest under the upstream trace. When no `traceparent` is
+// present a fresh UUID is generated for backward compatibility with legacy
+// callers and direct curl requests.
+//
+// It also logs an 'ACCESS_GRANTED' event to the system_events table if the
+// request is for the Vault.
 func TraceIDMiddleware(logger *slog.Logger, logRepo *storage.LogRepository, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		traceID := resolveRequestTraceID(r)
@@ -106,10 +113,17 @@ func normalizeTraceID(raw string) (uuid.UUID, bool) {
 	return id, true
 }
 
-// traceparent format: version-traceid-parentid-flags
+// traceparent format: version-traceid-parentid-flags (W3C); rejects malformed
+// and all-zero trace_id per spec.
 func traceIDFromTraceparent(header string) (uuid.UUID, bool) {
 	parts := strings.Split(strings.TrimSpace(header), "-")
 	if len(parts) != 4 {
+		return uuid.UUID{}, false
+	}
+	if len(parts[0]) != 2 || len(parts[1]) != 32 || len(parts[2]) != 16 || len(parts[3]) != 2 {
+		return uuid.UUID{}, false
+	}
+	if parts[1] == "00000000000000000000000000000000" {
 		return uuid.UUID{}, false
 	}
 	return normalizeTraceID(parts[1])

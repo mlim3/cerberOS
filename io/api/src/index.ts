@@ -26,6 +26,64 @@ import { traceMiddleware } from './trace-context'
 import { ioLog, logFromContext } from './logger'
 
 // =============================================================================
+// Planner input enrichment
+// =============================================================================
+
+/**
+ * Build the `raw_input` string that goes into the orchestrator's planner prompt.
+ *
+ * When a task is a follow-up (e.g. the user continues a COMPLETED task), the
+ * current message alone is often ambiguous — "Is it nice living there?" after
+ * "What's Texas?" — and the planner LLM returns a conversational clarification
+ * instead of a valid execution-plan JSON object, which the orchestrator then
+ * rejects with "planner result is not a valid execution plan JSON object".
+ *
+ * The web UI already sends `conversationHistory` (prior turns + the current
+ * user message as the last entry). We prepend a "Conversation so far" block
+ * when there is meaningful prior context, so the planner sees what the user
+ * is actually referring to. For first-turn messages we keep `raw_input`
+ * identical to `content` to avoid changing the planner prompt for existing
+ * flows.
+ *
+ * Length is bounded to protect the planner context window: we keep only the
+ * last MAX_TURNS entries prior to the current message, and truncate any
+ * individual message to MAX_CHARS_PER_MSG characters.
+ */
+const MAX_TURNS = 10
+const MAX_CHARS_PER_MSG = 1500
+function buildRawInputWithHistory(
+  content: string,
+  conversationHistory?: Array<{ role: 'user' | 'assistant'; content: string }>,
+): string {
+  if (!conversationHistory || conversationHistory.length === 0) {
+    return content
+  }
+  // The web UI appends the current message to history before calling; drop it
+  // for the prior-context block so we don't duplicate the "Current message"
+  // line. Fall back to the full history if the last entry doesn't match.
+  const last = conversationHistory[conversationHistory.length - 1]
+  const prior = (last?.role === 'user' && last.content === content)
+    ? conversationHistory.slice(0, -1)
+    : conversationHistory
+  if (prior.length === 0) {
+    return content
+  }
+  const trimmed = prior.slice(-MAX_TURNS).map(m => {
+    const c = m.content.length > MAX_CHARS_PER_MSG
+      ? m.content.slice(0, MAX_CHARS_PER_MSG) + ' …[truncated]'
+      : m.content
+    return `${m.role}: ${c}`
+  })
+  return [
+    'Conversation so far:',
+    ...trimmed,
+    '',
+    'Current message:',
+    content,
+  ].join('\n')
+}
+
+// =============================================================================
 // Configuration
 // =============================================================================
 
@@ -406,6 +464,71 @@ app.post('/api/orchestrator/stream-events', async (c) => {
 });
 
 // =============================================================================
+// Plan approval: IO → Orchestrator
+// =============================================================================
+
+/**
+ * The web dashboard POSTs the user's approve/reject decision here.
+ * Body: { taskId, orchestratorTaskRef, approved, reason? }
+ * The decision is forwarded to the orchestrator over NATS on
+ * `aegis.orchestrator.plan.decision`.
+ */
+app.post('/api/orchestrator/plan-decision', async (c) => {
+  type PlanDecisionRequest = {
+    taskId?: string
+    orchestratorTaskRef?: string
+    approved?: boolean
+    reason?: string
+  }
+  let body: PlanDecisionRequest
+  try {
+    body = (await c.req.json()) as PlanDecisionRequest
+  } catch {
+    return c.json({ error: 'invalid json' }, 400)
+  }
+  const taskId = typeof body.taskId === 'string' ? body.taskId : ''
+  const orchestratorTaskRef =
+    typeof body.orchestratorTaskRef === 'string' ? body.orchestratorTaskRef : ''
+  const approved = body.approved === true
+  const reason = typeof body.reason === 'string' ? body.reason : undefined
+
+  if (!taskId || !orchestratorTaskRef) {
+    return c.json({ error: 'taskId and orchestratorTaskRef are required' }, 400)
+  }
+
+  logFromContext(c, 'info', 'orchestrator', 'POST /api/orchestrator/plan-decision', {
+    task_id: taskId,
+    orchestrator_task_ref: orchestratorTaskRef,
+    approved,
+  })
+
+  if (!natsClient?.connected) {
+    return c.json(
+      { error: 'orchestrator not connected — cannot deliver decision' },
+      503,
+    )
+  }
+
+  try {
+    await natsClient.publishPlanDecision({
+      task_id: taskId,
+      orchestrator_task_ref: orchestratorTaskRef,
+      approved,
+      reason,
+      trace_id: c.get('traceId'),
+    })
+  } catch (err) {
+    logFromContext(c, 'error', 'nats', 'failed to publish plan_decision', {
+      task_id: taskId,
+      err: String(err),
+    })
+    return c.json({ error: 'failed to publish decision' }, 502)
+  }
+
+  return c.json({ ok: true })
+})
+
+// =============================================================================
 // Chat streaming
 // =============================================================================
 
@@ -455,16 +578,23 @@ app.post('/api/chat', async (c) => {
   // Publish user message to orchestrator via NATS
   if (useRealOrchestrator) {
     try {
+      const rawInput = buildRawInputWithHistory(content, conversationHistory)
+      const isFollowUp = rawInput !== content
       await natsClient!.publishUserTask({
         task_id: taskId,
         user_id: userId,
         content,
-        payload: { raw_input: content },
+        payload: { raw_input: rawInput },
         callback_topic: callbackTopicForTask(taskId),
         trace_id: traceId,
       })
       awaitingOrchestratorChat = true
-      logFromContext(c, 'info', 'nats', 'published user_task', { task_id: taskId })
+      logFromContext(c, 'info', 'nats', 'published user_task', {
+        task_id: taskId,
+        is_follow_up: isFollowUp,
+        history_turns: conversationHistory?.length ?? 0,
+        raw_input_len: rawInput.length,
+      })
     } catch (err) {
       userTaskPublishError = String(err)
       logFromContext(c, 'error', 'nats', 'failed to publish user_task', { task_id: taskId, err: userTaskPublishError })
@@ -500,7 +630,9 @@ app.post('/api/chat', async (c) => {
       if (awaitingOrchestratorChat) {
         // Wait for the orchestrator to deliver a response via NATS callback or HTTP bridge
         const TIMEOUT_MS = 120_000
-        let accumulated = ''
+        // Seed with a local ack so the user sees feedback within ~100ms instead of
+        // waiting the full planner round-trip for the orchestrator's task_accepted.
+        let accumulated = 'Task received — sending to orchestrator...\n'
         let streamDone = false
 
         const safeEnqueue = (line: string) => {
@@ -585,7 +717,10 @@ app.post('/api/chat', async (c) => {
             appendLogEntry({ sessionId, userId, role: 'assistant', content: errContent, taskId, traceId })
           },
         })
-        // Flush so clients/proxies see a non-empty body immediately; avoids 0-byte files until NATS callbacks.
+        // Flush the local ack immediately so the user sees feedback before the orchestrator round-trip.
+        safeEnqueue(`data: ${JSON.stringify({ chunk: accumulated })}\n\n`)
+        ioLog('info', 'http', 'task_received_local_ack', { task_id: taskId })
+        // SSE comment line primes buffered proxies/bun runtime so the next real chunk isn't held back.
         safeEnqueue(': io-waiting\n\n')
         // Idle long-poll streams can be closed by proxies or stacks with no bytes for ~30s; keep TCP/SSE alive until orchestrator responds.
         // Bun default idleTimeout is 10s; keepalives must fire more often or the TCP is reset mid-SSE.

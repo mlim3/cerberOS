@@ -14,6 +14,7 @@ const (
 	StateDispatchPending     = "DISPATCH_PENDING"
 	StateDispatched          = "DISPATCHED"
 	StateDecomposing         = "DECOMPOSING"          // NEW v3.0 — awaiting Planner Agent response
+	StateAwaitingApproval    = "AWAITING_APPROVAL"    // NEW m3 — plan produced, waiting on user approve/reject
 	StatePlanActive          = "PLAN_ACTIVE"          // NEW v3.0 — Plan Executor dispatching subtasks
 	StateRunning             = "RUNNING"
 	StateRecovering          = "RECOVERING"
@@ -62,7 +63,18 @@ const (
 	ErrCodeInvalidPlan          = "INVALID_PLAN"          // NEW v3.0
 	ErrCodeEmptyPlan            = "EMPTY_PLAN"            // NEW v3.0
 	ErrCodePlanTooLarge         = "PLAN_TOO_LARGE"        // NEW v3.0
+	ErrCodePlanRejected         = "PLAN_REJECTED"         // NEW m3 — user rejected the plan
+	ErrCodeApprovalTimeout      = "PLAN_APPROVAL_TIMEOUT" // NEW m3 — user did not respond in time
 )
+
+// PlanDecision is delivered by User I/O (via Gateway) when the user approves
+// or rejects a proposed execution plan (see §Multi-step prompting).
+type PlanDecision struct {
+	OrchestratorTaskRef string `json:"orchestrator_task_ref"`
+	TaskID              string `json:"task_id"`
+	Approved            bool   `json:"approved"`
+	Reason              string `json:"reason,omitempty"`
+}
 
 // ─── Recovery Reason Constants ────────────────────────────────────────────────
 // Passed from Task Monitor to Recovery Manager so recovery logic can distinguish

@@ -4,9 +4,20 @@
 // context either from stdin (process-manager mode) or from the Firecracker MMDS
 // (Microvm Metadata Service) when AEGIS_MMDS_ENDPOINT is set in the environment.
 //
-// The binary executes the task using the four-phase ReAct loop (EDD §13.1) and
-// writes a JSON-encoded TaskOutput to stdout. All diagnostic logs go to stderr
-// so they do not contaminate the JSON output stream.
+// In stdin mode the binary loops: each iteration reads one JSON SpawnContext,
+// runs the four-phase ReAct loop (EDD §13.1), writes a single JSON-encoded
+// TaskOutput followed by a newline to stdout, and waits for the next context.
+// On stdin EOF it exits cleanly with code 0. This lets the Lifecycle Manager
+// reuse a warm process across tasks (zero Vault + fork tax on Priority-1 IDLE
+// reuse) while remaining fully backward compatible with the old one-shot
+// contract — a caller that sends exactly one SpawnContext and closes stdin
+// gets exactly one TaskOutput and a clean exit.
+//
+// In MMDS mode the one-shot contract is preserved (the Firecracker host only
+// publishes a single SpawnContext per VM); reuse is not wired up there.
+//
+// All diagnostic logs go to stderr so they do not contaminate the JSON output
+// stream.
 //
 // Inputs (stdin or MMDS at AEGIS_MMDS_ENDPOINT):
 //
@@ -45,6 +56,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -53,6 +65,7 @@ import (
 	"strconv"
 
 	"github.com/cerberOS/agents-component/internal/skills"
+	"github.com/cerberOS/agents-component/internal/telemetry"
 )
 
 // mmdsPayload is the envelope written to the Firecracker MMDS by the Lifecycle
@@ -88,32 +101,127 @@ type TaskOutput struct {
 }
 
 func main() {
-	log := slog.New(slog.NewJSONHandler(os.Stderr, nil)).
+	rootLog := slog.New(slog.NewJSONHandler(os.Stderr, nil)).
 		With("service", "agents", "component", "agent-process")
 
-	spawnCtx, err := readSpawnContext(log)
-	if err != nil {
-		writeError(log, "", "", err.Error())
-		os.Exit(1)
+	rootCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// OTLP tracing is process-scoped (one exporter + one TracerProvider across
+	// every task we handle). Each iteration of the task loop opens its own
+	// child span rooted at the incoming SpawnContext.TraceID so subsequent
+	// reused-process tasks still show up in Tempo as independent traces.
+	traceShutdown, tErr := telemetry.Init(rootCtx)
+	if tErr != nil {
+		rootLog.Warn("telemetry init failed — continuing without traces", "error", tErr)
+	}
+	defer func() {
+		if traceShutdown != nil {
+			_ = traceShutdown(context.Background())
+		}
+	}()
+
+	// Process-scoped spec budget. Resetting per-task would defeat the point of
+	// a budget (it bounds total skill-spec tokens loaded over the lifetime of
+	// a single agent). Long-lived reused processes therefore share one budget.
+	var specBudget *skills.SpecBudget
+	if budgetStr := os.Getenv("AEGIS_SKILL_SPEC_BUDGET"); budgetStr != "" {
+		if ceiling, err := strconv.Atoi(budgetStr); err == nil && ceiling > 0 {
+			if b, err := skills.NewSpecBudget(ceiling); err == nil {
+				specBudget = b
+				rootLog.Info("spec budget enabled", "ceiling_tokens", ceiling)
+			} else {
+				rootLog.Warn("spec budget init failed, disabling budget enforcement", "error", err)
+			}
+		}
 	}
 
-	log = log.With("task_id", spawnCtx.TaskID, "trace_id", spawnCtx.TraceID)
+	// Shared stdout writer: we must emit exactly one JSON object per task,
+	// newline-delimited, so the host-side Lifecycle Manager can frame task
+	// boundaries when the process is reused across tasks.
+	encoder := json.NewEncoder(os.Stdout)
+	stdinDecoder := json.NewDecoder(os.Stdin)
+
+	iteration := 0
+	for {
+		iteration++
+		spawnCtx, err := readNextSpawnContext(rootLog, stdinDecoder)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				// Clean shutdown — host closed stdin.
+				if iteration == 1 {
+					rootLog.Warn("agent-process exiting: stdin closed before any SpawnContext was delivered")
+				} else {
+					rootLog.Info("agent-process exiting: stdin closed", "tasks_handled", iteration-1)
+				}
+				return
+			}
+			// Decode error on a non-first task: emit a best-effort failure
+			// envelope and exit. We cannot recover from a corrupt framing.
+			writeError(rootLog, "", "", fmt.Sprintf("decode spawn context: %v", err))
+			os.Exit(1)
+		}
+
+		if err := runOneTask(rootCtx, rootLog, spawnCtx, specBudget, encoder); err != nil {
+			// runOneTask already emitted a failure TaskOutput on stdout; continue
+			// to the next iteration so a transient task failure does not kill the
+			// reusable process. The factory observes the failed TaskOutput and
+			// tears the process down itself if it considers the agent unhealthy.
+			rootLog.Error("task failed", "error", err, "task_id", spawnCtx.TaskID)
+		}
+	}
+}
+
+// readNextSpawnContext reads one SpawnContext from the shared decoder in stdin
+// mode, or fetches the MMDS envelope in Firecracker mode. Returns io.EOF when
+// the stream is cleanly closed so the caller can exit with status 0.
+func readNextSpawnContext(log *slog.Logger, dec *json.Decoder) (*SpawnContext, error) {
+	if os.Getenv("AEGIS_MMDS_ENDPOINT") != "" {
+		// MMDS mode: fetch once, then signal EOF on the next call so the loop
+		// terminates (Firecracker VM reuse is not wired up yet).
+		if mmdsDelivered {
+			return nil, io.EOF
+		}
+		mmdsDelivered = true
+		return readSpawnContextFromMMDS(log)
+	}
+	var ctx SpawnContext
+	if err := dec.Decode(&ctx); err != nil {
+		return nil, err
+	}
+	return &ctx, nil
+}
+
+// mmdsDelivered flips true after the first MMDS read so the loop exits on the
+// next iteration (Firecracker mode remains one-shot).
+var mmdsDelivered bool
+
+// runOneTask executes a single TaskSpec end-to-end. It emits exactly one
+// newline-delimited TaskOutput to stdout (success or failure). It returns a
+// non-nil error only when the task itself failed after validation so the
+// caller can log it; framing and output are always written regardless.
+func runOneTask(rootCtx context.Context, rootLog *slog.Logger, spawnCtx *SpawnContext, specBudget *skills.SpecBudget, encoder *json.Encoder) error {
+	log := rootLog.With("task_id", spawnCtx.TaskID, "trace_id", spawnCtx.TraceID)
 
 	if err := validate(spawnCtx); err != nil {
 		writeError(log, spawnCtx.TaskID, spawnCtx.TraceID, err.Error())
-		os.Exit(1)
+		return err
 	}
 
-	log.Info("agent-process started", "skill_domain", spawnCtx.SkillDomain)
+	log.Info("agent-process task started", "skill_domain", spawnCtx.SkillDomain)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	taskCtx, cancel := context.WithCancel(rootCtx)
 	defer cancel()
+	taskCtx = telemetry.ContextWithTraceID(taskCtx, spawnCtx.TraceID)
+	taskCtx, span := telemetry.Tracer().Start(taskCtx, "agent-process.run")
+	defer span.End()
 
-	startHeartbeat(ctx, log, spawnCtx.TaskID, spawnCtx.TraceID)
+	startHeartbeat(taskCtx, log, spawnCtx.TaskID, spawnCtx.TraceID)
 
 	// VaultExecutor manages the async request/result flow for credentialed operations
 	// (ADR-004). Returns nil if NATS env vars are absent — non-credentialed tools
-	// continue to function normally.
+	// continue to function normally. Task-scoped so each task gets its own
+	// permission token binding.
 	ve := NewVaultExecutor(log, spawnCtx.TaskID, spawnCtx.PermissionToken, spawnCtx.TraceID)
 	if ve != nil {
 		defer ve.Close()
@@ -136,24 +244,10 @@ func main() {
 		defer as.Close()
 	}
 
-	// Build the per-agent spec budget when AEGIS_SKILL_SPEC_BUDGET is set.
-	// 0 or unset = no budget enforcement (nil disables all budget logic in RunLoop).
-	var specBudget *skills.SpecBudget
-	if budgetStr := os.Getenv("AEGIS_SKILL_SPEC_BUDGET"); budgetStr != "" {
-		if ceiling, err := strconv.Atoi(budgetStr); err == nil && ceiling > 0 {
-			if b, err := skills.NewSpecBudget(ceiling); err == nil {
-				specBudget = b
-				log.Info("spec budget enabled", "ceiling_tokens", ceiling)
-			} else {
-				log.Warn("spec budget init failed, disabling budget enforcement", "error", err)
-			}
-		}
-	}
-
-	result, err := RunLoop(ctx, log, spawnCtx, ve, steerer, as, specBudget)
+	result, err := RunLoop(taskCtx, log, spawnCtx, ve, steerer, as, specBudget)
 	if err != nil {
 		writeError(log, spawnCtx.TaskID, spawnCtx.TraceID, err.Error())
-		os.Exit(1)
+		return err
 	}
 
 	out := TaskOutput{
@@ -162,33 +256,23 @@ func main() {
 		Success: true,
 		Result:  result,
 	}
-	if err := json.NewEncoder(os.Stdout).Encode(out); err != nil {
+	if err := encoder.Encode(out); err != nil {
 		log.Error("encode output failed", "error", err)
+		// Encode failure means stdout is broken — can't meaningfully continue
+		// the loop because the host can't observe our outputs.
 		os.Exit(1)
 	}
 
-	log.Info("agent-process completed")
+	log.Info("agent-process task completed")
+	return nil
 }
 
-// readSpawnContext reads the SpawnContext from MMDS when AEGIS_MMDS_ENDPOINT is
-// set in the environment (Firecracker microVM mode), or from stdin otherwise
-// (process-manager / local-dev mode).
-//
-// When reading from MMDS the payload envelope also carries an "env" map of
-// key→value pairs forwarded from the host. These are applied to the process
-// environment so all subsequent os.Getenv calls observe the injected values.
-func readSpawnContext(log *slog.Logger) (*SpawnContext, error) {
+// readSpawnContextFromMMDS reads a single SpawnContext envelope from the
+// Firecracker MMDS at AEGIS_MMDS_ENDPOINT and applies any forwarded env vars
+// to the current process so downstream os.Getenv calls observe them.
+// Firecracker mode remains one-shot; reuse is not wired up there.
+func readSpawnContextFromMMDS(log *slog.Logger) (*SpawnContext, error) {
 	mmdsEndpoint := os.Getenv("AEGIS_MMDS_ENDPOINT")
-	if mmdsEndpoint == "" {
-		// Stdin path — process-manager / local-dev mode.
-		var ctx SpawnContext
-		if err := json.NewDecoder(os.Stdin).Decode(&ctx); err != nil {
-			return nil, fmt.Errorf("decode spawn context from stdin: %w", err)
-		}
-		return &ctx, nil
-	}
-
-	// MMDS path — Firecracker microVM mode.
 	log.Info("reading spawn context from MMDS", "endpoint", mmdsEndpoint)
 
 	resp, err := http.Get(mmdsEndpoint) //nolint:noctx,gosec // endpoint is operator-controlled
@@ -211,7 +295,6 @@ func readSpawnContext(log *slog.Logger) (*SpawnContext, error) {
 		return nil, fmt.Errorf("decode MMDS payload: %w", err)
 	}
 
-	// Apply forwarded env vars so downstream os.Getenv calls observe them.
 	for k, v := range payload.Env {
 		if err := os.Setenv(k, v); err != nil {
 			log.Warn("failed to set env var from MMDS", "key", k, "error", err)
