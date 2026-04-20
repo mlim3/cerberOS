@@ -64,6 +64,7 @@ import (
 	"os"
 	"strconv"
 
+	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/cerberOS/agents-component/internal/skills"
 	"github.com/cerberOS/agents-component/internal/telemetry"
 )
@@ -79,16 +80,18 @@ type mmdsPayload struct {
 // SpawnContext is the initial context injected by the Lifecycle Manager at spawn.
 // It is delivered as JSON via stdin.
 type SpawnContext struct {
-	TaskID           string `json:"task_id"`
-	SkillDomain      string `json:"skill_domain"`
-	PermissionToken  string `json:"permission_token"` // opaque credential ref — never a raw credential value
-	Instructions     string `json:"instructions"`
-	CommandManifest  string `json:"command_manifest,omitempty"`  // "- name: description" list built by factory; injected into system prompt
-	RecoveredContext string `json:"recovered_context,omitempty"` // non-empty on respawn
-	AgentMemory      string `json:"agent_memory,omitempty"`      // distilled facts from past tasks in this domain; injected into system prompt
-	UserProfile      string `json:"user_profile,omitempty"`      // user preference observations; injected into system prompt
-	TraceID          string `json:"trace_id"`
-	UserContextID    string `json:"user_context_id,omitempty"` // propagated from parent TaskSpec; echoed in all outbound events (issue #67)
+	TaskID           string                   `json:"task_id"`
+	SkillDomain      string                   `json:"skill_domain"`
+	PermissionToken  string                   `json:"permission_token"` // opaque credential ref — never a raw credential value
+	Instructions     string                   `json:"instructions"`
+	CommandManifest  string                   `json:"command_manifest,omitempty"`  // "- name: description" list built by factory; injected into system prompt
+	RecoveredContext string                   `json:"recovered_context,omitempty"` // non-empty on respawn
+	AgentMemory      string                   `json:"agent_memory,omitempty"`      // distilled facts from past tasks in this domain; injected into system prompt
+	UserProfile      string                   `json:"user_profile,omitempty"`      // user preference observations; injected into system prompt
+	TraceID          string                   `json:"trace_id"`
+	UserContextID    string                   `json:"user_context_id,omitempty"` // propagated from parent TaskSpec; echoed in all outbound events (issue #67)
+	ConversationID   string                   `json:"conversation_id,omitempty"` // non-empty when this task continues a prior conversation
+	PriorTurns       []anthropic.MessageParam `json:"prior_turns,omitempty"`     // reconstructed history from factory; nil for standalone tasks
 }
 
 // TaskOutput is the result written to stdout when the task completes or fails.
@@ -142,6 +145,13 @@ func main() {
 	encoder := json.NewEncoder(os.Stdout)
 	stdinDecoder := json.NewDecoder(os.Stdin)
 
+	// persistedHistory and persistedConversationID support the warm-path
+	// optimisation: when a reused process handles consecutive tasks in the
+	// same conversation the in-memory history slice is passed directly to
+	// RunLoop, skipping the JSON deserialisation of PriorTurns entirely.
+	var persistedHistory []anthropic.MessageParam
+	var persistedConversationID string
+
 	iteration := 0
 	for {
 		iteration++
@@ -162,7 +172,32 @@ func main() {
 			os.Exit(1)
 		}
 
-		if err := runOneTask(rootCtx, rootLog, spawnCtx, specBudget, encoder); err != nil {
+		// Choose the history source. When this process already holds the prior
+		// turns in memory (warm path) prefer those over the factory-injected
+		// PriorTurns to avoid unnecessary deserialisation. Fall back to the
+		// factory-injected turns for cold provisions and conversation switches.
+		var injectedHistory []anthropic.MessageParam
+		if spawnCtx.ConversationID != "" &&
+			spawnCtx.ConversationID == persistedConversationID &&
+			len(persistedHistory) > 0 {
+			injectedHistory = persistedHistory
+		} else {
+			injectedHistory = spawnCtx.PriorTurns
+		}
+
+		finalHistory, err := runOneTask(rootCtx, rootLog, spawnCtx, specBudget, encoder, injectedHistory)
+
+		// Thread the final history for the next iteration if this task was part
+		// of a conversation. Reset on conversation change or standalone tasks.
+		if spawnCtx.ConversationID != "" && finalHistory != nil {
+			persistedHistory = finalHistory
+			persistedConversationID = spawnCtx.ConversationID
+		} else {
+			persistedHistory = nil
+			persistedConversationID = ""
+		}
+
+		if err != nil {
 			// runOneTask already emitted a failure TaskOutput on stdout; continue
 			// to the next iteration so a transient task failure does not kill the
 			// reusable process. The factory observes the failed TaskOutput and
@@ -197,15 +232,15 @@ func readNextSpawnContext(log *slog.Logger, dec *json.Decoder) (*SpawnContext, e
 var mmdsDelivered bool
 
 // runOneTask executes a single TaskSpec end-to-end. It emits exactly one
-// newline-delimited TaskOutput to stdout (success or failure). It returns a
-// non-nil error only when the task itself failed after validation so the
-// caller can log it; framing and output are always written regardless.
-func runOneTask(rootCtx context.Context, rootLog *slog.Logger, spawnCtx *SpawnContext, specBudget *skills.SpecBudget, encoder *json.Encoder) error {
+// newline-delimited TaskOutput to stdout (success or failure). It returns the
+// final conversation history slice (for warm-path threading) and any error.
+// framing and output are always written to stdout regardless of error.
+func runOneTask(rootCtx context.Context, rootLog *slog.Logger, spawnCtx *SpawnContext, specBudget *skills.SpecBudget, encoder *json.Encoder, priorTurns []anthropic.MessageParam) ([]anthropic.MessageParam, error) {
 	log := rootLog.With("task_id", spawnCtx.TaskID, "trace_id", spawnCtx.TraceID)
 
 	if err := validate(spawnCtx); err != nil {
 		writeError(log, spawnCtx.TaskID, spawnCtx.TraceID, err.Error())
-		return err
+		return nil, err
 	}
 
 	log.Info("agent-process task started", "skill_domain", spawnCtx.SkillDomain)
@@ -244,10 +279,10 @@ func runOneTask(rootCtx context.Context, rootLog *slog.Logger, spawnCtx *SpawnCo
 		defer as.Close()
 	}
 
-	result, err := RunLoop(taskCtx, log, spawnCtx, ve, steerer, as, specBudget)
+	result, finalHistory, err := RunLoop(taskCtx, log, spawnCtx, ve, steerer, as, specBudget, priorTurns)
 	if err != nil {
 		writeError(log, spawnCtx.TaskID, spawnCtx.TraceID, err.Error())
-		return err
+		return nil, err
 	}
 
 	out := TaskOutput{
@@ -264,7 +299,7 @@ func runOneTask(rootCtx context.Context, rootLog *slog.Logger, spawnCtx *SpawnCo
 	}
 
 	log.Info("agent-process task completed")
-	return nil
+	return finalHistory, nil
 }
 
 // readSpawnContextFromMMDS reads a single SpawnContext envelope from the

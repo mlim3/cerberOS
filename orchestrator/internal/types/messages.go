@@ -10,11 +10,11 @@ import (
 // Messages without a valid envelope are rejected by the Communications Gateway.
 
 type MessageEnvelope struct {
-	MessageID       string          `json:"message_id"`       // UUID
-	MessageType     string          `json:"message_type"`     // e.g. "task_spec", "capability_query"
-	SourceComponent string          `json:"source_component"` // always "orchestrator"
-	CorrelationID   string          `json:"correlation_id"`   // task UUID
-	TraceID         string          `json:"trace_id"`         // W3C trace_id (32 hex) for distributed tracing
+	MessageID       string          `json:"message_id"`        // UUID
+	MessageType     string          `json:"message_type"`      // e.g. "task_spec", "capability_query"
+	SourceComponent string          `json:"source_component"`  // always "orchestrator"
+	CorrelationID   string          `json:"correlation_id"`    // task UUID
+	TraceID         string          `json:"trace_id"`          // W3C trace_id (32 hex) for distributed tracing
 	SpanID          string          `json:"span_id,omitempty"` // optional span ID
 	Timestamp       time.Time       `json:"timestamp"`
 	SchemaVersion   string          `json:"schema_version"` // "1.0"
@@ -56,6 +56,7 @@ type CapabilityResponse struct {
 //   - metadata
 //   - trace_id
 //   - user_context_id
+//   - conversation_id
 //
 // PolicyScope and CallbackTopic remain internal orchestrator concerns and are
 // preserved here so Dispatcher / Executor / Recovery can reuse the same struct.
@@ -72,6 +73,7 @@ type TaskSpec struct {
 	Metadata             map[string]string `json:"metadata,omitempty"`
 	CallbackTopic        string            `json:"callback_topic"`
 	UserContextID        string            `json:"user_context_id,omitempty"`
+	ConversationID       string            `json:"conversation_id,omitempty"`  // Stable ID linking tasks in the same multi-turn conversation
 	ProgressSummary      string            `json:"progress_summary,omitempty"` // Set on recovery re-dispatch
 	// TraceID is W3C trace_id (32 hex); empty uses orchestrator_task_ref on the agent wire payload.
 	TraceID string `json:"trace_id,omitempty"`

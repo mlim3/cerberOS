@@ -334,9 +334,10 @@ func (e *PlanExecutor) dispatchSubtask(ctx context.Context, exec *planExecution,
 			"subtask_id":     sub.SubtaskID,
 			"action":         st.Action,
 		},
-		CallbackTopic: exec.ts.CallbackTopic,
-		UserContextID: exec.ts.UserContextID,
-		TraceID:       exec.ts.TraceID,
+		CallbackTopic:  exec.ts.CallbackTopic,
+		UserContextID:  exec.ts.UserContextID,
+		ConversationID: exec.ts.ConversationID,
+		TraceID:        exec.ts.TraceID,
 	}
 
 	if err := e.gw.PublishTaskSpec(ctx, spec); err != nil {
@@ -439,11 +440,31 @@ func (e *PlanExecutor) checkPlanCompletion(exec *planExecution) {
 		return
 	}
 
-	// Some subtasks failed or were blocked.
+	// Some subtasks failed or were blocked. Surface the most informative
+	// error code we can: the first failing subtask's ErrorCode (which
+	// carries the real underlying cause from the agent — e.g.
+	// "unexpected stop reason: max_tokens") falls through to the user
+	// instead of being flattened into a misleading MAX_RETRIES_EXCEEDED.
+	//
+	// Fallback ordering:
+	//   1. First FAILED/DELIVERY_FAILED/TIMED_OUT subtask's ErrorCode.
+	//   2. ErrCodeInvalidPlan when all remaining subtasks are BLOCKED on
+	//      dependencies (no direct failure to report).
+	//   3. ErrCodeSubtaskFailed as the generic fallback.
 	partial := len(completedResults) > 0
-	errorCode := types.ErrCodeMaxRetriesExceeded
+	errorCode := types.ErrCodeSubtaskFailed
 	if anyBlocked && !anyFailed {
-		errorCode = types.ErrCodeInvalidPlan // all failures are blocked deps
+		errorCode = types.ErrCodeInvalidPlan
+	} else {
+		for _, st := range exec.plan.Subtasks {
+			sub := exec.subtasks[st.SubtaskID]
+			if (sub.State == types.SubtaskStateFailed ||
+				sub.State == types.SubtaskStateDeliveryFailed ||
+				sub.State == types.SubtaskStateTimedOut) && sub.ErrorCode != "" {
+				errorCode = sub.ErrorCode
+				break
+			}
+		}
 	}
 
 	log.Warn("plan failed", "partial", partial, "error_code", errorCode)

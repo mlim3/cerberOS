@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/cerberOS/agents-component/internal/audit"
 	"github.com/cerberOS/agents-component/internal/comms"
 	"github.com/cerberOS/agents-component/internal/credentials"
@@ -458,6 +459,7 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 	// These reads are best-effort; failure does not abort provisioning.
 	agentMemory := f.fetchAgentMemory(entryDomain, spec.TraceID)
 	userProfile := f.fetchUserProfile(spec.UserContextID, spec.TraceID)
+	priorTurns, _ := f.fetchPriorTurns(spec.ConversationID, spec.TraceID)
 
 	// Step 6: Spawn agent process.
 	vmCfg := lifecycle.VMConfig{
@@ -472,6 +474,8 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 		UserProfile:     userProfile,
 		TraceID:         spec.TraceID,
 		UserContextID:   spec.UserContextID,
+		ConversationID:  spec.ConversationID,
+		PriorTurns:      priorTurns,
 		OnComplete:      f.processCompletionHandler(agentID),
 	}
 	if err := f.lifecycle.Spawn(vmCfg); err != nil {
@@ -572,6 +576,7 @@ func (f *Factory) assignTask(agentID string, spec *types.TaskSpec) error {
 	manifest := buildManifestText(commands)
 	agentMemory := f.fetchAgentMemory(entryDomain, spec.TraceID)
 	userProfile := f.fetchUserProfile(spec.UserContextID, spec.TraceID)
+	priorTurns, _ := f.fetchPriorTurns(spec.ConversationID, spec.TraceID)
 
 	vmCfg := lifecycle.VMConfig{
 		AgentID:         agentID,
@@ -584,6 +589,8 @@ func (f *Factory) assignTask(agentID string, spec *types.TaskSpec) error {
 		UserProfile:     userProfile,
 		TraceID:         spec.TraceID,
 		UserContextID:   spec.UserContextID,
+		ConversationID:  spec.ConversationID,
+		PriorTurns:      priorTurns,
 		OnComplete:      f.processCompletionHandler(agentID),
 	}
 
@@ -1311,6 +1318,119 @@ func (f *Factory) fetchUserProfile(userContextID, traceID string) string {
 	return joinMemoryPayloads(records, 2000)
 }
 
+// fetchPriorTurns retrieves the latest ConversationSnapshot for conversationID
+// from the Memory Component and returns the prior turns and their recorded token
+// count. Returns nil, 0 when conversationID is empty, no snapshot exists, or the
+// read fails (best-effort — callers treat absence as a standalone task).
+//
+// Token guard: if the snapshot's recorded token count already exceeds the
+// compaction threshold, turns are dropped from the front (oldest first) until the
+// estimated count fits within the budget. This is O(n) on turn count and requires
+// no LLM call. The per-turn estimate is snapshotTokens/len(turns) — a rough
+// average that is conservative enough for the guard's purpose.
+func (f *Factory) fetchPriorTurns(conversationID, traceID string) ([]anthropic.MessageParam, int64) {
+	if conversationID == "" {
+		return nil, 0
+	}
+	records, err := f.memory.Read("conversation:"+conversationID, "conversation_snapshot")
+	if err != nil || len(records) == 0 {
+		if err != nil {
+			f.log.Warn("factory: fetchPriorTurns failed", "conversation_id", conversationID, "error", err, "trace_id", traceID)
+		}
+		return nil, 0
+	}
+
+	// Deserialise all returned records and select the most recent snapshot by
+	// WrittenAt. Memory Component return ordering is not guaranteed by the
+	// interface contract, so we scan all records rather than assuming [0] is
+	// the latest.
+	var snap types.ConversationSnapshot
+	for _, rec := range records {
+		raw, mErr := json.Marshal(rec.Payload)
+		if mErr != nil {
+			f.log.Warn("factory: fetchPriorTurns: marshal record payload", "error", mErr, "trace_id", traceID)
+			continue
+		}
+		var s types.ConversationSnapshot
+		if uErr := json.Unmarshal(raw, &s); uErr != nil {
+			f.log.Warn("factory: fetchPriorTurns: unmarshal snapshot", "error", uErr, "trace_id", traceID)
+			continue
+		}
+		if s.WrittenAt.After(snap.WrittenAt) {
+			snap = s
+		}
+	}
+	if len(snap.Turns) == 0 {
+		return nil, 0
+	}
+
+	turns := make([]anthropic.MessageParam, 0, len(snap.Turns))
+	for _, rawTurn := range snap.Turns {
+		var msg anthropic.MessageParam
+		if err := json.Unmarshal(rawTurn, &msg); err != nil {
+			f.log.Warn("factory: fetchPriorTurns: unmarshal turn", "error", err, "trace_id", traceID)
+			return nil, 0
+		}
+		turns = append(turns, msg)
+	}
+
+	// Defensive sanitization: strip trailing assistant turns that contain
+	// tool_use blocks without a matching tool_result user turn after them.
+	// Anthropic rejects such histories with "tool_use ids were found without
+	// tool_result blocks immediately after". This defends against snapshots
+	// written by older agent-process builds that wrote the snapshot before
+	// appending the final tool_result user turn (see agent-process/loop.go
+	// taskDone path). Once all clients are upgraded this is a no-op.
+	droppedTrailing := 0
+	for len(turns) > 0 {
+		last := turns[len(turns)-1]
+		if last.Role != anthropic.MessageParamRoleAssistant {
+			break
+		}
+		hasToolUse := false
+		for _, b := range last.Content {
+			if b.OfToolUse != nil {
+				hasToolUse = true
+				break
+			}
+		}
+		if !hasToolUse {
+			break
+		}
+		turns = turns[:len(turns)-1]
+		droppedTrailing++
+	}
+	if droppedTrailing > 0 {
+		f.log.Warn("factory: fetchPriorTurns: dropped trailing assistant turns with unmatched tool_use",
+			"conversation_id", conversationID,
+			"dropped_count", droppedTrailing,
+			"trace_id", traceID,
+		)
+	}
+	if len(turns) == 0 {
+		return nil, 0
+	}
+
+	// Token guard: drop oldest turns until the snapshot fits within the
+	// compaction budget. This prevents a long conversation from arriving
+	// already over the 80% threshold before the new Instructions are added.
+	budget := int64(float64(types.ModelContextWindow) * types.CompactThreshold)
+	tokenEst := snap.TotalTokens
+	for len(turns) > 1 && tokenEst > budget {
+		tokenEst -= tokenEst / int64(len(turns))
+		turns = turns[1:]
+	}
+
+	f.log.Info("factory: prior turns fetched",
+		"conversation_id", conversationID,
+		"turn_count", len(turns),
+		"snapshot_tokens", snap.TotalTokens,
+		"token_est_after_guard", tokenEst,
+		"trace_id", traceID,
+	)
+	return turns, tokenEst
+}
+
 // joinMemoryPayloads extracts string payloads from MemoryWrite records and
 // joins them as a newline-separated list, truncated to maxChars total.
 func joinMemoryPayloads(records []types.MemoryWrite, maxChars int) string {
@@ -1542,15 +1662,29 @@ func (f *Factory) wakeAgent(agentID string, spec *types.TaskSpec) error {
 	if len(agent.SkillDomains) > 0 {
 		entryDomain = agent.SkillDomains[0]
 	}
+	commands, err := f.skills.GetCommands(entryDomain)
+	if err != nil {
+		return fmt.Errorf("factory: wakeAgent: skills.GetCommands %q: %w", entryDomain, err)
+	}
+	manifest := buildManifestText(commands)
+	agentMemory := f.fetchAgentMemory(entryDomain, spec.TraceID)
+	userProfile := f.fetchUserProfile(spec.UserContextID, spec.TraceID)
+	priorTurns, _ := f.fetchPriorTurns(spec.ConversationID, spec.TraceID)
 	vmCfg := lifecycle.VMConfig{
-		AgentID:       agentID,
-		VMID:          newVMID,
-		TaskID:        spec.TaskID,
-		SkillDomain:   entryDomain,
-		CredentialPtr: token,
-		Instructions:  spec.Instructions,
-		TraceID:       spec.TraceID,
-		UserContextID: spec.UserContextID,
+		AgentID:         agentID,
+		VMID:            newVMID,
+		TaskID:          spec.TaskID,
+		SkillDomain:     entryDomain,
+		CredentialPtr:   token,
+		Instructions:    spec.Instructions,
+		CommandManifest: manifest,
+		AgentMemory:     agentMemory,
+		UserProfile:     userProfile,
+		TraceID:         spec.TraceID,
+		UserContextID:   spec.UserContextID,
+		ConversationID:  spec.ConversationID,
+		PriorTurns:      priorTurns,
+		OnComplete:      f.processCompletionHandler(agentID),
 	}
 	if err := f.lifecycle.Spawn(vmCfg); err != nil {
 		return fmt.Errorf("factory: wakeAgent: lifecycle.Spawn: %w", err)
