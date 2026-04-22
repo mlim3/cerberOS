@@ -170,6 +170,20 @@ cmd_up() {
     psql -U "${POSTGRES_USER:-user}" -d "${POSTGRES_DB:-memory_db}" \
     -c "CREATE DATABASE openbao OWNER \"${POSTGRES_USER:-user}\""
 
+  # Re-apply the memory_db schema/seed on every bootstrap. The docker-entrypoint
+  # init scripts only run when the Postgres data dir is empty, so teammates with
+  # pre-existing volumes silently miss any new tables, indexes, or seed rows
+  # added to init-db.sql. Running it here (the file is idempotent —
+  # CREATE ... IF NOT EXISTS, INSERT ... ON CONFLICT DO NOTHING) guarantees
+  # every machine converges on the same schema + seed state after bootstrap,
+  # without destroying user-generated rows.
+  log "Re-applying memory_db schema/seed (idempotent)..."
+  docker compose exec -T memory-db \
+    psql -U "${POSTGRES_USER:-user}" -d "${POSTGRES_DB:-memory_db}" \
+    -v ON_ERROR_STOP=1 \
+    -f /docker-entrypoint-initdb.d/01-init-db.sql >/dev/null \
+    || die "failed to re-apply memory/scripts/init-db.sql"
+
   log "Starting remaining Docker services..."
   docker compose up --build --detach
 
