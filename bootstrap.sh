@@ -209,12 +209,23 @@ cmd_up() {
   # so this is a no-op on a genuinely up-to-date DB and cannot clobber
   # user-generated rows. Skipped on the default wipe path because
   # docker-entrypoint will have just run it fresh on the empty volume.
+  #
+  # Stream the file from the host via stdin rather than passing a container
+  # path to `psql -f`. Git Bash / MSYS on Windows rewrites any absolute
+  # argument starting with `/` into a Windows path (e.g.
+  # `/docker-entrypoint-initdb.d/01-init-db.sql` becomes
+  # `C:/Program Files/Git/docker-entrypoint-initdb.d/...`) which breaks `exec`
+  # even though the path was meant to be interpreted inside the container.
+  # stdin avoids that entirely and also uses the checked-out script directly
+  # instead of relying on the docker-entrypoint bind mount being in sync.
   if [[ "$keep_volumes" == true ]]; then
     log "Re-applying memory_db schema/seed (idempotent) for --keep-volumes..."
+    [[ -f "$ROOT/memory/scripts/init-db.sql" ]] \
+      || die "memory/scripts/init-db.sql not found at $ROOT"
     docker compose exec -T memory-db \
       psql -U "${POSTGRES_USER:-user}" -d "${POSTGRES_DB:-memory_db}" \
       -v ON_ERROR_STOP=1 \
-      -f /docker-entrypoint-initdb.d/01-init-db.sql >/dev/null \
+      < "$ROOT/memory/scripts/init-db.sql" >/dev/null \
       || die "failed to re-apply memory/scripts/init-db.sql"
   fi
 
