@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -273,7 +274,19 @@ func (h *PersonalInfoHandler) GetAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	facts, err := h.repo.Querier().GetAllFacts(r.Context(), userUUID)
+	includeArchived := false
+	if includeArchivedRaw := r.URL.Query().Get("includeArchived"); includeArchivedRaw != "" {
+		parsed, err := strconv.ParseBool(includeArchivedRaw)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "includeArchived must be a boolean", nil))
+			return
+		}
+		includeArchived = parsed
+	}
+
+	facts, err := h.repo.ListFacts(r.Context(), userUUID, includeArchived)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -291,14 +304,16 @@ func (h *PersonalInfoHandler) GetAll(w http.ResponseWriter, r *http.Request) {
 
 	// Format response
 	type FactResponse struct {
-		FactID     string      `json:"factId"`
-		UserID     string      `json:"userId"`
-		Category   string      `json:"category"`
-		FactKey    string      `json:"factKey"`
-		FactValue  interface{} `json:"factValue"`
-		Confidence float64     `json:"confidence"`
-		Version    int32       `json:"version"`
-		UpdatedAt  string      `json:"updatedAt"`
+		FactID             string      `json:"factId"`
+		UserID             string      `json:"userId"`
+		Category           string      `json:"category"`
+		FactKey            string      `json:"factKey"`
+		FactValue          interface{} `json:"factValue"`
+		Confidence         float64     `json:"confidence"`
+		Version            int32       `json:"version"`
+		UpdatedAt          string      `json:"updatedAt"`
+		ArchiveReason      string      `json:"archiveReason,omitempty"`
+		SupersededByFactID string      `json:"supersededByFactId,omitempty"`
 	}
 
 	type ChunkResponse struct {
@@ -323,6 +338,12 @@ func (h *PersonalInfoHandler) GetAll(w http.ResponseWriter, r *http.Request) {
 			Version:    f.Version.Int32,
 			UpdatedAt:  f.UpdatedAt.Time.Format("2006-01-02T15:04:05Z"),
 		}
+		if f.ArchiveReason.Valid {
+			formattedFacts[i].ArchiveReason = f.ArchiveReason.String
+		}
+		if f.SupersededByFactID.Valid {
+			formattedFacts[i].SupersededByFactID = h.formatUUID(f.SupersededByFactID)
+		}
 	}
 
 	formattedChunks := make([]ChunkResponse, len(chunks))
@@ -342,6 +363,10 @@ func (h *PersonalInfoHandler) GetAll(w http.ResponseWriter, r *http.Request) {
 		"facts":  formattedFacts,
 		"chunks": formattedChunks,
 	}))
+}
+
+type ArchiveFactRequest struct {
+	Reason string `json:"reason"`
 }
 
 type UpdateFactRequest struct {
@@ -558,6 +583,203 @@ func (h *PersonalInfoHandler) DeleteFact(w http.ResponseWriter, r *http.Request)
 	json.NewEncoder(w).Encode(SuccessResponse(map[string]interface{}{
 		"deleted": true,
 		"factId":  factId,
+	}))
+}
+
+// ArchiveFact archives a fact for a user.
+// @Summary Archive a fact
+// @Description Archives an active fact for a user with an explicit archive reason
+// @Tags personal_info
+// @Accept json
+// @Produce json
+// @Param userId path string true "User ID"
+// @Param factId path string true "Fact ID"
+// @Param request body ArchiveFactRequest true "Archive Fact Payload"
+// @Success 200 {object} map[string]interface{} "OK"
+// @Failure 400 {object} map[string]interface{} "Bad Request"
+// @Failure 404 {object} map[string]interface{} "Not Found"
+// @Failure 500 {object} map[string]interface{} "Internal Server Error"
+// @Router /api/v1/personal_info/{userId}/facts/{factId}/archive [post]
+func (h *PersonalInfoHandler) ArchiveFact(w http.ResponseWriter, r *http.Request) {
+	userId := r.PathValue("userId")
+	factId := r.PathValue("factId")
+	if userId == "" || factId == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "User ID and Fact ID are required", nil))
+		return
+	}
+
+	userUUID, exists, err := h.ensureUserExists(r.Context(), userId)
+	if err != nil {
+		if errors.Is(err, errInvalidUserID) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "Invalid User ID format", nil))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(ErrorResponse("internal", "Failed to validate user", err.Error()))
+		return
+	}
+	if !exists {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(ErrorResponse("not_found", "User not found", nil))
+		return
+	}
+
+	var factUUID pgtype.UUID
+	if err := factUUID.Scan(factId); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "Invalid Fact ID format", nil))
+		return
+	}
+
+	var req ArchiveFactRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "Invalid JSON payload", nil))
+		return
+	}
+
+	switch req.Reason {
+	case "decayed", "contradicted", "superseded", "manually_archived":
+	default:
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "reason must be decayed, contradicted, superseded, or manually_archived", nil))
+		return
+	}
+
+	if err := h.repo.ArchiveFact(r.Context(), userUUID, factUUID, req.Reason); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(ErrorResponse("not_found", "Fact not found", nil))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(ErrorResponse("internal", "Failed to archive fact", err.Error()))
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(SuccessResponse(map[string]interface{}{
+		"factId":        factId,
+		"archiveReason": req.Reason,
+	}))
+}
+
+type SupersedeFactRequest struct {
+	Category   string      `json:"category"`
+	FactKey    string      `json:"factKey"`
+	FactValue  interface{} `json:"factValue"`
+	Confidence float64     `json:"confidence"`
+}
+
+// SupersedeFact replaces an active fact with a new one and archives the old one.
+// @Summary Supersede a fact
+// @Description Creates a replacement fact and archives the previous active fact as superseded
+// @Tags personal_info
+// @Accept json
+// @Produce json
+// @Param userId path string true "User ID"
+// @Param factId path string true "Fact ID"
+// @Param request body SupersedeFactRequest true "Supersede Fact Payload"
+// @Success 200 {object} map[string]interface{} "OK"
+// @Failure 400 {object} map[string]interface{} "Bad Request"
+// @Failure 404 {object} map[string]interface{} "Not Found"
+// @Failure 500 {object} map[string]interface{} "Internal Server Error"
+// @Router /api/v1/personal_info/{userId}/facts/{factId}/supersede [post]
+func (h *PersonalInfoHandler) SupersedeFact(w http.ResponseWriter, r *http.Request) {
+	userId := r.PathValue("userId")
+	factId := r.PathValue("factId")
+	if userId == "" || factId == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "User ID and Fact ID are required", nil))
+		return
+	}
+
+	userUUID, exists, err := h.ensureUserExists(r.Context(), userId)
+	if err != nil {
+		if errors.Is(err, errInvalidUserID) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "Invalid User ID format", nil))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(ErrorResponse("internal", "Failed to validate user", err.Error()))
+		return
+	}
+	if !exists {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(ErrorResponse("not_found", "User not found", nil))
+		return
+	}
+
+	var factUUID pgtype.UUID
+	if err := factUUID.Scan(factId); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "Invalid Fact ID format", nil))
+		return
+	}
+
+	var req SupersedeFactRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "Invalid JSON payload", nil))
+		return
+	}
+	if req.FactValue == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "factValue is required", nil))
+		return
+	}
+
+	factValue, err := json.Marshal(req.FactValue)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "Invalid fact value", nil))
+		return
+	}
+
+	var category pgtype.Text
+	category.Scan(req.Category)
+
+	newFactID, err := h.repo.SupersedeFact(r.Context(), userUUID, factUUID, category, req.FactKey, factValue, req.Confidence)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(ErrorResponse("not_found", "Fact not found", nil))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(ErrorResponse("internal", "Failed to supersede fact", err.Error()))
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(SuccessResponse(map[string]interface{}{
+		"oldFactId":     factId,
+		"newFactId":     h.formatUUID(newFactID),
+		"archiveReason": "superseded",
 	}))
 }
 

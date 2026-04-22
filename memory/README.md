@@ -1,83 +1,86 @@
-# Memory Service API Specification
+# Memory Service API And Current Specification
 
-Version: v1  
-Implementation Language: Go  
-Database: PostgreSQL with pgvector
+The memory service is the persistence layer for CerberOS chat state, personal memory, internal vault secrets, orchestrator records, scheduled jobs, system events, and agent execution logs.
 
-## CLI Tool
+This document is intentionally comprehensive. It preserves the specification-style detail that used to live here, but it has been rewritten to match the service that exists today instead of the older changelog-era contract.
 
-The memory service includes a hybrid CLI tool that allows other services or scripts to interact with the memory database directly (avoiding HTTP network latency) or fallback to the HTTP API.
+Open follow-up work that is still not implemented lives in [to_do.md](./to_do.md).
 
-### Build the CLI
+## 1. Service Overview
 
-```bash
-cd /Users/aniketthakker/Downloads/cerberOS/memory
-go build -o memory-cli ./cmd/cli
-```
+### Purpose
 
-### Usage
+The memory service provides:
 
-By default, the CLI will attempt to connect to the HTTP API at `http://localhost:8080`.
+- user-owned conversations, tasks, and immutable chat messages
+- personal-info chunk storage and semantic retrieval
+- fact CRUD plus archive and supersession lifecycle
+- encrypted per-user secret storage for internal services
+- agent task execution logs
+- orchestrator record persistence for internal workflows
+- scheduled-job storage and run history
+- system event logging
 
-```bash
-# Query facts using HTTP API
-./memory-cli chat history --session <session-uuid> --limit 10
-./memory-cli facts query --user <user-uuid> "what is my favorite color?"
-```
+### Architecture
 
-#### Direct Database Connection (Zero Latency)
+- implementation language: Go
+- primary store: PostgreSQL
+- vector search: `pgvector`
+- docs: Swagger artifacts under `memory/docs/`
+- metrics: Prometheus endpoint at `/internal/metrics`
 
-To bypass the HTTP API and connect directly to the database, provide the `-db` flag or set the standard DB environment variables (`DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`).
+### Internal-only surfaces
 
-```bash
-# Connect directly to the DB to avoid network hops
-./memory-cli -db="postgres://user:pass@localhost:5432/memory_db" facts query --user <user-uuid> "tell me about myself"
-```
+The following route families require `X-Internal-API-Key`:
 
-## Swagger Generation
+- `/api/v1/vault/...`
+- `/api/v1/orchestrator/...`
 
-Swagger is generated from handler annotations with `swaggo/swag`.
+### Current embedding behavior
 
-From `/Users/colbydobson/cs/cerberOS/memory`, run:
+- if `OPENAI_API_KEY` is set, the service uses OpenAI embeddings with `text-embedding-3-small`
+- otherwise it uses a deterministic local embedder intended for local development, demos, and tests
 
-```bash
-go generate ./cmd/server
-```
+### Current extraction behavior
 
-That regenerates:
+- `personal_info/save` can create facts when `extractFacts=true`
+- that extraction path is still placeholder behavior today, not a production fact extractor
 
-- `docs/docs.go`
-- `docs/swagger.json`
-- `docs/swagger.yaml`
+## 2. API Conventions
 
-The server imports the generated docs package and serves Swagger UI at `http://localhost:8080/swagger/index.html`.
+### Base path
 
-## 1. Architectural Overview
+All routes are served under `/api/v1/` except for:
 
-The Memory Service acts as the central memory layer for the AI OS. It follows a logically distributed architecture on a single PostgreSQL instance, with strict sharding keys that allow physical distribution in the future. Externally, it exposes domain-specific, versioned REST endpoints. Internally, it routes these requests to isolated PostgreSQL schemas, ensuring clear service boundaries, security, and optimized querying.
+- `/internal/metrics`
+- `/swagger/index.html`
 
-All endpoints are versioned under `/api/v1/`.
-All requests and responses use JSON.
-Timestamps use RFC3339 format (example: `2026-03-04T12:34:56Z`).
-All IDs use UUIDv7 for decentralized generation and time-ordered clustering.
+### Content type
 
-**Design Philosophy (The Facade Pattern):** This service intentionally abstracts complexity away from the caller. For long-term memory, the caller simply passes raw text. The Memory Service itself handles text chunking, embedding generation, fact extraction, and traceability linking internally. This ensures the rest of the OS does not need to understand vector math or chunking strategies.
+- requests and responses use JSON
 
-## 2. Standard API Response Format
+### Time format
 
-All endpoints return a standardized response envelope.
+- timestamps are RFC3339
 
-### Successful response
+### IDs
+
+- service-generated IDs are typically UUIDv7
+- callers may also supply IDs on some create flows where the route supports idempotent or caller-owned identifiers
+
+### Response envelope
+
+Successful response:
 
 ```json
 {
   "ok": true,
-  "data": {...},
+  "data": {},
   "error": null
 }
 ```
 
-### Error response
+Error response:
 
 ```json
 {
@@ -86,603 +89,878 @@ All endpoints return a standardized response envelope.
   "error": {
     "code": "invalid_argument | not_found | conflict | internal",
     "message": "Human readable error",
-    "details": {...}
+    "details": null
   }
 }
 ```
 
-## 3. The API Contract & Service Logic (v1)
+## 3. Data Model Summary
 
-We use path variables like `{sessionId}`, `{userId}`, `{taskId}`, and `{factId}` to clearly identify the resource being modified.
+### Chat domain
 
-All user-scoped endpoints validate that the referenced `userId` exists in `identity_schema.users` before performing work. All resource lookups are constrained by `userId` ownership. If a requested resource does not exist for the specified user, the service returns `not_found` rather than exposing cross-user existence.
+- `conversations` are explicit user-owned chat containers
+- `tasks` belong to conversations and optionally carry orchestrator metadata
+- `messages` are append-only chat entries under a conversation
 
-### A. Health Endpoint
+### Personal info domain
 
-**Purpose:** To provide service health information for monitoring and orchestration systems.
+- `chunks` store raw text plus embeddings for retrieval
+- `facts` store structured user facts
+- `source references` link chunks and facts back to their source material
+- archived facts move to `user_facts_archive` and are excluded from default retrieval
 
-**Endpoint:** `GET /api/v1/healthz`
+### Vault domain
 
-**Arguments:** None
+- secrets are stored encrypted at rest
+- decrypted values are only returned from the internal API
 
-**Return values:**
+### Orchestrator domain
 
-- `status` — `healthy` or `degraded`
-- `database` — `connected` or `disconnected`
-- `timestamp` — current server time
+- records are stored by typed contract
+- task-state records behave like upserts
+- audit-log-style records append
 
-**Dataflow:**
+### Scheduler domain
 
-1. The request enters the HTTP handler.
-2. The handler performs a lightweight database ping.
-3. If the ping succeeds, the service returns `healthy`.
-4. The standardized response envelope is returned to the caller.
+- scheduled jobs represent internal or external work that should run later
+- scheduled job runs record execution history
 
-### B. Chat Store
+## 4. Endpoint Specification
 
-**Target Schema:** `chat_schema`
+### A. Health
 
-**Purpose:** To store the exact chronological transcript of conversations between the user and the AI.
+#### `GET /api/v1/healthz`
 
-**Why it is needed:** This store provides exact short-term conversational memory with no summarization or transformation.
+Purpose:
 
-Chat messages are append-only and immutable through this API. Update and delete operations are intentionally not exposed.
+- report service and database health
 
-#### `POST /api/v1/chat/{sessionId}/messages`
+Success data:
 
-**Request arguments:**
+- `status`: `healthy` or `degraded`
+- `database`: `connected` or `disconnected`
+- `timestamp`
 
-- **Request JSON:**
+Notes:
 
-```json
-{
-  "userId": "0194d7b4-9d31-7d31-a111-111111111111",
-  "role": "user",
-  "content": "What did I say about PostgreSQL last week?",
-  "tokenCount": 12,
-  "idempotencyKey": "0194d7b4-9d31-7d31-a222-222222222222"
-}
-```
+- returns `200` when healthy
+- returns `503` when the database ping fails
 
-- `sessionId` — UUID of the conversation session
-- `userId` — UUID of the user who owns the conversation
-- `role` — `user | assistant | system`
-- `content` — exact message text
-- `tokenCount` — optional integer token count
-- `idempotencyKey` — UUID used to prevent duplicate insertion on retry
+### B. Conversations, Tasks, And Chat Messages
 
-**Return values:**
+#### `GET /api/v1/conversations?userId=<uuid>&limit=<n>`
 
-- `message` — inserted message record
+Purpose:
 
-**Successful response JSON:**
+- list conversation summaries for one user
 
-```json
-{
-  "ok": true,
-  "data": {
-    "message": {
-      "messageId": "0194d7b4-9d31-7d31-a333-333333333333",
-      "sessionId": "0194d7b4-9d31-7d31-a444-444444444444",
-      "userId": "0194d7b4-9d31-7d31-a111-111111111111",
-      "role": "user",
-      "content": "What did I say about PostgreSQL last week?",
-      "tokenCount": 12,
-      "createdAt": "2026-03-04T12:34:56Z"
-    }
-  },
-  "error": null
-}
-```
+Validation:
 
-**Dataflow:**
+- `userId` query parameter is required
+- unknown users return `404 not_found`
 
-1. Request arrives; service validates required fields and verifies that the supplied `sessionId` belongs to the supplied `userId`.
-2. `idempotencyKey` uniqueness is enforced per session.
-3. If the same `idempotencyKey` is retried with the same payload, the existing message record is returned.
-4. If the same `idempotencyKey` is retried with a different payload, the service returns a `conflict` error.
-5. If the request is new, the service inserts the row into `chat_schema.messages`.
-6. The inserted or previously existing message record is returned.
+Response data:
 
-#### `GET /api/v1/chat/{sessionId}/messages`
+- `conversations`: array of conversation summaries
 
-**Request arguments:**
+Conversation fields:
 
-- **Successful response JSON:**
+- `conversationId`
+- `userId`
+- `title`
+- `createdAt`
+- `updatedAt`
+- `lastMessagePreview`
+- `messageCount`
+- `latestTaskId`
+- `latestTaskStatus`
+
+#### `POST /api/v1/conversations`
+
+Purpose:
+
+- create a conversation for a user
+
+Request body:
 
 ```json
 {
-  "ok": true,
-  "data": {
-    "messages": [
-      {
-        "messageId": "0194d7b4-9d31-7d31-a333-333333333333",
-        "sessionId": "0194d7b4-9d31-7d31-a444-444444444444",
-        "userId": "0194d7b4-9d31-7d31-a111-111111111111",
-        "role": "user",
-        "content": "What did I say about PostgreSQL last week?",
-        "tokenCount": 12,
-        "createdAt": "2026-03-04T12:34:56Z"
-      }
-    ]
-  },
-  "error": null
+  "userId": "uuid",
+  "conversationId": "uuid optional",
+  "title": "optional title"
 }
 ```
 
-- `sessionId` — UUID of the conversation session
-- `limit` — optional integer maximum number of messages to return
+Behavior:
 
-**Return values:**
+- validates the user exists
+- creates a new conversation when `conversationId` does not exist
+- returns the existing conversation when the supplied `conversationId` already belongs to the same user
+- returns `404 not_found` when the supplied `conversationId` is already owned by another user
 
-- `messages` — ordered array of message records. Each record contains:
-  - `messageId`
-  - `sessionId`
-  - `userId`
-  - `role`
-  - `content`
-  - `tokenCount`
-  - `createdAt`
+Response data:
 
-**Dataflow:**
+- `conversation`
 
-1. Service queries `chat_schema.messages` where `session_id` matches the path variable.
-2. Results are ordered by `created_at` ascending.
-3. If `limit` is provided, the result set is truncated.
+#### `POST /api/v1/tasks`
 
-### C. Personal Info Store
+Purpose:
 
-**Target Schema:** `personal_info_schema` (utilizing `pgvector`)
+- create a task linked to a conversation
 
-**Purpose:** The core long-term intelligent memory. This is where the system handles semantic chunks, structured facts, and traceability links.
+Request body:
 
-This API intentionally exposes high-level memory operations rather than full CRUD over every underlying table. The primary workflow is save, semantic query, and full export, with direct fact correction available where structured edits are necessary.
+```json
+{
+  "userId": "uuid",
+  "taskId": "uuid optional",
+  "conversationId": "uuid optional",
+  "title": "optional title for auto-created conversation",
+  "orchestratorTaskRef": "optional string",
+  "traceId": "optional string",
+  "status": "optional string",
+  "inputSummary": "optional string"
+}
+```
+
+Behavior:
+
+- validates the user exists
+- creates the conversation first when `conversationId` is omitted
+- enforces conversation ownership when `conversationId` is supplied
+
+Response data:
+
+- `task`
+
+Task fields:
+
+- `taskId`
+- `conversationId`
+- `userId`
+- `orchestratorTaskRef`
+- `traceId`
+- `status`
+- `inputSummary`
+- `createdAt`
+- `updatedAt`
+- `completedAt`
+
+#### `GET /api/v1/tasks/{taskId}?userId=<uuid>`
+
+Purpose:
+
+- fetch one task owned by a user
+
+Validation:
+
+- `taskId` path parameter must be a UUID
+- `userId` query parameter is required
+
+Response data:
+
+- `task`
+
+#### `POST /api/v1/chat/{conversationId}/messages`
+
+Purpose:
+
+- append a message to a conversation
+
+Request body:
+
+```json
+{
+  "userId": "uuid",
+  "role": "user | assistant | system",
+  "content": "message text",
+  "tokenCount": 123,
+  "idempotencyKey": "uuid optional"
+}
+```
+
+Behavior:
+
+- validates the user exists
+- enforces conversation ownership
+- creates the conversation on first write when the conversation ID is new and belongs to this user
+- messages are immutable after creation
+- idempotency is scoped per conversation
+- replaying the same `idempotencyKey` with the same payload returns the existing message
+- replaying the same `idempotencyKey` with a different payload returns `409 conflict`
+
+Response data:
+
+- `message`
+
+Message fields:
+
+- `messageId`
+- `conversationId`
+- `userId`
+- `role`
+- `content`
+- `tokenCount`
+- `createdAt`
+
+#### `GET /api/v1/chat/{conversationId}/messages?userId=<uuid>&limit=<n>`
+
+Purpose:
+
+- list messages in one conversation
+
+Validation:
+
+- `userId` query parameter is required
+- unknown users return `404`
+- users cannot read another user's conversation
+
+Response data:
+
+- `messages`: array of chat messages
+
+### C. Personal Info And Fact Lifecycle
 
 #### `POST /api/v1/personal_info/{userId}/save`
 
-**Request arguments:**
+Purpose:
 
-- **Request JSON:**
+- save raw user material into chunked memory
+- optionally create extracted facts and source references
+
+Request body:
 
 ```json
 {
-  "content": "Colby prefers PostgreSQL with pgvector for agent memory because it keeps relational data and vector search in one system.",
-  "sourceType": "chat",
-  "sourceId": "0194d7b4-9d31-7d31-a555-555555555555",
+  "content": "raw text",
+  "sourceType": "chat | uploaded_file | document | web",
+  "sourceId": "uuid",
   "extractFacts": true
 }
 ```
 
-- `userId` — UUID of the user
-- `content` — raw text content to intelligently store
-- `sourceType` — `chat | uploaded_file | document | web`
-- `sourceId` — UUID of the original source
-- `extractFacts` — boolean indicating whether to run the structured fact extraction pipeline
+Behavior:
 
-**Return values:**
+- validates the user exists
+- chunks the content
+- generates embeddings for chunks
+- stores source references for created chunks
+- optionally creates facts plus fact source references
 
-- `chunkIds` — array of UUIDs for inserted semantic chunks
-- `factIds` — array of UUIDs for inserted structured facts
-- `sourceReferenceIds` — array of UUIDs for inserted traceability links
+Response data:
 
-**Successful response JSON:**
-
-```json
-{
-  "ok": true,
-  "data": {
-    "chunkIds": ["0194d7b4-9d31-7d31-a666-666666666666"],
-    "factIds": ["0194d7b4-9d31-7d31-a777-777777777777"],
-    "sourceReferenceIds": [
-      "0194d7b4-9d31-7d31-a888-888888888888",
-      "0194d7b4-9d31-7d31-a999-999999999999"
-    ]
-  },
-  "error": null
-}
-```
-
-**Dataflow:**
-
-1. Service validates that `userId` exists and that the source payload is well-formed.
-2. Raw `content` is accepted.
-3. The Go service internally chunks the content into smaller semantic units.
-4. The service calls an embedding model to vectorize each chunk.
-5. Chunks and vectors are written into `personal_info_schema.personal_info_chunks`.
-6. Exactly one `source_references` row is created for each inserted chunk.
-7. If `extractFacts` is true, the service runs the fact extraction pipeline over the content.
-8. Extracted facts are written into `personal_info_schema.user_facts`.
-9. Exactly one `source_references` row is created for each inserted fact.
-10. Existing source reference rows are not reused during this operation; a new traceability row is inserted for each created chunk or fact.
-11. The service returns the created chunk, fact, and source reference IDs.
+- `chunkIds`
+- `factIds`
+- `sourceReferenceIds`
 
 #### `POST /api/v1/personal_info/{userId}/query`
 
-**Request arguments:**
+Purpose:
 
-- **Request JSON:**
+- run semantic retrieval over stored chunks for one user
+
+Request body:
 
 ```json
 {
-  "query": "What database choice has Colby preferred for memory service work?",
+  "query": "string",
   "topK": 5
 }
 ```
 
-- `userId` — UUID of the user
-- `query` — natural language query string
-- `topK` — maximum number of vector results to return
+Behavior:
 
-**Return values:**
+- validates the user exists
+- embeds the query
+- retrieves chunks by vector distance
+- breaks ties with `created_at DESC`
+- returns similarity scores derived from vector distance
 
-- `results` — ordered list of semantic memory matches. Each match contains:
-  - `chunkId`
-  - `text`
-  - `similarityScore` — cosine similarity score in the range `[0, 1]`, where higher is better
-  - `sourceReferences` — array of related source reference records
+Response data:
 
-**Successful response JSON:**
+- `results`
 
-```json
-{
-  "ok": true,
-  "data": {
-    "results": [
-      {
-        "chunkId": "0194d7b4-9d31-7d31-a666-666666666666",
-        "text": "Colby prefers PostgreSQL with pgvector for agent memory because it keeps relational data and vector search in one system.",
-        "similarityScore": 0.93,
-        "sourceReferences": [
-          {
-            "sourceReferenceId": "0194d7b4-9d31-7d31-a888-888888888888",
-            "targetId": "0194d7b4-9d31-7d31-a666-666666666666",
-            "targetType": "chunk",
-            "sourceId": "0194d7b4-9d31-7d31-a555-555555555555",
-            "sourceType": "chat"
-          }
-        ]
-      }
-    ]
-  },
-  "error": null
-}
-```
+Result fields:
 
-**Dataflow:**
+- `chunkId`
+- `text`
+- `similarityScore`
+- `sourceReferences`
 
-1. The query string is converted into an embedding vector internally.
-2. A pgvector approximate nearest-neighbor cosine-similarity search is executed against `personal_info_chunks` for this `userId`.
-3. Raw pgvector distance values are converted into cosine similarity scores in the range `[0, 1]` for the API response.
-4. Results are ranked by similarity score, with higher scores treated as better matches.
-5. Ties are broken by `created_at` descending.
-6. Related source reference rows are loaded and attached to each matched chunk.
-7. The top `K` ranked matches are returned.
-8. This endpoint returns chunk matches only; it does not directly return fact rows.
+Source-reference fields:
+
+- `sourceReferenceId`
+- `targetId`
+- `targetType`
+- `sourceId`
+- `sourceType`
 
 #### `GET /api/v1/personal_info/{userId}/all`
 
-**Request arguments:**
+Purpose:
 
-- `userId` — UUID of the user from the path
+- list the current active facts and all stored chunks for a user
 
-**Return values:**
+Optional query parameters:
 
-- `facts` — array of structured fact objects. Each object contains:
-  - `factId`
-  - `userId`
-  - `category`
-  - `factKey`
-  - `factValue`
-  - `confidence`
-  - `version`
-  - `updatedAt`
-- `chunks` — array of semantic chunk objects. Each object contains:
-  - `chunkId`
-  - `userId`
-  - `rawText`
-  - `modelVersion`
-  - `createdAt`
+- `includeArchived=true|false`
 
-**Successful response JSON:**
+Behavior:
 
-```json
-{
-  "ok": true,
-  "data": {
-    "facts": [
-      {
-        "factId": "0194d7b4-9d31-7d31-a777-777777777777",
-        "userId": "0194d7b4-9d31-7d31-a111-111111111111",
-        "category": "Preferences",
-        "factKey": "memory_database_choice",
-        "factValue": "PostgreSQL with pgvector",
-        "confidence": 0.94,
-        "version": 1,
-        "updatedAt": "2026-03-04T12:35:10Z"
-      }
-    ],
-    "chunks": [
-      {
-        "chunkId": "0194d7b4-9d31-7d31-a666-666666666666",
-        "userId": "0194d7b4-9d31-7d31-a111-111111111111",
-        "rawText": "Colby prefers PostgreSQL with pgvector for agent memory because it keeps relational data and vector search in one system.",
-        "modelVersion": "text-embedding-3-large",
-        "createdAt": "2026-03-04T12:35:00Z"
-      }
-    ]
-  },
-  "error": null
-}
-```
+- archived facts are excluded by default
+- archived facts are appended to the returned `facts` array when `includeArchived=true`
 
-**Dataflow:**
+Response data:
 
-1. Service queries all rows in `personal_info_schema.user_facts` for the specified `userId`.
-2. Service queries all rows in `personal_info_schema.personal_info_chunks` for the specified `userId`.
-3. Vector payloads are excluded from the response.
-4. The two datasets are packaged into a single response envelope.
+- `facts`
+- `chunks`
+
+Fact fields:
+
+- `factId`
+- `userId`
+- `category`
+- `factKey`
+- `factValue`
+- `confidence`
+- `version`
+- `updatedAt`
+- `archiveReason` when archived
+- `supersededByFactId` when archived due to supersession
+
+Chunk fields:
+
+- `chunkId`
+- `userId`
+- `rawText`
+- `modelVersion`
+- `createdAt`
 
 #### `PUT /api/v1/personal_info/{userId}/facts/{factId}`
 
-**Request arguments:**
+Purpose:
 
-- **Request JSON:**
+- update a fact with optimistic concurrency control
+
+Request body:
 
 ```json
 {
-  "category": "Preferences",
-  "factKey": "memory_database_choice",
-  "factValue": "PostgreSQL with pgvector",
-  "confidence": 0.97,
+  "category": "string",
+  "factKey": "string",
+  "factValue": "json value",
+  "confidence": 0.95,
   "version": 1
 }
 ```
 
-- `userId` — UUID of the user
-- `factId` — UUID of the fact
-- `category` — updated category string
-- `factKey` — updated key name
-- `factValue` — updated JSON value
-- `confidence` — updated confidence score
-- `version` — current version for optimistic concurrency control
+Behavior:
 
-**Return values:**
+- validates the user exists
+- updates only when the supplied version matches the current version
+- returns `409 conflict` when the fact exists but the version is stale
+- returns `404 not_found` when the fact does not exist for that user
 
-- `fact` — updated fact record
+Response data:
 
-**Successful response JSON:**
-
-```json
-{
-  "ok": true,
-  "data": {
-    "fact": {
-      "factId": "0194d7b4-9d31-7d31-a777-777777777777",
-      "userId": "0194d7b4-9d31-7d31-a111-111111111111",
-      "category": "Preferences",
-      "factKey": "memory_database_choice",
-      "factValue": "PostgreSQL with pgvector",
-      "confidence": 0.97,
-      "version": 2,
-      "updatedAt": "2026-03-05T09:00:00Z"
-    }
-  },
-  "error": null
-}
-```
-
-**Dataflow:**
-
-1. Service loads the target fact by `factId` and `userId`.
-2. Service compares the submitted `version` against the stored version.
-3. If versions do not match, the service returns a `conflict` error.
-4. If versions match, the fact row is updated and the version is incremented.
-5. The updated fact metadata is returned.
-6. PUT is treated as full replacement of the mutable fact fields; partial updates are not supported.
+- `fact`
 
 #### `DELETE /api/v1/personal_info/{userId}/facts/{factId}`
 
-**Request arguments:**
+Purpose:
 
-- `userId` — UUID of the user
-- `factId` — UUID of the fact
+- delete an active fact
 
-**Return values:**
+Response data:
 
-- `deleted` — boolean
-- `factId` — UUID of deleted fact
+- `deleted`
+- `factId`
 
-**Successful response JSON:**
+#### `POST /api/v1/personal_info/{userId}/facts/{factId}/archive`
+
+Purpose:
+
+- move an active fact into the archive table
+
+Request body:
 
 ```json
 {
-  "ok": true,
-  "data": {
-    "deleted": true,
-    "factId": "0194d7b4-9d31-7d31-a777-777777777777"
-  },
-  "error": null
+  "reason": "decayed | contradicted | superseded | manually_archived"
 }
 ```
 
-**Dataflow:**
+Behavior:
 
-1. Service validates that the fact exists for the specified user.
-2. The target row is deleted from `personal_info_schema.user_facts`.
-3. The service returns the deletion result.
+- returns `404 not_found` when the active fact does not exist
+- archived facts no longer appear in default retrieval
 
-### D. Agent Log Store
+Response data:
 
-**Target Schema:** `agent_logs_schema`
+- `factId`
+- `archiveReason`
 
-**Purpose:** To track the autonomous actions, tool executions, and reasoning paths of the internal AI agents.
+#### `POST /api/v1/personal_info/{userId}/facts/{factId}/supersede`
 
-Task execution records are append-only audit records. Update and delete operations are intentionally not exposed through this API.
+Purpose:
 
-#### `POST /api/v1/agent/{taskId}/executions`
+- create a replacement fact and archive the old fact with reason `superseded`
 
-**Request arguments:**
+Request body:
 
-- `taskId` — UUID of the task
-- `agentId` — identifier of the specific agent performing the step
-- `actionType` — `tool_call | reasoning_step | final_answer`
-- `payload` — machine-readable JSON input/output of the step
-- `status` — `pending | success | failed`
-- `errorContext` — optional text describing the failure
+```json
+{
+  "category": "optional string",
+  "factKey": "optional string",
+  "factValue": "required json value",
+  "confidence": 0.95
+}
+```
 
-**Return values:**
+Behavior:
 
-- `executionId`
-- `createdAt`
+- creates a new fact
+- archives the old fact
+- links the archived fact to the new fact through `supersededByFactId`
 
-#### `GET /api/v1/agent/{taskId}/executions`
+Response data:
 
-**Request arguments:**
+- `oldFactId`
+- `newFactId`
+- `archiveReason`
 
-- `taskId` — UUID of the task
-- `limit` — optional integer maximum number of rows
-
-**Return values:**
-
-- `executions` — ordered array of execution records. Each record contains:
-  - `executionId`
-  - `taskId`
-  - `agentId`
-  - `actionType`
-  - `payload`
-  - `status`
-  - `errorContext`
-  - `createdAt`
-
-### E. Service Log Store
-
-**Target Schema:** `service_log_schema`
-
-**Purpose:** To store system-level telemetry and infrastructure visibility records.
-
-System events are append-only operational records. Update and delete operations are intentionally not exposed through this API. Retention and cleanup are handled outside this API boundary.
+### D. System Events
 
 #### `POST /api/v1/system/events`
 
-**Request arguments:**
+Purpose:
 
-- `traceId` — optional UUID used to correlate distributed requests
-- `serviceName` — name of the emitting service
-- `severity` — `INFO | WARN | ERROR | FATAL`
-- `message` — human-readable log message
-- `metadata` — structured machine-readable context
+- create a system event log entry
 
-**Return values:**
+Request body:
+
+```json
+{
+  "traceId": "uuid optional",
+  "serviceName": "optional string",
+  "severity": "optional string",
+  "message": "required string",
+  "metadata": {}
+}
+```
+
+Response data:
 
 - `eventId`
 - `createdAt`
 
-#### `GET /api/v1/system/events`
+#### `GET /api/v1/system/events?limit=<n>&serviceName=<name>&severity=<level>`
 
-**Request arguments:**
+Purpose:
 
-- `serviceName` — optional service name filter
-- `severity` — optional severity filter
-- `limit` — optional integer maximum number of rows
+- list system events
 
-**Return values:**
+Response data:
 
-- `events` — ordered array of system event records. Each record contains:
-  - `eventId`
-  - `traceId`
-  - `serviceName`
-  - `severity`
-  - `message`
-  - `metadata`
-  - `createdAt`
+- `events`
 
-## 4. Database Schema (Logical Distribution & Data Modeling)
+Event fields:
 
-All schemas reside in a logically distributed PostgreSQL instance. Primary keys utilize UUIDv7. Logical sharding keys (`user_id`, `session_id`) are strictly enforced on all tables to allow future physical distribution.
+- `eventId`
+- `traceId`
+- `serviceName`
+- `severity`
+- `message`
+- `metadata`
+- `createdAt`
 
-### Schema: identity_schema
+### E. Vault Secrets
 
-**Table: users**
+All vault routes require:
 
-| Column Name | Data Type    | Constraints / Indexes  | Distributed Purpose / Description                |
-| :---------- | :----------- | :--------------------- | :----------------------------------------------- |
-| id          | UUID         | PRIMARY KEY            | Generated via UUIDv7. Canonical user identifier. |
-| email       | VARCHAR(255) | UNIQUE INDEX, NOT NULL | Human identity and login correlation field.      |
-| created_at  | TIMESTAMPTZ  | DEFAULT NOW()          | User creation timestamp.                         |
+- header `X-Internal-API-Key`
 
-### Schema: chat_schema (Table: messages)
+#### `POST /api/v1/vault/{userId}/secrets`
 
-| Column Name     | Data Type   | Constraints / Indexes | Distributed Purpose / Description                                            |
-| :-------------- | :---------- | :-------------------- | :--------------------------------------------------------------------------- |
-| id              | UUID        | PRIMARY KEY           | Generated via UUIDv7.                                                        |
-| session_id      | UUID        | INDEX, NOT NULL       | **Logical sharding key**. All messages for a session stay on the same shard. |
-| user_id         | UUID        | INDEX, NOT NULL       | Links the session to the canonical identity record.                          |
-| role            | VARCHAR(50) | NOT NULL              | `user`, `assistant`, or `system`.                                            |
-| content         | TEXT        | NOT NULL              | The exact text of the message.                                               |
-| token_count     | INT         |                       | Optional computed token count.                                               |
-| idempotency_key | UUID        | UNIQUE INDEX          | Prevents duplicate insertion.                                                |
-| created_at      | TIMESTAMPTZ | DEFAULT NOW()         | Immutable timestamp of the event.                                            |
+Purpose:
 
-### Schema: personal_info_schema
+- create or save an encrypted secret
 
-This schema stores long-term memory records and is the primary schema where the service performs chunking, embedding-backed retrieval, fact persistence, and traceability linking.
+Request body:
 
-**Table: personal_info_chunks**
+```json
+{
+  "key_name": "OPENAI_API_KEY",
+  "value": "secret-value"
+}
+```
 
-| Column Name   | Data Type    | Constraints / Indexes | Distributed Purpose / Description                                                      |
-| :------------ | :----------- | :-------------------- | :------------------------------------------------------------------------------------- |
-| id            | UUID         | PRIMARY KEY           | Generated via UUIDv7.                                                                  |
-| user_id       | UUID         | INDEX, NOT NULL       | **Logical sharding key**.                                                              |
-| raw_text      | TEXT         | NOT NULL              | Text chunk to be retrieved during semantic search.                                     |
-| embedding     | VECTOR(1536) | HNSW INDEX            | pgvector column indexed using HNSW for high-speed approximate nearest neighbor search. |
-| model_version | VARCHAR(50)  | NOT NULL              | Tracks which embedding model created the vector.                                       |
-| created_at    | TIMESTAMPTZ  | DEFAULT NOW()         | Chunk creation timestamp.                                                              |
+Response data:
 
-**Table: user_facts**
+- `key_name`
+- `created`
 
-| Column Name | Data Type    | Constraints / Indexes                           | Distributed Purpose / Description                                                             |
-| :---------- | :----------- | :---------------------------------------------- | :-------------------------------------------------------------------------------------------- |
-| id          | UUID         | PRIMARY KEY                                     | Generated via UUIDv7.                                                                         |
-| user_id     | UUID         | INDEX, NOT NULL                                 | **Logical sharding key**.                                                                     |
-| category    | VARCHAR(50)  | INDEX                                           | `Diet`, `Code_Preference`, `Relationships`, etc.                                              |
-| fact_key    | VARCHAR(100) | NOT NULL                                        | Example: `allergy`.                                                                           |
-| fact_value  | JSONB        | NOT NULL                                        | Flexible structured value.                                                                    |
-| confidence  | FLOAT        | CHECK (confidence >= 0.0 AND confidence <= 1.0) | AI certainty score.                                                                           |
-| version     | INT          | DEFAULT 1                                       | **Optimistic concurrency control** field. Prevents race conditions during concurrent updates. |
-| updated_at  | TIMESTAMPTZ  | DEFAULT NOW()                                   | Last update timestamp.                                                                        |
+#### `GET /api/v1/vault/{userId}/secrets?key_name=<name>`
 
-**Table: source_references**
+Purpose:
 
-| Column Name | Data Type   | Constraints / Indexes | Distributed Purpose / Description                                        |
-| :---------- | :---------- | :-------------------- | :----------------------------------------------------------------------- |
-| id          | UUID        | PRIMARY KEY           | Generated via UUIDv7.                                                    |
-| user_id     | UUID        | INDEX, NOT NULL       | **Logical sharding key**. Ensures references reside on the user's shard. |
-| target_id   | UUID        | INDEX, NOT NULL       | ID of the chunk or fact being referenced.                                |
-| target_type | VARCHAR(50) | NOT NULL              | `chunk` or `fact`.                                                       |
-| source_id   | UUID        | INDEX, NOT NULL       | ID of the chat message, uploaded file, document, etc.                    |
-| source_type | VARCHAR(50) | NOT NULL              | `chat`, `uploaded_file`, `document`, `web`.                              |
+- retrieve and decrypt one secret
 
-### Schema: agent_logs_schema (Table: task_executions)
+Response data:
 
-| Column Name   | Data Type    | Constraints / Indexes | Distributed Purpose / Description                                |
-| :------------ | :----------- | :-------------------- | :--------------------------------------------------------------- |
-| id            | UUID         | PRIMARY KEY           | Generated via UUIDv7.                                            |
-| task_id       | UUID         | INDEX, NOT NULL       | **Correlation ID** grouping all agent actions for the same task. |
-| agent_id      | VARCHAR(100) | INDEX, NOT NULL       | Specific agent executing the step.                               |
-| action_type   | VARCHAR(50)  | NOT NULL              | `tool_call`, `reasoning_step`, or `final_answer`.                |
-| payload       | JSONB        | NOT NULL              | Exact input/output of the tool call or reasoning step.           |
-| status        | VARCHAR(20)  | NOT NULL              | `pending`, `success`, or `failed`.                               |
-| error_context | TEXT         |                       | Stack trace or model failure reason.                             |
-| created_at    | TIMESTAMPTZ  | DEFAULT NOW()         | Event timestamp.                                                 |
+- `key_name`
+- `value`
 
-### Schema: service_log_schema (Table: system_events)
+#### `PUT /api/v1/vault/{userId}/secrets/{keyName}`
 
-| Column Name  | Data Type    | Constraints / Indexes | Distributed Purpose / Description                                  |
-| :----------- | :----------- | :-------------------- | :----------------------------------------------------------------- |
-| id           | UUID         | PRIMARY KEY           | Generated via UUIDv7.                                              |
-| trace_id     | UUID         | INDEX                 | **Distributed trace ID** passed through service boundaries.        |
-| service_name | VARCHAR(100) | INDEX                 | Emitting service name.                                             |
-| severity     | VARCHAR(20)  | INDEX                 | `INFO`, `WARN`, `ERROR`, or `FATAL`.                               |
-| message      | TEXT         | NOT NULL              | Human-readable log message.                                        |
-| metadata     | JSONB        |                       | Structured machine-readable context (e.g., latency, memory usage). |
-| created_at   | TIMESTAMPTZ  | DEFAULT NOW()         | Time-series optimized event timestamp.                             |
+Purpose:
+
+- update an encrypted secret
+
+Request body:
+
+```json
+{
+  "value": "new-secret-value"
+}
+```
+
+Response data:
+
+- `key_name`
+- `updated`
+
+#### `DELETE /api/v1/vault/{userId}/secrets/{keyName}`
+
+Purpose:
+
+- delete one secret
+
+Response data:
+
+- `key_name`
+- `deleted`
+
+### F. Agent Execution Logs
+
+#### `POST /api/v1/agent/{taskId}/executions`
+#### `POST /api/v1/agents/tasks/{taskId}/executions`
+
+Purpose:
+
+- append an execution log for one task
+
+The singular route is the preferred route. The plural route remains as a legacy compatibility alias.
+
+Request body:
+
+```json
+{
+  "agentId": "string",
+  "actionType": "tool_call | reasoning_step | final_answer",
+  "payload": {},
+  "status": "pending | success | failed",
+  "errorContext": "optional string"
+}
+```
+
+Legacy snake_case request keys are still accepted:
+
+- `agent_id`
+- `action_type`
+- `error_context`
+
+Response data:
+
+- `executionId`
+- `createdAt`
+
+#### `GET /api/v1/agent/{taskId}/executions?limit=<n>`
+#### `GET /api/v1/agents/tasks/{taskId}/executions?limit=<n>`
+
+Purpose:
+
+- list execution history for one task
+
+Response data:
+
+- `executions`
+
+Execution fields:
+
+- `executionId`
+- `taskId`
+- `agentId`
+- `actionType`
+- `payload`
+- `status`
+- `errorContext`
+- `createdAt`
+
+### G. Orchestrator Records
+
+All orchestrator routes require:
+
+- header `X-Internal-API-Key`
+
+#### `POST /api/v1/orchestrator/records`
+
+Purpose:
+
+- persist one orchestrator record
+
+Request body:
+
+```json
+{
+  "orchestrator_task_ref": "required string",
+  "task_id": "required string",
+  "plan_id": "optional string",
+  "subtask_id": "optional string",
+  "trace_id": "optional string",
+  "data_type": "required string",
+  "timestamp": "required RFC3339 timestamp",
+  "payload": {},
+  "ttl_seconds": 0
+}
+```
+
+Behavior:
+
+- validates `data_type`
+- rejects payloads larger than 256 KB
+- task-state-style records can upsert depending on the underlying data type contract
+
+Response data:
+
+- `id`
+- `record`
+
+Record fields:
+
+- `id`
+- `orchestrator_task_ref`
+- `task_id`
+- `plan_id`
+- `subtask_id`
+- `trace_id`
+- `data_type`
+- `timestamp`
+- `payload`
+- `ttl_seconds`
+- `created_at`
+
+#### `GET /api/v1/orchestrator/records`
+
+Purpose:
+
+- query orchestrator records
+
+Query parameters:
+
+- `data_type` required
+- `task_id` optional
+- `orchestrator_task_ref` optional
+- `from_timestamp` optional
+- `to_timestamp` optional
+- `state_filter=not_terminal` optional
+
+Behavior:
+
+- requires either `task_id`, `orchestrator_task_ref`, or `state_filter`
+- validates timestamp filters when supplied
+
+Response data:
+
+- `records`
+
+#### `GET /api/v1/orchestrator/records/latest?task_id=<id>&data_type=<type>`
+
+Purpose:
+
+- fetch the latest record for a task and data type
+
+Response data:
+
+- `record`
+
+### H. Scheduled Jobs
+
+#### `POST /api/v1/scheduled_jobs`
+
+Purpose:
+
+- create a scheduled job
+
+Request body:
+
+```json
+{
+  "jobType": "required string",
+  "targetKind": "required string",
+  "targetService": "required string",
+  "status": "required string",
+  "scheduleKind": "required string",
+  "intervalSeconds": 300,
+  "name": "required string",
+  "payload": {},
+  "nextRunAt": "required RFC3339 timestamp"
+}
+```
+
+Response data:
+
+- `id`
+- `jobType`
+- `targetKind`
+- `targetService`
+- `status`
+- `scheduleKind`
+- `name`
+- `nextRunAt`
+
+#### `POST /api/v1/scheduled_jobs/run_due`
+
+Purpose:
+
+- execute all jobs whose `next_run_at <= now` and whose status is `active`
+
+Current behavior:
+
+- records scheduled job runs
+- updates `last_run_at`, `last_success_at`, and `next_run_at`
+- produces a dispatch-style result payload
+- does not yet perform a real orchestrator/BUS dispatch for external jobs
+
+Response data:
+
+- `runs`
+
+#### `GET /api/v1/scheduled_jobs/{jobId}/runs`
+
+Purpose:
+
+- list recorded runs for a job
+
+Response data:
+
+- `runs`
+
+Run fields:
+
+- `id`
+- `jobId`
+- `status`
+- `targetService`
+- `startedAt`
+- `finishedAt`
+- `result`
+
+## 5. CLI
+
+The service includes `memory-cli`, which can talk to the HTTP API or connect directly to the database.
+
+Build:
+
+```bash
+go build -o memory-cli ./cmd/cli
+```
+
+### Current commands
+
+Facts:
+
+- `memory-cli facts query --user <uuid> "question"`
+- `memory-cli facts all --user <uuid>`
+- `memory-cli facts save --user <uuid> "fact text"`
+
+Chat:
+
+- `memory-cli chat history --conversation <uuid> --limit 10`
+- `memory-cli chat history --session <uuid> --limit 10`
+
+Agent:
+
+- `memory-cli agent history --task <uuid> --limit 20`
+
+System:
+
+- `memory-cli system events --limit 50`
+
+Vault:
+
+- `memory-cli vault list --user <uuid>`
+
+## 6. Local Development
+
+Required environment variables:
+
+- `DB_HOST`
+- `DB_PORT`
+- `DB_USER`
+- `DB_PASSWORD`
+- `DB_NAME`
+- `VAULT_MASTER_KEY`
+- `INTERNAL_VAULT_API_KEY`
+
+Optional environment variables:
+
+- `OPENAI_API_KEY`
+- `PORT`
+- `OTEL_EXPORTER_OTLP_ENDPOINT`
+
+Run the server:
+
+```bash
+go run ./cmd/server
+```
+
+## 7. Testing
+
+The current memory test suite passes with the local Postgres-backed test setup:
+
+```bash
+GOCACHE=/tmp/go-build \
+DB_HOST=localhost \
+DB_PORT=5432 \
+DB_USER=user \
+DB_PASSWORD=password \
+DB_NAME=memory_db \
+VAULT_MASTER_KEY=0123456789abcdef0123456789abcdef \
+INTERNAL_VAULT_API_KEY=test-vault-key \
+go test ./tests -count=1
+```
+
+Verified status as of April 21, 2026:
+
+- `go test ./tests -count=1` passes
+- `go generate ./cmd/server` succeeds after fixing the `//go:generate` path in `cmd/server/main.go`
+- Swagger generation coverage still depends on handler annotation completeness, so generated output should still be reviewed when routes change
+
+## 8. Swagger
+
+Swagger artifacts are committed under:
+
+- `memory/docs/docs.go`
+- `memory/docs/swagger.json`
+- `memory/docs/swagger.yaml`
+
+Regenerate Swagger artifacts from `memory/` with:
+
+```bash
+go generate ./cmd/server
+```
+
+The service serves Swagger UI at:
+
+- `/swagger/index.html`
+
+## 9. Known Current Gaps
+
+These are intentionally brief here; the actionable list lives in [to_do.md](./to_do.md).
+
+- fact extraction is still placeholder behavior
+- the embedding story is usable but still needs production-hardening/documentation cleanup
+- scheduled external dispatch is still stubbed rather than connected to the real orchestrator/BUS path
+- the generic typed memory store expected by PR 124 does not exist yet
+- Swagger generation now runs successfully, but full Swagger coverage still depends on keeping route annotations complete

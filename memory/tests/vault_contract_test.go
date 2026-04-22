@@ -26,7 +26,7 @@ func TestVaultContract_BlackBox(t *testing.T) {
 			"key_name": vaultKeyName(),
 			"value":    "secret-value",
 		}, map[string]string{
-			"X-API-KEY": "definitely-invalid",
+			"X-Internal-API-Key": "definitely-invalid",
 		})
 
 		if status != http.StatusUnauthorized {
@@ -42,7 +42,7 @@ func TestVaultContract_BlackBox(t *testing.T) {
 			"key_name": vaultKeyName(),
 			"value":    "secret-value",
 		}, map[string]string{
-			"X-API-KEY": apiKey,
+			"X-Internal-API-Key": apiKey,
 		})
 
 		if status != http.StatusBadRequest {
@@ -56,7 +56,7 @@ func TestVaultContract_BlackBox(t *testing.T) {
 			"key_name": vaultKeyName(),
 			"value":    "secret-value",
 		}, map[string]string{
-			"X-API-KEY": apiKey,
+			"X-Internal-API-Key": apiKey,
 		})
 
 		if status != http.StatusNotFound {
@@ -67,7 +67,7 @@ func TestVaultContract_BlackBox(t *testing.T) {
 
 	t.Run("missing_required_fields_return_bad_request", func(t *testing.T) {
 		status, env := apiJSONRequest(t, http.MethodPost, baseURL+"/api/v1/vault/"+validUserFixture(t)+"/secrets", map[string]string{}, map[string]string{
-			"X-API-KEY": apiKey,
+			"X-Internal-API-Key": apiKey,
 		})
 
 		if status != http.StatusBadRequest {
@@ -84,7 +84,7 @@ func TestVaultContract_BlackBox(t *testing.T) {
 			"key_name": keyName,
 			"value":    "secret-value",
 		}, map[string]string{
-			"X-API-KEY": apiKey,
+			"X-Internal-API-Key": apiKey,
 		})
 		if createStatus != http.StatusCreated {
 			t.Fatalf("create status = %d, want %d", createStatus, http.StatusCreated)
@@ -92,7 +92,7 @@ func TestVaultContract_BlackBox(t *testing.T) {
 		assertSuccessEnvelope(t, createEnv)
 
 		getStatus, getEnv := apiJSONRequest(t, http.MethodGet, baseURL+"/api/v1/vault/"+userID+"/secrets?key_name="+keyName, nil, map[string]string{
-			"X-API-KEY": apiKey,
+			"X-Internal-API-Key": apiKey,
 		})
 		if getStatus != http.StatusOK {
 			t.Fatalf("get status = %d, want %d", getStatus, http.StatusOK)
@@ -104,7 +104,7 @@ func TestVaultContract_BlackBox(t *testing.T) {
 		updateStatus, updateEnv := apiJSONRequest(t, http.MethodPut, baseURL+"/api/v1/vault/"+userID+"/secrets/"+keyName, map[string]string{
 			"value": "new-secret-value",
 		}, map[string]string{
-			"X-API-KEY": apiKey,
+			"X-Internal-API-Key": apiKey,
 		})
 		if updateStatus != http.StatusOK {
 			t.Fatalf("update status = %d, want %d", updateStatus, http.StatusOK)
@@ -112,7 +112,7 @@ func TestVaultContract_BlackBox(t *testing.T) {
 		assertSuccessEnvelope(t, updateEnv)
 
 		getUpdatedStatus, getUpdatedEnv := apiJSONRequest(t, http.MethodGet, baseURL+"/api/v1/vault/"+userID+"/secrets?key_name="+keyName, nil, map[string]string{
-			"X-API-KEY": apiKey,
+			"X-Internal-API-Key": apiKey,
 		})
 		if getUpdatedStatus != http.StatusOK {
 			t.Fatalf("get-updated status = %d, want %d", getUpdatedStatus, http.StatusOK)
@@ -122,7 +122,7 @@ func TestVaultContract_BlackBox(t *testing.T) {
 		assertJSONContainsStringField(t, getUpdatedEnv.Data, "value", "new-secret-value")
 
 		deleteStatus, deleteEnv := apiJSONRequest(t, http.MethodDelete, baseURL+"/api/v1/vault/"+userID+"/secrets/"+keyName, nil, map[string]string{
-			"X-API-KEY": apiKey,
+			"X-Internal-API-Key": apiKey,
 		})
 		if deleteStatus != http.StatusOK {
 			t.Fatalf("delete status = %d, want %d", deleteStatus, http.StatusOK)
@@ -132,7 +132,7 @@ func TestVaultContract_BlackBox(t *testing.T) {
 
 	t.Run("get_secret_missing_query_parameter_returns_bad_request", func(t *testing.T) {
 		status, env := apiJSONRequest(t, http.MethodGet, baseURL+"/api/v1/vault/"+validUserFixture(t)+"/secrets", nil, map[string]string{
-			"X-API-KEY": apiKey,
+			"X-Internal-API-Key": apiKey,
 		})
 
 		if status != http.StatusBadRequest {
@@ -143,7 +143,7 @@ func TestVaultContract_BlackBox(t *testing.T) {
 
 	t.Run("update_secret_missing_value_returns_bad_request", func(t *testing.T) {
 		status, env := apiJSONRequest(t, http.MethodPut, baseURL+"/api/v1/vault/"+validUserFixture(t)+"/secrets/"+vaultKeyName(), map[string]string{}, map[string]string{
-			"X-API-KEY": apiKey,
+			"X-Internal-API-Key": apiKey,
 		})
 
 		if status != http.StatusBadRequest {

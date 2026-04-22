@@ -11,8 +11,11 @@ import {
 } from '@cerberos/io-core';
 import {
   appendLogEntry,
-  getSessionLogs,
-  getOrCreateSessionId,
+  createConversation,
+  createTask,
+  getTask,
+  getConversationLogs,
+  listConversations,
   type MemoryLogEntry,
 } from '@cerberos/io-core/memory-client'
 import { transcribe, warmupTranscription } from './transcription/runner'
@@ -114,9 +117,17 @@ type ChatResponseCallback = {
 }
 const pendingChatResponses = new Map<string, ChatResponseCallback>()
 
+const DEFAULT_UI_USER_ID = process.env.IO_DEFAULT_USER_ID ?? '00000000-0000-0000-0000-000000000001'
+
 /** Map key for pending chat — UUID string case must match (e.g. uuidgen vs NATS subject). */
 function chatPendingKey(taskId: string): string {
   return taskId.trim().toLowerCase()
+}
+
+function requestUserId(c: { req: { header: (name: string) => string | undefined; query: (name: string) => string | undefined } }): string {
+  const fromHeader = c.req.header('X-User-Id')
+  const fromQuery = c.req.query('userId')
+  return fromHeader || fromQuery || DEFAULT_UI_USER_ID
 }
 
 function deliverChatResponse(taskId: string, content: string, done: boolean): boolean {
@@ -388,7 +399,7 @@ app.get('/api/status', (c) => {
 });
 
 // =============================================================================
-// Task endpoints
+// Conversation / Task endpoints
 // =============================================================================
 
 // Get all tasks
@@ -409,24 +420,62 @@ app.get('/api/tasks/:taskId', (c) => {
   return c.json(task);
 });
 
+app.post('/api/conversations', async (c) => {
+  const { title, userId } = await c.req.json()
+  const effectiveUserId = typeof userId === 'string' && userId ? userId : requestUserId(c)
+  const conversation = await createConversation({
+    userId: effectiveUserId,
+    title: typeof title === 'string' ? title : undefined,
+  })
+  if (!conversation) {
+    return c.json({ error: 'Failed to create conversation' }, 502)
+  }
+  return c.json({
+    conversationId: conversation.conversationId,
+    title: conversation.title,
+    status: 'created',
+  })
+})
+
 // Create a new task
 app.post('/api/tasks', async (c) => {
-  const { content, userId } = await c.req.json()
-  const taskId = crypto.randomUUID()
+  const body = await c.req.json()
+  const userId = typeof body.userId === 'string' && body.userId ? body.userId : requestUserId(c)
+  const conversationId = typeof body.conversationId === 'string' && body.conversationId ? body.conversationId : undefined
+  const title = typeof body.title === 'string' ? body.title : undefined
+  const inputSummary = typeof body.inputSummary === 'string' ? body.inputSummary : undefined
+  const status = typeof body.status === 'string' ? body.status : 'awaiting_feedback'
+  const createdTask = await createTask({
+    userId,
+    conversationId,
+    title,
+    traceId: c.get('traceId'),
+    inputSummary,
+    status,
+  })
+  if (!createdTask) {
+    return c.json({ error: 'Failed to create task' }, 502)
+  }
 
-  logFromContext(c, 'info', 'http', 'POST /api/tasks', { task_id: taskId, user_id: userId })
+  const taskId = createdTask.taskId
 
-  const task: StatusUpdate = {
+  logFromContext(c, 'info', 'http', 'POST /api/tasks', {
+    task_id: taskId,
+    user_id: userId,
+    conversation_id: createdTask.conversationId,
+  })
+
+  const statusUpdate: StatusUpdate = {
     taskId,
-    status: 'awaiting_feedback',
+    status: status === 'working' || status === 'completed' ? status : 'awaiting_feedback',
     lastUpdate: 'Task created — awaiting orchestrator',
     expectedNextInputMinutes: null,
     timestamp: Date.now(),
   }
-  tasks.set(taskId, task)
-  broadcastStatus(taskId, task)
+  tasks.set(taskId, statusUpdate)
+  broadcastStatus(taskId, statusUpdate)
 
-  return c.json({ taskId, status: 'created' })
+  return c.json({ taskId, conversationId: createdTask.conversationId, status: 'created' })
 });
 
 // =============================================================================
@@ -535,18 +584,23 @@ app.post('/api/orchestrator/plan-decision', async (c) => {
 // Send a message (returns streaming response)
 app.post('/api/chat', async (c) => {
   const body = (await c.req.json()) as SendMessageRequest;
-  const { taskId, content, conversationHistory, conversationId } = body;
+  const { taskId, userId, content, conversationHistory, conversationId } = body as SendMessageRequest & { userId?: string };
+  const effectiveUserId = userId || requestUserId(c)
   logFromContext(c, 'info', 'http', 'POST /api/chat', {
     task_id: taskId,
+    user_id: effectiveUserId,
+    conversation_id: conversationId,
     content_len: content.length,
     history_len: conversationHistory?.length,
   })
 
+  if (!conversationId) {
+    return c.json({ error: 'conversationId is required' }, 400)
+  }
   // Log user message via memory client — fire-and-forget so the SSE stream opens immediately.
-  const sessionId = getOrCreateSessionId(taskId, '00000000-0000-0000-0000-000000000001')
   appendLogEntry({
-    sessionId,
-    userId: '00000000-0000-0000-0000-000000000001',
+    conversationId,
+    userId: effectiveUserId,
     role: 'user',
     content,
     taskId,
@@ -561,7 +615,6 @@ app.post('/api/chat', async (c) => {
   };
   persistAndBroadcastStatus(workingStatus);
 
-  const userId = '00000000-0000-0000-0000-000000000001'
   const encoder = new TextEncoder();
 
   // When NATS is connected, forward the message and wait for the real orchestrator response.
@@ -616,7 +669,7 @@ app.post('/api/chat', async (c) => {
         controller.enqueue(encoder.encode(`data: ${JSON.stringify({ chunk: fallbackMsg })}\n\n`));
         controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true })}\n\n`));
         controller.close();
-        appendLogEntry({ sessionId, userId, role: 'assistant', content: fallbackMsg, taskId })
+        appendLogEntry({ conversationId, userId: effectiveUserId, role: 'assistant', content: fallbackMsg, taskId })
         return;
       }
 
@@ -627,7 +680,7 @@ app.post('/api/chat', async (c) => {
         controller.enqueue(encoder.encode(`data: ${JSON.stringify({ chunk: errMsg })}\n\n`))
         controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true })}\n\n`))
         controller.close()
-        appendLogEntry({ sessionId, userId, role: 'assistant', content: errMsg, taskId })
+        appendLogEntry({ conversationId, userId: effectiveUserId, role: 'assistant', content: errMsg, taskId })
         return
       }
 
@@ -678,7 +731,7 @@ app.post('/api/chat', async (c) => {
           }
           safeEnqueue(`data: ${JSON.stringify({ done: true })}\n\n`)
           safeClose()
-          appendLogEntry({ sessionId, userId, role: 'assistant', content: msg, taskId })
+          appendLogEntry({ conversationId, userId: effectiveUserId, role: 'assistant', content: msg, taskId })
         }, TIMEOUT_MS)
 
         cleanupChatStream = () => {
@@ -700,7 +753,7 @@ app.post('/api/chat', async (c) => {
             if (streamDone) return
             safeEnqueue(`data: ${JSON.stringify({ done: true })}\n\n`)
             safeClose()
-            appendLogEntry({ sessionId, userId, role: 'assistant', content: accumulated, taskId })
+            appendLogEntry({ conversationId, userId: effectiveUserId, role: 'assistant', content: accumulated, taskId })
             const doneStatus: StatusUpdate = {
               taskId,
               status: 'awaiting_feedback',
@@ -718,7 +771,7 @@ app.post('/api/chat', async (c) => {
             safeEnqueue(`data: ${JSON.stringify({ chunk: errContent })}\n\n`)
             safeEnqueue(`data: ${JSON.stringify({ done: true })}\n\n`)
             safeClose()
-            appendLogEntry({ sessionId, userId, role: 'assistant', content: errContent, taskId })
+            appendLogEntry({ conversationId, userId: effectiveUserId, role: 'assistant', content: errContent, taskId })
           },
         })
         // Flush the local ack immediately so the user sees feedback before the orchestrator round-trip.
@@ -748,7 +801,7 @@ app.post('/api/chat', async (c) => {
         }
         controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true })}\n\n`));
         controller.close();
-        await appendLogEntry({ sessionId, userId, role: 'assistant', content: accumulated, taskId })
+        await appendLogEntry({ conversationId, userId: effectiveUserId, role: 'assistant', content: accumulated, taskId })
         const doneStatus: StatusUpdate = {
           taskId, status: 'awaiting_feedback', lastUpdate: 'Response complete',
           expectedNextInputMinutes: 0, timestamp: Date.now(),
@@ -778,12 +831,34 @@ app.post('/api/chat', async (c) => {
 // Get logs for a task
 app.get('/api/logs/:taskId', async (c) => {
   const taskId = c.req.param('taskId');
+  const userId = requestUserId(c)
   logFromContext(c, 'info', 'http', 'GET /api/logs/:taskId', { task_id: taskId })
-  const sessionId = getOrCreateSessionId(taskId, '00000000-0000-0000-0000-000000000001')
-  const memoryLogs = await getSessionLogs(sessionId, { taskId })
+  const task = await getTask(taskId, userId)
+  if (!task) {
+    return c.json({ logs: [] })
+  }
+  const memoryLogs = await getConversationLogs(task.conversationId, { userId })
   const logs = memoryLogs.map(memoryToLogEntry)
   return c.json({ logs });
 });
+
+app.get('/api/conversations', async (c) => {
+  const userId = requestUserId(c)
+  logFromContext(c, 'info', 'http', 'GET /api/conversations', { user_id: userId })
+  const conversations = await listConversations(userId)
+  return c.json({ conversations })
+})
+
+app.get('/api/conversations/:conversationId/logs', async (c) => {
+  const conversationId = c.req.param('conversationId')
+  const userId = requestUserId(c)
+  logFromContext(c, 'info', 'http', 'GET /api/conversations/:conversationId/logs', {
+    conversation_id: conversationId,
+    user_id: userId,
+  })
+  const memoryLogs = await getConversationLogs(conversationId, { userId })
+  return c.json({ logs: memoryLogs.map(memoryToLogEntry) })
+})
 
 // Get all logs — session-scoped queries via /api/logs/:taskId are the intended API
 app.get('/api/logs', (c) => {
@@ -821,7 +896,7 @@ app.post('/api/credential', async (c) => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-API-KEY': memoryApiKey,
+        'X-Internal-API-Key': memoryApiKey,
         'traceparent': c.get('traceparent'),
         'X-Trace-ID': c.get('traceId'),
       },

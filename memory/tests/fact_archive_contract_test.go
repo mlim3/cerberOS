@@ -72,4 +72,35 @@ func TestFactArchiveVisibilityContract_FutureBlackBox(t *testing.T) {
 		assertSuccessEnvelope(t, env)
 		assertArchivedFactHasReason(t, env.Data, factID, "manually_archived")
 	})
+
+	t.Run("invalid_archive_reason_returns_bad_request", func(t *testing.T) {
+		status, env := apiJSONRequest(t, http.MethodPost, baseURL+"/api/v1/personal_info/"+userID+"/facts/"+uuid.NewString()+"/archive", map[string]any{
+			"reason": "totally_invalid_reason",
+		}, nil)
+
+		if status != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", status, http.StatusBadRequest)
+		}
+		assertErrorCode(t, env, "invalid_argument")
+	})
+
+	t.Run("invalid_include_archived_query_returns_bad_request", func(t *testing.T) {
+		status, env := apiJSONRequest(t, http.MethodGet, baseURL+"/api/v1/personal_info/"+userID+"/all?includeArchived=definitely-not-bool", nil, nil)
+
+		if status != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", status, http.StatusBadRequest)
+		}
+		assertErrorCode(t, env, "invalid_argument")
+	})
+
+	t.Run("archiving_already_archived_fact_returns_not_found", func(t *testing.T) {
+		status, env := apiJSONRequest(t, http.MethodPost, baseURL+"/api/v1/personal_info/"+userID+"/facts/"+factID+"/archive", map[string]any{
+			"reason": "manually_archived",
+		}, nil)
+
+		if status != http.StatusNotFound {
+			t.Fatalf("status = %d, want %d", status, http.StatusNotFound)
+		}
+		assertErrorCode(t, env, "not_found")
+	})
 }

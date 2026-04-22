@@ -71,9 +71,19 @@ func TestMain(m *testing.M) {
 	dbPool = db.GetPool()
 
 	chatRepo := storage.NewChatRepository(dbPool)
+	if err := chatRepo.EnsureSchema(ctx); err != nil {
+		logger.Error("failed to ensure chat schema for testing", "error", err)
+		os.Exit(1)
+	}
+	orchestratorRepo := storage.NewOrchestratorRepository(dbPool)
+	if err := orchestratorRepo.EnsureSchema(ctx); err != nil {
+		logger.Error("failed to ensure orchestrator schema for testing", "error", err)
+		os.Exit(1)
+	}
 	logRepo := storage.NewLogRepository(dbPool)
 	vaultRepo := storage.NewVaultRepository(dbPool)
 	agentLogsRepo := storage.NewAgentLogsRepository(dbPool)
+	schedulerRepo := storage.NewSchedulerRepository(dbPool)
 
 	vaultManager, err := logic.NewVaultManager()
 	if err != nil {
@@ -86,21 +96,37 @@ func TestMain(m *testing.M) {
 	piProcessor := logic.NewProcessor(piRepo, testEmbedder)
 
 	chatHandler := api.NewChatHandler(chatRepo)
+	orchestratorHandler := api.NewOrchestratorHandler(orchestratorRepo)
 	logHandler := api.NewSystemLogHandler(logRepo)
 	piHandler := api.NewPersonalInfoHandler(piProcessor, piRepo)
 	vaultHandler := api.NewVaultHandler(vaultRepo, vaultManager, logRepo)
 	agentHandler := api.NewAgentHandler(agentLogsRepo)
+	scheduledJobsHandler := api.NewScheduledJobsHandler(schedulerRepo)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/v1/chat/{sessionId}/messages", chatHandler.HandleCreateMessage)
-	mux.HandleFunc("GET /api/v1/chat/{sessionId}/messages", chatHandler.HandleListMessages)
+	mux.HandleFunc("GET /api/v1/conversations", chatHandler.HandleListConversations)
+	mux.HandleFunc("POST /api/v1/conversations", chatHandler.HandleCreateConversation)
+	mux.HandleFunc("POST /api/v1/tasks", chatHandler.HandleCreateTask)
+	mux.HandleFunc("GET /api/v1/tasks/{taskId}", chatHandler.HandleGetTask)
+	mux.HandleFunc("POST /api/v1/chat/{conversationId}/messages", chatHandler.HandleCreateMessage)
+	mux.HandleFunc("GET /api/v1/chat/{conversationId}/messages", chatHandler.HandleListMessages)
+	orchestratorMux := http.NewServeMux()
+	orchestratorMux.HandleFunc("POST /api/v1/orchestrator/records", orchestratorHandler.HandleWriteRecord)
+	orchestratorMux.HandleFunc("GET /api/v1/orchestrator/records", orchestratorHandler.HandleQueryRecords)
+	orchestratorMux.HandleFunc("GET /api/v1/orchestrator/records/latest", orchestratorHandler.HandleReadLatest)
+	mux.Handle("/api/v1/orchestrator/", http.StripPrefix("", api.RequireVaultKey(orchestratorMux)))
 	mux.HandleFunc("POST /api/v1/personal_info/{userId}/save", piHandler.Save)
 	mux.HandleFunc("POST /api/v1/personal_info/{userId}/query", piHandler.Query)
 	mux.HandleFunc("GET /api/v1/personal_info/{userId}/all", piHandler.GetAll)
 	mux.HandleFunc("PUT /api/v1/personal_info/{userId}/facts/{factId}", piHandler.UpdateFact)
 	mux.HandleFunc("DELETE /api/v1/personal_info/{userId}/facts/{factId}", piHandler.DeleteFact)
+	mux.HandleFunc("POST /api/v1/personal_info/{userId}/facts/{factId}/archive", piHandler.ArchiveFact)
+	mux.HandleFunc("POST /api/v1/personal_info/{userId}/facts/{factId}/supersede", piHandler.SupersedeFact)
 	mux.HandleFunc("POST /api/v1/system/events", logHandler.HandleCreateSystemEvent)
 	mux.HandleFunc("GET /api/v1/system/events", logHandler.HandleListSystemEvents)
+	mux.HandleFunc("POST /api/v1/scheduled_jobs", scheduledJobsHandler.HandleCreateScheduledJob)
+	mux.HandleFunc("POST /api/v1/scheduled_jobs/run_due", scheduledJobsHandler.HandleRunDueJobs)
+	mux.HandleFunc("GET /api/v1/scheduled_jobs/{jobId}/runs", scheduledJobsHandler.HandleListScheduledJobRuns)
 
 	vaultMux := http.NewServeMux()
 	vaultMux.HandleFunc("POST /api/v1/vault/{userId}/secrets", vaultHandler.HandleSaveSecret)

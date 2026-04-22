@@ -1,26 +1,41 @@
+basePath: /
 definitions:
-  github_com_mlim3_cerberOS_memory_internal_storage.AgentLogsSchemaTaskExecution:
+  api.ArchiveFactRequest:
     properties:
-      action_type:
-        type: string
-      agent_id:
-        type: string
-      created_at:
-        $ref: '#/definitions/pgtype.Timestamptz'
-      error_context:
-        $ref: '#/definitions/pgtype.Text'
-      id:
-        type: string
-      payload:
-        items:
-          type: integer
-        type: array
-      status:
-        type: string
-      task_id:
+      reason:
         type: string
     type: object
-  internal_api.CreateMessageRequest:
+  api.ConversationResponse:
+    properties:
+      conversationId:
+        type: string
+      createdAt:
+        type: string
+      lastMessagePreview:
+        type: string
+      latestTaskId:
+        type: string
+      latestTaskStatus:
+        type: string
+      messageCount:
+        type: integer
+      title:
+        type: string
+      updatedAt:
+        type: string
+      userId:
+        type: string
+    type: object
+  api.CreateConversationRequest:
+    properties:
+      conversationId:
+        type: string
+      title:
+        type: string
+      userId:
+        type: string
+    type: object
+  api.CreateMessageRequest:
     properties:
       content:
         type: string
@@ -33,7 +48,28 @@ definitions:
       userId:
         type: string
     type: object
-  internal_api.CreateSystemEventRequest:
+  api.CreateScheduledJobRequest:
+    properties:
+      intervalSeconds:
+        type: integer
+      jobType:
+        type: string
+      name:
+        type: string
+      nextRunAt:
+        type: string
+      payload:
+        type: object
+      scheduleKind:
+        type: string
+      status:
+        type: string
+      targetKind:
+        type: string
+      targetService:
+        type: string
+    type: object
+  api.CreateSystemEventRequest:
     properties:
       message:
         type: string
@@ -47,9 +83,30 @@ definitions:
       traceId:
         type: string
     type: object
-  internal_api.MessageResponse:
+  api.CreateTaskRequest:
+    properties:
+      conversationId:
+        type: string
+      inputSummary:
+        type: string
+      orchestratorTaskRef:
+        type: string
+      status:
+        type: string
+      taskId:
+        type: string
+      title:
+        type: string
+      traceId:
+        type: string
+      userId:
+        type: string
+    type: object
+  api.MessageResponse:
     properties:
       content:
+        type: string
+      conversationId:
         type: string
       createdAt:
         type: string
@@ -57,21 +114,19 @@ definitions:
         type: string
       role:
         type: string
-      sessionId:
-        type: string
       tokenCount:
         type: integer
       userId:
         type: string
     type: object
-  internal_api.QueryPersonalInfoRequest:
+  api.QueryPersonalInfoRequest:
     properties:
       query:
         type: string
       topK:
         type: integer
     type: object
-  internal_api.SavePersonalInfoRequest:
+  api.SavePersonalInfoRequest:
     properties:
       content:
         type: string
@@ -82,7 +137,17 @@ definitions:
       sourceType:
         type: string
     type: object
-  internal_api.SystemEventResponse:
+  api.SupersedeFactRequest:
+    properties:
+      category:
+        type: string
+      confidence:
+        type: number
+      factKey:
+        type: string
+      factValue: {}
+    type: object
+  api.SystemEventResponse:
     properties:
       createdAt:
         type: string
@@ -100,7 +165,30 @@ definitions:
       traceId:
         type: string
     type: object
-  internal_api.UpdateFactRequest:
+  api.TaskResponse:
+    properties:
+      completedAt:
+        type: string
+      conversationId:
+        type: string
+      createdAt:
+        type: string
+      inputSummary:
+        type: string
+      orchestratorTaskRef:
+        type: string
+      status:
+        type: string
+      taskId:
+        type: string
+      traceId:
+        type: string
+      updatedAt:
+        type: string
+      userId:
+        type: string
+    type: object
+  api.UpdateFactRequest:
     properties:
       category:
         type: string
@@ -112,35 +200,33 @@ definitions:
       version:
         type: integer
     type: object
-  pgtype.InfinityModifier:
-    enum:
-    - 1
-    - 0
-    - -1
-    format: int32
-    type: integer
-    x-enum-varnames:
-    - Infinity
-    - Finite
-    - NegativeInfinity
-  pgtype.Text:
+  api.WriteOrchestratorRecordRequest:
     properties:
-      string:
+      data_type:
         type: string
-      valid:
-        type: boolean
-    type: object
-  pgtype.Timestamptz:
-    properties:
-      infinityModifier:
-        $ref: '#/definitions/pgtype.InfinityModifier'
-      time:
+      orchestrator_task_ref:
         type: string
-      valid:
-        type: boolean
+      payload:
+        type: object
+      plan_id:
+        type: string
+      subtask_id:
+        type: string
+      task_id:
+        type: string
+      timestamp:
+        type: string
+      trace_id:
+        type: string
+      ttl_seconds:
+        type: integer
     type: object
 info:
   contact: {}
+  description: REST API for CerberOS memory, chat, personal info, system event, vault,
+    and agent execution services.
+  title: Memory Service API
+  version: v1
 paths:
   /api/v1/agent/{taskId}/executions:
     get:
@@ -152,19 +238,28 @@ paths:
         name: taskId
         required: true
         type: string
+      - description: 'Limit number of executions (default: 100)'
+        in: query
+        name: limit
+        type: integer
       produces:
       - application/json
       responses:
         "200":
-          description: List of task executions
+          description: OK
           schema:
-            items:
-              $ref: '#/definitions/github_com_mlim3_cerberOS_memory_internal_storage.AgentLogsSchemaTaskExecution'
-            type: array
+            additionalProperties: true
+            type: object
         "400":
           description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
         "500":
           description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
       summary: Get task executions
       tags:
       - agents
@@ -206,19 +301,28 @@ paths:
         name: taskId
         required: true
         type: string
+      - description: 'Limit number of executions (default: 100)'
+        in: query
+        name: limit
+        type: integer
       produces:
       - application/json
       responses:
         "200":
-          description: List of task executions
+          description: OK
           schema:
-            items:
-              $ref: '#/definitions/github_com_mlim3_cerberOS_memory_internal_storage.AgentLogsSchemaTaskExecution'
-            type: array
+            additionalProperties: true
+            type: object
         "400":
           description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
         "500":
           description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
       summary: Get task executions
       tags:
       - agents
@@ -250,13 +354,18 @@ paths:
       summary: Create task execution log
       tags:
       - agents
-  /api/v1/chat/{sessionId}/messages:
+  /api/v1/chat/{conversationId}/messages:
     get:
       description: Retrieves a list of messages for a specific chat session
       parameters:
-      - description: Session ID
+      - description: Conversation ID
         in: path
-        name: sessionId
+        name: conversationId
+        required: true
+        type: string
+      - description: User ID
+        in: query
+        name: userId
         required: true
         type: string
       - description: 'Limit number of messages (default: 100)'
@@ -271,11 +380,16 @@ paths:
           schema:
             additionalProperties:
               items:
-                $ref: '#/definitions/internal_api.MessageResponse'
+                $ref: '#/definitions/api.MessageResponse'
               type: array
             type: object
         "400":
           description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Not Found
           schema:
             additionalProperties: true
             type: object
@@ -292,9 +406,9 @@ paths:
       - application/json
       description: Creates a new message in a chat session
       parameters:
-      - description: Session ID
+      - description: Conversation ID
         in: path
-        name: sessionId
+        name: conversationId
         required: true
         type: string
       - description: Message Payload
@@ -302,16 +416,21 @@ paths:
         name: request
         required: true
         schema:
-          $ref: '#/definitions/internal_api.CreateMessageRequest'
+          $ref: '#/definitions/api.CreateMessageRequest'
       produces:
       - application/json
       responses:
         "201":
           description: Created
           schema:
-            $ref: '#/definitions/internal_api.MessageResponse'
+            $ref: '#/definitions/api.MessageResponse'
         "400":
           description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Not Found
           schema:
             additionalProperties: true
             type: object
@@ -321,6 +440,88 @@ paths:
             additionalProperties: true
             type: object
       summary: Create a new chat message
+      tags:
+      - chat
+  /api/v1/conversations:
+    get:
+      description: Retrieves conversation summaries for a specific user
+      parameters:
+      - description: User ID
+        in: query
+        name: userId
+        required: true
+        type: string
+      - description: 'Limit number of conversations (default: 100)'
+        in: query
+        name: limit
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              items:
+                $ref: '#/definitions/api.ConversationResponse'
+              type: array
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: List conversations
+      tags:
+      - chat
+    post:
+      consumes:
+      - application/json
+      description: Creates a new conversation for a specific user
+      parameters:
+      - description: Conversation Payload
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/api.CreateConversationRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Already Exists
+          schema:
+            $ref: '#/definitions/api.ConversationResponse'
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/api.ConversationResponse'
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Create conversation
       tags:
       - chat
   /api/v1/healthz:
@@ -342,6 +543,130 @@ paths:
       summary: Health check
       tags:
       - system
+  /api/v1/orchestrator/records:
+    get:
+      description: Retrieves orchestrator records by data_type and task/orchestrator
+        filters
+      parameters:
+      - description: Data type
+        in: query
+        name: data_type
+        required: true
+        type: string
+      - description: Task ID
+        in: query
+        name: task_id
+        type: string
+      - description: Orchestrator task ref
+        in: query
+        name: orchestrator_task_ref
+        type: string
+      - description: Inclusive lower bound timestamp
+        in: query
+        name: from_timestamp
+        type: string
+      - description: Inclusive upper bound timestamp
+        in: query
+        name: to_timestamp
+        type: string
+      - description: Use not_terminal to exclude terminal task states
+        in: query
+        name: state_filter
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Query orchestrator records
+      tags:
+      - orchestrator
+    post:
+      consumes:
+      - application/json
+      description: Creates or upserts one orchestrator record depending on data_type
+        semantics
+      parameters:
+      - description: Orchestrator record payload
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/api.WriteOrchestratorRecordRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Write orchestrator record
+      tags:
+      - orchestrator
+  /api/v1/orchestrator/records/latest:
+    get:
+      description: Retrieves the latest orchestrator record for a task and data_type
+      parameters:
+      - description: Task ID
+        in: query
+        name: task_id
+        required: true
+        type: string
+      - description: Data type
+        in: query
+        name: data_type
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Read latest orchestrator record
+      tags:
+      - orchestrator
   /api/v1/personal_info/{userId}/all:
     get:
       description: Retrieves all stored facts and chunks for a user
@@ -432,7 +757,7 @@ paths:
         name: request
         required: true
         schema:
-          $ref: '#/definitions/internal_api.UpdateFactRequest'
+          $ref: '#/definitions/api.UpdateFactRequest'
       produces:
       - application/json
       responses:
@@ -464,6 +789,103 @@ paths:
       summary: Update a fact
       tags:
       - personal_info
+  /api/v1/personal_info/{userId}/facts/{factId}/archive:
+    post:
+      consumes:
+      - application/json
+      description: Archives an active fact for a user with an explicit archive reason
+      parameters:
+      - description: User ID
+        in: path
+        name: userId
+        required: true
+        type: string
+      - description: Fact ID
+        in: path
+        name: factId
+        required: true
+        type: string
+      - description: Archive Fact Payload
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/api.ArchiveFactRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Archive a fact
+      tags:
+      - personal_info
+  /api/v1/personal_info/{userId}/facts/{factId}/supersede:
+    post:
+      consumes:
+      - application/json
+      description: Creates a replacement fact and archives the previous active fact
+        as superseded
+      parameters:
+      - description: User ID
+        in: path
+        name: userId
+        required: true
+        type: string
+      - description: Fact ID
+        in: path
+        name: factId
+        required: true
+        type: string
+      - description: Supersede Fact Payload
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/api.SupersedeFactRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Supersede a fact
+      tags:
+      - personal_info
   /api/v1/personal_info/{userId}/query:
     post:
       consumes:
@@ -480,7 +902,7 @@ paths:
         name: request
         required: true
         schema:
-          $ref: '#/definitions/internal_api.QueryPersonalInfoRequest'
+          $ref: '#/definitions/api.QueryPersonalInfoRequest'
       produces:
       - application/json
       responses:
@@ -518,7 +940,7 @@ paths:
         name: request
         required: true
         schema:
-          $ref: '#/definitions/internal_api.SavePersonalInfoRequest'
+          $ref: '#/definitions/api.SavePersonalInfoRequest'
       produces:
       - application/json
       responses:
@@ -540,6 +962,91 @@ paths:
       summary: Save personal information
       tags:
       - personal_info
+  /api/v1/scheduled_jobs:
+    post:
+      consumes:
+      - application/json
+      description: Creates a scheduled job for internal maintenance or external dispatch
+      parameters:
+      - description: Scheduled Job Payload
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/api.CreateScheduledJobRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Create scheduled job
+      tags:
+      - scheduled_jobs
+  /api/v1/scheduled_jobs/{jobId}/runs:
+    get:
+      description: Retrieves run history for a scheduled job
+      parameters:
+      - description: Job ID
+        in: path
+        name: jobId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: List scheduled job runs
+      tags:
+      - scheduled_jobs
+  /api/v1/scheduled_jobs/run_due:
+    post:
+      consumes:
+      - application/json
+      description: Executes all active scheduled jobs whose next run time is due and
+        records run history
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Run due scheduled jobs
+      tags:
+      - scheduled_jobs
   /api/v1/system/events:
     get:
       description: Retrieves a list of system event logs
@@ -564,7 +1071,7 @@ paths:
           schema:
             additionalProperties:
               items:
-                $ref: '#/definitions/internal_api.SystemEventResponse'
+                $ref: '#/definitions/api.SystemEventResponse'
               type: array
             type: object
         "400":
@@ -590,7 +1097,7 @@ paths:
         name: request
         required: true
         schema:
-          $ref: '#/definitions/internal_api.CreateSystemEventRequest'
+          $ref: '#/definitions/api.CreateSystemEventRequest'
       produces:
       - application/json
       responses:
@@ -612,6 +1119,87 @@ paths:
       summary: Create a system event
       tags:
       - system_events
+  /api/v1/tasks:
+    post:
+      consumes:
+      - application/json
+      description: Creates a new task for an existing conversation or creates a conversation
+        first when none is provided
+      parameters:
+      - description: Task Payload
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/api.CreateTaskRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Already Exists
+          schema:
+            $ref: '#/definitions/api.TaskResponse'
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/api.TaskResponse'
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Create task
+      tags:
+      - chat
+  /api/v1/tasks/{taskId}:
+    get:
+      description: Retrieves a task and its conversation mapping for a specific user
+      parameters:
+      - description: Task ID
+        in: path
+        name: taskId
+        required: true
+        type: string
+      - description: User ID
+        in: query
+        name: userId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.TaskResponse'
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Get task
+      tags:
+      - chat
   /api/v1/vault/{userId}/secrets:
     get:
       description: Retrieves and decrypts a secret for a user
@@ -741,4 +1329,11 @@ paths:
       summary: Update a secret
       tags:
       - vault
+schemes:
+- http
+securityDefinitions:
+  ApiKeyAuth:
+    in: header
+    name: X-Internal-API-Key
+    type: apiKey
 swagger: "2.0"

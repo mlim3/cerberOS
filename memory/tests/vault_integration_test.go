@@ -43,7 +43,7 @@ func TestVaultSecurity(t *testing.T) {
 		}
 
 		headers := map[string]string{
-			"X-API-KEY":  vaultKey,
+			"X-Internal-API-Key": vaultKey,
 			"X-Trace-ID": uuid.New().String(),
 		}
 

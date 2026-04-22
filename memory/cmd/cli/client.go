@@ -50,7 +50,7 @@ type MemoryClient interface {
 	SaveFact(ctx context.Context, userID uuid.UUID, fact string) error
 
 	// Chat
-	GetChatHistory(ctx context.Context, sessionID uuid.UUID, limit int) ([]Message, error)
+	GetConversationHistory(ctx context.Context, conversationID uuid.UUID, limit int) ([]Message, error)
 
 	// Agent
 	GetAgentExecutions(ctx context.Context, taskID uuid.UUID, limit int) ([]AgentExecution, error)

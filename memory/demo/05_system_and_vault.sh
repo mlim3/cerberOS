@@ -30,12 +30,12 @@ info "HTTP status: $code"
 info "4) Vault save with API key"
 curl -sS -X POST "$BASE_URL/vault/$DEMO_USER_ID/secrets" \
   -H "Content-Type: application/json" \
-  -H "X-API-KEY: $VAULT_API_KEY" \
+  -H "X-Internal-API-Key: $VAULT_API_KEY" \
   -d "$vault_body" >/dev/null
 ok "Vault save succeeded."
 
 info "5) Vault read with API key"
 curl -sS -X GET "$BASE_URL/vault/$DEMO_USER_ID/secrets?key_name=DEMO_TOKEN" \
-  -H "X-API-KEY: $VAULT_API_KEY" | jq .
+  -H "X-Internal-API-Key: $VAULT_API_KEY" | jq .
 
 ok "System + Vault demo complete."
