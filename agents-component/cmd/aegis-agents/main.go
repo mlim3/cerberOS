@@ -11,11 +11,13 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/cerberOS/agents-component/config"
 	"github.com/cerberOS/agents-component/internal/comms"
 	"github.com/cerberOS/agents-component/internal/credentials"
 	"github.com/cerberOS/agents-component/internal/factory"
+	"github.com/cerberOS/agents-component/internal/heartbeat"
 	"github.com/cerberOS/agents-component/internal/lifecycle"
 	"github.com/cerberOS/agents-component/internal/memory"
 	"github.com/cerberOS/agents-component/internal/metrics"
@@ -24,6 +26,7 @@ import (
 	"github.com/cerberOS/agents-component/internal/skillsconfig"
 	"github.com/cerberOS/agents-component/internal/telemetry"
 	"github.com/cerberOS/agents-component/pkg/types"
+	"github.com/nats-io/nats.go"
 )
 
 func main() {
@@ -104,6 +107,23 @@ func main() {
 	if err := commsClient.EnsureStreams(); err != nil {
 		log.Error("stream provisioning failed", "error", err)
 		os.Exit(1)
+	}
+
+	// Service-level heartbeat on aegis.heartbeat.service.<service>.
+	// Opens a dedicated raw NATS connection so beats bypass the comms
+	// envelope and can be parsed by the orchestrator's sweeper without
+	// understanding cross-component message framing. See docs/heartbeat.md.
+	if hbNC, err := nats.Connect(cfg.NATSURL,
+		nats.Name("aegis-agents-heartbeat"),
+		nats.RetryOnFailedConnect(true),
+		nats.MaxReconnects(-1),
+		nats.ReconnectWait(500*time.Millisecond),
+	); err != nil {
+		log.Warn("heartbeat: NATS connect failed — liveness will not be published", "error", err)
+	} else {
+		defer hbNC.Close()
+		hbEmitter := heartbeat.New(hbNC, "agents", log)
+		go hbEmitter.Start(ctx)
 	}
 
 	reg := registry.New(registry.WithStateChangeHook(rec.ObserveStateChange))

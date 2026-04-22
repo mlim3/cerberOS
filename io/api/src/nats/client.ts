@@ -72,6 +72,13 @@ export interface IONatsClient {
   connected: boolean
   publishUserTask(task: UserTaskPayload): Promise<void>
   publishPlanDecision(decision: PlanDecisionPayload): Promise<void>
+  /**
+   * Publish a raw JSON-serializable object on a core NATS subject (no
+   * JetStream, no envelope wrapping). Used by the heartbeat emitter — the
+   * orchestrator's heartbeat consumer expects raw Beat objects. Silently
+   * no-ops when the connection has not yet completed.
+   */
+  publishRaw(subject: string, payload: unknown): void
   subscribe(channel: string, handler: (msg: unknown) => void): () => void
   close(): void
 }
@@ -266,6 +273,19 @@ export function createNatsClient(config: NatsConfig): IONatsClient | null {
       )
       const data = new TextEncoder().encode(JSON.stringify(envelope))
       await js.publish(SUBJECT_PLAN_DECISION, data)
+    },
+
+    publishRaw(subject: string, payload: unknown): void {
+      if (!nc) return
+      try {
+        const data = new TextEncoder().encode(JSON.stringify(payload))
+        nc.publish(subject, data)
+      } catch (err) {
+        ioLog('warn', 'nats', 'publishRaw failed', {
+          subject,
+          err: String(err),
+        })
+      }
     },
 
     subscribe(channel: string, handler: (msg: unknown) => void): () => void {

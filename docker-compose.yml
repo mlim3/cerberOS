@@ -139,6 +139,8 @@ services:
     depends_on:
       memory-db:
         condition: service_healthy
+      nats-1:
+        condition: service_healthy
     environment:
       DB_HOST: memory-db
       DB_PORT: "5432"
@@ -148,6 +150,8 @@ services:
       PORT: "8081"
       VAULT_MASTER_KEY: ${VAULT_MASTER_KEY:?Set VAULT_MASTER_KEY in .env (exactly 32 ASCII chars)}
       INTERNAL_VAULT_API_KEY: ${INTERNAL_VAULT_API_KEY:?Set INTERNAL_VAULT_API_KEY in .env}
+      # Heartbeat emitter publishes to aegis.heartbeat.service.memory.
+      NATS_URL: nats://nats:4222
       # Observability: OTLP HTTP trace export to Tempo (same pattern as io-api).
       OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
       OTEL_SERVICE_NAME: memory-api
@@ -186,8 +190,11 @@ services:
     environment:
       BAO_ADDR: http://openbao:8200
       BAO_TOKEN: ${BAO_TOKEN:-}
+      # Heartbeat emitter publishes to aegis.heartbeat.service.vault.
+      NATS_URL: nats://nats:4222
     depends_on:
       - openbao
+      - nats-1
     restart: "no"
     networks:
       - cerberos

@@ -33,6 +33,7 @@ import (
 	"github.com/mlim3/cerberOS/orchestrator/internal/executor"
 	"github.com/mlim3/cerberOS/orchestrator/internal/gateway"
 	"github.com/mlim3/cerberOS/orchestrator/internal/health"
+	"github.com/mlim3/cerberOS/orchestrator/internal/heartbeat"
 	"github.com/mlim3/cerberOS/orchestrator/internal/interfaces"
 	ioclient "github.com/mlim3/cerberOS/orchestrator/internal/io"
 	memoryiface "github.com/mlim3/cerberOS/orchestrator/internal/memory"
@@ -99,6 +100,13 @@ func main() {
 
 	go emitMetrics(cfg, rt.gateway, rt.dispatcher, rt.health)
 
+	// Heartbeat: publish orchestrator's own beat and run the sweeper
+	// that scans cross-service beats on a 30s cron-style interval.
+	go rt.hbEmitter.Start(ctx)
+	if err := rt.hbSweeper.Start(ctx); err != nil {
+		startLog.Warn("heartbeat sweeper failed to start — continuing", "error", err)
+	}
+
 	if err := rt.gateway.Start(); err != nil {
 		startLog.Error("gateway start failed", "error", err)
 		os.Exit(1)
@@ -116,18 +124,20 @@ func main() {
 }
 
 type runtime struct {
-	memory     *memoryiface.Interface
-	vault      *mocks.VaultMock
-	nats       interfaces.NATSClient
-	mockNATS   *mocks.NATSMock
-	mockMemory *mocks.MemoryMock
-	gateway    *gateway.Gateway
-	monitor    *monitor.Monitor
-	recovery   *recovery.Manager
-	dispatcher *dispatcher.Dispatcher
-	executor   *executor.PlanExecutor
-	health     *health.Handler
-	mux        *http.ServeMux
+	memory         *memoryiface.Interface
+	vault          *mocks.VaultMock
+	nats           interfaces.NATSClient
+	mockNATS       *mocks.NATSMock
+	mockMemory     *mocks.MemoryMock
+	gateway        *gateway.Gateway
+	monitor        *monitor.Monitor
+	recovery       *recovery.Manager
+	dispatcher     *dispatcher.Dispatcher
+	executor       *executor.PlanExecutor
+	health         *health.Handler
+	hbEmitter      *heartbeat.Emitter
+	hbSweeper      *heartbeat.Sweeper
+	mux            *http.ServeMux
 }
 
 func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
@@ -210,10 +220,15 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 
 	healthHandler := health.New(vaultClient, memClient, natsClient, taskMonitor, cfg.NodeID)
 
+	// Heartbeat: own emitter + cross-service sweeper ("cron" loop).
+	hbEmitter := heartbeat.NewEmitter(natsClient, "orchestrator")
+	hbSweeper := heartbeat.NewSweeper(natsClient)
+
 	debugHandler := &api.DebugHandler{LokiURL: cfg.LokiURL}
 	metricsHandler := &api.MetricsHandler{Provider: taskDispatcher}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler.ServeHTTP)
+	mux.Handle("GET /heartbeats", &heartbeat.HTTPHandler{Sweeper: hbSweeper})
 	mux.HandleFunc("GET /debug/trace/{trace_id}", debugHandler.GetTrace)
 	mux.Handle("GET /metrics", metricsHandler)
 
@@ -237,6 +252,8 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 		dispatcher: taskDispatcher,
 		executor:   planExecutor,
 		health:     healthHandler,
+		hbEmitter:  hbEmitter,
+		hbSweeper:  hbSweeper,
 		mux:        mux,
 	}, nil
 }
