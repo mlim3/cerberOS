@@ -2,10 +2,16 @@
 # cerberOS bootstrap — bring the full stack up or tear it down.
 #
 # Usage:
-#   ./bootstrap.sh                # build, start, init + unseal OpenBao
-#   ./bootstrap.sh down           # stop stack, clean up OpenBao state
+#   ./bootstrap.sh                       # wipe volumes, build, start, init + unseal OpenBao
+#   ./bootstrap.sh --keep-volumes        # build, start, init + unseal OpenBao without wiping volumes
+#   ./bootstrap.sh down                  # stop stack, clean up OpenBao state
 #   ./bootstrap.sh down --keep-db        # stop but keep openbao database
 #   ./bootstrap.sh down --delete-volumes # stop and remove Docker volumes
+#
+# By default `up` wipes the Docker volumes before bringing the stack up, so every
+# teammate ends a bootstrap run on the same schema and seed state regardless of
+# prior volume history. Use --keep-volumes when you want to preserve local chat,
+# vault secrets, or other data across a bootstrap.
 
 set -euo pipefail
 
@@ -100,6 +106,14 @@ cmd_down() {
 # UP
 # =============================================================================
 cmd_up() {
+  local keep_volumes=false
+  for arg in "$@"; do
+    case "$arg" in
+      --keep-volumes) keep_volumes=true ;;
+      *) die "unknown option: $arg" ;;
+    esac
+  done
+
   # --- Prerequisites ---
   require_cmd docker
   docker info >/dev/null 2>&1 || die "Docker is not running or not accessible"
@@ -113,6 +127,24 @@ cmd_up() {
     die "use Docker Compose v2 (docker compose), not docker-compose"
   else
     die "docker compose (v2) is required"
+  fi
+
+  # --- Wipe volumes (default) ---
+  # Bootstrap is meant to produce a known, identical starting state on every
+  # teammate's machine. `docker-entrypoint-initdb.d` scripts only run when the
+  # Postgres data dir is empty, so preserving volumes silently ships stale
+  # schema and seed rows to whoever bootstraps against an older volume.
+  # Wiping by default eliminates that drift; --keep-volumes is the explicit
+  # opt-out when a dev wants to preserve local data across a bootstrap.
+  if [[ "$keep_volumes" == false ]]; then
+    log "Wiping Docker volumes (opt out with --keep-volumes)..."
+    docker compose down -v --remove-orphans 2>/dev/null || true
+    rm -f "$ROOT/vault/.openbao-init.json"
+    if [[ -f "$ROOT/.env" ]] && grep -q "^BAO_TOKEN=" "$ROOT/.env" 2>/dev/null; then
+      upsert_env_var "$ROOT/.env" "BAO_TOKEN" ""
+    fi
+  else
+    log "Keeping existing Docker volumes (--keep-volumes)."
   fi
 
   # --- .env ---
@@ -169,6 +201,33 @@ cmd_up() {
     docker compose exec memory-db \
     psql -U "${POSTGRES_USER:-user}" -d "${POSTGRES_DB:-memory_db}" \
     -c "CREATE DATABASE openbao OWNER \"${POSTGRES_USER:-user}\""
+
+  # On --keep-volumes runs, Postgres skips docker-entrypoint-initdb.d because
+  # the data dir already exists, so new tables/indexes/seed rows added to
+  # init-db.sql would not land. Re-apply the script explicitly — it is
+  # idempotent (CREATE ... IF NOT EXISTS, INSERT ... ON CONFLICT DO NOTHING)
+  # so this is a no-op on a genuinely up-to-date DB and cannot clobber
+  # user-generated rows. Skipped on the default wipe path because
+  # docker-entrypoint will have just run it fresh on the empty volume.
+  #
+  # Stream the file from the host via stdin rather than passing a container
+  # path to `psql -f`. Git Bash / MSYS on Windows rewrites any absolute
+  # argument starting with `/` into a Windows path (e.g.
+  # `/docker-entrypoint-initdb.d/01-init-db.sql` becomes
+  # `C:/Program Files/Git/docker-entrypoint-initdb.d/...`) which breaks `exec`
+  # even though the path was meant to be interpreted inside the container.
+  # stdin avoids that entirely and also uses the checked-out script directly
+  # instead of relying on the docker-entrypoint bind mount being in sync.
+  if [[ "$keep_volumes" == true ]]; then
+    log "Re-applying memory_db schema/seed (idempotent) for --keep-volumes..."
+    [[ -f "$ROOT/memory/scripts/init-db.sql" ]] \
+      || die "memory/scripts/init-db.sql not found at $ROOT"
+    docker compose exec -T memory-db \
+      psql -U "${POSTGRES_USER:-user}" -d "${POSTGRES_DB:-memory_db}" \
+      -v ON_ERROR_STOP=1 \
+      < "$ROOT/memory/scripts/init-db.sql" >/dev/null \
+      || die "failed to re-apply memory/scripts/init-db.sql"
+  fi
 
   log "Starting remaining Docker services..."
   docker compose up --build --detach
@@ -306,5 +365,6 @@ cmd_up() {
 case "${1:-up}" in
   up)      [[ $# -gt 0 ]] && shift; cmd_up "$@" ;;
   down)    [[ $# -gt 0 ]] && shift; cmd_down "$@" ;;
+  -*)      cmd_up "$@" ;;
   *)       die "usage: $0 [up|down] [options]" ;;
 esac
