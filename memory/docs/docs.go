@@ -32,23 +32,35 @@ const docTemplate = `{
                         "name": "taskId",
                         "in": "path",
                         "required": true
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Limit number of executions (default: 100)",
+                        "name": "limit",
+                        "in": "query"
                     }
                 ],
                 "responses": {
                     "200": {
-                        "description": "List of task executions",
+                        "description": "OK",
                         "schema": {
-                            "type": "array",
-                            "items": {
-                                "$ref": "#/definitions/github_com_mlim3_cerberOS_memory_internal_storage.AgentLogsSchemaTaskExecution"
-                            }
+                            "type": "object",
+                            "additionalProperties": true
                         }
                     },
                     "400": {
-                        "description": "Bad Request"
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
                     },
                     "500": {
-                        "description": "Internal Server Error"
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
                     }
                 }
             },
@@ -112,23 +124,35 @@ const docTemplate = `{
                         "name": "taskId",
                         "in": "path",
                         "required": true
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Limit number of executions (default: 100)",
+                        "name": "limit",
+                        "in": "query"
                     }
                 ],
                 "responses": {
                     "200": {
-                        "description": "List of task executions",
+                        "description": "OK",
                         "schema": {
-                            "type": "array",
-                            "items": {
-                                "$ref": "#/definitions/github_com_mlim3_cerberOS_memory_internal_storage.AgentLogsSchemaTaskExecution"
-                            }
+                            "type": "object",
+                            "additionalProperties": true
                         }
                     },
                     "400": {
-                        "description": "Bad Request"
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
                     },
                     "500": {
-                        "description": "Internal Server Error"
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
                     }
                 }
             },
@@ -175,7 +199,7 @@ const docTemplate = `{
                 }
             }
         },
-        "/api/v1/chat/{sessionId}/messages": {
+        "/api/v1/chat/{conversationId}/messages": {
             "get": {
                 "description": "Retrieves a list of messages for a specific chat session",
                 "produces": [
@@ -188,9 +212,16 @@ const docTemplate = `{
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "Session ID",
-                        "name": "sessionId",
+                        "description": "Conversation ID",
+                        "name": "conversationId",
                         "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "User ID",
+                        "name": "userId",
+                        "in": "query",
                         "required": true
                     },
                     {
@@ -208,13 +239,20 @@ const docTemplate = `{
                             "additionalProperties": {
                                 "type": "array",
                                 "items": {
-                                    "$ref": "#/definitions/internal_api.MessageResponse"
+                                    "$ref": "#/definitions/api.MessageResponse"
                                 }
                             }
                         }
                     },
                     "400": {
                         "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
                         "schema": {
                             "type": "object",
                             "additionalProperties": true
@@ -244,8 +282,8 @@ const docTemplate = `{
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "Session ID",
-                        "name": "sessionId",
+                        "description": "Conversation ID",
+                        "name": "conversationId",
                         "in": "path",
                         "required": true
                     },
@@ -255,7 +293,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/internal_api.CreateMessageRequest"
+                            "$ref": "#/definitions/api.CreateMessageRequest"
                         }
                     }
                 ],
@@ -263,11 +301,139 @@ const docTemplate = `{
                     "201": {
                         "description": "Created",
                         "schema": {
-                            "$ref": "#/definitions/internal_api.MessageResponse"
+                            "$ref": "#/definitions/api.MessageResponse"
                         }
                     },
                     "400": {
                         "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/conversations": {
+            "get": {
+                "description": "Retrieves conversation summaries for a specific user",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "chat"
+                ],
+                "summary": "List conversations",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "User ID",
+                        "name": "userId",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Limit number of conversations (default: 100)",
+                        "name": "limit",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "array",
+                                "items": {
+                                    "$ref": "#/definitions/api.ConversationResponse"
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            },
+            "post": {
+                "description": "Creates a new conversation for a specific user",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "chat"
+                ],
+                "summary": "Create conversation",
+                "parameters": [
+                    {
+                        "description": "Conversation Payload",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/api.CreateConversationRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Already Exists",
+                        "schema": {
+                            "$ref": "#/definitions/api.ConversationResponse"
+                        }
+                    },
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/api.ConversationResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
                         "schema": {
                             "type": "object",
                             "additionalProperties": true
@@ -303,6 +469,185 @@ const docTemplate = `{
                     },
                     "503": {
                         "description": "Degraded",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/orchestrator/records": {
+            "get": {
+                "description": "Retrieves orchestrator records by data_type and task/orchestrator filters",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "orchestrator"
+                ],
+                "summary": "Query orchestrator records",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Data type",
+                        "name": "data_type",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Task ID",
+                        "name": "task_id",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Orchestrator task ref",
+                        "name": "orchestrator_task_ref",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Inclusive lower bound timestamp",
+                        "name": "from_timestamp",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Inclusive upper bound timestamp",
+                        "name": "to_timestamp",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Use not_terminal to exclude terminal task states",
+                        "name": "state_filter",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            },
+            "post": {
+                "description": "Creates or upserts one orchestrator record depending on data_type semantics",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "orchestrator"
+                ],
+                "summary": "Write orchestrator record",
+                "parameters": [
+                    {
+                        "description": "Orchestrator record payload",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/api.WriteOrchestratorRecordRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/orchestrator/records/latest": {
+            "get": {
+                "description": "Retrieves the latest orchestrator record for a task and data_type",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "orchestrator"
+                ],
+                "summary": "Read latest orchestrator record",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Task ID",
+                        "name": "task_id",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Data type",
+                        "name": "data_type",
+                        "in": "query",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
                         "schema": {
                             "type": "object",
                             "additionalProperties": true
@@ -356,6 +701,81 @@ const docTemplate = `{
             }
         },
         "/api/v1/personal_info/{userId}/facts/{factId}": {
+            "put": {
+                "description": "Updates a fact for a user with optimistic concurrency control",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "personal_info"
+                ],
+                "summary": "Update a fact",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "User ID",
+                        "name": "userId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Fact ID",
+                        "name": "factId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Update Fact Payload",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/api.UpdateFactRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            },
             "delete": {
                 "description": "Deletes a fact for a user",
                 "produces": [
@@ -411,9 +831,11 @@ const docTemplate = `{
                         }
                     }
                 }
-            },
-            "put": {
-                "description": "Updates a fact for a user with optimistic concurrency control",
+            }
+        },
+        "/api/v1/personal_info/{userId}/facts/{factId}/archive": {
+            "post": {
+                "description": "Archives an active fact for a user with an explicit archive reason",
                 "consumes": [
                     "application/json"
                 ],
@@ -423,7 +845,7 @@ const docTemplate = `{
                 "tags": [
                     "personal_info"
                 ],
-                "summary": "Update a fact",
+                "summary": "Archive a fact",
                 "parameters": [
                     {
                         "type": "string",
@@ -440,12 +862,12 @@ const docTemplate = `{
                         "required": true
                     },
                     {
-                        "description": "Update Fact Payload",
+                        "description": "Archive Fact Payload",
                         "name": "request",
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/internal_api.UpdateFactRequest"
+                            "$ref": "#/definitions/api.ArchiveFactRequest"
                         }
                     }
                 ],
@@ -471,8 +893,71 @@ const docTemplate = `{
                             "additionalProperties": true
                         }
                     },
-                    "409": {
-                        "description": "Conflict",
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/personal_info/{userId}/facts/{factId}/supersede": {
+            "post": {
+                "description": "Creates a replacement fact and archives the previous active fact as superseded",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "personal_info"
+                ],
+                "summary": "Supersede a fact",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "User ID",
+                        "name": "userId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Fact ID",
+                        "name": "factId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Supersede Fact Payload",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/api.SupersedeFactRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
                         "schema": {
                             "type": "object",
                             "additionalProperties": true
@@ -515,7 +1000,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/internal_api.QueryPersonalInfoRequest"
+                            "$ref": "#/definitions/api.QueryPersonalInfoRequest"
                         }
                     }
                 ],
@@ -571,8 +1056,132 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/internal_api.SavePersonalInfoRequest"
+                            "$ref": "#/definitions/api.SavePersonalInfoRequest"
                         }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/scheduled_jobs": {
+            "post": {
+                "description": "Creates a scheduled job for internal maintenance or external dispatch",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "scheduled_jobs"
+                ],
+                "summary": "Create scheduled job",
+                "parameters": [
+                    {
+                        "description": "Scheduled Job Payload",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/api.CreateScheduledJobRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/scheduled_jobs/run_due": {
+            "post": {
+                "description": "Executes all active scheduled jobs whose next run time is due and records run history",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "scheduled_jobs"
+                ],
+                "summary": "Run due scheduled jobs",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/scheduled_jobs/{jobId}/runs": {
+            "get": {
+                "description": "Retrieves run history for a scheduled job",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "scheduled_jobs"
+                ],
+                "summary": "List scheduled job runs",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Job ID",
+                        "name": "jobId",
+                        "in": "path",
+                        "required": true
                     }
                 ],
                 "responses": {
@@ -638,7 +1247,7 @@ const docTemplate = `{
                             "additionalProperties": {
                                 "type": "array",
                                 "items": {
-                                    "$ref": "#/definitions/internal_api.SystemEventResponse"
+                                    "$ref": "#/definitions/api.SystemEventResponse"
                                 }
                             }
                         }
@@ -678,7 +1287,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/internal_api.CreateSystemEventRequest"
+                            "$ref": "#/definitions/api.CreateSystemEventRequest"
                         }
                     }
                 ],
@@ -692,6 +1301,124 @@ const docTemplate = `{
                     },
                     "400": {
                         "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/tasks": {
+            "post": {
+                "description": "Creates a new task for an existing conversation or creates a conversation first when none is provided",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "chat"
+                ],
+                "summary": "Create task",
+                "parameters": [
+                    {
+                        "description": "Task Payload",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/api.CreateTaskRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Already Exists",
+                        "schema": {
+                            "$ref": "#/definitions/api.TaskResponse"
+                        }
+                    },
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/api.TaskResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/tasks/{taskId}": {
+            "get": {
+                "description": "Retrieves a task and its conversation mapping for a specific user",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "chat"
+                ],
+                "summary": "Get task",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Task ID",
+                        "name": "taskId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "User ID",
+                        "name": "userId",
+                        "in": "query",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.TaskResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
                         "schema": {
                             "type": "object",
                             "additionalProperties": true
@@ -910,39 +1637,61 @@ const docTemplate = `{
         }
     },
     "definitions": {
-        "github_com_mlim3_cerberOS_memory_internal_storage.AgentLogsSchemaTaskExecution": {
+        "api.ArchiveFactRequest": {
             "type": "object",
             "properties": {
-                "action_type": {
-                    "type": "string"
-                },
-                "agent_id": {
-                    "type": "string"
-                },
-                "created_at": {
-                    "$ref": "#/definitions/pgtype.Timestamptz"
-                },
-                "error_context": {
-                    "$ref": "#/definitions/pgtype.Text"
-                },
-                "id": {
-                    "type": "string"
-                },
-                "payload": {
-                    "type": "array",
-                    "items": {
-                        "type": "integer"
-                    }
-                },
-                "status": {
-                    "type": "string"
-                },
-                "task_id": {
+                "reason": {
                     "type": "string"
                 }
             }
         },
-        "internal_api.CreateMessageRequest": {
+        "api.ConversationResponse": {
+            "type": "object",
+            "properties": {
+                "conversationId": {
+                    "type": "string"
+                },
+                "createdAt": {
+                    "type": "string"
+                },
+                "lastMessagePreview": {
+                    "type": "string"
+                },
+                "latestTaskId": {
+                    "type": "string"
+                },
+                "latestTaskStatus": {
+                    "type": "string"
+                },
+                "messageCount": {
+                    "type": "integer"
+                },
+                "title": {
+                    "type": "string"
+                },
+                "updatedAt": {
+                    "type": "string"
+                },
+                "userId": {
+                    "type": "string"
+                }
+            }
+        },
+        "api.CreateConversationRequest": {
+            "type": "object",
+            "properties": {
+                "conversationId": {
+                    "type": "string"
+                },
+                "title": {
+                    "type": "string"
+                },
+                "userId": {
+                    "type": "string"
+                }
+            }
+        },
+        "api.CreateMessageRequest": {
             "type": "object",
             "properties": {
                 "content": {
@@ -962,7 +1711,39 @@ const docTemplate = `{
                 }
             }
         },
-        "internal_api.CreateSystemEventRequest": {
+        "api.CreateScheduledJobRequest": {
+            "type": "object",
+            "properties": {
+                "intervalSeconds": {
+                    "type": "integer"
+                },
+                "jobType": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "nextRunAt": {
+                    "type": "string"
+                },
+                "payload": {
+                    "type": "object"
+                },
+                "scheduleKind": {
+                    "type": "string"
+                },
+                "status": {
+                    "type": "string"
+                },
+                "targetKind": {
+                    "type": "string"
+                },
+                "targetService": {
+                    "type": "string"
+                }
+            }
+        },
+        "api.CreateSystemEventRequest": {
             "type": "object",
             "properties": {
                 "message": {
@@ -983,10 +1764,42 @@ const docTemplate = `{
                 }
             }
         },
-        "internal_api.MessageResponse": {
+        "api.CreateTaskRequest": {
+            "type": "object",
+            "properties": {
+                "conversationId": {
+                    "type": "string"
+                },
+                "inputSummary": {
+                    "type": "string"
+                },
+                "orchestratorTaskRef": {
+                    "type": "string"
+                },
+                "status": {
+                    "type": "string"
+                },
+                "taskId": {
+                    "type": "string"
+                },
+                "title": {
+                    "type": "string"
+                },
+                "traceId": {
+                    "type": "string"
+                },
+                "userId": {
+                    "type": "string"
+                }
+            }
+        },
+        "api.MessageResponse": {
             "type": "object",
             "properties": {
                 "content": {
+                    "type": "string"
+                },
+                "conversationId": {
                     "type": "string"
                 },
                 "createdAt": {
@@ -998,9 +1811,6 @@ const docTemplate = `{
                 "role": {
                     "type": "string"
                 },
-                "sessionId": {
-                    "type": "string"
-                },
                 "tokenCount": {
                     "type": "integer"
                 },
@@ -1009,7 +1819,7 @@ const docTemplate = `{
                 }
             }
         },
-        "internal_api.QueryPersonalInfoRequest": {
+        "api.QueryPersonalInfoRequest": {
             "type": "object",
             "properties": {
                 "query": {
@@ -1020,7 +1830,7 @@ const docTemplate = `{
                 }
             }
         },
-        "internal_api.SavePersonalInfoRequest": {
+        "api.SavePersonalInfoRequest": {
             "type": "object",
             "properties": {
                 "content": {
@@ -1037,7 +1847,22 @@ const docTemplate = `{
                 }
             }
         },
-        "internal_api.SystemEventResponse": {
+        "api.SupersedeFactRequest": {
+            "type": "object",
+            "properties": {
+                "category": {
+                    "type": "string"
+                },
+                "confidence": {
+                    "type": "number"
+                },
+                "factKey": {
+                    "type": "string"
+                },
+                "factValue": {}
+            }
+        },
+        "api.SystemEventResponse": {
             "type": "object",
             "properties": {
                 "createdAt": {
@@ -1064,7 +1889,42 @@ const docTemplate = `{
                 }
             }
         },
-        "internal_api.UpdateFactRequest": {
+        "api.TaskResponse": {
+            "type": "object",
+            "properties": {
+                "completedAt": {
+                    "type": "string"
+                },
+                "conversationId": {
+                    "type": "string"
+                },
+                "createdAt": {
+                    "type": "string"
+                },
+                "inputSummary": {
+                    "type": "string"
+                },
+                "orchestratorTaskRef": {
+                    "type": "string"
+                },
+                "status": {
+                    "type": "string"
+                },
+                "taskId": {
+                    "type": "string"
+                },
+                "traceId": {
+                    "type": "string"
+                },
+                "updatedAt": {
+                    "type": "string"
+                },
+                "userId": {
+                    "type": "string"
+                }
+            }
+        },
+        "api.UpdateFactRequest": {
             "type": "object",
             "properties": {
                 "category": {
@@ -1082,56 +1942,56 @@ const docTemplate = `{
                 }
             }
         },
-        "pgtype.InfinityModifier": {
-            "type": "integer",
-            "format": "int32",
-            "enum": [
-                1,
-                0,
-                -1
-            ],
-            "x-enum-varnames": [
-                "Infinity",
-                "Finite",
-                "NegativeInfinity"
-            ]
-        },
-        "pgtype.Text": {
+        "api.WriteOrchestratorRecordRequest": {
             "type": "object",
             "properties": {
-                "string": {
+                "data_type": {
                     "type": "string"
                 },
-                "valid": {
-                    "type": "boolean"
-                }
-            }
-        },
-        "pgtype.Timestamptz": {
-            "type": "object",
-            "properties": {
-                "infinityModifier": {
-                    "$ref": "#/definitions/pgtype.InfinityModifier"
-                },
-                "time": {
+                "orchestrator_task_ref": {
                     "type": "string"
                 },
-                "valid": {
-                    "type": "boolean"
+                "payload": {
+                    "type": "object"
+                },
+                "plan_id": {
+                    "type": "string"
+                },
+                "subtask_id": {
+                    "type": "string"
+                },
+                "task_id": {
+                    "type": "string"
+                },
+                "timestamp": {
+                    "type": "string"
+                },
+                "trace_id": {
+                    "type": "string"
+                },
+                "ttl_seconds": {
+                    "type": "integer"
                 }
             }
+        }
+    },
+    "securityDefinitions": {
+        "ApiKeyAuth": {
+            "type": "apiKey",
+            "name": "X-Internal-API-Key",
+            "in": "header"
         }
     }
 }`
 
 // SwaggerInfo holds exported Swagger Info so clients can modify it
 var SwaggerInfo = &swag.Spec{
-	Version:          "",
+	Version:          "v1",
 	Host:             "",
-	BasePath:         "",
-	Schemes:          []string{},
-	Title:            "",
-	Description:      "",
+	BasePath:         "/",
+	Schemes:          []string{"http"},
+	Title:            "Memory Service API",
+	Description:      "REST API for CerberOS memory, chat, personal info, system event, vault, and agent execution services.",
 	InfoInstanceName: "swagger",
 	SwaggerTemplate:  docTemplate,
 	LeftDelim:        "{{",

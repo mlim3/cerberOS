@@ -227,15 +227,15 @@ The IO BFF maintains an in-memory `Map<taskId, StatusUpdate>`. When a browser co
 
 ## 4. For the Memory Team
 
-The IO component uses two Memory service endpoints: session logging and credential vault storage. Both are called from the IO API server (BFF), which acts as a proxy so the browser never directly contacts Memory.
+The IO component uses two Memory service endpoints: conversation logging and credential vault storage. Both are called from the IO API server (BFF), which acts as a proxy so the browser never directly contacts Memory.
 
-### 4.1 Session logging
+### 4.1 Conversation logging
 
-Appends a user or assistant message to a session log for persistence and analytics.
+Appends a user or assistant message to a conversation log for persistence and analytics.
 
 ```
-POST /api/v1/chat/{sessionId}/messages
-X-API-KEY: {MEMORY_API_KEY}
+POST /api/v1/chat/{conversationId}/messages
+X-Internal-API-Key: {MEMORY_API_KEY}
 Content-Type: application/json
 
 {
@@ -253,7 +253,7 @@ Content-Type: application/json
   "data": {
     "message": {
       "messageId": "msg-uuid",
-      "sessionId": "sess-uuid",
+      "conversationId": "conv-uuid",
       "userId": "00000000-0000-0000-0000-000000000001",
       "role": "user",
       "content": "Deploy the new schema...",
@@ -267,8 +267,8 @@ Content-Type: application/json
 Retrieve logs:
 
 ```
-GET /api/v1/chat/{sessionId}/messages?limit=50
-X-API-KEY: {MEMORY_API_KEY}
+GET /api/v1/chat/{conversationId}/messages?limit=50
+X-Internal-API-Key: {MEMORY_API_KEY}
 ```
 
 **Response:**
@@ -279,7 +279,7 @@ X-API-KEY: {MEMORY_API_KEY}
     "messages": [
       {
         "messageId": "msg-uuid",
-        "sessionId": "sess-uuid",
+        "conversationId": "conv-uuid",
         "userId": "00000000-0000-0000-0000-000000000001",
         "role": "user",
         "content": "Deploy the new schema...",
@@ -291,7 +291,7 @@ X-API-KEY: {MEMORY_API_KEY}
 }
 ```
 
-The IO API server provides an equivalent wrapper at `GET /api/logs/:taskId` that maps `taskId` to `sessionId` internally.
+The IO API server provides an equivalent wrapper at `GET /api/logs/:taskId` that maps `taskId` to `conversationId` internally.
 
 **Note on credentials:** Credentials are NEVER passed through this logging channel. The activity log records only `"Credential submitted through secure channel (content not logged)"`.
 
@@ -301,7 +301,7 @@ When a user provides a credential, the IO API server writes it directly to the M
 
 ```
 POST /api/v1/vault/{userId}/secrets
-X-API-KEY: {MEMORY_VAULT_API_KEY}
+X-Internal-API-Key: {MEMORY_VAULT_API_KEY}
 X-Trace-ID: {optional-trace-id}
 Content-Type: application/json
 

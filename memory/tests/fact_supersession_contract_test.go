@@ -80,4 +80,31 @@ func TestFactSupersessionContract_FutureBlackBox(t *testing.T) {
 		assertSuccessEnvelope(t, env)
 		assertArchivedFactSupersededBy(t, env.Data, oldFactID, newFactID)
 	})
+
+	t.Run("supersede_missing_fact_returns_not_found", func(t *testing.T) {
+		status, env := apiJSONRequest(t, http.MethodPost, baseURL+"/api/v1/personal_info/"+userID+"/facts/"+uuid.NewString()+"/supersede", map[string]any{
+			"category":   "profile",
+			"factKey":    "employer",
+			"factValue":  "Missing Corp",
+			"confidence": 0.5,
+		}, nil)
+
+		if status != http.StatusNotFound {
+			t.Fatalf("status = %d, want %d", status, http.StatusNotFound)
+		}
+		assertErrorCode(t, env, "not_found")
+	})
+
+	t.Run("supersede_missing_fact_value_returns_bad_request", func(t *testing.T) {
+		status, env := apiJSONRequest(t, http.MethodPost, baseURL+"/api/v1/personal_info/"+userID+"/facts/"+newFactID+"/supersede", map[string]any{
+			"category":   "profile",
+			"factKey":    "employer",
+			"confidence": 0.5,
+		}, nil)
+
+		if status != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", status, http.StatusBadRequest)
+		}
+		assertErrorCode(t, env, "invalid_argument")
+	})
 }

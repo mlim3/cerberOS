@@ -132,7 +132,7 @@ Request body:
 | `key_name` | `string` | The `keyName` from the credential request. |
 | `value` | `string` | The user-provided secret (plaintext). Memory encrypts it server-side with AES-256-GCM. |
 
-Headers: `X-API-KEY` (Memory's internal vault key), `X-Trace-ID` (optional, for distributed tracing).
+Headers: `X-Internal-API-Key` (Memory's internal vault key), `X-Trace-ID` (optional, for distributed tracing).
 
 **Credential acknowledgment (IO → Orchestrator)**
 

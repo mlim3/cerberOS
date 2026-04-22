@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -183,37 +184,87 @@ func (c *dbClient) SaveFact(ctx context.Context, userID uuid.UUID, fact string) 
 	return nil
 }
 
-func (c *dbClient) GetChatHistory(ctx context.Context, sessionID uuid.UUID, limit int) ([]Message, error) {
-	var sessionUUID pgtype.UUID
-	if err := sessionUUID.Scan(sessionID.String()); err != nil {
-		return nil, fmt.Errorf("invalid session ID: %w", err)
+func (c *dbClient) GetConversationHistory(ctx context.Context, conversationID uuid.UUID, limit int) ([]Message, error) {
+	if limit <= 0 {
+		limit = 100
 	}
 
-	dbMessages, err := c.chatRepo.ListMessagesBySession(ctx, sessionUUID, int32(limit))
+	chatIDColumn, err := c.resolveChatIDColumn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve chat history schema: %w", err)
+	}
+
+	rows, err := c.db.GetPool().Query(ctx, fmt.Sprintf(`
+SELECT id, role, content, created_at
+FROM chat_schema.messages
+WHERE %s = $1
+ORDER BY created_at ASC
+LIMIT $2`, chatIDColumn), conversationID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get chat history: %w", err)
 	}
+	defer rows.Close()
 
 	var messages []Message
-	for _, m := range dbMessages {
-		id, _ := uuid.Parse(formatUUID(m.ID))
+	for rows.Next() {
+		var (
+			id        uuid.UUID
+			role      string
+			content   string
+			createdAt time.Time
+		)
+		if err := rows.Scan(&id, &role, &content, &createdAt); err != nil {
+			return nil, fmt.Errorf("failed to scan chat history row: %w", err)
+		}
 		messages = append(messages, Message{
 			ID:        id,
-			Role:      m.Role,
-			Content:   string(m.Content),
-			CreatedAt: m.CreatedAt.Time.String(),
+			Role:      role,
+			Content:   content,
+			CreatedAt: createdAt.String(),
 		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate chat history rows: %w", err)
 	}
 	if messages == nil {
 		messages = []Message{}
 	}
 
-	// reverse to show chronological order
-	for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
-		messages[i], messages[j] = messages[j], messages[i]
-	}
-
 	return messages, nil
+}
+
+func (c *dbClient) resolveChatIDColumn(ctx context.Context) (string, error) {
+	rows, err := c.db.GetPool().Query(ctx, `
+SELECT column_name
+FROM information_schema.columns
+WHERE table_schema = 'chat_schema'
+  AND table_name = 'messages'
+  AND column_name IN ('session_id', 'conversation_id')`)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+
+	foundConversation := false
+	for rows.Next() {
+		var columnName string
+		if err := rows.Scan(&columnName); err != nil {
+			return "", err
+		}
+		if columnName == "session_id" {
+			return "session_id", nil
+		}
+		if columnName == "conversation_id" {
+			foundConversation = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	if foundConversation {
+		return "conversation_id", nil
+	}
+	return "", fmt.Errorf("neither session_id nor conversation_id exists on chat_schema.messages")
 }
 
 func (c *dbClient) GetAgentExecutions(ctx context.Context, taskID uuid.UUID, limit int) ([]AgentExecution, error) {

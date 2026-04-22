@@ -1,4 +1,4 @@
-//go:generate go run github.com/swaggo/swag/cmd/swag@v1.16.6 init -g cmd/server/main.go -o docs
+//go:generate go run github.com/swaggo/swag/cmd/swag@v1.16.6 init -g main.go -d .,../../internal/api -o ../../docs --parseInternal
 
 // Package main runs the memory service API.
 //
@@ -129,9 +129,19 @@ func main() {
 	// 2. Initialize the Repositories
 	pool := db.GetPool()
 	chatRepo := storage.NewChatRepository(pool)
+	if err := chatRepo.EnsureSchema(ctx); err != nil {
+		logger.Error("failed to ensure chat schema", "error", err)
+		os.Exit(1)
+	}
+	orchestratorRepo := storage.NewOrchestratorRepository(pool)
+	if err := orchestratorRepo.EnsureSchema(ctx); err != nil {
+		logger.Error("failed to ensure orchestrator schema", "error", err)
+		os.Exit(1)
+	}
 	logRepo := storage.NewLogRepository(pool)
 	vaultRepo := storage.NewVaultRepository(pool)
 	agentLogsRepo := storage.NewAgentLogsRepository(pool)
+	schedulerRepo := storage.NewSchedulerRepository(pool)
 
 	// Initialize Vault Manager
 	vaultManager, err := logic.NewVaultManager()
@@ -155,10 +165,12 @@ func main() {
 
 	// 3. Initialize the Handlers
 	chatHandler := api.NewChatHandler(chatRepo)
+	orchestratorHandler := api.NewOrchestratorHandler(orchestratorRepo)
 	logHandler := api.NewSystemLogHandler(logRepo)
 	piHandler := api.NewPersonalInfoHandler(piProcessor, piRepo)
 	vaultHandler := api.NewVaultHandler(vaultRepo, vaultManager, logRepo)
 	agentHandler := api.NewAgentHandler(agentLogsRepo)
+	scheduledJobsHandler := api.NewScheduledJobsHandler(schedulerRepo)
 
 	// Set up the router using Go 1.22's enhanced mux
 	mux := http.NewServeMux()
@@ -173,8 +185,19 @@ func main() {
 	mux.HandleFunc("GET /api/v1/healthz", newHealthzHandler(db, logger))
 
 	// Chat endpoints
-	mux.HandleFunc("POST /api/v1/chat/{sessionId}/messages", chatHandler.HandleCreateMessage)
-	mux.HandleFunc("GET /api/v1/chat/{sessionId}/messages", chatHandler.HandleListMessages)
+	mux.HandleFunc("GET /api/v1/conversations", chatHandler.HandleListConversations)
+	mux.HandleFunc("POST /api/v1/conversations", chatHandler.HandleCreateConversation)
+	mux.HandleFunc("POST /api/v1/tasks", chatHandler.HandleCreateTask)
+	mux.HandleFunc("GET /api/v1/tasks/{taskId}", chatHandler.HandleGetTask)
+	mux.HandleFunc("POST /api/v1/chat/{conversationId}/messages", chatHandler.HandleCreateMessage)
+	mux.HandleFunc("GET /api/v1/chat/{conversationId}/messages", chatHandler.HandleListMessages)
+
+	// Orchestrator persistence endpoints (Internal Only)
+	orchestratorMux := http.NewServeMux()
+	orchestratorMux.HandleFunc("POST /api/v1/orchestrator/records", orchestratorHandler.HandleWriteRecord)
+	orchestratorMux.HandleFunc("GET /api/v1/orchestrator/records", orchestratorHandler.HandleQueryRecords)
+	orchestratorMux.HandleFunc("GET /api/v1/orchestrator/records/latest", orchestratorHandler.HandleReadLatest)
+	mux.Handle("/api/v1/orchestrator/", http.StripPrefix("", api.RequireVaultKey(orchestratorMux)))
 
 	// Personal Info endpoints
 	mux.HandleFunc("POST /api/v1/personal_info/{userId}/save", piHandler.Save)
@@ -182,10 +205,17 @@ func main() {
 	mux.HandleFunc("GET /api/v1/personal_info/{userId}/all", piHandler.GetAll)
 	mux.HandleFunc("PUT /api/v1/personal_info/{userId}/facts/{factId}", piHandler.UpdateFact)
 	mux.HandleFunc("DELETE /api/v1/personal_info/{userId}/facts/{factId}", piHandler.DeleteFact)
+	mux.HandleFunc("POST /api/v1/personal_info/{userId}/facts/{factId}/archive", piHandler.ArchiveFact)
+	mux.HandleFunc("POST /api/v1/personal_info/{userId}/facts/{factId}/supersede", piHandler.SupersedeFact)
 
 	// System Log endpoints
 	mux.HandleFunc("POST /api/v1/system/events", logHandler.HandleCreateSystemEvent)
 	mux.HandleFunc("GET /api/v1/system/events", logHandler.HandleListSystemEvents)
+
+	// Scheduled Jobs endpoints
+	mux.HandleFunc("POST /api/v1/scheduled_jobs", scheduledJobsHandler.HandleCreateScheduledJob)
+	mux.HandleFunc("POST /api/v1/scheduled_jobs/run_due", scheduledJobsHandler.HandleRunDueJobs)
+	mux.HandleFunc("GET /api/v1/scheduled_jobs/{jobId}/runs", scheduledJobsHandler.HandleListScheduledJobRuns)
 
 	// Vault endpoints (Internal Only)
 	vaultMux := http.NewServeMux()

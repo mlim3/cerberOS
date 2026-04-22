@@ -102,8 +102,9 @@ func extractTraceparentID(header string) string {
 	return tid
 }
 
-// RequireVaultKey is a middleware that checks for the X-API-KEY header
-// and validates it against the INTERNAL_VAULT_API_KEY environment variable.
+// RequireVaultKey is a middleware that checks for the X-Internal-API-Key
+// header and validates it against the INTERNAL_VAULT_API_KEY environment
+// variable.
 func RequireVaultKey(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		expectedKey := os.Getenv("INTERNAL_VAULT_API_KEY")
@@ -115,7 +116,7 @@ func RequireVaultKey(next http.Handler) http.Handler {
 			return
 		}
 
-		apiKey := r.Header.Get("X-API-KEY")
+		apiKey := r.Header.Get("X-Internal-API-Key")
 		if apiKey != expectedKey {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
