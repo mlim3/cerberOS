@@ -27,6 +27,7 @@ import {
 } from './nats/client'
 import { traceMiddleware } from './trace-context'
 import { ioLog, logFromContext } from './logger'
+import { startHeartbeatEmitter } from './heartbeat'
 
 // =============================================================================
 // Planner input enrichment
@@ -105,6 +106,8 @@ ioLog(
   'transport',
   natsClient ? 'using NATS' : 'using HTTP bridge (POST /api/orchestrator/stream-events)',
 )
+
+startHeartbeatEmitter(natsClient)
 
 // =============================================================================
 // Pending chat responses — POST /api/chat registers here, orchestrator delivers

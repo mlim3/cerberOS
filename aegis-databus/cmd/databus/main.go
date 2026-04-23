@@ -15,6 +15,7 @@ import (
 
 	"aegis-databus/internal/dlq"
 	"aegis-databus/internal/health"
+	"aegis-databus/internal/heartbeat"
 	httpproxy "aegis-databus/internal/http"
 	"aegis-databus/internal/jetstreammetrics"
 	"aegis-databus/internal/relay"
@@ -254,9 +255,15 @@ func main() {
 		logger.Info("DLQ replay handler started")
 	}
 
-	// Health heartbeat
+	// Health heartbeat (legacy subject aegis.health.databus).
 	hb := health.NewHeartbeat(nc, legacyLog)
 	go hb.Start(ctx)
+
+	// Standardized service heartbeat (aegis.heartbeat.service.databus).
+	// See docs/heartbeat.md. This is what the orchestrator's sweeper
+	// subscribes to.
+	serviceHB := heartbeat.New(nc, "databus", logger)
+	go serviceHB.Start(ctx)
 
 	// JetStream gauges for Grafana (stream messages, bytes, pending)
 	go jetstreammetrics.Start(ctx, nc, jetstreammetrics.DefaultPollInterval, legacyLog)
