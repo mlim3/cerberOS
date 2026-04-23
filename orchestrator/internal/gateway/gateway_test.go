@@ -72,6 +72,53 @@ func TestGatewayIsConnected_ReflectsNATSState(t *testing.T) {
 	}
 }
 
+// Agents-component publishes task.result with trace_id on the payload only (no envelope field).
+func TestHandleTaskResult_UsesPayloadTraceIDWhenEnvelopeTraceIDEmpty(t *testing.T) {
+	nats := mocks.NewNATSMock()
+	gw := gateway.New(nats, "test-node")
+
+	wantTrace := "ab39fcf8-7872-4836-8001-acb3bc1e7bc2"
+	var gotTrace string
+	gw.RegisterTaskResultHandler(func(ctx context.Context, result types.TaskResult) error {
+		gotTrace = observability.TraceIDFrom(ctx)
+		return nil
+	})
+	if err := gw.Start(); err != nil {
+		t.Fatalf("gateway.Start() error = %v", err)
+	}
+
+	payload, err := json.Marshal(map[string]any{
+		"task_id":  "cefc6a71-7fa7-459f-8fef-0e4afe20544f",
+		"agent_id": "agent-1",
+		"success":  true,
+		"trace_id": wantTrace,
+		"result":   map[string]any{"plan_id": "p1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := types.MessageEnvelope{
+		MessageID:       "msg-task-result-1",
+		MessageType:     "task.result",
+		SourceComponent: "agents",
+		CorrelationID:   "cefc6a71-7fa7-459f-8fef-0e4afe20544f",
+		Timestamp:       time.Now().UTC(),
+		SchemaVersion:   "1.0",
+		Payload:         payload,
+	}
+	data, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := nats.Deliver(gateway.TopicTaskResult, data); err != nil {
+		t.Fatalf("Deliver(task.result) error = %v", err)
+	}
+	if gotTrace != wantTrace {
+		t.Fatalf("TraceIDFrom(handler ctx) = %q, want %q", gotTrace, wantTrace)
+	}
+}
+
 // ── Envelope Validation ───────────────────────────────────────────────────────
 
 func TestHandleInboundTask_MalformedEnvelope_DeadLettered(t *testing.T) {

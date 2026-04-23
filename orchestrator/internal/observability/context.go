@@ -10,7 +10,13 @@
 //	log.Info("task received", "priority", task.Priority)
 package observability
 
-import "context"
+import (
+	"context"
+	"crypto/rand"
+	"strings"
+
+	"go.opentelemetry.io/otel/trace"
+)
 
 // ctxKey is an unexported type for context keys in this package.
 type ctxKey int
@@ -23,9 +29,43 @@ const (
 	moduleKey                  // module — name of the module generating the log line
 )
 
-// WithTraceID returns a context carrying the given trace ID.
+// WithTraceID returns a context carrying the given trace ID for logging and
+// stamps the same id into OpenTelemetry span context when id is a 128-bit
+// trace id (32 hex chars, optional UUID dashes). That way log trace_id matches
+// Tempo/Grafana trace lookup. Non-hex or wrong-length ids only update the log
+// key (backward compatible).
 func WithTraceID(ctx context.Context, id string) context.Context {
-	return context.WithValue(ctx, traceIDKey, id)
+	id = strings.TrimSpace(id)
+	ctx = context.WithValue(ctx, traceIDKey, id)
+	if id == "" {
+		return ctx
+	}
+	if sc, ok := spanContextForLogTraceID(id); ok {
+		ctx = trace.ContextWithSpanContext(ctx, sc)
+	}
+	return ctx
+}
+
+// spanContextForLogTraceID builds a root-style SpanContext so Tracer.Start
+// creates spans under the given trace id. SpanID is random (synthetic parent).
+func spanContextForLogTraceID(id string) (trace.SpanContext, bool) {
+	hexStr := strings.ReplaceAll(strings.ToLower(id), "-", "")
+	if len(hexStr) != 32 {
+		return trace.SpanContext{}, false
+	}
+	tid, err := trace.TraceIDFromHex(hexStr)
+	if err != nil {
+		return trace.SpanContext{}, false
+	}
+	var sid trace.SpanID
+	if _, err := rand.Read(sid[:]); err != nil {
+		return trace.SpanContext{}, false
+	}
+	return trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    tid,
+		SpanID:     sid,
+		TraceFlags: trace.FlagsSampled,
+	}), true
 }
 
 // WithTaskID returns a context carrying the given task ID.
