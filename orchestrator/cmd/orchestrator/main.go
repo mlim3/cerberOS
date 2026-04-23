@@ -323,6 +323,19 @@ func applyEnvOverrides(cfg *config.OrchestratorConfig) {
 			cfg.CronWakeTimeoutSeconds = parsed
 		}
 	}
+	// Observability (esp. when falling back to demoConfig — full Load() already sets these).
+	if v := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")); v != "" {
+		cfg.OTELEndpoint = observability.NormalizeOTLPGRPCEndpoint(v)
+	}
+	if v := os.Getenv("LOG_LEVEL"); v != "" {
+		cfg.LogLevel = v
+	}
+	if v := os.Getenv("LOG_FORMAT"); v != "" {
+		cfg.LogFormat = v
+	}
+	if v := os.Getenv("LOKI_URL"); v != "" {
+		cfg.LokiURL = v
+	}
 }
 
 func buildNATSClient(cfg *config.OrchestratorConfig) (interfaces.NATSClient, *mocks.NATSMock, error) {
@@ -406,5 +419,7 @@ func demoConfig() *config.OrchestratorConfig {
 		QueueHighWaterMark:          500,
 		MemoryWriteBufferSeconds:    30,
 		NodeID:                      "demo-node",
+		LogLevel:                    "info",
+		LogFormat:                   "json",
 	}
 }
