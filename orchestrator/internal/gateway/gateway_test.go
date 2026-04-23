@@ -55,8 +55,8 @@ func newGateway(t *testing.T) (*gateway.Gateway, *mocks.NATSMock) {
 func TestGatewayStart_SubscribesToInboundTopics(t *testing.T) {
 	_, nats := newGateway(t)
 
-	if nats.SubscribeCallCount != 7 {
-		t.Fatalf("SubscribeCallCount = %d, want 7 (tasks.inbound, agent.status, capability.response, task.accepted, task.result, task.failed, credential.request)", nats.SubscribeCallCount)
+	if nats.SubscribeCallCount != 10 {
+		t.Fatalf("SubscribeCallCount = %d, want 10 (tasks.inbound, agent.status, capability.response, task.accepted, task.result, task.failed, credential.request, plan.decision, state.write, state.read.request)", nats.SubscribeCallCount)
 	}
 }
 
@@ -153,7 +153,7 @@ func TestHandleInboundTask_EnvelopeTraceID_MergedIntoUserTask(t *testing.T) {
 	gw, nats := newGateway(t)
 
 	var received types.UserTask
-	gw.RegisterTaskHandler(func(task types.UserTask) error {
+	gw.RegisterTaskHandler(func(_ context.Context, task types.UserTask) error {
 		received = task
 		return nil
 	})
@@ -343,7 +343,8 @@ func TestPublishTaskSpec_WirePrefersW3CTraceID(t *testing.T) {
 		TraceID:              "0123456789abcdef0123456789abcdef",
 	}
 
-	if err := gw.PublishTaskSpec(spec); err != nil {
+	specCtx := observability.WithTraceID(context.Background(), spec.TraceID)
+	if err := gw.PublishTaskSpec(specCtx, spec); err != nil {
 		t.Fatalf("PublishTaskSpec() error = %v", err)
 	}
 
@@ -389,7 +390,8 @@ func TestPublishCapabilityQuery_MessageEnvelopeTraceID(t *testing.T) {
 		RequiredSkillDomains: []string{"web"},
 		TraceID:              traceID,
 	}
-	if _, err := gw.PublishCapabilityQuery(query); err != nil {
+	qctx := observability.WithTraceID(context.Background(), traceID)
+	if _, err := gw.PublishCapabilityQuery(qctx, query); err != nil {
 		t.Fatalf("PublishCapabilityQuery() error = %v", err)
 	}
 
@@ -554,18 +556,15 @@ func TestGatewayDemoFlow(t *testing.T) {
 	t.Log("demo setup: no real NATS connection — all publish/subscribe calls go through the mock")
 
 	// ── Step 1: Startup — Subscribe to inbound topics ─────────────────────
-	// The Gateway must subscribe to exactly 3 inbound topics on Start():
-	//   aegis.orchestrator.tasks.inbound
-	//   aegis.agents.status.events
-	//   aegis.agents.capability.response
+	// The Gateway subscribes to all inbound orchestrator topics on Start().
 	t.Log("─────────────────────────────────────────────────────")
 	t.Log("step 1: startup — calling gw.Start() and verifying subscriptions")
 
 	if err := gw.Start(); err != nil {
 		t.Fatalf("step 1: Start() error = %v", err)
 	}
-	if nats.SubscribeCallCount != 7 {
-		t.Fatalf("step 1: SubscribeCallCount = %d, want 7", nats.SubscribeCallCount)
+	if nats.SubscribeCallCount != 10 {
+		t.Fatalf("step 1: SubscribeCallCount = %d, want 10", nats.SubscribeCallCount)
 	}
 	if !gw.IsConnected() {
 		t.Fatal("step 1: IsConnected() = false, want true")

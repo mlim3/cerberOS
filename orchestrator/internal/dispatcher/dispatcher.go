@@ -296,6 +296,10 @@ func (d *Dispatcher) HandleInboundTask(ctx context.Context, task types.UserTask)
 	d.monitor.TrackTask(ts)
 	atomic.AddInt64(&d.queueDepth, 1)
 
+	rawInput := extractRawInput(task.Payload)
+	systemPrompt := extractSystemPrompt(task.Payload)
+	maintenance := isMaintenancePayload(task.Payload)
+
 	// ── Early task_accepted to User I/O ────────────────────────────────────
 	// Fires right after policy + memory persist so the user sees acknowledgement
 	// in ~tens of ms instead of waiting a full planner-LLM round-trip. The second
@@ -312,15 +316,17 @@ func (d *Dispatcher) HandleInboundTask(ctx context.Context, task types.UserTask)
 	}
 
 	// ── Notify IO: task received, planning underway ────────────────────────
-	expectedMins := 2
-	_ = d.io.PushStatus(task.TaskID, ioclient.StatusWorking, "Planning your task...", &expectedMins)
+	if !maintenance {
+		expectedMins := 2
+		_ = d.io.PushStatus(task.TaskID, ioclient.StatusWorking, "Planning your task...", &expectedMins)
+	}
 
 	// ── Step 6: Publish planner task via standard task.inbound ─────────────
-	rawInput := extractRawInput(task.Payload)
 	// Personalization: fetch user facts from Memory (best-effort). A failure
 	// or empty result is non-fatal — the prompt is emitted without facts.
+	// Cron / maintenance tasks skip personalization to avoid noisy Memory reads.
 	var userFacts []string
-	if d.personalization != nil && task.UserID != "" {
+	if !maintenance && d.personalization != nil && task.UserID != "" {
 		facts, ferr := d.personalization.FetchFacts(ctx, task.UserID, 8)
 		if ferr != nil {
 			log.Warn("personalization fetch failed — continuing without facts", "error", ferr)
@@ -337,9 +343,9 @@ func (d *Dispatcher) HandleInboundTask(ctx context.Context, task types.UserTask)
 		PolicyScope:          scope,
 		TimeoutSeconds:       minInt(task.TimeoutSeconds, d.cfg.DecompositionTimeoutSeconds),
 		Payload:              task.Payload,
-		Instructions:         buildDecompositionInstructionsWithFacts(task.TaskID, rawInput, scope, userFacts),
+		Instructions:         buildDecompositionInstructionsWithFacts(task.TaskID, rawInput, scope, userFacts, systemPrompt),
 		Metadata: map[string]string{
-			"task_kind":      "decomposition",
+			"task_kind":      taskKindForPlannerSpec(maintenance),
 			"parent_task_id": task.TaskID,
 		},
 		CallbackTopic:   task.CallbackTopic,
@@ -455,7 +461,8 @@ func (d *Dispatcher) HandleDecompositionResponse(ctx context.Context, resp types
 	ts.PlanID = resp.Plan.PlanID
 	d.pendingDecompositions.Delete(ts.OrchestratorTaskRef)
 
-	if d.planApprovalRequired(resp.Plan) {
+	// Cron / maintenance runs must not block on human plan approval.
+	if d.planApprovalRequired(resp.Plan) && !isMaintenancePayload(ts.Payload) {
 		return d.enterAwaitingApproval(ctx, ts, resp.Plan, now)
 	}
 
@@ -514,23 +521,25 @@ func (d *Dispatcher) enterAwaitingApproval(ctx context.Context, ts *types.TaskSt
 			Domains:      s.RequiredSkillDomains,
 		})
 	}
-	if err := d.io.PushPlanPreview(ioclient.PlanPreviewPayload{
-		TaskID:              ts.TaskID,
-		OrchestratorTaskRef: ts.OrchestratorTaskRef,
-		PlanID:              plan.PlanID,
-		Subtasks:            previewSubtasks,
-		ExpiresInSeconds:    timeoutSec,
-	}); err != nil {
-		log.Warn("push plan_preview to IO failed — will still await decision", "error", err)
-	}
+	if !isMaintenancePayload(ts.Payload) {
+		if err := d.io.PushPlanPreview(ioclient.PlanPreviewPayload{
+			TaskID:              ts.TaskID,
+			OrchestratorTaskRef: ts.OrchestratorTaskRef,
+			PlanID:              plan.PlanID,
+			Subtasks:            previewSubtasks,
+			ExpiresInSeconds:    timeoutSec,
+		}); err != nil {
+			log.Warn("push plan_preview to IO failed — will still await decision", "error", err)
+		}
 
-	// Also surface a status-line so users without the preview UI see something.
-	minsLeft := int(time.Duration(timeoutSec) * time.Second / time.Minute)
-	if minsLeft < 1 {
-		minsLeft = 1
+		// Also surface a status-line so users without the preview UI see something.
+		minsLeft := int(time.Duration(timeoutSec) * time.Second / time.Minute)
+		if minsLeft < 1 {
+			minsLeft = 1
+		}
+		_ = d.io.PushStatus(ts.TaskID, ioclient.StatusAwaitingFeedback,
+			fmt.Sprintf("Awaiting your approval for a %d-step plan...", len(plan.Subtasks)), &minsLeft)
 	}
-	_ = d.io.PushStatus(ts.TaskID, ioclient.StatusAwaitingFeedback,
-		fmt.Sprintf("Awaiting your approval for a %d-step plan...", len(plan.Subtasks)), &minsLeft)
 
 	// Arm the timeout.
 	timerCtx, cancel := context.WithCancel(context.Background())
@@ -588,12 +597,14 @@ func (d *Dispatcher) startPlanExecution(ctx context.Context, ts *types.TaskState
 	}
 
 	subtaskCount := len(plan.Subtasks)
-	expectedMins := subtaskCount / 2
-	if expectedMins < 1 {
-		expectedMins = 1
+	if !isMaintenancePayload(ts.Payload) {
+		expectedMins := subtaskCount / 2
+		if expectedMins < 1 {
+			expectedMins = 1
+		}
+		_ = d.io.PushStatus(ts.TaskID, ioclient.StatusWorking,
+			fmt.Sprintf("Executing %d subtasks...", subtaskCount), &expectedMins)
 	}
-	_ = d.io.PushStatus(ts.TaskID, ioclient.StatusWorking,
-		fmt.Sprintf("Executing %d subtasks...", subtaskCount), &expectedMins)
 
 	planCtx := observability.WithPlanID(ctx, plan.PlanID)
 	if err := d.executor.Execute(planCtx, plan, ts); err != nil {
@@ -694,8 +705,10 @@ func (d *Dispatcher) HandlePlanComplete(ts *types.TaskState, aggregatedResults [
 	}
 
 	// Notify IO: task complete.
-	zero := 0
-	_ = d.io.PushStatus(ts.TaskID, ioclient.StatusCompleted, "Task complete", &zero)
+	if !isMaintenancePayload(ts.Payload) {
+		zero := 0
+		_ = d.io.PushStatus(ts.TaskID, ioclient.StatusCompleted, "Task complete", &zero)
+	}
 
 	if err := d.policy.RevokeCredentials(ctx, ts.OrchestratorTaskRef); err != nil {
 		log.Error("credential revocation failed", "error", err)
@@ -755,12 +768,14 @@ func (d *Dispatcher) HandlePlanFailed(ts *types.TaskState, errorCode string, par
 	}
 
 	// Notify IO: task failed (partial or full failure).
-	zero := 0
-	lastUpdate := humanReadableError(errorCode)
-	if partial {
-		lastUpdate = "Partially completed — some subtasks failed"
+	if !isMaintenancePayload(ts.Payload) {
+		zero := 0
+		lastUpdate := humanReadableError(errorCode)
+		if partial {
+			lastUpdate = "Partially completed — some subtasks failed"
+		}
+		_ = d.io.PushStatus(ts.TaskID, ioclient.StatusCompleted, lastUpdate, &zero)
 	}
-	_ = d.io.PushStatus(ts.TaskID, ioclient.StatusCompleted, lastUpdate, &zero)
 
 	if err := d.policy.RevokeCredentials(ctx, ts.OrchestratorTaskRef); err != nil {
 		log.Error("credential revocation failed", "error", err)
@@ -873,8 +888,10 @@ func (d *Dispatcher) failTaskWithState(ctx context.Context, ts *types.TaskState,
 	})
 
 	// Notify IO: task failed during decomposition.
-	zero := 0
-	_ = d.io.PushStatus(ts.TaskID, ioclient.StatusCompleted, userMessage, &zero)
+	if !isMaintenancePayload(ts.Payload) {
+		zero := 0
+		_ = d.io.PushStatus(ts.TaskID, ioclient.StatusCompleted, userMessage, &zero)
+	}
 
 	d.activeTasks.Delete(ts.TaskID)
 	d.monitor.UntrackTask(ts.TaskID)
@@ -1078,14 +1095,23 @@ func extractRawInput(payload []byte) string {
 }
 
 func buildDecompositionInstructions(taskID, rawInput string, scope types.PolicyScope) string {
-	return buildDecompositionInstructionsWithFacts(taskID, rawInput, scope, nil)
+	return buildDecompositionInstructionsWithFacts(taskID, rawInput, scope, nil, "")
+}
+
+func taskKindForPlannerSpec(maintenance bool) string {
+	if maintenance {
+		return "maintenance"
+	}
+	return "decomposition"
 }
 
 // buildDecompositionInstructionsWithFacts renders the planner prompt with an
 // optional list of user facts (from personal_info via the Memory service).
 // When facts is empty the prompt is byte-identical to the historic output so
 // existing tests keep passing.
-func buildDecompositionInstructionsWithFacts(taskID, rawInput string, scope types.PolicyScope, facts []string) string {
+// systemPrompt is optional; when non-empty it is prepended as scheduled maintenance
+// directives for the planner (cron wake / batch jobs).
+func buildDecompositionInstructionsWithFacts(taskID, rawInput string, scope types.PolicyScope, facts []string, systemPrompt string) string {
 	allowedDomains := scope.Domains
 	if len(allowedDomains) == 0 {
 		allowedDomains = []string{"general"}
@@ -1095,6 +1121,12 @@ func buildDecompositionInstructionsWithFacts(taskID, rawInput string, scope type
 	if len(allowedDomains) > 0 {
 		raw, _ := json.Marshal(allowedDomains)
 		domains = string(raw)
+	}
+
+	systemSection := ""
+	if strings.TrimSpace(systemPrompt) != "" {
+		systemSection = "Scheduled maintenance directives (follow in addition to the rules below):\n" +
+			strings.TrimSpace(systemPrompt) + "\n\n"
 	}
 
 	factsSection := ""
@@ -1109,7 +1141,7 @@ func buildDecompositionInstructionsWithFacts(taskID, rawInput string, scope type
 		factsSection = b.String()
 	}
 
-	return factsSection + fmt.Sprintf(
+	return systemSection + factsSection + fmt.Sprintf(
 		"Decompose the user's task into a JSON execution plan for downstream agents.\n"+
 			"Return JSON only. Do not wrap the result in markdown fences. Do not include commentary.\n"+
 			"The JSON schema is:\n"+

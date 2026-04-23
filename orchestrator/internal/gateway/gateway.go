@@ -233,6 +233,9 @@ func (g *Gateway) handleRawInboundTask(subject string, data []byte) error {
 		_ = g.publishDeadLetter(data, fmt.Sprintf("payload deserialize error: %v", err))
 		return fmt.Errorf("deserialize user_task: %w", err)
 	}
+	if task.TraceID == "" && strings.TrimSpace(envelope.TraceID) != "" {
+		task.TraceID = strings.TrimSpace(envelope.TraceID)
+	}
 
 	ctx := extractOrCreateCtx(envelope, "comms_gateway")
 	ctx = observability.WithTaskID(ctx, task.TaskID)
