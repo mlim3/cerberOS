@@ -28,10 +28,21 @@ jobs:
 
       - name: Add required Helm repos
         run: |
-          helm repo add nats https://nats-io.github.io/k8s/helm/charts
           helm repo add grafana https://grafana.github.io/helm-charts
           helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
           helm repo update
+
+      - name: Resolve component chart dependencies
+        run: |
+          # Any component chart that declares `dependencies:` needs its sub-charts
+          # fetched before `helm lint --strict` will pass (strict mode treats
+          # missing dependencies as errors).
+          for chart in deploy/helm/charts/*/; do
+            if grep -q "^dependencies:" "$chart/Chart.yaml" 2>/dev/null; then
+              echo "==> Resolving deps for $chart"
+              helm dependency update "$chart"
+            fi
+          done
 
       - name: Lint all component charts
         run: |
