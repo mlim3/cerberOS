@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: io
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "io.labels" . | nindent 4 }}
+spec:
+  type: NodePort
+  selector:
+    {{- include "io.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      nodePort: {{ .Values.service.nodePort }}

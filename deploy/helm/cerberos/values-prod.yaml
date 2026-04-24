@@ -1,0 +1,93 @@
+# =============================================================================
+# values-prod.yaml — production / managed K8s extension profile
+# =============================================================================
+# This file documents the production extension knobs.
+# All secrets MUST be supplied via External Secrets Operator or --set at
+# deploy time — never commit real values here.
+# =============================================================================
+
+postgres:
+  storage:
+    size: 20Gi
+    storageClass: gp3  # AWS; change to pd-ssd (GCP) or managed-premium (AKS)
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+  # Extension hook: CloudNativePG operator
+  # operator:
+  #   enabled: true
+
+openbao:
+  devMode: false
+  storage:
+    size: 5Gi
+    storageClass: gp3
+  # baoToken: supplied via External Secrets or --set
+
+# 3-node NATS JetStream cluster (HA) — requires extending the StatefulSet template
+# to add cluster config and per-pod anti-affinity. For now, scale replicaCount and
+# add cluster routes in nats.conf via a values override.
+nats:
+  replicaCount: 3
+  storage:
+    jetstreamSize: 10Gi
+
+memory-api:
+  replicaCount: 2
+
+orchestrator:
+  replicaCount: 2
+
+io:
+  replicaCount: 2
+  # Enable Ingress with TLS (requires cert-manager and an ingress controller)
+  ingress:
+    enabled: true
+    className: nginx
+    host: cerberos.example.com
+    tls:
+      enabled: true
+      secretName: cerberos-tls
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+
+aegis-databus:
+  replicaCount: 2
+
+aegis-agents:
+  replicaCount: 2
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 4000m
+      memory: 4Gi
+  # Extension hook: Firecracker microVM lifecycle
+  # firecracker:
+  #   enabled: true
+  #   socketDir: "/run/firecracker-containerd"
+  #   nodeSelectorKey: "firecracker"
+  #   nodeSelectorValue: "true"
+
+network-policies:
+  # Requires a NetworkPolicy-aware CNI (Calico, Cilium)
+  enabled: true
+
+observability:
+  enabled: true
+  prometheus:
+    server:
+      persistentVolume:
+        enabled: true
+        size: 20Gi
+        storageClass: gp3
+  grafana:
+    persistence:
+      enabled: true
+      size: 5Gi
+      storageClass: gp3
