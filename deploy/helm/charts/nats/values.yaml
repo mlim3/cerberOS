@@ -1,0 +1,39 @@
+# ---------------------------------------------------------------------------
+# cerberOS NATS chart values
+# ---------------------------------------------------------------------------
+# The upstream nats-io/nats chart is aliased as "server".
+# All upstream values are namespaced under server.*
+# ---------------------------------------------------------------------------
+
+server:
+  nameOverride: nats
+  fullnameOverride: nats
+
+  config:
+    jetstream:
+      enabled: true
+      fileStore:
+        pvc:
+          enabled: true
+          size: 1Gi
+
+  # ---------------------------------------------------------------------------
+  # Extension hook: cluster mode (off by default)
+  # Set replicas: 3 and cluster.enabled: true in values-prod.yaml to flip to
+  # a 3-node JetStream cluster with per-pod anti-affinity.
+  # ---------------------------------------------------------------------------
+  container:
+    merge:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 500m
+          memory: 256Mi
+
+  # NodePort so kind's extraPortMappings (30222 → 4222) work
+  service:
+    ports:
+      nats:
+        nodePort: 30222

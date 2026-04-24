@@ -1,0 +1,110 @@
+# =============================================================================
+# values-dev.yaml — kind local cluster overrides
+# =============================================================================
+# Usage:
+#   helm upgrade --install cerberos deploy/helm/cerberos \
+#     --namespace cerberos \
+#     -f deploy/helm/cerberos/values-dev.yaml \
+#     --set aegis-agents.anthropicApiKey=$ANTHROPIC_API_KEY \
+#     --set memory-api.vaultMasterKey=$VAULT_MASTER_KEY \
+#     --set memory-api.internalVaultApiKey=$INTERNAL_VAULT_API_KEY
+# =============================================================================
+
+# Use locally-built images (loaded via kind load docker-image)
+nats:
+  server:
+    container:
+      merge:
+        resources:
+          requests:
+            cpu: 25m
+            memory: 32Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+
+postgres:
+  auth:
+    password: password
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+openbao:
+  # devMode=true: in-memory storage, auto-unsealed, no PVC needed.
+  # Flip to false and provide baoToken for persistent storage.
+  devMode: true
+  postgres:
+    password: password
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+
+vault-engine:
+  image:
+    repository: cerberos-vault-engine
+    tag: local
+    pullPolicy: Never
+
+memory-api:
+  image:
+    repository: cerberos-memory-api
+    tag: local
+    pullPolicy: Never
+  db:
+    password: password
+  vaultMasterKey: "00000000000000000000000000000000"
+  internalVaultApiKey: "dev-internal-key"
+
+orchestrator:
+  image:
+    repository: cerberos-orchestrator
+    tag: local
+    pullPolicy: Never
+
+io:
+  image:
+    repository: cerberos-io
+    tag: local
+    pullPolicy: Never
+
+aegis-databus:
+  image:
+    repository: cerberos-aegis-databus
+    tag: local
+    pullPolicy: Never
+
+simulator:
+  image:
+    repository: cerberos-aegis-agents
+    tag: local
+    pullPolicy: Never
+
+aegis-agents:
+  image:
+    repository: cerberos-aegis-agents
+    tag: local
+    pullPolicy: Never
+  # anthropicApiKey: set via --set at install time
+
+observability:
+  enabled: true
+  grafana:
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+  prometheus:
+    server:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 128Mi
+
+network-policies:
+  enabled: false

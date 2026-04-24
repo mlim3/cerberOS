@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vault-engine.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "vault-engine.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "vault-engine.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "vault-engine.selectorLabels" . | nindent 8 }}
+    spec:
+      initContainers:
+        - name: wait-for-openbao
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z openbao 8200; do
+                echo "Waiting for openbao..."; sleep 3;
+              done
+      containers:
+        - name: vault-engine
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: BAO_ADDR
+              value: "http://openbao:8200"
+            - name: BAO_TOKEN
+              value: {{ .Values.baoToken | quote }}
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 15
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}

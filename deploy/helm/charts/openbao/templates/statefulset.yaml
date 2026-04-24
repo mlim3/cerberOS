@@ -1,0 +1,88 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: openbao
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "openbao.labels" . | nindent 4 }}
+spec:
+  serviceName: openbao
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "openbao.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openbao.selectorLabels" . | nindent 8 }}
+    spec:
+      # initContainer waits for Postgres to be ready before starting OpenBao
+      initContainers:
+        - name: wait-for-postgres
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z {{ .Values.postgres.host }} {{ .Values.postgres.port }}; do
+                echo "Waiting for postgres at {{ .Values.postgres.host }}:{{ .Values.postgres.port }}...";
+                sleep 2;
+              done
+      containers:
+        - name: openbao
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["server", "-config=/openbao/config/openbao.hcl"]
+          ports:
+            - name: http
+              containerPort: 8200
+          env:
+            - name: BAO_ADDR
+              value: "http://127.0.0.1:8200"
+            {{- if .Values.baoToken }}
+            - name: BAO_TOKEN
+              value: {{ .Values.baoToken | quote }}
+            {{- end }}
+          securityContext:
+            capabilities:
+              add: ["IPC_LOCK"]
+          volumeMounts:
+            - name: config
+              mountPath: /openbao/config
+            {{- if not .Values.devMode }}
+            - name: data
+              mountPath: /openbao/data
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /v1/sys/health?uninitcode=204&sealedcode=204
+              port: 8200
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /v1/sys/health?uninitcode=204&sealedcode=204
+              port: 8200
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: openbao-config
+  {{- if not .Values.devMode }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.storage.storageClass }}
+        storageClassName: {{ .Values.storage.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.storage.size }}
+  {{- end }}

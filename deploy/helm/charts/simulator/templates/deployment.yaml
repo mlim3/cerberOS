@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "simulator.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "simulator.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "simulator.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "simulator.selectorLabels" . | nindent 8 }}
+    spec:
+      initContainers:
+        - name: wait-for-nats
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z nats 4222; do
+                echo "Waiting for nats..."; sleep 3;
+              done
+      containers:
+        - name: simulator
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # Override the default entrypoint to run the simulator binary
+          command: ["/app/simulator"]
+          env:
+            - name: AEGIS_NATS_URL
+              value: {{ .Values.natsUrl | quote }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.observability.otlpEndpoint | quote }}
+            - name: OTEL_SERVICE_NAME
+              value: {{ .Values.observability.serviceName | quote }}
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}

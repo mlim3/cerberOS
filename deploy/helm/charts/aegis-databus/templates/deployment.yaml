@@ -1,0 +1,99 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "aegis-databus.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "aegis-databus.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "aegis-databus.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "aegis-databus.selectorLabels" . | nindent 8 }}
+    spec:
+      initContainers:
+        - name: wait-for-nats
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z nats 4222; do
+                echo "Waiting for nats..."; sleep 3;
+              done
+        - name: wait-for-orchestrator
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z orchestrator 8080; do
+                echo "Waiting for orchestrator..."; sleep 3;
+              done
+      containers:
+        - name: aegis-databus
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: metrics
+              containerPort: 9091
+          env:
+            - name: AEGIS_NATS_URL
+              value: {{ .Values.natsUrl | quote }}
+            - name: AEGIS_NATS_HTTP_URL
+              value: {{ .Values.natsHttpUrl | quote }}
+            - name: AEGIS_NATS_REPLICAS
+              value: {{ .Values.natsReplicas | quote }}
+            - name: AEGIS_ORCHESTRATOR_URL
+              value: {{ .Values.orchestratorUrl | quote }}
+            - name: AEGIS_MEMORY_URL
+              value: {{ .Values.memoryUrl | quote }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.observability.otlpEndpoint | quote }}
+            - name: OTEL_SERVICE_NAME
+              value: {{ .Values.observability.serviceName | quote }}
+          # Preserve security hardening from docker-compose
+          securityContext:
+            runAsUser: 65532
+            runAsGroup: 65532
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 9091
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 36
+            # start_period equivalent: give it 3 min on first boot (JetStream init)
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 9091
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 60
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 9091
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
