@@ -60,7 +60,7 @@ data:
             "tooltip": { "mode": "multi", "sort": "none" }
           },
           "targets": [
-            { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum by (outcome) (rate(aegis_agents_skill_invocations_total[5m]))", "legendFormat": "{{outcome}}", "refId": "A" }
+            { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum by (outcome) (rate(aegis_agents_skill_invocations_total[5m]))", "legendFormat": "{{ `{{outcome}}` }}", "refId": "A" }
           ],
           "title": "Skill invocation rate by outcome",
           "type": "timeseries"

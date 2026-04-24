@@ -99,6 +99,9 @@ grafana:
 loki:
   deploymentMode: SingleBinary
   loki:
+    # Satisfies Loki's schema_config validation without a full schemaConfig block.
+    # Set to false and provide schemaConfig in values-prod.yaml for production.
+    useTestSchema: true
     commonConfig:
       replication_factor: 1
     storage:
@@ -106,6 +109,13 @@ loki:
     auth_enabled: false
   singleBinary:
     replicas: 1
+  # Explicitly zero scalable targets so the SingleBinary validation passes
+  read:
+    replicas: 0
+  write:
+    replicas: 0
+  backend:
+    replicas: 0
   # K8s-native log collection via Promtail DaemonSet (replaces docker.sock approach)
   promtail:
     enabled: true
