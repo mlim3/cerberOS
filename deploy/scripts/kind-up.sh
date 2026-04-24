@@ -46,19 +46,34 @@ fi
 if [ "$SKIP_INSTALL" = false ]; then
   echo ""
   echo "==> [5/5] Installing umbrella Helm chart ..."
+  # Resolve sub-chart deps for any component chart that declares them
+  # (e.g. observability → prometheus/grafana/loki/tempo). Must run BEFORE
+  # the umbrella's helm dependency update, otherwise the observability
+  # sub-chart gets packaged without its own dependencies and none of the
+  # monitoring pods ever deploy.
+  for chart in "${REPO_ROOT}"/deploy/helm/charts/*/; do
+    if grep -q "^dependencies:" "$chart/Chart.yaml" 2>/dev/null; then
+      echo "    Resolving deps for $(basename "$chart") ..."
+      helm dependency update "$chart" >/dev/null
+    fi
+  done
   helm dependency update "${REPO_ROOT}/deploy/helm/cerberos" >/dev/null
   helm upgrade --install cerberos "${REPO_ROOT}/deploy/helm/cerberos" \
     --namespace "${NAMESPACE}" \
     --values "${REPO_ROOT}/deploy/helm/cerberos/values-dev.yaml"
 
   echo ""
-  echo "    Waiting for core pods to be ready (up to 5 min) ..."
-  # Core pods required for the UI to load. aegis-databus/agents are nice-to-have.
-  for app in memory-db openbao nats memory-api orchestrator io; do
-    kubectl wait --for=condition=ready pod \
-      -l "app.kubernetes.io/name=${app}" \
-      -n "${NAMESPACE}" \
-      --timeout=5m || echo "    (warning: ${app} did not become ready in time)"
+  echo "    Waiting for core workloads to be ready (up to 5 min) ..."
+  # StatefulSets: use rollout status (handles the case where the pod
+  # hasn't been created yet when we start waiting).
+  for sts in memory-db openbao nats; do
+    kubectl rollout status statefulset "${sts}" -n "${NAMESPACE}" --timeout=5m \
+      || echo "    (warning: statefulset/${sts} did not become ready in time)"
+  done
+  # Deployments: wait on the deployment condition directly.
+  for deploy in memory-api orchestrator io; do
+    kubectl rollout status deployment "${deploy}" -n "${NAMESPACE}" --timeout=5m \
+      || echo "    (warning: deployment/${deploy} did not become ready in time)"
   done
 else
   echo ""
