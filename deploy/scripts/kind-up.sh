@@ -17,7 +17,7 @@ for arg in "$@"; do
   esac
 done
 
-echo "==> [1/4] Creating kind cluster '${CLUSTER}' ..."
+echo "==> [1/5] Creating kind cluster '${CLUSTER}' ..."
 if kind get clusters 2>/dev/null | grep -q "^${CLUSTER}$"; then
   echo "    Cluster already exists, skipping creation."
 else
@@ -25,34 +25,59 @@ else
 fi
 
 echo ""
-echo "==> [2/4] Creating namespace '${NAMESPACE}' ..."
+echo "==> [2/5] Creating namespace '${NAMESPACE}' ..."
 kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+
+echo ""
+echo "==> [3/5] Ensuring required Helm repos are configured ..."
+helm repo add grafana https://grafana.github.io/helm-charts --force-update >/dev/null 2>&1 || true
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts --force-update >/dev/null 2>&1 || true
+helm repo update >/dev/null
 
 if [ "$SKIP_BUILD" = false ]; then
   echo ""
-  echo "==> [3/4] Building & loading images ..."
+  echo "==> [4/5] Building & loading images ..."
   "${SCRIPT_DIR}/build-and-load.sh" "${CLUSTER}"
 else
   echo ""
-  echo "==> [3/4] Skipping image build (--skip-build)."
+  echo "==> [4/5] Skipping image build (--skip-build)."
 fi
 
 if [ "$SKIP_INSTALL" = false ]; then
   echo ""
-  echo "==> [4/4] Installing umbrella Helm chart ..."
-  helm dependency update "${REPO_ROOT}/deploy/helm/cerberos"
+  echo "==> [5/5] Installing umbrella Helm chart ..."
+  helm dependency update "${REPO_ROOT}/deploy/helm/cerberos" >/dev/null
   helm upgrade --install cerberos "${REPO_ROOT}/deploy/helm/cerberos" \
     --namespace "${NAMESPACE}" \
-    --values "${REPO_ROOT}/deploy/helm/cerberos/values-dev.yaml" \
-    --wait --timeout 10m
+    --values "${REPO_ROOT}/deploy/helm/cerberos/values-dev.yaml"
+
+  echo ""
+  echo "    Waiting for core pods to be ready (up to 5 min) ..."
+  # Core pods required for the UI to load. aegis-databus/agents are nice-to-have.
+  for app in memory-db openbao nats memory-api orchestrator io; do
+    kubectl wait --for=condition=ready pod \
+      -l "app.kubernetes.io/name=${app}" \
+      -n "${NAMESPACE}" \
+      --timeout=5m || echo "    (warning: ${app} did not become ready in time)"
+  done
 else
   echo ""
-  echo "==> [4/4] Skipping Helm install (--skip-install)."
+  echo "==> [5/5] Skipping Helm install (--skip-install)."
 fi
 
 echo ""
-echo "==> Done! Useful commands:"
-echo "    kubectl get pods -n ${NAMESPACE} -o wide"
-echo "    kubectl port-forward -n ${NAMESPACE} svc/io 3001:3001"
-echo "    kubectl port-forward -n ${NAMESPACE} svc/grafana 3000:80"
-echo "    helm uninstall cerberos -n ${NAMESPACE}"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  cerberOS is up!"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+echo "  Web UI:         http://localhost:3001"
+echo "  Orchestrator:   http://localhost:8080/health"
+echo "  Grafana:        http://localhost:3000  (admin / admin)"
+echo "  NATS:           nats://localhost:4222"
+echo ""
+echo "  OpenBao (dev):  kubectl port-forward -n ${NAMESPACE} svc/openbao 8200:8200"
+echo "                  root token: root"
+echo ""
+echo "  All pods:       kubectl get pods -n ${NAMESPACE} -o wide"
+echo "  Tear down:      ./deploy/scripts/kind-down.sh"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

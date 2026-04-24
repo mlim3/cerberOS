@@ -54,23 +54,21 @@ spec:
             - name: LOKI_URL
               value: {{ .Values.observability.lokiUrl | quote }}
           securityContext:
-            runAsNonRoot: true
             allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
             seccompProfile:
               type: RuntimeDefault
             capabilities:
               drop: ["ALL"]
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /health
               port: 8080
             initialDelaySeconds: 5
             periodSeconds: 5
             failureThreshold: 12
           livenessProbe:
             httpGet:
-              path: /healthz
+              path: /health
               port: 8080
             initialDelaySeconds: 30
             periodSeconds: 15

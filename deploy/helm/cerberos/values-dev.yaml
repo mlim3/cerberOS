@@ -12,16 +12,13 @@
 
 # Use locally-built images (loaded via kind load docker-image)
 nats:
-  server:
-    container:
-      merge:
-        resources:
-          requests:
-            cpu: 25m
-            memory: 32Mi
-          limits:
-            cpu: 200m
-            memory: 128Mi
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
 
 postgres:
   auth:
@@ -50,6 +47,8 @@ vault-engine:
     repository: cerberos-vault-engine
     tag: local
     pullPolicy: Never
+  # Dev-mode OpenBao (-dev-root-token-id=root) auto-unseals with this token
+  baoToken: "root"
 
 memory-api:
   image:

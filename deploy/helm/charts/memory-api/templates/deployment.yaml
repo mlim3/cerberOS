@@ -63,9 +63,7 @@ spec:
                   name: memory-api-secrets
                   key: INTERNAL_VAULT_API_KEY
           securityContext:
-            runAsNonRoot: true
             allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
             seccompProfile:
               type: RuntimeDefault
             capabilities:

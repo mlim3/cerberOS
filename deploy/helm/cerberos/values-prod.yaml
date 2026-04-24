@@ -28,20 +28,13 @@ openbao:
     storageClass: gp3
   # baoToken: supplied via External Secrets or --set
 
-# 3-node NATS JetStream cluster
+# 3-node NATS JetStream cluster (HA) — requires extending the StatefulSet template
+# to add cluster config and per-pod anti-affinity. For now, scale replicaCount and
+# add cluster routes in nats.conf via a values override.
 nats:
-  server:
-    config:
-      cluster:
-        enabled: true
-        replicas: 3
-    affinity:
-      podAntiAffinity:
-        requiredDuringSchedulingIgnoredDuringExecution:
-          - labelSelector:
-              matchLabels:
-                app.kubernetes.io/name: nats
-            topologyKey: kubernetes.io/hostname
+  replicaCount: 3
+  storage:
+    jetstreamSize: 10Gi
 
 memory-api:
   replicaCount: 2

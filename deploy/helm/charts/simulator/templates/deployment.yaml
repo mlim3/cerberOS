@@ -39,9 +39,7 @@ spec:
             - name: OTEL_SERVICE_NAME
               value: {{ .Values.observability.serviceName | quote }}
           securityContext:
-            runAsNonRoot: true
             allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
             seccompProfile:
               type: RuntimeDefault
             capabilities:

@@ -17,6 +17,11 @@ prometheus:
       servicePort: 9090
     persistentVolume:
       enabled: false
+    extraConfigmapMounts:
+      - name: alert-rules
+        mountPath: /etc/prometheus/rules
+        configMap: prometheus-alert-rules
+        readOnly: true
   alertmanager:
     enabled: false
   kube-state-metrics:
@@ -25,35 +30,21 @@ prometheus:
     enabled: false
   prometheus-pushgateway:
     enabled: false
-  serverFiles:
-    prometheus.yml:
-      global:
-        scrape_interval: 15s
-      rule_files:
-        - /etc/prometheus/rules/*.yml
-      scrape_configs:
-        - job_name: nats-exporter
-          static_configs:
-            - targets: ["nats-exporter:7777"]
-        - job_name: aegis-databus
-          static_configs:
-            - targets: ["aegis-databus:9091"]
-        - job_name: orchestrator
-          metrics_path: /metrics
-          static_configs:
-            - targets: ["orchestrator:8080"]
-        - job_name: memory-api
-          metrics_path: /internal/metrics
-          static_configs:
-            - targets: ["memory-api:8081"]
-        - job_name: aegis-agents
-          static_configs:
-            - targets: ["aegis-agents:9090"]
-  extraConfigmapMounts:
-    - name: alert-rules
-      mountPath: /etc/prometheus/rules
-      configMap: prometheus-alert-rules
-      readOnly: true
+  extraScrapeConfigs: |
+    - job_name: aegis-databus
+      static_configs:
+        - targets: ["aegis-databus:9091"]
+    - job_name: orchestrator
+      metrics_path: /metrics
+      static_configs:
+        - targets: ["orchestrator:8080"]
+    - job_name: memory-api
+      metrics_path: /internal/metrics
+      static_configs:
+        - targets: ["memory-api:8081"]
+    - job_name: aegis-agents
+      static_configs:
+        - targets: ["aegis-agents:9090"]
 
 grafana:
   fullnameOverride: grafana

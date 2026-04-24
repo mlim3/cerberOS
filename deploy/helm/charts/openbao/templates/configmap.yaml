@@ -1,3 +1,4 @@
+{{- if not .Values.devMode }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -25,3 +26,4 @@ data:
       ha_table       = "openbao_ha_locks"
     }
     {{- end }}
+{{- end }}

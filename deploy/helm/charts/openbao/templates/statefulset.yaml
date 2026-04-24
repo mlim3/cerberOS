@@ -16,6 +16,7 @@ spec:
       labels:
         {{- include "openbao.selectorLabels" . | nindent 8 }}
     spec:
+      {{- if not .Values.devMode }}
       # initContainer waits for Postgres to be ready before starting OpenBao
       initContainers:
         - name: wait-for-postgres
@@ -28,17 +29,31 @@ spec:
                 echo "Waiting for postgres at {{ .Values.postgres.host }}:{{ .Values.postgres.port }}...";
                 sleep 2;
               done
+      {{- end }}
       containers:
         - name: openbao
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if .Values.devMode }}
+          # Dev mode: auto-init, auto-unseal, in-memory storage, fixed root token
+          args:
+            - "server"
+            - "-dev"
+            - "-dev-root-token-id=root"
+            - "-dev-listen-address=0.0.0.0:8200"
+          {{- else }}
           args: ["server", "-config=/openbao/config/openbao.hcl"]
+          {{- end }}
           ports:
             - name: http
               containerPort: 8200
           env:
             - name: BAO_ADDR
               value: "http://127.0.0.1:8200"
+            {{- if .Values.devMode }}
+            - name: BAO_DEV_ROOT_TOKEN_ID
+              value: "root"
+            {{- end }}
             {{- if .Values.baoToken }}
             - name: BAO_TOKEN
               value: {{ .Values.baoToken | quote }}
@@ -47,9 +62,9 @@ spec:
             capabilities:
               add: ["IPC_LOCK"]
           volumeMounts:
+            {{- if not .Values.devMode }}
             - name: config
               mountPath: /openbao/config
-            {{- if not .Values.devMode }}
             - name: data
               mountPath: /openbao/data
             {{- end }}
@@ -69,10 +84,12 @@ spec:
             failureThreshold: 3
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+      {{- if not .Values.devMode }}
       volumes:
         - name: config
           configMap:
             name: openbao-config
+      {{- end }}
   {{- if not .Values.devMode }}
   volumeClaimTemplates:
     - metadata:

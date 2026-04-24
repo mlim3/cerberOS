@@ -1,39 +1,30 @@
 # ---------------------------------------------------------------------------
-# cerberOS NATS chart values
-# ---------------------------------------------------------------------------
-# The upstream nats-io/nats chart is aliased as "server".
-# All upstream values are namespaced under server.*
+# cerberOS NATS chart values — self-contained (no upstream dependency)
 # ---------------------------------------------------------------------------
 
-server:
-  nameOverride: nats
-  fullnameOverride: nats
+image:
+  repository: nats
+  tag: "2.10-alpine"
+  pullPolicy: IfNotPresent
 
-  config:
-    jetstream:
-      enabled: true
-      fileStore:
-        pvc:
-          enabled: true
-          size: 1Gi
+# Single-node by default; override in values-prod.yaml for JetStream HA cluster.
+replicaCount: 1
 
-  # ---------------------------------------------------------------------------
-  # Extension hook: cluster mode (off by default)
-  # Set replicas: 3 and cluster.enabled: true in values-prod.yaml to flip to
-  # a 3-node JetStream cluster with per-pod anti-affinity.
-  # ---------------------------------------------------------------------------
-  container:
-    merge:
-      resources:
-        requests:
-          cpu: 50m
-          memory: 64Mi
-        limits:
-          cpu: 500m
-          memory: 256Mi
-
+service:
   # NodePort so kind's extraPortMappings (30222 → 4222) work
-  service:
-    ports:
-      nats:
-        nodePort: 30222
+  type: NodePort
+  clientPort: 4222
+  monitorPort: 8222
+  clientNodePort: 30222
+
+storage:
+  jetstreamSize: 1Gi
+  storageClass: ""
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
