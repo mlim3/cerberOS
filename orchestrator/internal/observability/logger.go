@@ -23,34 +23,37 @@ func init() {
 // InitLogger sets up the global structured logger.
 // Must be called once from main.go before any log output.
 //
-//   - level:  "debug" | "info" | "warn" | "error"  (default: "info")
-//   - format: "json" (production) | "text" (local dev)
+//   - level:  "debug" | "info" | "warn" | "warning" | "error" | "fatal" | "critical" (default: "info")
+//   - format: accepted for backward compatibility; logs are always JSON
 //   - node:   NODE_ID value for the node_id field
 func InitLogger(level, format, node string) {
+	_ = format
 	nodeID = node
 
 	var lvl slog.Level
 	switch strings.ToLower(level) {
 	case "debug":
 		lvl = slog.LevelDebug
-	case "warn":
+	case "warn", "warning":
 		lvl = slog.LevelWarn
-	case "error":
+	case "error", "fatal", "critical":
 		lvl = slog.LevelError
 	default:
 		lvl = slog.LevelInfo
 	}
 
 	opts := &slog.HandlerOptions{Level: lvl}
+	defaultLogger = slog.New(slog.NewJSONHandler(os.Stdout, opts))
+}
 
-	var handler slog.Handler
-	if strings.ToLower(format) == "text" {
-		handler = slog.NewTextHandler(os.Stdout, opts)
-	} else {
-		handler = slog.NewJSONHandler(os.Stdout, opts)
+// LoggerWithComponent returns the default orchestrator logger with canonical
+// service/component attrs. Prefer LogFromContext when context IDs are available.
+func LoggerWithComponent(component string) *slog.Logger {
+	attrs := []any{"service", "orchestrator", "component", component}
+	if nodeID != "" {
+		attrs = append(attrs, "node_id", nodeID)
 	}
-
-	defaultLogger = slog.New(handler)
+	return defaultLogger.With(attrs...)
 }
 
 // LogFromContext returns a *slog.Logger pre-populated with all IDs present in ctx.
@@ -70,13 +73,7 @@ func InitLogger(level, format, node string) {
 //   - task result payloads
 //   - planner output
 func LogFromContext(ctx context.Context) *slog.Logger {
-	attrs := []any{
-		"service", "orchestrator",
-		"component", "orchestrator",
-	}
-	if nodeID != "" {
-		attrs = append(attrs, "node_id", nodeID)
-	}
+	attrs := []any{}
 	if v := TraceIDFrom(ctx); v != "" {
 		attrs = append(attrs, "trace_id", v)
 	}
@@ -92,5 +89,5 @@ func LogFromContext(ctx context.Context) *slog.Logger {
 	if v := ModuleFrom(ctx); v != "" {
 		attrs = append(attrs, "module", v)
 	}
-	return defaultLogger.With(attrs...)
+	return LoggerWithComponent("orchestrator").With(attrs...)
 }

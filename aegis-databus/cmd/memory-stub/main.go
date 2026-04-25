@@ -6,7 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -20,6 +20,9 @@ import (
 const defaultAddr = ":8090"
 
 func main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).
+		With("service", "databus", "component", "memory-stub")
+
 	mock := memory.NewMockMemoryClient()
 	ctx := context.Background()
 	seedDemo(ctx, mock)
@@ -49,9 +52,10 @@ func main() {
 	if addr == "" {
 		addr = defaultAddr
 	}
-	log.Printf("memory-stub listening on %s", addr)
+	logger.Info("memory stub listening", "addr", addr)
 	if err := http.ListenAndServe(addr, mux); err != nil {
-		log.Fatal(err)
+		logger.Error("memory stub failed", "error", err, "exit_code", 1)
+		os.Exit(1)
 	}
 }
 

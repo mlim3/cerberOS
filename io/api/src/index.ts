@@ -640,7 +640,7 @@ app.post('/api/chat', async (c) => {
       const isFollowUp = !conversationId && rawInput !== content
       await natsClient!.publishUserTask({
         task_id: taskId,
-        user_id: userId,
+        user_id: effectiveUserId,
         content,
         payload: { raw_input: rawInput },
         callback_topic: callbackTopicForTask(taskId),

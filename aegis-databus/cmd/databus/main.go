@@ -56,10 +56,10 @@ func seedAuditDemo(ctx context.Context, m *memory.MockMemoryClient) {
 }
 
 const (
-	defaultNatsURL      = "nats://127.0.0.1:4222"
-	defaultNatsHTTPURL  = "http://127.0.0.1:8222"
-	metricsAddr         = ":9091"
-	memoryPingInterval  = 15 * time.Second
+	defaultNatsURL     = "nats://127.0.0.1:4222"
+	defaultNatsHTTPURL = "http://127.0.0.1:8222"
+	metricsAddr        = ":9091"
+	memoryPingInterval = 15 * time.Second
 )
 
 func main() {
@@ -80,13 +80,9 @@ func main() {
 		_ = shutdownTel(sctx)
 	}()
 
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).
-		With("service", "databus", "component", "server")
-	// Bridge for internal packages that still accept *log.Logger.
-	legacyLog := slog.NewLogLogger(
-		logger.Handler(),
-		slog.LevelInfo,
-	)
+	baseLogger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).
+		With("service", "databus")
+	logger := baseLogger.With("component", "server")
 	if telemetry.Enabled() {
 		logger.Info("OpenTelemetry OTLP export enabled")
 	}
@@ -240,7 +236,7 @@ func main() {
 	relay := &relay.OutboxRelay{
 		JS:           js,
 		MemoryClient: mem,
-		Logger:       legacyLog,
+		Logger:       baseLogger.With("component", "outbox-relay"),
 	}
 	go relay.Start(ctx)
 
@@ -250,13 +246,13 @@ func main() {
 		checker = c
 	}
 	if os.Getenv("AEGIS_DLQ_REPLAY_ENABLED") == "1" {
-		rh := &dlq.ReplayHandler{JS: js, Checker: checker, Logger: legacyLog, Component: "aegis-databus"}
+		rh := &dlq.ReplayHandler{JS: js, Checker: checker, Logger: baseLogger.With("component", "dlq-replay"), Component: "aegis-databus"}
 		go rh.Start(ctx)
 		logger.Info("DLQ replay handler started")
 	}
 
 	// Health heartbeat (legacy subject aegis.health.databus).
-	hb := health.NewHeartbeat(nc, legacyLog)
+	hb := health.NewHeartbeat(nc, baseLogger.With("component", "health-heartbeat"))
 	go hb.Start(ctx)
 
 	// Standardized service heartbeat (aegis.heartbeat.service.databus).
@@ -266,7 +262,7 @@ func main() {
 	go serviceHB.Start(ctx)
 
 	// JetStream gauges for Grafana (stream messages, bytes, pending)
-	go jetstreammetrics.Start(ctx, nc, jetstreammetrics.DefaultPollInterval, legacyLog)
+	go jetstreammetrics.Start(ctx, nc, jetstreammetrics.DefaultPollInterval, baseLogger.With("component", "jetstream-metrics"))
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)

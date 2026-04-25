@@ -25,12 +25,12 @@
         {
           "datasource": { "type": "loki", "uid": "loki" },
           "editorMode": "code",
-          "expr": "{compose_service=~\"orchestrator|io|nats\"}",
+          "expr": "{job=\"docker\", service=~\".+\"}",
           "queryType": "range",
           "refId": "A"
         }
       ],
-      "title": "IO + Orchestrator + NATS (JSON parse)",
+      "title": "cerberOS component JSON logs",
       "type": "logs"
     }
   ],

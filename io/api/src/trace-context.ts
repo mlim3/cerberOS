@@ -7,6 +7,7 @@
  */
 
 import type { MiddlewareHandler } from 'hono'
+import { ioLog } from './logger'
 
 const VERSION = '00'
 const FLAGS = '01'
@@ -108,7 +109,7 @@ const MAX_BUFFER = 64
 let otlpReady = false
 
 if (OTLP_ENDPOINT) {
-  console.log(`[trace] OTLP exporter enabled → ${OTLP_ENDPOINT}/v1/traces`)
+  ioLog('info', 'trace', 'OTLP exporter enabled', { endpoint: `${OTLP_ENDPOINT}/v1/traces` })
 }
 
 function scheduleFlush() {
@@ -151,13 +152,16 @@ function flushSpans() {
   }).then(res => {
     if (!otlpReady && res.ok) {
       otlpReady = true
-      console.log(`[trace] OTLP export OK (${spans.length} spans → Tempo)`)
+      ioLog('info', 'trace', 'OTLP export OK', { spans: spans.length })
     }
     if (!res.ok) {
-      res.text().then(t => console.error(`[trace] OTLP export failed: ${res.status} ${t}`))
+      res.text().then(t => ioLog('error', 'trace', 'OTLP export failed', {
+        status: res.status,
+        response_bytes: t.length,
+      }))
     }
   }).catch(err => {
-    console.error(`[trace] OTLP export error: ${err}`)
+    ioLog('error', 'trace', 'OTLP export error', { error: String(err) })
   })
 }
 

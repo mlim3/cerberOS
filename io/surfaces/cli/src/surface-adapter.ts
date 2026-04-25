@@ -18,6 +18,19 @@ import { streamChat, fetchTasks } from './io/orchestrator-client'
 import { submitCredential } from './io/memory-client'
 import { SessionStore } from './session/store'
 
+function cliLog(level: 'info' | 'warn' | 'error', msg: string, fields: Record<string, unknown> = {}): void {
+  const line = JSON.stringify({
+    time: new Date().toISOString(),
+    level: level.toUpperCase(),
+    service: 'io-cli',
+    component: 'surface-adapter',
+    msg,
+    ...fields,
+  })
+  if (level === 'error') console.error(line)
+  else console.log(line)
+}
+
 export interface CLISurfaceConfig {
   surfaceId?: string
   apiUrl?: string
@@ -45,18 +58,17 @@ export class CLISurfaceAdapter implements SurfaceAdapter {
 
   async initialize(): Promise<void> {
     await this.store.load()
-    console.log(`[CLISurfaceAdapter] Initialized: ${this.surfaceId}`)
-    console.log(`[CLISurfaceAdapter] API URL: ${this.apiUrl}`)
+    cliLog('info', 'initialized', { surface_id: this.surfaceId, api_url: this.apiUrl })
   }
 
   receiveInput(input: ProcessedInput): void {
     if (input.type !== 'text') {
-      console.warn('[CLISurfaceAdapter] Non-text input not supported in CLI')
+      cliLog('warn', 'non-text input not supported', { input_type: input.type })
       return
     }
     // In library mode, this is a fire-and-forget send
     this.sendMessage(input.taskId ?? this.store.getActiveTaskId() ?? 'unknown', input.content)
-      .catch(console.error)
+      .catch(err => cliLog('error', 'send message failed', { task_id: input.taskId, error: String(err) }))
   }
 
   showTaskStatus(update: StatusUpdate): void {
@@ -91,7 +103,7 @@ export class CLISurfaceAdapter implements SurfaceAdapter {
   }
 
   async shutdown(): Promise<void> {
-    console.log(`[CLISurfaceAdapter] Shutdown: ${this.surfaceId}`)
+    cliLog('info', 'shutdown', { surface_id: this.surfaceId })
   }
 
   async sendMessage(taskId: string, content: string): Promise<string> {

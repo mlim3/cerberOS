@@ -5,6 +5,7 @@
 import type { Context } from 'hono'
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
+export type LogLevelInput = LogLevel | 'warning' | 'fatal' | 'critical'
 
 const SERVICE = 'io-api'
 
@@ -20,6 +21,8 @@ function normalizeLogLevel(raw: string | undefined): LogLevel {
   if (v === 'debug' || v === 'info' || v === 'warn' || v === 'error') {
     return v
   }
+  if (v === 'warning') return 'warn'
+  if (v === 'fatal' || v === 'critical') return 'error'
   return 'info'
 }
 
@@ -39,22 +42,23 @@ export type LogFields = Record<string, unknown>
  * Emit one structured log line (no request context).
  */
 export function ioLog(
-  level: LogLevel,
+  level: LogLevelInput,
   component: string,
   msg: string,
   fields: LogFields = {},
 ): void {
-  if (!shouldEmit(level)) return
+  const normalizedLevel = normalizeLogLevel(level)
+  if (!shouldEmit(normalizedLevel)) return
   const rec: Record<string, unknown> = {
     time: new Date().toISOString(),
-    level: level.toUpperCase(),
+    level: normalizedLevel.toUpperCase(),
     service: SERVICE,
     component,
     msg,
     ...fields,
   }
   const line = JSON.stringify(rec)
-  if (level === 'error') console.error(line)
+  if (normalizedLevel === 'error') console.error(line)
   else console.log(line)
 }
 
@@ -63,18 +67,19 @@ export function ioLog(
  */
 export function logFromContext(
   c: Context,
-  level: LogLevel,
+  level: LogLevelInput,
   component: string,
   msg: string,
   fields: LogFields = {},
 ): void {
   const traceId = c.get('traceId') as string | undefined
-  logFromContextWithTrace(traceId, level, component, msg, fields)
+  const taskId = c.get('taskId') as string | undefined
+  logFromContextWithTrace(traceId, level, component, msg, taskId ? { task_id: taskId, ...fields } : fields)
 }
 
 export function logFromContextWithTrace(
   traceId: string | undefined,
-  level: LogLevel,
+  level: LogLevelInput,
   component: string,
   msg: string,
   fields: LogFields = {},

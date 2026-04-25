@@ -21,6 +21,14 @@ async function main() {
 }
 
 main().catch(err => {
-  console.error('Fatal error:', err)
+  console.error(JSON.stringify({
+    time: new Date().toISOString(),
+    level: 'ERROR',
+    service: 'io-cli',
+    component: 'cli',
+    msg: 'fatal error',
+    error: String(err),
+    exit_code: 1,
+  }))
   process.exit(1)
 })

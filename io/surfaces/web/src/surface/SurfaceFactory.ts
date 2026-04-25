@@ -26,6 +26,17 @@ import type { SurfaceAdapter, SurfaceCapabilities } from '@cerberos/io-core'
 // Import built-in web implementation
 import { createWebSurface, type WebSurfaceConfig } from './WebSurfaceAdapter'
 
+function factoryLog(msg: string, fields: Record<string, unknown> = {}): void {
+  console.log(JSON.stringify({
+    time: new Date().toISOString(),
+    level: 'INFO',
+    service: 'io-web',
+    component: 'surface-factory',
+    msg,
+    ...fields,
+  }))
+}
+
 // ============================================================================
 // Extensible Type Map
 // ============================================================================
@@ -80,7 +91,7 @@ export function registerSurface<TType extends SurfaceType>(
 export function registerSurface(type: string, creator: SurfaceCreator<string>): void
 export function registerSurface(type: string, creator: SurfaceCreator<string>): void {
   surfaceRegistry.set(type.toLowerCase(), creator)
-  console.log(`[SurfaceFactory] Registered surface type: ${type}`)
+  factoryLog('surface registered', { surface_type: type })
 }
 
 /** Check if a surface type is registered */
@@ -123,7 +134,7 @@ export async function createSurface(config: SurfaceConfig<string>): Promise<Surf
     )
   }
 
-  console.log(`[SurfaceFactory] Creating surface: ${type}`)
+  factoryLog('surface creating', { surface_type: type })
   return creator(config)
 }
 
@@ -183,7 +194,7 @@ export function mergeCapabilities(surfaces: SurfaceAdapter[]): SurfaceCapabiliti
 function initializeBuiltins(): void {
   registerSurface('web', (config) => createWebSurface(config.config as WebSurfaceConfig | undefined))
 
-  console.log('[SurfaceFactory] Initialized with surfaces:', getRegisteredSurfaces().join(', '))
+  factoryLog('surface factory initialized', { surfaces: getRegisteredSurfaces() })
 }
 
 // Auto-initialize built-ins on import

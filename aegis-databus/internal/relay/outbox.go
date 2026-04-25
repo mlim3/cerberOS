@@ -3,7 +3,7 @@ package relay
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"os"
 	"time"
 
@@ -29,7 +29,7 @@ type OutboxRelay struct {
 	MemoryClient memory.MemoryClient
 	PollInterval time.Duration
 	MaxBatch     int
-	Logger       *log.Logger
+	Logger       *slog.Logger
 }
 
 func (r *OutboxRelay) Start(ctx context.Context) {
@@ -44,8 +44,10 @@ func (r *OutboxRelay) Start(ctx context.Context) {
 		r.MaxBatch = 100
 	}
 	if r.Logger == nil {
-		r.Logger = log.New(os.Stdout, "outbox-relay ", log.LstdFlags)
+		r.Logger = slog.New(slog.NewJSONHandler(os.Stdout, nil)).
+			With("service", "databus", "component", "outbox-relay")
 	}
+	logger := r.Logger
 
 	ticker := time.NewTicker(r.PollInterval)
 	defer ticker.Stop()
@@ -56,7 +58,7 @@ func (r *OutboxRelay) Start(ctx context.Context) {
 	doFetch := func() {
 		entries, err := r.MemoryClient.FetchPendingOutbox(ctx, r.MaxBatch)
 		if err != nil {
-			r.Logger.Printf("fetch failed: %v", err)
+			logger.Error("outbox fetch failed", "error", err)
 			if !sleepWithContext(ctx, backoff) {
 				return
 			}
@@ -84,20 +86,20 @@ func (r *OutboxRelay) Start(ctx context.Context) {
 			}
 			span.End()
 			if err != nil {
-				r.Logger.Printf("publish failed subject=%s size=%d attempt=%d err=%v",
-					entry.Subject,
-					len(entry.Payload),
-					entry.AttemptCount+1,
-					err,
+				logger.Error("outbox publish failed",
+					"subject", entry.Subject,
+					"size_bytes", len(entry.Payload),
+					"attempt", entry.AttemptCount+1,
+					"error", err,
 				)
 				if updateErr := r.applyPublishFailure(ctx, entry); updateErr != nil {
-					r.Logger.Printf("update failed id=%s err=%v", entry.ID, updateErr)
+					logger.Error("outbox update failed", "entry_id", entry.ID, "error", updateErr)
 				}
 				continue
 			}
 
 			if err := r.MemoryClient.MarkOutboxSent(ctx, entry.ID, ack.Sequence); err != nil {
-				r.Logger.Printf("mark sent failed id=%s err=%v", entry.ID, err)
+				logger.Error("outbox mark sent failed", "entry_id", entry.ID, "error", err)
 			} else {
 				metrics.OutboxRelayProcessed.Inc()
 				// Audit log: metadata only, no payload (SR-DB-005); traceid for Design Principle 4

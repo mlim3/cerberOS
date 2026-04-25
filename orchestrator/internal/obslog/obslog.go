@@ -3,15 +3,15 @@ package obslog
 
 import (
 	"log/slog"
-	"os"
+
+	"github.com/mlim3/cerberOS/orchestrator/internal/observability"
 )
 
 const Service = "orchestrator"
 
 // NewLogger returns a slog JSON logger with service + component attributes.
 func NewLogger(component string) *slog.Logger {
-	h := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})
-	return slog.New(h).With("service", Service, "component", component)
+	return observability.LoggerWithComponent(component)
 }
 
 // AppendTrace appends trace_id when non-empty (W3C 32-hex from I/O).

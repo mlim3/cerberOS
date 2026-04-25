@@ -114,7 +114,7 @@ func NewSweeper(client interfaces.NATSClient, opts ...Option) *Sweeper {
 // Returns an error if subscription fails; otherwise runs until ctx is
 // done.
 func (s *Sweeper) Start(ctx context.Context) error {
-	log := observability.LogFromContext(ctx).With("component", "heartbeat_sweeper")
+	log := observability.LogFromContext(observability.WithModule(ctx, "heartbeat_sweeper"))
 
 	if err := s.client.Subscribe(SubjectWildcard, s.handleMessage); err != nil {
 		return err
@@ -169,7 +169,7 @@ func (s *Sweeper) handleMessage(subject string, data []byte) error {
 }
 
 func (s *Sweeper) sweepLoop(ctx context.Context) {
-	log := observability.LogFromContext(ctx).With("component", "heartbeat_sweeper")
+	log := observability.LogFromContext(observability.WithModule(ctx, "heartbeat_sweeper"))
 	ticker := time.NewTicker(s.sweepInterval)
 	defer ticker.Stop()
 

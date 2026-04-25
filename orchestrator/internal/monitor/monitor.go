@@ -46,6 +46,8 @@ func New(cfg *config.OrchestratorConfig, memory interfaces.MemoryClient, recover
 // Returns error if rehydration takes longer than 10 seconds (§NFR-06).
 func (m *Monitor) RehydrateFromMemory() error {
 	start := time.Now()
+	log := observability.LogFromContext(observability.WithModule(context.Background(), "task_monitor"))
+	log.Info("task monitor rehydration started")
 
 	records, err := m.memory.Read(types.MemoryQuery{
 		DataType: types.DataTypeTaskState,
@@ -77,6 +79,7 @@ func (m *Monitor) RehydrateFromMemory() error {
 	if time.Since(start) > 10*time.Second {
 		return fmt.Errorf("rehydration exceeded 10 second startup budget")
 	}
+	log.Info("task monitor rehydration complete", "tasks_restored", len(latestByTask), "elapsed_ms", time.Since(start).Milliseconds())
 	return nil
 }
 
@@ -87,6 +90,9 @@ func (m *Monitor) TrackTask(ts *types.TaskState) {
 		return
 	}
 	m.activeTasks.Store(ts.TaskID, ts)
+	observability.LogFromContext(taskCtx(ts, "task_monitor")).Info("task tracking started",
+		"state", ts.State,
+	)
 	go m.monitorTaskTimeout(ts)
 }
 
@@ -117,6 +123,7 @@ func (m *Monitor) StateTransition(_ context.Context, taskID, newState, reason st
 		return fmt.Errorf("invalid state transition: %s -> %s", ts.State, newState)
 	}
 
+	fromState := ts.State
 	now := time.Now().UTC()
 	ts.State = newState
 	if types.IsTerminalState(newState) {
@@ -159,6 +166,11 @@ func (m *Monitor) StateTransition(_ context.Context, taskID, newState, reason st
 	if types.IsTerminalState(newState) {
 		m.activeTasks.Delete(taskID)
 	}
+	observability.LogFromContext(taskCtx(ts, "task_monitor")).Info("task state transitioned",
+		"from_state", fromState,
+		"to_state", newState,
+		"reason", reason,
+	)
 	return nil
 }
 
@@ -236,9 +248,7 @@ func (m *Monitor) monitorTaskTimeout(ts *types.TaskState) {
 
 		remaining := time.Until(*current.TimeoutAt)
 		if remaining > 0 {
-			select {
-			case <-time.After(remaining):
-			}
+			time.Sleep(remaining)
 			continue
 		}
 
@@ -247,12 +257,14 @@ func (m *Monitor) monitorTaskTimeout(ts *types.TaskState) {
 		// for that phase. Re-check periodically so we still enforce the
 		// backstop once execution resumes.
 		if current.State == types.StateAwaitingApproval {
-			select {
-			case <-time.After(approvalRecheckInterval):
-			}
+			time.Sleep(approvalRecheckInterval)
 			continue
 		}
 
+		observability.LogFromContext(ctx).Warn("task timeout elapsed",
+			"state", current.State,
+			"timeout_at", current.TimeoutAt.Format(time.RFC3339Nano),
+		)
 		m.recovery.HandleRecovery(ctx, current, types.RecoveryReasonTimeout)
 		return
 	}

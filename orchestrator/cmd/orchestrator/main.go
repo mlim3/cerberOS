@@ -17,7 +17,6 @@ package main
 
 import (
 	"context"
-	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -38,10 +37,10 @@ import (
 	ioclient "github.com/mlim3/cerberOS/orchestrator/internal/io"
 	memoryiface "github.com/mlim3/cerberOS/orchestrator/internal/memory"
 	"github.com/mlim3/cerberOS/orchestrator/internal/mocks"
-	"github.com/mlim3/cerberOS/orchestrator/internal/personalization"
 	"github.com/mlim3/cerberOS/orchestrator/internal/monitor"
 	natsclient "github.com/mlim3/cerberOS/orchestrator/internal/nats"
 	"github.com/mlim3/cerberOS/orchestrator/internal/observability"
+	"github.com/mlim3/cerberOS/orchestrator/internal/personalization"
 	"github.com/mlim3/cerberOS/orchestrator/internal/policy"
 	"github.com/mlim3/cerberOS/orchestrator/internal/recovery"
 	"github.com/mlim3/cerberOS/orchestrator/internal/types"
@@ -50,9 +49,8 @@ import (
 func main() {
 	cfg, err := loadRuntimeConfig()
 	if err != nil {
-		slog.New(slog.NewJSONHandler(os.Stdout, nil)).
-			With("service", "orchestrator", "component", "main").
-			Error("config load failed", "error", err)
+		observability.LoggerWithComponent("main").
+			Error("config load failed", "error", err, "exit_code", 1)
 		os.Exit(1)
 	}
 
@@ -124,20 +122,20 @@ func main() {
 }
 
 type runtime struct {
-	memory         *memoryiface.Interface
-	vault          *mocks.VaultMock
-	nats           interfaces.NATSClient
-	mockNATS       *mocks.NATSMock
-	mockMemory     *mocks.MemoryMock
-	gateway        *gateway.Gateway
-	monitor        *monitor.Monitor
-	recovery       *recovery.Manager
-	dispatcher     *dispatcher.Dispatcher
-	executor       *executor.PlanExecutor
-	health         *health.Handler
-	hbEmitter      *heartbeat.Emitter
-	hbSweeper      *heartbeat.Sweeper
-	mux            *http.ServeMux
+	memory     *memoryiface.Interface
+	vault      *mocks.VaultMock
+	nats       interfaces.NATSClient
+	mockNATS   *mocks.NATSMock
+	mockMemory *mocks.MemoryMock
+	gateway    *gateway.Gateway
+	monitor    *monitor.Monitor
+	recovery   *recovery.Manager
+	dispatcher *dispatcher.Dispatcher
+	executor   *executor.PlanExecutor
+	health     *health.Handler
+	hbEmitter  *heartbeat.Emitter
+	hbSweeper  *heartbeat.Sweeper
+	mux        *http.ServeMux
 }
 
 func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
@@ -262,8 +260,7 @@ func loadRuntimeConfig() (*config.OrchestratorConfig, error) {
 	cfg, err := config.Load()
 	if err != nil {
 		cfg = demoConfig()
-		slog.New(slog.NewJSONHandler(os.Stdout, nil)).
-			With("service", "orchestrator", "component", "main").
+		observability.LoggerWithComponent("main").
 			Warn("config incomplete, starting from demo defaults", "error", err)
 	}
 	applyEnvOverrides(cfg)

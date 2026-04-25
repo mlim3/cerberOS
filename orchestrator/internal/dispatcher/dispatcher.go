@@ -153,7 +153,7 @@ func New(
 		monitor:  monitor,
 		executor: executor,
 		io:       io,
-		logger:   slog.Default().With("module", "dispatcher"),
+		logger:   observability.LoggerWithComponent("dispatcher"),
 	}
 }
 

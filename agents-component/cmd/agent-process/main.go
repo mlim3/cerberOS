@@ -106,6 +106,7 @@ type TaskOutput struct {
 func main() {
 	rootLog := slog.New(slog.NewJSONHandler(os.Stderr, nil)).
 		With("service", "agents", "component", "agent-process")
+	slog.SetDefault(rootLog)
 
 	rootCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()

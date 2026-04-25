@@ -2,7 +2,8 @@ package dlq
 
 import (
 	"context"
-	"log"
+	"log/slog"
+	"os"
 	"strings"
 
 	"aegis-databus/pkg/bus"
@@ -19,9 +20,9 @@ import (
 //
 // Consumers should use bus.ForwardToDLQ when sending to DLQ so X-Aegis-Original-Subject is set.
 type ReplayHandler struct {
-	JS       nats.JetStreamContext
-	Checker  memory.IdempotencyChecker // optional: if nil, always replay
-	Logger   *log.Logger
+	JS        nats.JetStreamContext
+	Checker   memory.IdempotencyChecker // optional: if nil, always replay
+	Logger    *slog.Logger
 	Component string // for ACL, e.g. "aegis-databus"
 }
 
@@ -31,8 +32,10 @@ func (h *ReplayHandler) Start(ctx context.Context) {
 		return
 	}
 	if h.Logger == nil {
-		h.Logger = log.Default()
+		h.Logger = slog.New(slog.NewJSONHandler(os.Stdout, nil)).
+			With("service", "databus", "component", "dlq-replay")
 	}
+	logger := h.Logger
 	component := h.Component
 	if component == "" {
 		component = "aegis-databus"
@@ -41,7 +44,7 @@ func (h *ReplayHandler) Start(ctx context.Context) {
 	_, err := bus.SubscribeWithACL(h.JS, component, bus.SubjectDLQ, func(m *nats.Msg) {
 		originalSubject := m.Header.Get(bus.HeaderOriginalSubject)
 		if originalSubject == "" {
-			h.Logger.Printf("dlq-replay: missing %s, discarding (ack)", bus.HeaderOriginalSubject)
+			logger.Warn("dlq original subject missing, discarding", "header", bus.HeaderOriginalSubject)
 			m.Ack()
 			return
 		}
@@ -50,9 +53,9 @@ func (h *ReplayHandler) Start(ctx context.Context) {
 		if h.Checker != nil && msgID != "" {
 			done, err := h.Checker.WasProcessed(ctx, msgID)
 			if err != nil {
-				h.Logger.Printf("dlq-replay: WasProcessed id=%s err=%v, will replay", msgID, err)
+				logger.Warn("dlq idempotency check failed, will replay", "message_id", msgID, "error", err)
 			} else if done {
-				h.Logger.Printf("dlq-replay: id=%s already processed, skipping replay", msgID)
+				logger.Info("dlq message already processed, skipping replay", "message_id", msgID)
 				m.Ack()
 				return
 			}
@@ -61,7 +64,7 @@ func (h *ReplayHandler) Start(ctx context.Context) {
 		// Republish with MsgId for 120s dedup (same id republished within window is dropped)
 		_, err := bus.PublishWithMsgID(h.JS, originalSubject, m.Data, msgID)
 		if err != nil {
-			h.Logger.Printf("dlq-replay: republish subject=%s id=%s err=%v", originalSubject, msgID, err)
+			logger.Error("dlq republish failed", "subject", originalSubject, "message_id", msgID, "error", err)
 			m.Nak()
 			return
 		}
@@ -69,12 +72,12 @@ func (h *ReplayHandler) Start(ctx context.Context) {
 		if h.Checker != nil && msgID != "" {
 			_ = h.Checker.RecordProcessed(ctx, msgID)
 		}
-		h.Logger.Printf("dlq-replay: replayed subject=%s id=%s", originalSubject, msgID)
+		logger.Info("dlq message replayed", "subject", originalSubject, "message_id", msgID)
 		m.Ack()
 	}, nats.Durable("dlq-replay"), nats.ManualAck())
 
 	if err != nil {
-		h.Logger.Printf("dlq-replay: subscribe failed: %v", err)
+		logger.Error("dlq subscribe failed", "error", err)
 		return
 	}
 

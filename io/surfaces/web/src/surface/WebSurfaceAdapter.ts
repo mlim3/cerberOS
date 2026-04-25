@@ -21,6 +21,19 @@ import type {
   ChatMessage,
 } from '@cerberos/io-core'
 
+function webLog(level: 'info' | 'warn' | 'error', component: string, msg: string, fields: Record<string, unknown> = {}): void {
+  const line = JSON.stringify({
+    time: new Date().toISOString(),
+    level: level.toUpperCase(),
+    service: 'io-web',
+    component,
+    msg,
+    ...fields,
+  })
+  if (level === 'error') console.error(line)
+  else console.log(line)
+}
+
 /** Configuration for creating a web surface adapter */
 export interface WebSurfaceConfig {
   /** Unique identifier for this surface instance */
@@ -93,56 +106,54 @@ export class WebSurfaceAdapter implements SurfaceAdapter {
   }
 
   async initialize(): Promise<void> {
-    console.log(`[WebSurfaceAdapter] Initialized: ${this.surfaceId}`)
+    webLog('info', 'surface-adapter', 'initialized', { surface_id: this.surfaceId })
     // The React app handles its own initialization
     // This is a no-op for the adapter
   }
 
   receiveInput(input: ProcessedInput): void {
-    console.log(`[WebSurfaceAdapter] Received input:`, input)
-
     if (input.type === 'text' && input.content.trim()) {
       const taskId = input.taskId ?? this.tasks[0]?.id
 
       if (taskId && this.taskCallbacks.onSendMessage) {
         this.taskCallbacks.onSendMessage(taskId, input.content.trim())
       } else {
-        console.warn('[WebSurfaceAdapter] No task selected and no default available')
+        webLog('warn', 'surface-adapter', 'no task selected', { input_type: input.type })
       }
     }
   }
 
   showTaskStatus(update: StatusUpdate): void {
-    console.log(`[WebSurfaceAdapter] Status update:`, update)
-
     // Notify all registered status callbacks
     this.statusCallbacks.forEach(cb => {
       try {
         cb(update)
       } catch (e) {
-        console.error('[WebSurfaceAdapter] Status callback error:', e)
+        webLog('error', 'surface-adapter', 'status callback error', {
+          task_id: update.taskId,
+          status: update.status,
+          error: String(e),
+        })
       }
     })
   }
 
   deliverResponse(response: AgentResponse): void {
-    console.log(`[WebSurfaceAdapter] Response:`, response)
-
     // Notify all registered response callbacks
     this.responseCallbacks.forEach(cb => {
       try {
         cb(response)
       } catch (e) {
-        console.error('[WebSurfaceAdapter] Response callback error:', e)
+        webLog('error', 'surface-adapter', 'response callback error', {
+          task_id: response.taskId,
+          error: String(e),
+        })
       }
     })
   }
 
   notify(notification: Notification): void {
-    console.log(`[WebSurfaceAdapter] Notification:`, notification)
-
     // For web, we could use the browser Notification API
-    // For now, just log it
     if (notification.priority === 'urgent' && 'Notification' in window) {
       if (Notification.permission === 'granted') {
         new Notification(notification.title, { body: notification.body })
@@ -166,7 +177,7 @@ export class WebSurfaceAdapter implements SurfaceAdapter {
   }
 
   async shutdown(): Promise<void> {
-    console.log(`[WebSurfaceAdapter] Shutting down: ${this.surfaceId}`)
+    webLog('info', 'surface-adapter', 'shutting down', { surface_id: this.surfaceId })
     this.statusCallbacks.clear()
     this.responseCallbacks.clear()
     this.taskCallbacks = {}
@@ -203,7 +214,7 @@ export function createWebSurface(config?: WebSurfaceConfig): WebSurfaceAdapter {
  */
 export function getSurfaceAdapter(): SurfaceAdapter {
   if (!webSurfaceAdapter) {
-    console.warn('[WebSurfaceAdapter] Not initialized - creating default instance')
+    webLog('warn', 'surface-adapter', 'not initialized, creating default instance')
     webSurfaceAdapter = createWebSurface()
   }
   return webSurfaceAdapter
