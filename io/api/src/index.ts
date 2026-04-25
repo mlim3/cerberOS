@@ -587,7 +587,7 @@ app.post('/api/orchestrator/plan-decision', async (c) => {
 // Send a message (returns streaming response)
 app.post('/api/chat', async (c) => {
   const body = (await c.req.json()) as SendMessageRequest;
-  const { taskId, userId, content, conversationHistory, conversationId } = body as SendMessageRequest & { userId?: string };
+  const { taskId, userId, content, conversationHistory, conversationId, required_skill_domains } = body as SendMessageRequest & { userId?: string; required_skill_domains?: string[] };
   const effectiveUserId = userId || requestUserId(c)
   logFromContext(c, 'info', 'http', 'POST /api/chat', {
     task_id: taskId,
@@ -646,6 +646,7 @@ app.post('/api/chat', async (c) => {
         callback_topic: callbackTopicForTask(taskId),
         trace_id: c.get('traceId'),
         conversation_id: conversationId,
+        required_skill_domains,
       })
       awaitingOrchestratorChat = true
       logFromContext(c, 'info', 'nats', 'published user_task', {

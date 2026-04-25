@@ -91,6 +91,7 @@ type TaskMonitor interface {
 type PlanExecutor interface {
 	Execute(ctx context.Context, plan types.ExecutionPlan, ts *types.TaskState) error
 	HandleSubtaskResult(ctx context.Context, result types.TaskResult) error
+	UserIDForSubtask(orchRef string) (string, bool)
 }
 
 // ── Dispatcher ────────────────────────────────────────────────────────────────
@@ -654,6 +655,35 @@ func (d *Dispatcher) HandlePlanDecision(ctx context.Context, decision types.Plan
 	return d.startPlanExecution(ctx, ts, pending.plan, now)
 }
 
+// HandleVaultExecuteRequest is registered with the Gateway to handle vault.execute.request messages.
+// It resolves user_id from in-flight task state (the orchestrator adds it — agents never provide it)
+// and forwards the operation to the Vault engine for execution.
+func (d *Dispatcher) HandleVaultExecuteRequest(ctx context.Context, req types.VaultExecuteRequest) (types.VaultExecuteResult, error) {
+	// Resolve user_id from trusted task state — never from the agent's request.
+	// First try the parent task (req.TaskID == parent task_id), then fall back
+	// to the executor's subtask-orchRef → plan → user_id path (req.TaskID == subtask orchRef).
+	var userID string
+	if tsVal, ok := d.activeTasks.Load(req.TaskID); ok {
+		userID = tsVal.(*types.TaskState).UserID
+	} else if uid, ok := d.executor.UserIDForSubtask(req.TaskID); ok {
+		userID = uid
+	} else {
+		return types.VaultExecuteResult{
+			RequestID:    req.RequestID,
+			AgentID:      req.AgentID,
+			Status:       types.VaultExecStatusScopeViolation,
+			ErrorCode:    "UNKNOWN_TASK",
+			ErrorMessage: "task_id not found in active tasks",
+		}, nil
+	}
+
+	log := observability.LogFromContext(ctx)
+	log.Info("vault execute: forwarding to vault engine", "request_id", req.RequestID, "operation_type", req.OperationType, "user_id", userID)
+	result, err := d.vault.Execute(ctx, userID, req)
+	log.Info("vault execute: result from vault engine", "request_id", req.RequestID, "status", result.Status, "elapsed_ms", result.ElapsedMS, "error", err)
+	return result, err
+}
+
 // HandlePlanComplete is called by the Plan Executor when all subtasks complete successfully.
 // Writes COMPLETED state, delivers aggregated result to User I/O, revokes credentials.
 func (d *Dispatcher) HandlePlanComplete(ts *types.TaskState, aggregatedResults []types.PriorResult) {
@@ -1097,6 +1127,15 @@ func buildDecompositionInstructionsWithFacts(taskID, rawInput string, scope type
 		domains = string(raw)
 	}
 
+	credSection := ""
+	if len(scope.AvailableCredTypes) > 0 {
+		raw, _ := json.Marshal(scope.AvailableCredTypes)
+		credSection = fmt.Sprintf(
+			"Available credential types (this user has registered these API keys in the Vault — only use credentialed skills for these types):\n%s\n",
+			string(raw),
+		)
+	}
+
 	factsSection := ""
 	if len(facts) > 0 {
 		var b strings.Builder
@@ -1109,7 +1148,7 @@ func buildDecompositionInstructionsWithFacts(taskID, rawInput string, scope type
 		factsSection = b.String()
 	}
 
-	return factsSection + fmt.Sprintf(
+	return factsSection + credSection + fmt.Sprintf(
 		"Decompose the user's task into a JSON execution plan for downstream agents.\n"+
 			"Return JSON only. Do not wrap the result in markdown fences. Do not include commentary.\n"+
 			"The JSON schema is:\n"+
@@ -1120,6 +1159,7 @@ func buildDecompositionInstructionsWithFacts(taskID, rawInput string, scope type
 			"- Do not invent new skill domain names outside the allowed list\n"+
 			"- Use an empty array for depends_on when a subtask has no dependencies\n"+
 			"- Keep the plan concise and executable\n"+
+			"- Only assign a credentialed domain (google_search, github, web, data, comms, storage) to a subtask if the corresponding credential type appears in the available credential types list above\n"+
 			"Ambiguity handling (CRITICAL):\n"+
 			"- You MUST return a valid execution plan JSON object. NEVER reply with a clarifying question, free-form text, an apology, or anything that is not JSON matching the schema above.\n"+
 			"- If the user's message is ambiguous, conversational, a greeting, or a follow-up that depends on prior context, produce a SINGLE-subtask plan where one %s-domain agent composes a direct natural-language answer using the conversation context provided.\n"+

@@ -45,6 +45,7 @@ import (
 	"github.com/mlim3/cerberOS/orchestrator/internal/policy"
 	"github.com/mlim3/cerberOS/orchestrator/internal/recovery"
 	"github.com/mlim3/cerberOS/orchestrator/internal/types"
+	"github.com/mlim3/cerberOS/orchestrator/internal/vaultclient"
 )
 
 func main() {
@@ -125,7 +126,7 @@ func main() {
 
 type runtime struct {
 	memory         *memoryiface.Interface
-	vault          *mocks.VaultMock
+	vault          interfaces.VaultClient
 	nats           interfaces.NATSClient
 	mockNATS       *mocks.NATSMock
 	mockMemory     *mocks.MemoryMock
@@ -147,7 +148,14 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 		return nil, err
 	}
 
-	vaultClient := &mocks.VaultMock{}
+	var vaultClient interfaces.VaultClient
+	if cfg.VaultEngineURL != "" {
+		observability.LogFromContext(context.Background()).Info("using real vault engine", "url", cfg.VaultEngineURL)
+		vaultClient = vaultclient.New(cfg.VaultEngineURL)
+	} else {
+		observability.LogFromContext(context.Background()).Info("vault engine URL not set — using mock vault")
+		vaultClient = &mocks.VaultMock{}
+	}
 	policyEnforcer := policy.New(cfg, vaultClient, memClient)
 
 	natsClient, mockNATS, err := buildNATSClient(cfg)
@@ -207,6 +215,7 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 	gw.RegisterAgentStatusHandler(taskMonitor.HandleAgentStatusUpdate)
 	gw.RegisterTaskResultHandler(taskDispatcher.HandleTaskResult)
 	gw.RegisterPlanDecisionHandler(taskDispatcher.HandlePlanDecision)
+	gw.RegisterVaultExecuteHandler(taskDispatcher.HandleVaultExecuteRequest)
 
 	// Forward agent user_input credential requests to the IO Component.
 	gw.RegisterCredentialRequestHandler(func(agentID, taskID, requestID, keyName, label string) error {
