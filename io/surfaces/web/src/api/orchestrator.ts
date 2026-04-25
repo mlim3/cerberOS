@@ -167,7 +167,6 @@ export async function submitCredential(
     return { ok: true, keyName: params.keyName }
   } catch (err) {
     // In demo mode the endpoint won't exist — simulate success
-    console.log('[credential] Demo mode: simulating credential storage')
     return { ok: true, keyName: params.keyName }
   }
 }

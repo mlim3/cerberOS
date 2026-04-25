@@ -4,7 +4,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -16,7 +16,7 @@ import (
 
 const defaultNatsURL = "nats://127.0.0.1:4222"
 
-func connectAs(ctx context.Context, connName, url string, logger *log.Logger) (*nats.Conn, nats.JetStreamContext, error) {
+func connectAs(ctx context.Context, connName, url string, logger *slog.Logger) (*nats.Conn, nats.JetStreamContext, error) {
 	seed, _ := security.GetNKeyFromOpenBao(ctx, "aegis-demo")
 	if seed != "" {
 		nc, err := security.NewConnectionWithNKeySeedAndName(url, seed, connName)
@@ -55,7 +55,9 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	logger := log.New(os.Stdout, "demo ", log.LstdFlags)
+	baseLogger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).
+		With("component", "databus")
+	logger := baseLogger.With("module", "demo")
 	url := os.Getenv("AEGIS_NATS_URL")
 	if url == "" {
 		url = defaultNatsURL
@@ -63,7 +65,7 @@ func main() {
 
 	seed, _ := security.GetNKeyFromOpenBao(ctx, "aegis-demo")
 	if seed != "" {
-		logger.Println("connected with NKey (Zero Trust)")
+		logger.Info("connected with NKey", "mode", "zero-trust")
 	}
 
 	// Each component gets its own connection for distinct Grafana "Traffic by component" names.
@@ -71,7 +73,7 @@ func main() {
 	components := []struct {
 		name string
 		acl  string
-		run  func(context.Context, *nats.Conn, nats.JetStreamContext, *log.Logger, string)
+		run  func(context.Context, *nats.Conn, nats.JetStreamContext, *slog.Logger, string)
 	}{
 		{"aegis-io", "io", runIO},
 		{"aegis-orchestrator", "orchestrator", runOrchestrator},
@@ -81,17 +83,19 @@ func main() {
 		{"aegis-monitoring", "monitoring", runMonitoring},
 	}
 
-	logger.Println("Starting 6 components: I/O, Orchestrator, Memory, Vault, Agent, Monitoring")
+	logger.Info("starting demo components", "count", len(components))
 	for _, c := range components {
 		connName, aclName, run := c.name, c.acl, c.run
 		go func() {
-			nc, js, err := connectAs(ctx, connName, url, logger)
+			componentLogger := baseLogger.With("module", "demo-"+aclName)
+			nc, js, err := connectAs(ctx, connName, url, componentLogger)
 			if err != nil {
-				logger.Printf("[%s] connect failed: %v", connName, err)
+				componentLogger.Error("connect failed", "conn_name", connName, "error", err)
 				return
 			}
 			defer nc.Close()
-			run(ctx, nc, js, logger, aclName)
+			componentLogger.Info("component connected", "conn_name", connName)
+			run(ctx, nc, js, componentLogger, aclName)
 		}()
 	}
 	time.Sleep(500 * time.Millisecond) // allow connections to establish
@@ -99,6 +103,6 @@ func main() {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	<-sig
-	logger.Println("shutting down")
+	logger.Info("shutting down")
 	cancel()
 }

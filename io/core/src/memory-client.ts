@@ -7,6 +7,22 @@ const MEMORY_API_KEY = process.env.MEMORY_API_KEY ?? ''
 
 const DEMO_MODE = !MEMORY_API_BASE
 
+type CoreLogLevel = 'debug' | 'info' | 'warn' | 'error'
+
+function memoryClientLog(level: CoreLogLevel, msg: string, fields: Record<string, unknown> = {}): void {
+  const rec = {
+    time: new Date().toISOString(),
+    level: level.toUpperCase(),
+    component: 'io',
+    module: 'memory-client',
+    msg,
+    ...fields,
+  }
+  const line = JSON.stringify(rec)
+  if (level === 'error') console.error(line)
+  else console.log(line)
+}
+
 interface DemoLogEntry {
   messageId: string
   conversationId: string
@@ -127,13 +143,14 @@ export async function createConversation(params: CreateConversationParams): Prom
       body: JSON.stringify(params),
     })
     if (!res.ok) {
-      console.error('[MemoryClient] Failed to create conversation:', res.status, await res.text())
+      const text = await res.text()
+      memoryClientLog('error', 'create conversation failed', { status: res.status, response_bytes: text.length })
       return null
     }
     const json = await res.json() as { data: { conversation: MemoryConversation } }
     return json.data?.conversation ?? null
   } catch (err) {
-    console.error('[MemoryClient] Network error creating conversation:', err)
+    memoryClientLog('error', 'create conversation network error', { error: String(err) })
     return null
   }
 }
@@ -174,13 +191,14 @@ export async function createTask(params: CreateTaskParams): Promise<MemoryTask |
       body: JSON.stringify(params),
     })
     if (!res.ok) {
-      console.error('[MemoryClient] Failed to create task:', res.status, await res.text())
+      const text = await res.text()
+      memoryClientLog('error', 'create task failed', { task_id: params.taskId, status: res.status, response_bytes: text.length })
       return null
     }
     const json = await res.json() as { data: { task: MemoryTask } }
     return json.data?.task ?? null
   } catch (err) {
-    console.error('[MemoryClient] Network error creating task:', err)
+    memoryClientLog('error', 'create task network error', { task_id: params.taskId, error: String(err) })
     return null
   }
 }
@@ -199,13 +217,13 @@ export async function getTask(taskId: string, userId: string): Promise<MemoryTas
       headers: { 'X-Internal-API-Key': MEMORY_API_KEY },
     })
     if (!res.ok) {
-      console.error('[MemoryClient] Failed to fetch task:', res.status)
+      memoryClientLog('error', 'fetch task failed', { task_id: taskId, status: res.status })
       return null
     }
     const json = await res.json() as { data: { task: MemoryTask } }
     return json.data?.task ?? null
   } catch (err) {
-    console.error('[MemoryClient] Network error fetching task:', err)
+    memoryClientLog('error', 'fetch task network error', { task_id: taskId, error: String(err) })
     return null
   }
 }
@@ -263,7 +281,8 @@ export async function appendLogEntry(params: AppendLogParams): Promise<MemoryLog
     })
 
     if (!res.ok) {
-      console.error('[MemoryClient] Failed to append log:', res.status, await res.text())
+      const text = await res.text()
+      memoryClientLog('error', 'append log failed', { task_id: params.taskId, status: res.status, response_bytes: text.length })
       return null
     }
 
@@ -274,7 +293,7 @@ export async function appendLogEntry(params: AppendLogParams): Promise<MemoryLog
     }
     return entry
   } catch (err) {
-    console.error('[MemoryClient] Network error appending log:', err)
+    memoryClientLog('error', 'append log network error', { task_id: params.taskId, error: String(err) })
     return null
   }
 }
@@ -309,7 +328,7 @@ export async function getConversationLogs(
     })
 
     if (!res.ok) {
-      console.error('[MemoryClient] Failed to fetch logs:', res.status)
+      memoryClientLog('error', 'fetch logs failed', { task_id: options?.taskId, status: res.status })
       return []
     }
 
@@ -321,7 +340,7 @@ export async function getConversationLogs(
     }
     return messages
   } catch (err) {
-    console.error('[MemoryClient] Network error fetching logs:', err)
+    memoryClientLog('error', 'fetch logs network error', { task_id: options?.taskId, error: String(err) })
     return []
   }
 }
@@ -350,13 +369,13 @@ export async function listConversations(
       },
     })
     if (!res.ok) {
-      console.error('[MemoryClient] Failed to list conversations:', res.status)
+      memoryClientLog('error', 'list conversations failed', { status: res.status })
       return []
     }
     const json = await res.json() as { data: { conversations: MemoryConversation[] } }
     return json.data?.conversations ?? []
   } catch (err) {
-    console.error('[MemoryClient] Network error listing conversations:', err)
+    memoryClientLog('error', 'list conversations network error', { error: String(err) })
     return []
   }
 }

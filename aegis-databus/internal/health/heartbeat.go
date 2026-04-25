@@ -3,7 +3,8 @@ package health
 import (
 	"context"
 	"encoding/json"
-	"log"
+	"log/slog"
+	"os"
 	"time"
 
 	"aegis-databus/internal/metrics"
@@ -16,12 +17,13 @@ const interval = 5 * time.Second
 // Heartbeat publishes aegis.health.databus status for Self-Healing to monitor.
 type Heartbeat struct {
 	nc     *nats.Conn
-	logger *log.Logger
+	logger *slog.Logger
 }
 
-func NewHeartbeat(nc *nats.Conn, logger *log.Logger) *Heartbeat {
+func NewHeartbeat(nc *nats.Conn, logger *slog.Logger) *Heartbeat {
 	if logger == nil {
-		logger = log.Default()
+		logger = slog.New(slog.NewJSONHandler(os.Stdout, nil)).
+			With("component", "databus", "module", "health-heartbeat")
 	}
 	return &Heartbeat{nc: nc, logger: logger}
 }
@@ -41,7 +43,7 @@ func (h *Heartbeat) Start(ctx context.Context) {
 				"time":      time.Now().UTC().Format(time.RFC3339Nano),
 			})
 			if err := h.nc.Publish(bus.SubjectHealthDatabus, payload); err != nil {
-				h.logger.Printf("heartbeat publish failed: %v", err)
+				h.logger.Warn("heartbeat publish failed", "subject", bus.SubjectHealthDatabus, "error", err)
 			} else {
 				metrics.HeartbeatsPublished.Inc()
 			}
