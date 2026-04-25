@@ -13,8 +13,8 @@ function memoryClientLog(level: CoreLogLevel, msg: string, fields: Record<string
   const rec = {
     time: new Date().toISOString(),
     level: level.toUpperCase(),
-    service: 'io-core',
-    component: 'memory-client',
+    component: 'io',
+    module: 'memory-client',
     msg,
     ...fields,
   }

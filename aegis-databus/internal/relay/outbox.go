@@ -45,7 +45,7 @@ func (r *OutboxRelay) Start(ctx context.Context) {
 	}
 	if r.Logger == nil {
 		r.Logger = slog.New(slog.NewJSONHandler(os.Stdout, nil)).
-			With("service", "databus", "component", "outbox-relay")
+			With("component", "databus", "module", "outbox-relay")
 	}
 	logger := r.Logger
 

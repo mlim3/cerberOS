@@ -159,9 +159,11 @@ func (s *Sweeper) handleMessage(subject string, data []byte) error {
 	s.mu.Unlock()
 
 	if had && prev.stale {
-		observability.LogFromContext(context.Background()).Info(
+		observability.LogFromContext(
+			observability.WithModule(context.Background(), "heartbeat_sweeper"),
+		).Info(
 			"heartbeat: service recovered",
-			"service", beat.Service,
+			"peer_service", beat.Service,
 			"instance_id", beat.InstanceID,
 		)
 	}
@@ -202,7 +204,7 @@ func (s *Sweeper) sweep(log *slog.Logger) {
 
 	for _, sh := range newlyStale {
 		log.Warn("heartbeat: service stale",
-			"service", sh.Service,
+			"peer_service", sh.Service,
 			"instance_id", sh.InstanceID,
 			"last_seen", sh.LastSeen.Format(time.RFC3339),
 			"age_seconds", sh.AgeSeconds,

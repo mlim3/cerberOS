@@ -49,7 +49,7 @@ import (
 func main() {
 	cfg, err := loadRuntimeConfig()
 	if err != nil {
-		observability.LoggerWithComponent("main").
+		observability.LoggerWithModule("main").
 			Error("config load failed", "error", err, "exit_code", 1)
 		os.Exit(1)
 	}
@@ -260,7 +260,7 @@ func loadRuntimeConfig() (*config.OrchestratorConfig, error) {
 	cfg, err := config.Load()
 	if err != nil {
 		cfg = demoConfig()
-		observability.LoggerWithComponent("main").
+		observability.LoggerWithModule("main").
 			Warn("config incomplete, starting from demo defaults", "error", err)
 	}
 	applyEnvOverrides(cfg)

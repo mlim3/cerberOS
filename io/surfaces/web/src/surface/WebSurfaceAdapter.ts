@@ -21,12 +21,12 @@ import type {
   ChatMessage,
 } from '@cerberos/io-core'
 
-function webLog(level: 'info' | 'warn' | 'error', component: string, msg: string, fields: Record<string, unknown> = {}): void {
+function webLog(level: 'info' | 'warn' | 'error', module: string, msg: string, fields: Record<string, unknown> = {}): void {
   const line = JSON.stringify({
     time: new Date().toISOString(),
     level: level.toUpperCase(),
-    service: 'io-web',
-    component,
+    component: 'io',
+    module: `web-${module}`,
     msg,
     ...fields,
   })

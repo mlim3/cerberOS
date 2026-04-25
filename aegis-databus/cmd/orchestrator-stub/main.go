@@ -18,7 +18,7 @@ const (
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).
-		With("service", "databus", "component", "orchestrator-stub")
+		With("component", "databus", "module", "orchestrator-stub")
 
 	memoryURL := os.Getenv("AEGIS_MEMORY_URL")
 	if memoryURL == "" {

@@ -30,8 +30,8 @@ function factoryLog(msg: string, fields: Record<string, unknown> = {}): void {
   console.log(JSON.stringify({
     time: new Date().toISOString(),
     level: 'INFO',
-    service: 'io-web',
-    component: 'surface-factory',
+    component: 'io',
+    module: 'web-surface-factory',
     msg,
     ...fields,
   }))

@@ -25,7 +25,7 @@ func Start(ctx context.Context, nc *nats.Conn, interval time.Duration, logger *s
 	}
 	if logger == nil {
 		logger = slog.New(slog.NewJSONHandler(os.Stdout, nil)).
-			With("service", "databus", "component", "jetstream-metrics")
+			With("component", "databus", "module", "jetstream-metrics")
 	}
 	js, err := nc.JetStream()
 	if err != nil {

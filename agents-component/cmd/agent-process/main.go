@@ -105,7 +105,7 @@ type TaskOutput struct {
 
 func main() {
 	rootLog := slog.New(slog.NewJSONHandler(os.Stderr, nil)).
-		With("service", "agents", "component", "agent-process")
+		With("component", "agents", "module", "agent-process")
 	slog.SetDefault(rootLog)
 
 	rootCtx, cancel := context.WithCancel(context.Background())
@@ -238,6 +238,9 @@ var mmdsDelivered bool
 // framing and output are always written to stdout regardless of error.
 func runOneTask(rootCtx context.Context, rootLog *slog.Logger, spawnCtx *SpawnContext, specBudget *skills.SpecBudget, encoder *json.Encoder, priorTurns []anthropic.MessageParam) ([]anthropic.MessageParam, error) {
 	log := rootLog.With("task_id", spawnCtx.TaskID, "trace_id", spawnCtx.TraceID)
+	if spawnCtx.ConversationID != "" {
+		log = log.With("conversation_id", spawnCtx.ConversationID)
+	}
 
 	if err := validate(spawnCtx); err != nil {
 		writeError(log, spawnCtx.TaskID, spawnCtx.TraceID, err.Error())

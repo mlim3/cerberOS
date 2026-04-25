@@ -11,8 +11,8 @@ function sessionLog(msg: string, fields: Record<string, unknown> = {}): void {
   console.error(JSON.stringify({
     time: new Date().toISOString(),
     level: 'ERROR',
-    service: 'io-cli',
-    component: 'session-store',
+    component: 'io',
+    module: 'cli-session-store',
     msg,
     ...fields,
   }))

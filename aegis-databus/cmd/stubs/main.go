@@ -39,7 +39,7 @@ type CloudEvent struct {
 func main() {
 	ctx := context.Background()
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).
-		With("service", "databus", "component", "stubs")
+		With("component", "databus", "module", "stubs")
 
 	nc, js, err := connect(ctx, logger)
 	if err != nil {

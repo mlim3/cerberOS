@@ -56,8 +56,8 @@ func main() {
 	defer cancel()
 
 	baseLogger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).
-		With("service", "databus")
-	logger := baseLogger.With("component", "demo")
+		With("component", "databus")
+	logger := baseLogger.With("module", "demo")
 	url := os.Getenv("AEGIS_NATS_URL")
 	if url == "" {
 		url = defaultNatsURL
@@ -87,7 +87,7 @@ func main() {
 	for _, c := range components {
 		connName, aclName, run := c.name, c.acl, c.run
 		go func() {
-			componentLogger := baseLogger.With("component", aclName)
+			componentLogger := baseLogger.With("module", "demo-"+aclName)
 			nc, js, err := connectAs(ctx, connName, url, componentLogger)
 			if err != nil {
 				componentLogger.Error("connect failed", "conn_name", connName, "error", err)

@@ -33,7 +33,7 @@ func (h *ReplayHandler) Start(ctx context.Context) {
 	}
 	if h.Logger == nil {
 		h.Logger = slog.New(slog.NewJSONHandler(os.Stdout, nil)).
-			With("service", "databus", "component", "dlq-replay")
+			With("component", "databus", "module", "dlq-replay")
 	}
 	logger := h.Logger
 	component := h.Component

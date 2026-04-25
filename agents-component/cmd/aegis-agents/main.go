@@ -31,7 +31,7 @@ import (
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil)).
-		With("service", "agents", "component", "aegis-agents")
+		With("component", "agents", "module", "aegis-agents")
 	slog.SetDefault(log)
 
 	cfg, err := config.Load()

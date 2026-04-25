@@ -50,13 +50,19 @@ scrape_configs:
         target_label: container_name
 
     # Unwrap Docker json-file log lines ({"log":"...","stream":"stdout",...}) into plain text for Loki,
-    # then parse the standardized cerberOS JSON log schema.
+    # then parse the standardized cerberOS JSON log schema (see docs/logging.md).
+    #
+    # `component` is one of the six top-level components (agents, orchestrator,
+    # io, memory, vault, databus). `module` is the sub-unit within a component
+    # (server, dispatcher, http, ...). Both are bounded enough to be Loki labels.
+    # task_id / trace_id stay in the log body for LogQL `| json` queries and
+    # Tempo links.
     pipeline_stages:
       - docker: {}
       - json:
           expressions:
-            service: service
             component: component
+            module: module
             level: level
             msg: msg
             task_id: task_id
@@ -64,6 +70,6 @@ scrape_configs:
             request_id: request_id
             message_id: message_id
       - labels:
-          service:
           component:
+          module:
           level:

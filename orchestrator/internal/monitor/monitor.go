@@ -278,6 +278,7 @@ func taskCtx(ts *types.TaskState, module string) context.Context {
 		ctx = observability.WithTraceID(ctx, ts.TraceID)
 	}
 	ctx = observability.WithTaskID(ctx, ts.TaskID)
+	ctx = observability.WithConversationID(ctx, ts.ConversationID)
 	ctx = observability.WithModule(ctx, module)
 	return ctx
 }

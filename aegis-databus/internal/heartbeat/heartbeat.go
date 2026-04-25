@@ -76,7 +76,7 @@ func New(nc *nats.Conn, service string, log *slog.Logger) *Emitter {
 		hostname:   host,
 		pid:        pid,
 		subject:    SubjectPrefix + service,
-		log:        log.With("component", "heartbeat", "service", service),
+		log:        log.With("module", "heartbeat"),
 		interval:   DefaultInterval,
 		startedAt:  time.Now().UTC(),
 	}

@@ -88,7 +88,9 @@ export function resolveTraceparent(incoming: string | undefined): {
 // ── OTLP HTTP span export (fire-and-forget to Tempo) ──────────────────────────
 
 const OTLP_ENDPOINT = process.env.OTEL_EXPORTER_OTLP_ENDPOINT ?? ''
-const SERVICE_NAME = process.env.OTEL_SERVICE_NAME ?? 'io-api'
+// `service.name` matches the canonical component name from docs/logging.md so
+// Tempo trace UI and Loki log labels stay aligned.
+const SERVICE_NAME = process.env.OTEL_SERVICE_NAME ?? 'io'
 
 interface OtlpSpan {
   traceId: string

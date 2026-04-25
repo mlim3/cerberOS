@@ -24,8 +24,8 @@ main().catch(err => {
   console.error(JSON.stringify({
     time: new Date().toISOString(),
     level: 'ERROR',
-    service: 'io-cli',
-    component: 'cli',
+    component: 'io',
+    module: 'cli',
     msg: 'fatal error',
     error: String(err),
     exit_code: 1,

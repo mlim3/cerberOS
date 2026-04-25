@@ -70,7 +70,7 @@ func main() {
 	shutdownTel, errInit := telemetry.Init(ctx)
 	if errInit != nil {
 		slog.New(slog.NewJSONHandler(os.Stdout, nil)).
-			With("service", "databus", "component", "server").
+			With("component", "databus", "module", "server").
 			Error("telemetry init failed", "error", errInit)
 		os.Exit(1)
 	}
@@ -81,8 +81,8 @@ func main() {
 	}()
 
 	baseLogger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).
-		With("service", "databus")
-	logger := baseLogger.With("component", "server")
+		With("component", "databus")
+	logger := baseLogger.With("module", "server")
 	if telemetry.Enabled() {
 		logger.Info("OpenTelemetry OTLP export enabled")
 	}
@@ -236,7 +236,7 @@ func main() {
 	relay := &relay.OutboxRelay{
 		JS:           js,
 		MemoryClient: mem,
-		Logger:       baseLogger.With("component", "outbox-relay"),
+		Logger:       baseLogger.With("module", "outbox-relay"),
 	}
 	go relay.Start(ctx)
 
@@ -246,13 +246,13 @@ func main() {
 		checker = c
 	}
 	if os.Getenv("AEGIS_DLQ_REPLAY_ENABLED") == "1" {
-		rh := &dlq.ReplayHandler{JS: js, Checker: checker, Logger: baseLogger.With("component", "dlq-replay"), Component: "aegis-databus"}
+		rh := &dlq.ReplayHandler{JS: js, Checker: checker, Logger: baseLogger.With("module", "dlq-replay"), Component: "aegis-databus"}
 		go rh.Start(ctx)
 		logger.Info("DLQ replay handler started")
 	}
 
 	// Health heartbeat (legacy subject aegis.health.databus).
-	hb := health.NewHeartbeat(nc, baseLogger.With("component", "health-heartbeat"))
+	hb := health.NewHeartbeat(nc, baseLogger.With("module", "health-heartbeat"))
 	go hb.Start(ctx)
 
 	// Standardized service heartbeat (aegis.heartbeat.service.databus).
@@ -262,7 +262,7 @@ func main() {
 	go serviceHB.Start(ctx)
 
 	// JetStream gauges for Grafana (stream messages, bytes, pending)
-	go jetstreammetrics.Start(ctx, nc, jetstreammetrics.DefaultPollInterval, baseLogger.With("component", "jetstream-metrics"))
+	go jetstreammetrics.Start(ctx, nc, jetstreammetrics.DefaultPollInterval, baseLogger.With("module", "jetstream-metrics"))
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)

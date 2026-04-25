@@ -21,7 +21,7 @@ const defaultAddr = ":8090"
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).
-		With("service", "databus", "component", "memory-stub")
+		With("component", "databus", "module", "memory-stub")
 
 	mock := memory.NewMockMemoryClient()
 	ctx := context.Background()

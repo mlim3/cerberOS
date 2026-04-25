@@ -23,7 +23,7 @@ type Heartbeat struct {
 func NewHeartbeat(nc *nats.Conn, logger *slog.Logger) *Heartbeat {
 	if logger == nil {
 		logger = slog.New(slog.NewJSONHandler(os.Stdout, nil)).
-			With("service", "databus", "component", "health-heartbeat")
+			With("component", "databus", "module", "health-heartbeat")
 	}
 	return &Heartbeat{nc: nc, logger: logger}
 }

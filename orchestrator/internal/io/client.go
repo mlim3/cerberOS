@@ -108,7 +108,7 @@ func New(baseURL string) *Client {
 		httpClient: &http.Client{
 			Timeout: 5 * time.Second,
 		},
-		logger: observability.LoggerWithComponent("io-client"),
+		logger: observability.LoggerWithModule("io-client"),
 	}
 }
 

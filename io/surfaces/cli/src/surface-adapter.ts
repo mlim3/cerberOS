@@ -22,8 +22,8 @@ function cliLog(level: 'info' | 'warn' | 'error', msg: string, fields: Record<st
   const line = JSON.stringify({
     time: new Date().toISOString(),
     level: level.toUpperCase(),
-    service: 'io-cli',
-    component: 'surface-adapter',
+    component: 'io',
+    module: 'cli-surface-adapter',
     msg,
     ...fields,
   })
