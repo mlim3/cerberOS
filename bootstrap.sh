@@ -326,10 +326,22 @@ cmd_up() {
   log "  Service token created."
 
   upsert_env_var "$ROOT/.env" "BAO_TOKEN" "$SERVICE_TOKEN"
+  export BAO_TOKEN="$SERVICE_TOKEN"
   log "  .env updated with BAO_TOKEN."
 
-  log "Restarting vault service..."
-  docker compose restart vault
+  log "Recreating vault service with updated BAO_TOKEN..."
+  docker compose up -d --no-deps --force-recreate vault
+
+  log "Waiting for vault engine to be ready..."
+  for _ in $(seq 1 30); do
+    if curl -sf "http://127.0.0.1:8000/healthz" -o /dev/null 2>/dev/null; then
+      log "  Vault engine ready."
+      break
+    fi
+    sleep 1
+  done
+  curl -sf "http://127.0.0.1:8000/healthz" -o /dev/null 2>/dev/null \
+    || die "Vault engine did not become ready on :8000"
 
   # Smoke test
   log "Running smoke test..."

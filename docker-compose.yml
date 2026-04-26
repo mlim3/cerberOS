@@ -31,14 +31,14 @@
 services:
   nats-1:
     image: nats:2.10-alpine
-    command: ["--jetstream", "--store_dir=/data", "-m", "8222"]
+    command: [ "--jetstream", "--store_dir=/data", "-m", "8222" ]
     volumes:
       - nats1-data:/data
     ports:
       - "4222:4222"
       - "8222:8222"
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
+      test: [ "CMD", "wget", "-qO-", "http://localhost:8222/healthz" ]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -61,6 +61,7 @@ services:
       NATS_CREDS_PATH: ""
       VAULT_ADDR: http://openbao:8200
       MEMORY_ENDPOINT: http://memory-api:8081
+      VAULT_ENGINE_URL: http://vault:8000 #for keys test
       IO_API_BASE: http://io:3001
       # Planner task timeout. The FIRST planner task on a fresh aegis-agents
       # process pays full cold start (Vault pre-authorize + process fork +
@@ -122,7 +123,7 @@ services:
       - ./scripts/init-openbao-db.sql:/docker-entrypoint-initdb.d/02-init-openbao-db.sql:ro
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-user} -d ${POSTGRES_DB:-memory_db}"]
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-user} -d ${POSTGRES_DB:-memory_db}" ]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -223,7 +224,7 @@ services:
     ports:
       - "9091:9091"
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9091/healthz"]
+      test: [ "CMD", "wget", "-q", "--spider", "http://127.0.0.1:9091/healthz" ]
       interval: 5s
       timeout: 3s
       retries: 36
@@ -296,8 +297,8 @@ services:
     volumes:
       - ./orchestrator/observability/tempo/config.yaml:/etc/tempo/config.yaml:ro
     ports:
-      - "3200:3200"   # Tempo HTTP (query)
-      - "4317:4317"   # OTLP gRPC (trace ingest)
+      - "3200:3200" # Tempo HTTP (query)
+      - "4317:4317" # OTLP gRPC (trace ingest)
     networks:
       - cerberos
 
@@ -327,12 +328,15 @@ services:
   simulator:
     build:
       context: ./agents-component
-    entrypoint: ["/app/simulator"]
+    entrypoint: [ "/app/simulator" ]
     depends_on:
       nats-1:
         condition: service_healthy
     environment:
       AEGIS_NATS_URL: nats://nats:4222
+      # Disable mock vault responses so the real orchestrator handles vault
+      # execute requests end-to-end (set to "true" when running without orchestrator).
+      SIMULATE_VAULT_EXECUTE: "false"
       # Observability: OTLP HTTP trace export (safe no-op if not using tracing here).
       OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
       OTEL_SERVICE_NAME: agents
@@ -394,5 +398,5 @@ volumes:
   nats1-data:
   postgres-data:
   promtail-positions:
-  # Reserved for future mTLS (see CA_PLAN.md):
-  # certs:
+    # Reserved for future mTLS (see CA_PLAN.md):
+    # certs:
