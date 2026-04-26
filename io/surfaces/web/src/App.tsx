@@ -998,21 +998,13 @@ function App() {
             </h1>
             {selectedTask && (
               <div className="header-meta">
-                <span className={`header-status-pill ${selectedTask.status}`}>
-                  {selectedTask.status === 'working' && (
-                    <span className="header-heartbeat-dot"></span>
-                  )}
+                <span className={`header-status-dot ${selectedTask.status}`}></span>
+                <span className="header-status-text">
                   {selectedTask.status === 'awaiting_feedback' && 'Awaiting feedback'}
-                  {selectedTask.status === 'working' && 'In progress'}
-                  {selectedTask.status === 'completed' && 'Completed — ask anything to continue'}
-                </span>
-                <span className="header-eta">
-                  ETA: {selectedTask.expectedNextInput}
+                  {selectedTask.status === 'working' && 'Working'}
+                  {selectedTask.status === 'completed' && 'Completed'}
                 </span>
               </div>
-            )}
-            {selectedTask && (
-              <p className="header-last-update">{selectedTask.lastUpdate}</p>
             )}
           </div>
           <SettingsButton

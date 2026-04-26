@@ -5,27 +5,38 @@
 }
 
 :root {
-  /* GitHub Pages - arthur theme palette */
-  --bg-dark: #1c1c1c;
-  --bg-sidebar: #232323;
-  --bg-main: #1c1c1c;
-  --bg-card: #232323;
-  --bg-primary: #1c1c1c;
-  --bg-secondary: #232323;
-  --bg-tertiary: #232323;
+  /* Minimalist dark palette */
+  --bg-dark: #141414;
+  --bg-sidebar: #181818;
+  --bg-main: #141414;
+  --bg-card: #1e1e1e;
+  --bg-primary: #141414;
+  --bg-secondary: #1a1a1a;
+  --bg-tertiary: #1e1e1e;
   --accent: #6495ed;
   --accent-hover: #7eb3ff;
   --text-primary: #ddeedd;
   --text-secondary: #887766;
   --text-muted: #665544;
-  --border: 1px solid rgba(100, 149, 237, 0.3);
+  --border: 1px solid rgba(255, 255, 255, 0.04);
+  --border-subtle: 1px solid rgba(255, 255, 255, 0.06);
   --warning: #a89078;
-  --warning-bg: rgba(168, 144, 120, 0.12);
+  --warning-bg: rgba(168, 144, 120, 0.08);
   --success: #7ee787;
   --stuck: #9a8595;
-  --stuck-bg: rgba(154, 133, 149, 0.12);
-  --sidebar-width: 340px;
-  --header-height: 56px;
+  --stuck-bg: rgba(154, 133, 149, 0.08);
+  --sidebar-width: 260px;
+  --header-height: 40px;
+
+  /* Spacing scale */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+  --sp-7: 40px;
+  --sp-8: 64px;
 }
 
 html[data-font-scale="large"] {
@@ -35,7 +46,8 @@ html[data-font-scale="large"] {
 html[data-high-contrast="true"] {
   --text-primary: #ffffff;
   --text-secondary: #c0c0c0;
-  --border: 1px solid rgba(100, 149, 237, 0.5);
+  --border: 1px solid rgba(255, 255, 255, 0.08);
+  --border-subtle: 1px solid rgba(255, 255, 255, 0.12);
 }
 
 body {
