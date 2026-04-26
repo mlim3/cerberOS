@@ -383,6 +383,7 @@ function App() {
   }, [DEMO_MODE, selectedTaskId])
 
   // Orchestrator → IO push stream (SSE) for status + credential_request
+  const activeOrchestratorTaskId = tasks.find(t => t.id === selectedTaskId)?.currentTaskId
   useEffect(() => {
     if (!orchestratorSseEnabled()) return
 
@@ -428,9 +429,8 @@ function App() {
       }
     }
 
-    const activeTaskId = tasks.find(t => t.id === selectedTaskId)?.currentTaskId
-    if (!activeTaskId) return
-    const unsub = subscribeOrchestratorTaskStream(activeTaskId, {
+    if (!activeOrchestratorTaskId) return
+    const unsub = subscribeOrchestratorTaskStream(activeOrchestratorTaskId, {
       onOpen: () => {
         if (!cancelled) setUseMockHeartbeat(false)
       },
@@ -444,7 +444,7 @@ function App() {
       cancelled = true
       unsub()
     }
-  }, [selectedTaskId])
+  }, [selectedTaskId, activeOrchestratorTaskId])
 
   // Offline / API-down: still show credential demo for task 13 (matches IO API demo push)
   useEffect(() => {
