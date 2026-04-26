@@ -19,12 +19,14 @@
 //   - INBOUND:  aegis.orchestrator.task.accepted
 //   - INBOUND:  aegis.orchestrator.task.result
 //   - INBOUND:  aegis.orchestrator.task.failed
+//   - INBOUND:  aegis.orchestrator.agent.spawn.request
 //   - OUTBOUND: aegis.orchestrator.status.events
 //   - OUTBOUND: aegis.orchestrator.errors
 //   - OUTBOUND: aegis.orchestrator.audit.events
 //   - OUTBOUND: aegis.orchestrator.metrics
 //   - OUTBOUND: aegis.orchestrator.tasks.deadletter
 //   - OUTBOUND: aegis.agents.task.inbound
+//   - OUTBOUND: aegis.agents.agent.spawn.response
 //   - OUTBOUND: aegis.agents.capability.query
 //   - OUTBOUND: aegis.agents.lifecycle.terminate
 //   - OUTBOUND: aegis.agents.tasks.cancel
@@ -56,7 +58,9 @@ const (
 	TopicPlanDecision            = "aegis.orchestrator.plan.decision"
 	TopicAgentStateWrite         = "aegis.orchestrator.state.write"
 	TopicAgentStateReadRequest   = "aegis.orchestrator.state.read.request"
+	TopicAgentSpawnRequest       = "aegis.orchestrator.agent.spawn.request"
 	TopicAgentTasksInbound       = "aegis.agents.task.inbound"
+	TopicAgentSpawnResponse      = "aegis.agents.agent.spawn.response"
 	TopicCapabilityQuery         = "aegis.agents.capability.query"
 	TopicAgentTerminate          = "aegis.agents.lifecycle.terminate"
 	TopicTaskCancel              = "aegis.agents.tasks.cancel"
@@ -101,6 +105,10 @@ type CredentialRequestHandler func(agentID, taskID, requestID, keyName, label st
 // decision for a proposed execution plan. Registered by main.go → Dispatcher.
 type PlanDecisionHandler func(ctx context.Context, decision types.PlanDecision) error
 
+// AgentSpawnHandler is called when a parent agent asks the Orchestrator to
+// route a child task through the normal Agents task.inbound path.
+type AgentSpawnHandler func(ctx context.Context, req types.AgentSpawnRequest) error
+
 // ── Gateway ───────────────────────────────────────────────────────────────────
 
 // Gateway is M1: Communications Gateway.
@@ -113,6 +121,7 @@ type Gateway struct {
 	taskResultHandler        TaskResultHandler
 	credentialRequestHandler CredentialRequestHandler
 	planDecisionHandler      PlanDecisionHandler
+	agentSpawnHandler        AgentSpawnHandler
 
 	// pendingCapabilityQueries tracks in-flight capability query requests.
 	// key: query_id, value: chan *types.CapabilityResponse
@@ -168,6 +177,12 @@ func (g *Gateway) RegisterPlanDecisionHandler(h PlanDecisionHandler) {
 	g.planDecisionHandler = h
 }
 
+// RegisterAgentSpawnHandler registers the callback for parent-agent child-task
+// spawn requests. Optional; if unset, incoming requests are logged and dropped.
+func (g *Gateway) RegisterAgentSpawnHandler(h AgentSpawnHandler) {
+	g.agentSpawnHandler = h
+}
+
 // Start subscribes to all inbound NATS topics and begins message processing.
 // Must be called after all handlers are registered.
 func (g *Gateway) Start() error {
@@ -201,6 +216,9 @@ func (g *Gateway) Start() error {
 	if err := g.nats.Subscribe(TopicAgentStateReadRequest, g.handleRawStateReadRequest); err != nil {
 		return fmt.Errorf("subscribe %s: %w", TopicAgentStateReadRequest, err)
 	}
+	if err := g.nats.Subscribe(TopicAgentSpawnRequest, g.handleRawAgentSpawnRequest); err != nil {
+		return fmt.Errorf("subscribe %s: %w", TopicAgentSpawnRequest, err)
+	}
 	observability.LogFromContext(observability.WithModule(context.Background(), "comms_gateway")).
 		Info("gateway started — subscribed to inbound topics", "node_id", g.nodeID)
 	return nil
@@ -232,6 +250,9 @@ func (g *Gateway) handleRawInboundTask(subject string, data []byte) error {
 		observability.LogFromContext(ctx).Warn("failed to deserialize user_task payload", "error", err)
 		_ = g.publishDeadLetter(data, fmt.Sprintf("payload deserialize error: %v", err))
 		return fmt.Errorf("deserialize user_task: %w", err)
+	}
+	if task.TraceID == "" {
+		task.TraceID = envelope.TraceID
 	}
 
 	ctx := extractOrCreateCtx(envelope, "comms_gateway")
@@ -511,6 +532,46 @@ func (g *Gateway) handleRawPlanDecision(subject string, data []byte) error {
 	return g.planDecisionHandler(ctx, payload)
 }
 
+// handleRawAgentSpawnRequest handles aegis.orchestrator.agent.spawn.request.
+// Parent agents use this to ask the Orchestrator to route a child task to an
+// agent with a different skill domain. The Dispatcher validates parent context
+// and publishes the eventual AgentSpawnResponse.
+func (g *Gateway) handleRawAgentSpawnRequest(subject string, data []byte) error {
+	envelope, err := validateEnvelope(data)
+	if err != nil {
+		observability.LogFromContext(observability.WithModule(context.Background(), "comms_gateway")).
+			Warn("rejected malformed agent.spawn.request envelope", "error", err)
+		return err
+	}
+
+	var req types.AgentSpawnRequest
+	if err := json.Unmarshal(envelope.Payload, &req); err != nil {
+		ctx := extractOrCreateCtx(envelope, "comms_gateway")
+		observability.LogFromContext(ctx).Warn("failed to deserialize agent.spawn.request", "error", err)
+		return fmt.Errorf("deserialize agent.spawn.request: %w", err)
+	}
+	if req.TraceID == "" && strings.TrimSpace(envelope.TraceID) != "" {
+		req.TraceID = strings.TrimSpace(envelope.TraceID)
+	}
+	if req.RequestID == "" {
+		req.RequestID = envelope.CorrelationID
+	}
+
+	ctx := extractOrCreateCtx(envelope, "comms_gateway")
+	if req.ParentTaskID != "" {
+		ctx = observability.WithTaskID(ctx, req.ParentTaskID)
+	}
+
+	if g.agentSpawnHandler == nil {
+		observability.LogFromContext(ctx).Warn("agent.spawn.request received but no handler registered",
+			"request_id", req.RequestID,
+			"parent_agent_id", req.ParentAgentID,
+		)
+		return nil
+	}
+	return g.agentSpawnHandler(ctx, req)
+}
+
 // ── Agent Memory Bridge ───────────────────────────────────────────────────────
 //
 // handleRawStateWrite receives aegis.orchestrator.state.write messages published
@@ -649,6 +710,8 @@ func (g *Gateway) PublishTaskResult(ctx context.Context, callbackTopic string, r
 // PublishTaskSpec dispatches a validated task.inbound request to the Agents
 // Component. The internal TaskSpec is adapted to the agents-component schema.
 func (g *Gateway) PublishTaskSpec(ctx context.Context, spec types.TaskSpec) error {
+	traceID := firstNonEmpty(observability.TraceIDFrom(ctx), spec.TraceID, spec.OrchestratorTaskRef)
+	ctx = observability.WithTraceID(ctx, traceID)
 	wire := struct {
 		TaskID         string            `json:"task_id"`
 		RequiredSkills []string          `json:"required_skills"`
@@ -662,7 +725,7 @@ func (g *Gateway) PublishTaskSpec(ctx context.Context, spec types.TaskSpec) erro
 		RequiredSkills: spec.RequiredSkillDomains,
 		Instructions:   buildAgentInstructions(spec),
 		Metadata:       buildAgentMetadata(spec),
-		TraceID:        observability.TraceIDFrom(ctx),
+		TraceID:        traceID,
 		UserContextID:  spec.UserContextID,
 		ConversationID: spec.ConversationID,
 	}
@@ -672,6 +735,8 @@ func (g *Gateway) PublishTaskSpec(ctx context.Context, spec types.TaskSpec) erro
 // PublishCapabilityQuery sends a capability query and waits for the response.
 // Blocks up to CapabilityQueryTimeout. Returns error on timeout (§FR-ALC-01).
 func (g *Gateway) PublishCapabilityQuery(ctx context.Context, query types.CapabilityQuery) (*types.CapabilityResponse, error) {
+	traceID := firstNonEmpty(observability.TraceIDFrom(ctx), query.TraceID, query.OrchestratorTaskRef)
+	ctx = observability.WithTraceID(ctx, traceID)
 	responseCh := make(chan *types.CapabilityResponse, 1)
 	queryID := query.OrchestratorTaskRef
 	g.pendingCapabilityQueries.Store(queryID, responseCh)
@@ -684,7 +749,7 @@ func (g *Gateway) PublishCapabilityQuery(ctx context.Context, query types.Capabi
 	}{
 		QueryID: queryID,
 		Domains: query.RequiredSkillDomains,
-		TraceID: observability.TraceIDFrom(ctx),
+		TraceID: traceID,
 	}
 
 	if err := g.publishEnvelope(ctx, TopicCapabilityQuery, "capability.query", queryID, wire); err != nil {
@@ -762,6 +827,12 @@ func (g *Gateway) PublishMetrics(metrics types.MetricsPayload) error {
 // PublishAuditEvent emits an audit event to aegis.orchestrator.audit.events (§11.5).
 func (g *Gateway) PublishAuditEvent(ctx context.Context, event types.AuditEvent) error {
 	return g.publishEnvelope(ctx, TopicAuditEvents, "audit_event", event.OrchestratorTaskRef, event)
+}
+
+// PublishAgentSpawnResponse returns a completed child-agent result to the
+// requesting parent agent.
+func (g *Gateway) PublishAgentSpawnResponse(ctx context.Context, resp types.AgentSpawnResponse) error {
+	return g.publishEnvelope(ctx, TopicAgentSpawnResponse, "agent.spawn.response", resp.RequestID, resp)
 }
 
 // ── Envelope Helpers ──────────────────────────────────────────────────────────

@@ -46,6 +46,7 @@ type gatewayMock struct {
 	TaskSpecCalls     []types.TaskSpec
 	TaskResultCalls   []types.TaskResult
 	StatusUpdateCalls []types.StatusResponse
+	SpawnResponses    []types.AgentSpawnResponse
 
 	PublishTaskSpecError error
 	PublishAcceptedError error
@@ -74,6 +75,11 @@ func (g *gatewayMock) PublishTaskSpec(_ context.Context, spec types.TaskSpec) er
 
 func (g *gatewayMock) PublishStatusUpdate(_ context.Context, _ string, s types.StatusResponse) error {
 	g.StatusUpdateCalls = append(g.StatusUpdateCalls, s)
+	return nil
+}
+
+func (g *gatewayMock) PublishAgentSpawnResponse(_ context.Context, r types.AgentSpawnResponse) error {
+	g.SpawnResponses = append(g.SpawnResponses, r)
 	return nil
 }
 
@@ -914,6 +920,95 @@ func TestGetActiveTasks_ReflectsInFlightTasks(t *testing.T) {
 
 	if len(d.GetActiveTasks()) != 1 {
 		t.Fatalf("active tasks = %d, want 1 after first completion", len(d.GetActiveTasks()))
+	}
+}
+
+// ── Agent-as-Tool Child Spawns ────────────────────────────────────────────────
+
+func TestHandleAgentSpawnRequest_DispatchesChildTaskAndReturnsResult(t *testing.T) {
+	d, gw, _, _, exec, _ := newDispatcher(t)
+	parent := validTask("550e8400-e29b-41d4-a716-446655440090")
+	if err := d.HandleInboundTask(context.Background(), parent); err != nil {
+		t.Fatalf("HandleInboundTask() error = %v", err)
+	}
+	before := len(gw.TaskSpecCalls)
+
+	req := types.AgentSpawnRequest{
+		RequestID:      "spawn-req-1",
+		ParentAgentID:  "agent-parent",
+		ParentTaskID:   parent.TaskID,
+		RequiredSkills: []string{"web"},
+		Instructions:   "Fetch and summarize https://example.com",
+		TimeoutSeconds: 45,
+		TraceID:        "trace-spawn",
+		UserContextID:  "ctx-1",
+	}
+	if err := d.HandleAgentSpawnRequest(context.Background(), req); err != nil {
+		t.Fatalf("HandleAgentSpawnRequest() error = %v", err)
+	}
+	if len(gw.TaskSpecCalls) != before+1 {
+		t.Fatalf("TaskSpecCalls = %d, want %d", len(gw.TaskSpecCalls), before+1)
+	}
+	child := gw.TaskSpecCalls[len(gw.TaskSpecCalls)-1]
+	if child.Metadata["task_kind"] != "agent_spawn_child" {
+		t.Fatalf("child task_kind = %q", child.Metadata["task_kind"])
+	}
+	if child.Metadata["agent_spawn_request_id"] != req.RequestID {
+		t.Fatalf("agent_spawn_request_id = %q", child.Metadata["agent_spawn_request_id"])
+	}
+	if child.UserID != parent.UserID {
+		t.Fatalf("child UserID = %q, want %q", child.UserID, parent.UserID)
+	}
+	if child.RequiredSkillDomains[0] != "web" {
+		t.Fatalf("child required skills = %v", child.RequiredSkillDomains)
+	}
+
+	result := types.TaskResult{
+		OrchestratorTaskRef: child.OrchestratorTaskRef,
+		TaskID:              child.TaskID,
+		AgentID:             "agent-child",
+		Success:             true,
+		Result:              json.RawMessage(`"child says done"`),
+		CompletedAt:         time.Now().UTC(),
+	}
+	if err := d.HandleTaskResult(context.Background(), result); err != nil {
+		t.Fatalf("HandleTaskResult(child) error = %v", err)
+	}
+	if len(gw.SpawnResponses) != 1 {
+		t.Fatalf("SpawnResponses = %d, want 1", len(gw.SpawnResponses))
+	}
+	resp := gw.SpawnResponses[0]
+	if resp.RequestID != req.RequestID || resp.ParentAgentID != req.ParentAgentID {
+		t.Fatalf("spawn response correlation mismatch: %+v", resp)
+	}
+	if resp.Status != "success" || resp.ChildAgentID != "agent-child" {
+		t.Fatalf("spawn response = %+v, want success from child", resp)
+	}
+	if len(exec.ResultCalls) != 0 {
+		t.Fatalf("child spawn result must not be routed to plan executor; got %d calls", len(exec.ResultCalls))
+	}
+}
+
+func TestHandleAgentSpawnRequest_UnknownParentFailsFast(t *testing.T) {
+	d, gw, _, _, _, _ := newDispatcher(t)
+	req := types.AgentSpawnRequest{
+		RequestID:      "spawn-req-missing-parent",
+		ParentAgentID:  "agent-parent",
+		ParentTaskID:   "missing-parent-task",
+		RequiredSkills: []string{"web"},
+		Instructions:   "Do work",
+	}
+	if err := d.HandleAgentSpawnRequest(context.Background(), req); err != nil {
+		t.Fatalf("HandleAgentSpawnRequest() error = %v", err)
+	}
+	if len(gw.TaskSpecCalls) != 0 {
+		t.Fatalf("TaskSpecCalls = %d, want 0", len(gw.TaskSpecCalls))
+	}
+	if len(gw.SpawnResponses) != 1 {
+		t.Fatalf("SpawnResponses = %d, want 1", len(gw.SpawnResponses))
+	}
+	if gw.SpawnResponses[0].Status != "failed" || gw.SpawnResponses[0].ErrorCode != "UNKNOWN_PARENT_TASK" {
+		t.Fatalf("spawn failure response = %+v", gw.SpawnResponses[0])
 	}
 }
 

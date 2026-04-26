@@ -205,6 +205,7 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 	gw.RegisterAgentStatusHandler(taskMonitor.HandleAgentStatusUpdate)
 	gw.RegisterTaskResultHandler(taskDispatcher.HandleTaskResult)
 	gw.RegisterPlanDecisionHandler(taskDispatcher.HandlePlanDecision)
+	gw.RegisterAgentSpawnHandler(taskDispatcher.HandleAgentSpawnRequest)
 
 	// Forward agent user_input credential requests to the IO Component.
 	gw.RegisterCredentialRequestHandler(func(agentID, taskID, requestID, keyName, label string) error {

@@ -119,6 +119,26 @@ func New(
 	}
 }
 
+// TaskStateForSubtask resolves the top-level task state for an active subtask
+// orchestrator_task_ref. The Dispatcher uses this to route agent-spawn requests
+// from subtask agents without trusting user_id or policy fields from the agent.
+func (e *PlanExecutor) TaskStateForSubtask(orchRef string) (*types.TaskState, bool) {
+	planIDVal, ok := e.orchRefToPlan.Load(orchRef)
+	if !ok {
+		return nil, false
+	}
+	planID, _ := planIDVal.(string)
+	execVal, ok := e.activePlans.Load(planID)
+	if !ok {
+		return nil, false
+	}
+	exec, _ := execVal.(*planExecution)
+	if exec == nil || exec.ts == nil {
+		return nil, false
+	}
+	return exec.ts, true
+}
+
 // ── Execute — entry point from Task Dispatcher ────────────────────────────────
 
 // Execute initializes all subtasks as PENDING and dispatches those with no dependencies.

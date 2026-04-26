@@ -55,8 +55,8 @@ func newGateway(t *testing.T) (*gateway.Gateway, *mocks.NATSMock) {
 func TestGatewayStart_SubscribesToInboundTopics(t *testing.T) {
 	_, nats := newGateway(t)
 
-	if nats.SubscribeCallCount != 7 {
-		t.Fatalf("SubscribeCallCount = %d, want 7 (tasks.inbound, agent.status, capability.response, task.accepted, task.result, task.failed, credential.request)", nats.SubscribeCallCount)
+	if nats.SubscribeCallCount != 11 {
+		t.Fatalf("SubscribeCallCount = %d, want 11 inbound topics", nats.SubscribeCallCount)
 	}
 }
 
@@ -153,7 +153,7 @@ func TestHandleInboundTask_EnvelopeTraceID_MergedIntoUserTask(t *testing.T) {
 	gw, nats := newGateway(t)
 
 	var received types.UserTask
-	gw.RegisterTaskHandler(func(task types.UserTask) error {
+	gw.RegisterTaskHandler(func(_ context.Context, task types.UserTask) error {
 		received = task
 		return nil
 	})
@@ -203,6 +203,39 @@ func TestHandleInboundTask_NoHandlerRegistered_ReturnsError(t *testing.T) {
 	err := nats.Deliver(gateway.TopicTasksInbound, data)
 	if err == nil {
 		t.Fatal("Deliver() error = nil, want no handler error")
+	}
+}
+
+func TestHandleAgentSpawnRequest_ValidEnvelope_CallsSpawnHandler(t *testing.T) {
+	gw, nats := newGateway(t)
+
+	var received types.AgentSpawnRequest
+	gw.RegisterAgentSpawnHandler(func(_ context.Context, req types.AgentSpawnRequest) error {
+		received = req
+		return nil
+	})
+
+	req := types.AgentSpawnRequest{
+		RequestID:      "spawn-1",
+		ParentAgentID:  "agent-parent",
+		ParentTaskID:   "task-parent",
+		RequiredSkills: []string{"research"},
+		Instructions:   "Find supporting references.",
+	}
+	data := newEnvelopedMessage(t, "agent.spawn.request", "spawn-1", req)
+
+	if err := nats.Deliver(gateway.TopicAgentSpawnRequest, data); err != nil {
+		t.Fatalf("Deliver() error = %v", err)
+	}
+
+	if received.RequestID != "spawn-1" {
+		t.Fatalf("received.RequestID = %q, want spawn-1", received.RequestID)
+	}
+	if received.ParentTaskID != "task-parent" {
+		t.Fatalf("received.ParentTaskID = %q, want task-parent", received.ParentTaskID)
+	}
+	if len(received.RequiredSkills) != 1 || received.RequiredSkills[0] != "research" {
+		t.Fatalf("received.RequiredSkills = %v, want [research]", received.RequiredSkills)
 	}
 }
 
@@ -329,6 +362,51 @@ func TestPublishTaskSpec_PublishesToAgentsTopic(t *testing.T) {
 	}
 }
 
+func TestPublishAgentSpawnResponse_PublishesToSpawnResponseTopic(t *testing.T) {
+	gw, nats := newGateway(t)
+
+	resp := types.AgentSpawnResponse{
+		RequestID:     "spawn-1",
+		ParentAgentID: "agent-parent",
+		ChildAgentID:  "task-child",
+		Status:        "success",
+		Result:        "done",
+		TraceID:       "0123456789abcdef0123456789abcdef",
+	}
+
+	ctx := observability.WithTraceID(context.Background(), resp.TraceID)
+	if err := gw.PublishAgentSpawnResponse(ctx, resp); err != nil {
+		t.Fatalf("PublishAgentSpawnResponse() error = %v", err)
+	}
+
+	msgs := nats.Published[gateway.TopicAgentSpawnResponse]
+	if len(msgs) != 1 {
+		t.Fatalf("published spawn responses = %d, want 1", len(msgs))
+	}
+
+	var envelope types.MessageEnvelope
+	if err := json.Unmarshal(msgs[0], &envelope); err != nil {
+		t.Fatalf("invalid envelope: %v", err)
+	}
+	if envelope.MessageType != "agent.spawn.response" {
+		t.Fatalf("envelope.MessageType = %q, want agent.spawn.response", envelope.MessageType)
+	}
+	if envelope.CorrelationID != "spawn-1" {
+		t.Fatalf("envelope.CorrelationID = %q, want spawn-1", envelope.CorrelationID)
+	}
+	if envelope.TraceID != resp.TraceID {
+		t.Fatalf("envelope.TraceID = %q, want %q", envelope.TraceID, resp.TraceID)
+	}
+
+	var decoded types.AgentSpawnResponse
+	if err := json.Unmarshal(envelope.Payload, &decoded); err != nil {
+		t.Fatalf("decode response payload error = %v", err)
+	}
+	if decoded.Result != "done" {
+		t.Fatalf("decoded.Result = %q, want done", decoded.Result)
+	}
+}
+
 func TestPublishTaskSpec_WirePrefersW3CTraceID(t *testing.T) {
 	gw, nats := newGateway(t)
 
@@ -343,7 +421,7 @@ func TestPublishTaskSpec_WirePrefersW3CTraceID(t *testing.T) {
 		TraceID:              "0123456789abcdef0123456789abcdef",
 	}
 
-	if err := gw.PublishTaskSpec(spec); err != nil {
+	if err := gw.PublishTaskSpec(context.Background(), spec); err != nil {
 		t.Fatalf("PublishTaskSpec() error = %v", err)
 	}
 
@@ -389,7 +467,7 @@ func TestPublishCapabilityQuery_MessageEnvelopeTraceID(t *testing.T) {
 		RequiredSkillDomains: []string{"web"},
 		TraceID:              traceID,
 	}
-	if _, err := gw.PublishCapabilityQuery(query); err != nil {
+	if _, err := gw.PublishCapabilityQuery(context.Background(), query); err != nil {
 		t.Fatalf("PublishCapabilityQuery() error = %v", err)
 	}
 
@@ -527,7 +605,7 @@ func TestPublishError_NATSDisconnected_ReturnsError(t *testing.T) {
 //
 // Scenarios covered (in order):
 //
-//	Step 1 — Startup:            Gateway subscribes to 3 inbound topics; IsConnected = true
+//	Step 1 — Startup:            Gateway subscribes to inbound topics; IsConnected = true
 //	Step 2 — Inbound Task:       valid envelope → envelope validated → task handler called
 //	Step 3 — Dead-Letter:        malformed envelope → rejected and dead-lettered; handler not called
 //	Step 4 — Agent Status:       valid agent_status_update → status handler called
@@ -554,18 +632,15 @@ func TestGatewayDemoFlow(t *testing.T) {
 	t.Log("demo setup: no real NATS connection — all publish/subscribe calls go through the mock")
 
 	// ── Step 1: Startup — Subscribe to inbound topics ─────────────────────
-	// The Gateway must subscribe to exactly 3 inbound topics on Start():
-	//   aegis.orchestrator.tasks.inbound
-	//   aegis.agents.status.events
-	//   aegis.agents.capability.response
+	// The Gateway subscribes to all orchestrator-facing inbound topics on Start().
 	t.Log("─────────────────────────────────────────────────────")
 	t.Log("step 1: startup — calling gw.Start() and verifying subscriptions")
 
 	if err := gw.Start(); err != nil {
 		t.Fatalf("step 1: Start() error = %v", err)
 	}
-	if nats.SubscribeCallCount != 7 {
-		t.Fatalf("step 1: SubscribeCallCount = %d, want 7", nats.SubscribeCallCount)
+	if nats.SubscribeCallCount != 11 {
+		t.Fatalf("step 1: SubscribeCallCount = %d, want 11", nats.SubscribeCallCount)
 	}
 	if !gw.IsConnected() {
 		t.Fatal("step 1: IsConnected() = false, want true")
