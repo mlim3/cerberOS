@@ -326,6 +326,7 @@ cmd_up() {
   log "  Service token created."
 
   upsert_env_var "$ROOT/.env" "BAO_TOKEN" "$SERVICE_TOKEN"
+  BAO_TOKEN="$SERVICE_TOKEN"
   log "  .env updated with BAO_TOKEN."
 
   # Seed application secrets into OpenBao.
@@ -355,7 +356,7 @@ cmd_up() {
   fi
 
   log "Restarting vault service (recreating to pick up BAO_TOKEN)..."
-  docker compose up --detach vault
+  docker compose up --detach --force-recreate vault
 
   # Smoke test
   log "Running smoke test..."
