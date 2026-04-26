@@ -252,6 +252,7 @@ func (g *Gateway) handleRawInboundTask(subject string, data []byte) error {
 
 	ctx := extractOrCreateCtx(envelope, "comms_gateway")
 	ctx = observability.WithTaskID(ctx, task.TaskID)
+	ctx = observability.WithConversationID(ctx, task.ConversationID)
 
 	ctx, span := observability.StartSpan(ctx, "task_received")
 	defer span.End()

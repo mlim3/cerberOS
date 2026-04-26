@@ -102,7 +102,7 @@ services:
       STT_PROVIDER: disabled
       MEMORY_API_BASE: http://memory-api:8081
       OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
-      OTEL_SERVICE_NAME: io-api
+      OTEL_SERVICE_NAME: io
     restart: unless-stopped
     networks:
       - cerberos
@@ -155,7 +155,7 @@ services:
       NATS_URL: nats://nats:4222
       # Observability: OTLP HTTP trace export to Tempo (same pattern as io-api).
       OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
-      OTEL_SERVICE_NAME: memory-api
+      OTEL_SERVICE_NAME: memory
     ports:
       - "8081:8081"
     restart: unless-stopped
@@ -220,7 +220,7 @@ services:
       AEGIS_MEMORY_URL: http://memory-api:8081/v1/memory
       # Observability: OTLP HTTP export (databus uses otlptracehttp in pkg/telemetry).
       OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
-      OTEL_SERVICE_NAME: aegis-databus
+      OTEL_SERVICE_NAME: databus
     ports:
       - "9091:9091"
     healthcheck:
@@ -339,7 +339,7 @@ services:
       SIMULATE_VAULT_EXECUTE: "false"
       # Observability: OTLP HTTP trace export (safe no-op if not using tracing here).
       OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
-      OTEL_SERVICE_NAME: aegis-simulator
+      OTEL_SERVICE_NAME: agents
     restart: unless-stopped
     networks:
       - cerberos
@@ -377,7 +377,7 @@ services:
       # Observability: OTLP HTTP export continues the trace from Orchestrator
       # via TaskSpec.TraceID. Disabled automatically when endpoint is unset.
       OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
-      OTEL_SERVICE_NAME: aegis-agents
+      OTEL_SERVICE_NAME: agents
     ports:
       - "9190:9090"
     restart: unless-stopped

@@ -31,11 +31,12 @@ import (
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil)).
-		With("service", "agents", "component", "aegis-agents")
+		With("component", "agents", "module", "aegis-agents")
+	slog.SetDefault(log)
 
 	cfg, err := config.Load()
 	if err != nil {
-		log.Error("config load failed", "error", err)
+		log.Error("config load failed", "error", err, "exit_code", 1)
 		os.Exit(1)
 	}
 

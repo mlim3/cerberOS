@@ -154,7 +154,7 @@ func New(
 		monitor:  monitor,
 		executor: executor,
 		io:       io,
-		logger:   slog.Default().With("module", "dispatcher"),
+		logger:   observability.LoggerWithModule("dispatcher"),
 	}
 }
 
@@ -919,6 +919,7 @@ func ctxFromTaskState(ts *types.TaskState, module string) context.Context {
 		ctx = observability.WithTraceID(ctx, ts.TraceID)
 	}
 	ctx = observability.WithTaskID(ctx, ts.TaskID)
+	ctx = observability.WithConversationID(ctx, ts.ConversationID)
 	if ts.PlanID != "" {
 		ctx = observability.WithPlanID(ctx, ts.PlanID)
 	}

@@ -51,7 +51,7 @@ func main() {
 	defer cancel()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).
-		With("service", "vault", "component", "server")
+		With("component", "vault", "module", "server")
 
 	// Heartbeat emitter — non-fatal if NATS is unavailable.
 	if natsURL := os.Getenv("NATS_URL"); natsURL != "" {

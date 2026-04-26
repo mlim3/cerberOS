@@ -337,7 +337,8 @@ func newID() string {
 // ── main ──────────────────────────────────────────────────────────────────────
 
 func main() {
-	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	log := slog.New(slog.NewJSONHandler(os.Stdout, nil)).
+		With("component", "agents", "module", "simulator")
 
 	natsURL := os.Getenv("AEGIS_NATS_URL")
 	if natsURL == "" {

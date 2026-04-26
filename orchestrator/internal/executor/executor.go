@@ -447,6 +447,7 @@ func (e *PlanExecutor) checkPlanCompletion(exec *planExecution) {
 		planCtx = observability.WithTraceID(planCtx, exec.ts.TraceID)
 	}
 	planCtx = observability.WithTaskID(planCtx, exec.ts.TaskID)
+	planCtx = observability.WithConversationID(planCtx, exec.ts.ConversationID)
 	planCtx = observability.WithPlanID(planCtx, exec.plan.PlanID)
 	planCtx = observability.WithModule(planCtx, "plan_executor")
 	log := observability.LogFromContext(planCtx)

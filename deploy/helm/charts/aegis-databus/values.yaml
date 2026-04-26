@@ -1,0 +1,27 @@
+image:
+  repository: ghcr.io/mlim3/cerberos-aegis-databus
+  tag: latest
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+service:
+  port: 9091
+
+natsUrl: "nats://nats-1:4222"
+natsHttpUrl: "http://nats-1:8222"
+natsReplicas: "1"
+orchestratorUrl: "http://orchestrator:8080"
+memoryUrl: "http://memory-api:8081/v1/memory"
+
+observability:
+  otlpEndpoint: "http://tempo:4318"
+  serviceName: "aegis-databus"
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi

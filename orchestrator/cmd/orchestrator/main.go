@@ -17,7 +17,6 @@ package main
 
 import (
 	"context"
-	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -38,10 +37,10 @@ import (
 	ioclient "github.com/mlim3/cerberOS/orchestrator/internal/io"
 	memoryiface "github.com/mlim3/cerberOS/orchestrator/internal/memory"
 	"github.com/mlim3/cerberOS/orchestrator/internal/mocks"
-	"github.com/mlim3/cerberOS/orchestrator/internal/personalization"
 	"github.com/mlim3/cerberOS/orchestrator/internal/monitor"
 	natsclient "github.com/mlim3/cerberOS/orchestrator/internal/nats"
 	"github.com/mlim3/cerberOS/orchestrator/internal/observability"
+	"github.com/mlim3/cerberOS/orchestrator/internal/personalization"
 	"github.com/mlim3/cerberOS/orchestrator/internal/policy"
 	"github.com/mlim3/cerberOS/orchestrator/internal/recovery"
 	"github.com/mlim3/cerberOS/orchestrator/internal/types"
@@ -51,9 +50,8 @@ import (
 func main() {
 	cfg, err := loadRuntimeConfig()
 	if err != nil {
-		slog.New(slog.NewJSONHandler(os.Stdout, nil)).
-			With("service", "orchestrator", "component", "main").
-			Error("config load failed", "error", err)
+		observability.LoggerWithModule("main").
+			Error("config load failed", "error", err, "exit_code", 1)
 		os.Exit(1)
 	}
 
@@ -271,8 +269,7 @@ func loadRuntimeConfig() (*config.OrchestratorConfig, error) {
 	cfg, err := config.Load()
 	if err != nil {
 		cfg = demoConfig()
-		slog.New(slog.NewJSONHandler(os.Stdout, nil)).
-			With("service", "orchestrator", "component", "main").
+		observability.LoggerWithModule("main").
 			Warn("config incomplete, starting from demo defaults", "error", err)
 	}
 	applyEnvOverrides(cfg)

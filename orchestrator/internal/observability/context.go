@@ -16,11 +16,12 @@ import "context"
 type ctxKey int
 
 const (
-	traceIDKey   ctxKey = iota // trace_id — root correlation ID across all components
-	taskIDKey                  // task_id — user-facing task identifier
-	planIDKey                  // plan_id — execution plan identifier
-	subtaskIDKey               // subtask_id — individual subtask identifier
-	moduleKey                  // module — name of the module generating the log line
+	traceIDKey        ctxKey = iota // trace_id — root correlation ID across all components
+	taskIDKey                       // task_id — user-facing task identifier
+	conversationIDKey               // conversation_id — stable thread ID linking tasks in the same chat
+	planIDKey                       // plan_id — execution plan identifier
+	subtaskIDKey                    // subtask_id — individual subtask identifier
+	moduleKey                       // module — name of the module generating the log line
 )
 
 // WithTraceID returns a context carrying the given trace ID.
@@ -31,6 +32,16 @@ func WithTraceID(ctx context.Context, id string) context.Context {
 // WithTaskID returns a context carrying the given task ID.
 func WithTaskID(ctx context.Context, id string) context.Context {
 	return context.WithValue(ctx, taskIDKey, id)
+}
+
+// WithConversationID returns a context carrying the given conversation ID.
+// Empty IDs are dropped so callers can pass through optional values without a
+// guard at every call site.
+func WithConversationID(ctx context.Context, id string) context.Context {
+	if id == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, conversationIDKey, id)
 }
 
 // WithPlanID returns a context carrying the given plan ID.
@@ -57,6 +68,12 @@ func TraceIDFrom(ctx context.Context) string {
 // TaskIDFrom extracts the task ID from the context, or "" if not set.
 func TaskIDFrom(ctx context.Context) string {
 	v, _ := ctx.Value(taskIDKey).(string)
+	return v
+}
+
+// ConversationIDFrom extracts the conversation ID from the context, or "" if not set.
+func ConversationIDFrom(ctx context.Context) string {
+	v, _ := ctx.Value(conversationIDKey).(string)
 	return v
 }
 

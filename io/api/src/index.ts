@@ -357,6 +357,8 @@ type AppEnv = {
   Variables: {
     traceId: string
     traceparent: string
+    taskId: string
+    conversationId: string
   }
 }
 
@@ -415,7 +417,8 @@ app.get('/api/tasks', (c) => {
 // Get status for a specific task
 app.get('/api/tasks/:taskId', (c) => {
   const taskId = c.req.param('taskId');
-  logFromContext(c, 'info', 'http', 'GET /api/tasks/:taskId', { task_id: taskId })
+  c.set('taskId', taskId)
+  logFromContext(c, 'info', 'http', 'GET /api/tasks/:taskId')
   const task = tasks.get(taskId);
   if (!task) {
     return c.json({ error: 'Task not found' }, 404);
@@ -461,11 +464,11 @@ app.post('/api/tasks', async (c) => {
   }
 
   const taskId = createdTask.taskId
+  c.set('taskId', taskId)
+  c.set('conversationId', createdTask.conversationId)
 
   logFromContext(c, 'info', 'http', 'POST /api/tasks', {
-    task_id: taskId,
     user_id: userId,
-    conversation_id: createdTask.conversationId,
   })
 
   const statusUpdate: StatusUpdate = {
@@ -501,9 +504,9 @@ app.post('/api/orchestrator/stream-events', async (c) => {
     return c.json({ error: 'invalid orchestrator stream event' }, 400);
   }
   const taskId = event.payload.taskId;
-  logFromContext(c, 'info', 'orchestrator', 'POST /api/orchestrator/stream-events', {
+  if (taskId) c.set('taskId', taskId)
+  logFromContext(c, 'info', 'orchestrator-proxy', 'POST /api/orchestrator/stream-events', {
     event_type: event.type,
-    task_id: taskId,
   })
   if (event.type === 'status') {
     tasks.set(taskId, event.payload);
@@ -548,8 +551,8 @@ app.post('/api/orchestrator/plan-decision', async (c) => {
     return c.json({ error: 'taskId and orchestratorTaskRef are required' }, 400)
   }
 
-  logFromContext(c, 'info', 'orchestrator', 'POST /api/orchestrator/plan-decision', {
-    task_id: taskId,
+  c.set('taskId', taskId)
+  logFromContext(c, 'info', 'orchestrator-proxy', 'POST /api/orchestrator/plan-decision', {
     orchestrator_task_ref: orchestratorTaskRef,
     approved,
   })
@@ -571,7 +574,6 @@ app.post('/api/orchestrator/plan-decision', async (c) => {
     })
   } catch (err) {
     logFromContext(c, 'error', 'nats', 'failed to publish plan_decision', {
-      task_id: taskId,
       err: String(err),
     })
     return c.json({ error: 'failed to publish decision' }, 502)
@@ -589,10 +591,10 @@ app.post('/api/chat', async (c) => {
   const body = (await c.req.json()) as SendMessageRequest;
   const { taskId, userId, content, conversationHistory, conversationId, required_skill_domains } = body as SendMessageRequest & { userId?: string; required_skill_domains?: string[] };
   const effectiveUserId = userId || requestUserId(c)
+  if (taskId) c.set('taskId', taskId)
+  if (conversationId) c.set('conversationId', conversationId)
   logFromContext(c, 'info', 'http', 'POST /api/chat', {
-    task_id: taskId,
     user_id: effectiveUserId,
-    conversation_id: conversationId,
     content_len: content.length,
     history_len: conversationHistory?.length,
   })
@@ -640,7 +642,7 @@ app.post('/api/chat', async (c) => {
       const isFollowUp = !conversationId && rawInput !== content
       await natsClient!.publishUserTask({
         task_id: taskId,
-        user_id: userId,
+        user_id: effectiveUserId,
         content,
         payload: { raw_input: rawInput },
         callback_topic: callbackTopicForTask(taskId),
@@ -650,15 +652,13 @@ app.post('/api/chat', async (c) => {
       })
       awaitingOrchestratorChat = true
       logFromContext(c, 'info', 'nats', 'published user_task', {
-        task_id: taskId,
         is_follow_up: isFollowUp,
-        has_conversation_id: !!conversationId,
         history_turns: conversationHistory?.length ?? 0,
         raw_input_len: rawInput.length,
       })
     } catch (err) {
       userTaskPublishError = String(err)
-      logFromContext(c, 'error', 'nats', 'failed to publish user_task', { task_id: taskId, err: userTaskPublishError })
+      logFromContext(c, 'error', 'nats', 'failed to publish user_task', { err: userTaskPublishError })
     }
   }
 
@@ -836,11 +836,13 @@ app.post('/api/chat', async (c) => {
 app.get('/api/logs/:taskId', async (c) => {
   const taskId = c.req.param('taskId');
   const userId = requestUserId(c)
-  logFromContext(c, 'info', 'http', 'GET /api/logs/:taskId', { task_id: taskId })
+  c.set('taskId', taskId)
+  logFromContext(c, 'info', 'http', 'GET /api/logs/:taskId')
   const task = await getTask(taskId, userId)
   if (!task) {
     return c.json({ logs: [] })
   }
+  c.set('conversationId', task.conversationId)
   const memoryLogs = await getConversationLogs(task.conversationId, { userId })
   const logs = memoryLogs.map(memoryToLogEntry)
   return c.json({ logs });
@@ -856,8 +858,8 @@ app.get('/api/conversations', async (c) => {
 app.get('/api/conversations/:conversationId/logs', async (c) => {
   const conversationId = c.req.param('conversationId')
   const userId = requestUserId(c)
+  c.set('conversationId', conversationId)
   logFromContext(c, 'info', 'http', 'GET /api/conversations/:conversationId/logs', {
-    conversation_id: conversationId,
     user_id: userId,
   })
   const memoryLogs = await getConversationLogs(conversationId, { userId })
@@ -885,8 +887,8 @@ app.post('/api/credential', async (c) => {
     value: string;
   };
   const { taskId, requestId, userId, keyName } = body;
+  c.set('taskId', taskId)
   logFromContext(c, 'info', 'http', 'POST /api/credential', {
-    task_id: taskId,
     request_id: requestId,
     user_id: userId,
     key_name: keyName,
@@ -953,7 +955,8 @@ app.post('/api/credential', async (c) => {
 
 app.get('/api/events/:taskId', (c) => {
   const taskId = c.req.param('taskId');
-  logFromContext(c, 'info', 'http', 'GET /api/events/:taskId', { task_id: taskId })
+  c.set('taskId', taskId)
+  logFromContext(c, 'info', 'http', 'GET /api/events/:taskId')
 
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
