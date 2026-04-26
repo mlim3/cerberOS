@@ -3,6 +3,7 @@ import { marked } from 'marked'
 import type { Task, CredentialRequest, CredentialRequestStatus } from '@cerberos/io-core'
 import type { UISettings } from './SettingsPanel'
 import CredentialRequestCard from './CredentialRequestCard'
+import ProgressIndicator from './ProgressIndicator'
 import { VoiceRecorder } from './VoiceRecorder'
 import './ChatWindow.css'
 import './VoiceRecorder.css'
@@ -151,6 +152,10 @@ function ChatWindow({
             </div>
           </div>
         )}
+        <ProgressIndicator
+          isActive={isStreaming || task.status === 'working'}
+          statusText={isStreaming ? undefined : task.lastUpdate}
+        />
         <div ref={messagesEndRef} />
       </div>
 
