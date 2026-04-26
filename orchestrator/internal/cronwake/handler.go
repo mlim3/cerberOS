@@ -125,10 +125,25 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := observability.WithModule(context.Background(), "cron_wake")
 	ctx = observability.WithTraceID(ctx, uuid.NewString())
 
+	log := observability.LogFromContext(ctx)
+	log.Info("cron wake received",
+		"task_id", task.TaskID,
+		"job_name", strings.TrimSpace(body.JobName),
+		"user_id", task.UserID,
+		"callback_topic", task.CallbackTopic,
+		"timeout_seconds", task.TimeoutSeconds,
+	)
+
 	if err := h.ingest.HandleInboundTask(ctx, task); err != nil {
+		log.Error("cron wake dispatch failed", "task_id", task.TaskID, "error", err)
 		http.Error(w, "dispatch failed", http.StatusBadGateway)
 		return
 	}
+
+	log.Info("cron wake dispatched",
+		"task_id", task.TaskID,
+		"job_name", strings.TrimSpace(body.JobName),
+	)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
