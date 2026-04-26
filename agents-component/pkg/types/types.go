@@ -303,12 +303,13 @@ type CrashSnapshot struct {
 // When SearchQuery is set the Memory Component runs a full-text search across
 // matching records and returns the top MaxResults entries (0 = server default).
 type MemoryReadRequest struct {
-	AgentID     string `json:"agent_id"`
-	DataType    string `json:"data_type,omitempty"`
-	ContextTag  string `json:"context_tag"`
-	TraceID     string `json:"trace_id"`
-	SearchQuery string `json:"search_query,omitempty"` // when set, triggers FTS search in the Memory Component
-	MaxResults  int    `json:"max_results,omitempty"`  // cap on search results; 0 = server default (3)
+	AgentID     string          `json:"agent_id"`
+	DataType    string          `json:"data_type,omitempty"`
+	ContextTag  string          `json:"context_tag"`
+	TraceID     string          `json:"trace_id"`
+	SearchQuery string          `json:"search_query,omitempty"` // when set, triggers FTS search in the Memory Component
+	MaxResults  int             `json:"max_results,omitempty"`  // cap on search results; 0 = server default (3)
+	QueryParams json.RawMessage `json:"query_params,omitempty"` // structured filter params for log queries (DataType="system_log")
 }
 
 // MemoryResponse is received from the Orchestrator carrying records returned

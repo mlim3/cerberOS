@@ -232,7 +232,7 @@ export function createNatsClient(config: NatsConfig): IONatsClient | null {
       const natsPayload = {
         task_id: task.task_id,
         user_id: task.user_id,
-        required_skill_domains: task.required_skill_domains ?? ['general'],
+        required_skill_domains: task.required_skill_domains ?? [],
         priority: task.priority ?? 5,
         // Runaway backstop for a whole task. Individual phases are already
         // bounded by tighter timers in the orchestrator:

@@ -17,6 +17,8 @@ import SettingsPanel, { defaultUISettings } from './components/SettingsPanel'
 import type { UISettings } from './components/SettingsPanel'
 import ActivityLog from './components/ActivityLog'
 import type { LogEntry } from './components/ActivityLog'
+import SkillActivityToast from './components/SkillActivityToast'
+import type { SkillToastItem } from './components/SkillActivityToast'
 import {
   streamOrchestratorReply,
   submitCredential,
@@ -293,6 +295,13 @@ function App() {
     Record<string, { preview: PlanPreview; status: PlanDecisionStatus; error?: string }>
   >({})
 
+  // Skill-activity toast state — populated by orchestrator 'skill_activity' SSE events.
+  const [skillToasts, setSkillToasts] = useState<SkillToastItem[]>([])
+
+  const dismissSkillToast = useCallback((id: string) => {
+    setSkillToasts(prev => prev.filter(t => t.id !== id))
+  }, [])
+
   const selectedTask = tasks.find(t => t.id === selectedTaskId)
 
   const addLogEntry = useCallback((entry: Omit<LogEntry, 'id' | 'timestamp'>) => {
@@ -425,6 +434,11 @@ function App() {
           ...prev,
           [p.taskId]: { preview: p, status: 'pending' },
         }))
+      } else if (ev.type === 'skill_activity' && uiSettings.showSkillToasts) {
+        setSkillToasts(prev => [
+          ...prev.slice(-9), // keep at most 10 toasts
+          { id: nextId(), activity: ev.payload, createdAt: Date.now() },
+        ])
       }
     }
 
@@ -1079,6 +1093,11 @@ function App() {
           isSubmitting={credentialRequests[activeCredentialTaskId].status === 'submitting'}
         />
       )}
+
+      <SkillActivityToast
+        toasts={skillToasts}
+        onDismiss={dismissSkillToast}
+      />
     </div>
   )
 }

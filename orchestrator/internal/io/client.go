@@ -22,9 +22,9 @@ import (
 
 // TaskStatus values match the IO component's TaskStatus type.
 const (
-	StatusWorking         = "working"
+	StatusWorking          = "working"
 	StatusAwaitingFeedback = "awaiting_feedback"
-	StatusCompleted       = "completed"
+	StatusCompleted        = "completed"
 )
 
 // streamEventsPath is the IO endpoint that accepts orchestrator-pushed events.
@@ -38,18 +38,18 @@ type statusEvent struct {
 }
 
 type statusPayload struct {
-	TaskID                   string  `json:"taskId"`
-	Status                   string  `json:"status"`
-	LastUpdate               string  `json:"lastUpdate"`
-	ExpectedNextInputMinutes *int    `json:"expectedNextInputMinutes"`
-	Timestamp                int64   `json:"timestamp"` // Unix ms
+	TaskID                   string `json:"taskId"`
+	Status                   string `json:"status"`
+	LastUpdate               string `json:"lastUpdate"`
+	ExpectedNextInputMinutes *int   `json:"expectedNextInputMinutes"`
+	Timestamp                int64  `json:"timestamp"` // Unix ms
 }
 
 // credentialRequestEvent is the envelope for a credential request pushed to IO.
 // Matches: { type: 'credential_request', payload: CredentialRequest } in io/core/src/types.ts
 type credentialRequestEvent struct {
-	Type    string                    `json:"type"`
-	Payload CredentialRequestPayload  `json:"payload"`
+	Type    string                   `json:"type"`
+	Payload CredentialRequestPayload `json:"payload"`
 }
 
 // planPreviewEvent is the envelope for a plan preview pushed to IO.
@@ -159,6 +159,35 @@ func (c *Client) PushCredentialRequest(req CredentialRequestPayload) error {
 		Payload: req,
 	}
 	return c.post(evt)
+}
+
+// SkillActivityPayload carries the data for a skill_activity SSE event pushed
+// to the IO Component. Matches the SkillActivity type in io/core/src/types.ts.
+type SkillActivityPayload struct {
+	TaskID         string `json:"taskId"`
+	AgentID        string `json:"agentId"`
+	Domain         string `json:"domain"`
+	Command        string `json:"command"`
+	ElapsedMS      int64  `json:"elapsedMs"`
+	VaultDelegated bool   `json:"vaultDelegated"`
+	Outcome        string `json:"outcome"`
+	Timestamp      int64  `json:"timestamp"` // Unix ms
+}
+
+// skillActivityEvent is the envelope for a skill_activity event pushed to IO.
+// Matches: { type: 'skill_activity', payload: SkillActivity } in io/core/src/types.ts
+type skillActivityEvent struct {
+	Type    string               `json:"type"`
+	Payload SkillActivityPayload `json:"payload"`
+}
+
+// PushSkillActivity notifies the IO Component of a notable skill invocation so
+// the UI can display a skill-activity toast. No-op when IO is disabled.
+func (c *Client) PushSkillActivity(payload SkillActivityPayload) error {
+	if c.Disabled() {
+		return nil
+	}
+	return c.post(skillActivityEvent{Type: "skill_activity", Payload: payload})
 }
 
 // post marshals body as JSON and POSTs it to the IO stream-events endpoint.

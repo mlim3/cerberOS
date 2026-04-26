@@ -12,6 +12,7 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/mlim3/cerberOS/vault/engine/audit"
+	"github.com/mlim3/cerberOS/vault/engine/handlers/execute"
 	"github.com/mlim3/cerberOS/vault/engine/handlers/healthz"
 	"github.com/mlim3/cerberOS/vault/engine/handlers/inject"
 	"github.com/mlim3/cerberOS/vault/engine/handlers/secrets"
@@ -36,6 +37,9 @@ func main() {
 
 	hzHandler := &healthz.Handler{Auditor: auditor}
 	hzHandler.Register(mux)
+
+	execHandler := execute.New(manager, auditor)
+	execHandler.Register(mux)
 
 	httpSrv := &http.Server{Addr: ":8000", Handler: mux}
 

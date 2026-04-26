@@ -456,6 +456,7 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 					drillDownDepth(o.call.name),
 					o.elapsedMS,
 					outcomeFromResult(o.result),
+					isVaultDelegated(tools, o.call.name),
 				)
 			}
 

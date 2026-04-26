@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 )
 
 // VaultFailureMode controls Orchestrator behavior when Vault is unreachable (§FR-PE-04).
@@ -18,10 +19,11 @@ const (
 // No configuration is hard-coded. Fail loudly at startup if required vars are missing.
 type OrchestratorConfig struct {
 	// External dependencies
-	VaultAddr      string // VAULT_ADDR — OpenBao API endpoint
-	NATSUrl        string // NATS_URL — NATS JetStream server URL
-	NATSCredsPath  string // NATS_CREDS_PATH — optional path to NATS credentials file
-	MemoryEndpoint string // MEMORY_ENDPOINT — Memory Component write/read API
+	VaultAddr           string // VAULT_ADDR — OpenBao API endpoint
+	VaultEngineEndpoint string // VAULT_ENGINE_ENDPOINT — Vault engine HTTP base URL (e.g. http://vault:8000)
+	NATSUrl             string // NATS_URL — NATS JetStream server URL
+	NATSCredsPath       string // NATS_CREDS_PATH — optional path to NATS credentials file
+	MemoryEndpoint      string // MEMORY_ENDPOINT — Memory Component write/read API
 
 	// Vault behavior
 	VaultFailureMode    VaultFailureMode // VAULT_FAILURE_MODE — default: FAIL_CLOSED
@@ -78,6 +80,8 @@ func Load() (*OrchestratorConfig, error) {
 	if cfg.VaultAddr == "" {
 		missing = append(missing, "VAULT_ADDR")
 	}
+
+	cfg.VaultEngineEndpoint = strings.TrimRight(os.Getenv("VAULT_ENGINE_ENDPOINT"), "/")
 
 	cfg.NATSUrl = os.Getenv("NATS_URL")
 	if cfg.NATSUrl == "" {

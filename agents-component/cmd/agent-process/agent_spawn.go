@@ -49,6 +49,12 @@ const (
 
 	// spawnDefaultTimeoutSeconds is used when the LLM omits timeout_seconds.
 	spawnDefaultTimeoutSeconds = 300
+
+	// spawnMinTimeoutSeconds is the floor applied to any explicit timeout_seconds
+	// value. Web search + NATS round-trip overhead typically runs 30–50s; a
+	// minimum of 120s prevents LLM-chosen low values from causing spurious
+	// TOOL_TIMEOUT failures.
+	spawnMinTimeoutSeconds = 120
 )
 
 // AgentSpawner manages the async agent.spawn.request/response flow (issue #67).
@@ -226,6 +232,8 @@ func (as *AgentSpawner) Spawn(ctx context.Context, raw json.RawMessage) ToolResu
 	}
 	if params.TimeoutSeconds <= 0 {
 		params.TimeoutSeconds = spawnDefaultTimeoutSeconds
+	} else if params.TimeoutSeconds < spawnMinTimeoutSeconds {
+		params.TimeoutSeconds = spawnMinTimeoutSeconds
 	}
 
 	req := types.AgentSpawnRequest{

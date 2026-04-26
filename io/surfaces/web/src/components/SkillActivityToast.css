@@ -1,0 +1,113 @@
+/* SkillActivityToast — transient notification chips for notable skill invocations */
+
+.skill-toast-stack {
+  position: fixed;
+  bottom: 1.5rem;
+  right: 1.5rem;
+  display: flex;
+  flex-direction: column-reverse; /* newest on top */
+  gap: 0.5rem;
+  z-index: 9000;
+  pointer-events: none; /* let clicks pass through to page; buttons re-enable pointer events */
+  max-width: 320px;
+}
+
+.skill-toast {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 8px;
+  background: rgba(30, 30, 40, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  backdrop-filter: blur(8px);
+  color: #e8e8f0;
+  font-size: 0.8125rem;
+  line-height: 1.4;
+  pointer-events: auto;
+  animation: skill-toast-in 0.2s ease-out;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+}
+
+/* Domain accent colours — left border */
+.skill-toast--web    { border-left: 3px solid #60a5fa; }
+.skill-toast--logs   { border-left: 3px solid #a78bfa; }
+.skill-toast--storage { border-left: 3px solid #34d399; }
+.skill-toast--data   { border-left: 3px solid #fbbf24; }
+.skill-toast--comms  { border-left: 3px solid #f472b6; }
+
+.skill-toast-icon {
+  font-size: 1rem;
+  flex-shrink: 0;
+}
+
+.skill-toast-body {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.skill-toast-label {
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.skill-toast-badge {
+  font-size: 0.625rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0.1em 0.4em;
+  border-radius: 4px;
+}
+
+.skill-toast-badge--vault {
+  background: rgba(96, 165, 250, 0.18);
+  color: #93c5fd;
+  border: 1px solid rgba(96, 165, 250, 0.3);
+}
+
+.skill-toast-elapsed {
+  font-size: 0.6875rem;
+  color: #9ca3af;
+}
+
+.skill-toast-dismiss {
+  background: none;
+  border: none;
+  color: #6b7280;
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0;
+  margin-left: 0.25rem;
+  flex-shrink: 0;
+  transition: color 0.15s;
+}
+
+.skill-toast-dismiss:hover {
+  color: #e8e8f0;
+}
+
+@keyframes skill-toast-in {
+  from {
+    opacity: 0;
+    transform: translateX(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/* High-contrast overrides */
+:root.high-contrast .skill-toast {
+  background: #111;
+  border-color: #fff;
+  color: #fff;
+}

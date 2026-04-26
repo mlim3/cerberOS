@@ -121,9 +121,17 @@ func (s *simulator) start() error {
 
 	subs := []sub{
 		{subjectCredentialRequest, consumerCredentialRequest, s.handleCredentialRequest},
-		{subjectVaultExecuteRequest, consumerVaultExecuteRequest, s.handleVaultExecuteRequest},
 		{subjectStateWrite, consumerStateWrite, s.handleStateWrite},
 		{subjectStateReadRequest, consumerStateReadRequest, s.handleStateReadRequest},
+	}
+
+	// When SIMULATOR_SKIP_VAULT_EXECUTE=true a real vault engine is handling
+	// vault.execute.request — skip the mock handler to avoid a race where the
+	// simulator's empty {} result wins over the real vault's response.
+	if os.Getenv("SIMULATOR_SKIP_VAULT_EXECUTE") != "true" {
+		subs = append(subs, sub{subjectVaultExecuteRequest, consumerVaultExecuteRequest, s.handleVaultExecuteRequest})
+	} else {
+		s.log.Info("simulator: vault execute simulation disabled (SIMULATOR_SKIP_VAULT_EXECUTE=true)")
 	}
 
 	for _, entry := range subs {

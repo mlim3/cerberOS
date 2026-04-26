@@ -1081,6 +1081,11 @@ func buildDecompositionInstructions(taskID, rawInput string, scope types.PolicyS
 	return buildDecompositionInstructionsWithFacts(taskID, rawInput, scope, nil)
 }
 
+// allSkillDomains is the full set of registered skill domains in the agents component.
+// Used as the fallback when the task's policy scope carries no domain restrictions
+// (empty Domains = "any domain permitted"). Must stay in sync with default_skills.yaml.
+var allSkillDomains = []string{"web", "data", "comms", "storage", "logs", "general"}
+
 // buildDecompositionInstructionsWithFacts renders the planner prompt with an
 // optional list of user facts (from personal_info via the Memory service).
 // When facts is empty the prompt is byte-identical to the historic output so
@@ -1088,7 +1093,11 @@ func buildDecompositionInstructions(taskID, rawInput string, scope types.PolicyS
 func buildDecompositionInstructionsWithFacts(taskID, rawInput string, scope types.PolicyScope, facts []string) string {
 	allowedDomains := scope.Domains
 	if len(allowedDomains) == 0 {
-		allowedDomains = []string{"general"}
+		// Empty scope.Domains means "no restriction" — grant the planner access to
+		// all registered skill domains so it can assign the right domain per subtask.
+		// Previously this fell back to ["general"] which forced every subtask to run
+		// without web/data/comms/storage tools.
+		allowedDomains = allSkillDomains
 	}
 
 	domains := "[]"
@@ -1120,9 +1129,10 @@ func buildDecompositionInstructionsWithFacts(taskID, rawInput string, scope type
 			"- Do not invent new skill domain names outside the allowed list\n"+
 			"- Use an empty array for depends_on when a subtask has no dependencies\n"+
 			"- Keep the plan concise and executable\n"+
+			"Skill domain guide: use \"web\" for search/fetch, \"data\" for transforms/reads/writes, \"comms\" for messaging, \"storage\" for file operations, \"logs\" for log queries, \"general\" for reasoning/summarization with no external tools.\n"+
 			"Ambiguity handling (CRITICAL):\n"+
 			"- You MUST return a valid execution plan JSON object. NEVER reply with a clarifying question, free-form text, an apology, or anything that is not JSON matching the schema above.\n"+
-			"- If the user's message is ambiguous, conversational, a greeting, or a follow-up that depends on prior context, produce a SINGLE-subtask plan where one %s-domain agent composes a direct natural-language answer using the conversation context provided.\n"+
+			"- If the user's message is ambiguous, conversational, a greeting, or a follow-up that depends on prior context, produce a SINGLE-subtask plan where one general-domain agent composes a direct natural-language answer using the conversation context provided.\n"+
 			"- Treat \"Conversation so far:\" content in the user task as authoritative context for resolving pronouns and references in \"Current message:\".\n"+
 			"Parallelism guidance:\n"+
 			"- Independent subtasks MUST have empty depends_on so the executor can dispatch them in parallel.\n"+
@@ -1132,7 +1142,6 @@ func buildDecompositionInstructionsWithFacts(taskID, rawInput string, scope type
 		taskID,
 		taskID,
 		domains,
-		allowedDomains[0],
 		rawInput,
 	)
 }

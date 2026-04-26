@@ -38,10 +38,10 @@ import (
 	ioclient "github.com/mlim3/cerberOS/orchestrator/internal/io"
 	memoryiface "github.com/mlim3/cerberOS/orchestrator/internal/memory"
 	"github.com/mlim3/cerberOS/orchestrator/internal/mocks"
-	"github.com/mlim3/cerberOS/orchestrator/internal/personalization"
 	"github.com/mlim3/cerberOS/orchestrator/internal/monitor"
 	natsclient "github.com/mlim3/cerberOS/orchestrator/internal/nats"
 	"github.com/mlim3/cerberOS/orchestrator/internal/observability"
+	"github.com/mlim3/cerberOS/orchestrator/internal/personalization"
 	"github.com/mlim3/cerberOS/orchestrator/internal/policy"
 	"github.com/mlim3/cerberOS/orchestrator/internal/recovery"
 	"github.com/mlim3/cerberOS/orchestrator/internal/types"
@@ -124,20 +124,20 @@ func main() {
 }
 
 type runtime struct {
-	memory         *memoryiface.Interface
-	vault          *mocks.VaultMock
-	nats           interfaces.NATSClient
-	mockNATS       *mocks.NATSMock
-	mockMemory     *mocks.MemoryMock
-	gateway        *gateway.Gateway
-	monitor        *monitor.Monitor
-	recovery       *recovery.Manager
-	dispatcher     *dispatcher.Dispatcher
-	executor       *executor.PlanExecutor
-	health         *health.Handler
-	hbEmitter      *heartbeat.Emitter
-	hbSweeper      *heartbeat.Sweeper
-	mux            *http.ServeMux
+	memory     *memoryiface.Interface
+	vault      *mocks.VaultMock
+	nats       interfaces.NATSClient
+	mockNATS   *mocks.NATSMock
+	mockMemory *mocks.MemoryMock
+	gateway    *gateway.Gateway
+	monitor    *monitor.Monitor
+	recovery   *recovery.Manager
+	dispatcher *dispatcher.Dispatcher
+	executor   *executor.PlanExecutor
+	health     *health.Handler
+	hbEmitter  *heartbeat.Emitter
+	hbSweeper  *heartbeat.Sweeper
+	mux        *http.ServeMux
 }
 
 func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
@@ -155,6 +155,15 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 		return nil, err
 	}
 	gw := gateway.New(natsClient, cfg.NodeID)
+	if isHTTPMemoryEndpoint(cfg.MemoryEndpoint) {
+		gw.SetMemoryEndpoint(cfg.MemoryEndpoint)
+	}
+	if isHTTPMemoryEndpoint(cfg.VaultEngineEndpoint) {
+		gw.SetVaultEngineEndpoint(cfg.VaultEngineEndpoint)
+	}
+	if cfg.LokiURL != "" {
+		gw.SetLokiURL(cfg.LokiURL)
+	}
 
 	recoveryBridge := &recoveryProxy{}
 	taskMonitor := monitor.New(cfg, memClient, recoveryBridge)
@@ -216,6 +225,30 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 			KeyName:   keyName,
 			Label:     label,
 		})
+	})
+
+	// Forward notable skill_invocation audit events to the IO Component so
+	// the web dashboard can display skill-activity toasts.
+	gw.RegisterSkillActivityHandler(func(agentID, taskID, domain, command, outcome string, elapsedMS int64, vaultDelegated bool) {
+		// taskID here is the subtask's orchRef (internal UUID). Resolve it to the
+		// frontend-visible parent task ID so broadcastStreamEvent in IO can match
+		// the SSE client registered at /api/events/{parentTaskID}.
+		parentTaskID := planExecutor.ParentTaskIDForOrchRef(taskID)
+		if parentTaskID == "" {
+			parentTaskID = taskID // fallback: planner task or already-completed plan
+		}
+		if err := ioClient.PushSkillActivity(ioclient.SkillActivityPayload{
+			TaskID:         parentTaskID,
+			AgentID:        agentID,
+			Domain:         domain,
+			Command:        command,
+			ElapsedMS:      elapsedMS,
+			VaultDelegated: vaultDelegated,
+			Outcome:        outcome,
+			Timestamp:      time.Now().UnixMilli(),
+		}); err != nil {
+			observability.LogFromContext(context.Background()).Warn("skill_activity push to IO failed", "error", err)
+		}
 	})
 
 	healthHandler := health.New(vaultClient, memClient, natsClient, taskMonitor, cfg.NodeID)

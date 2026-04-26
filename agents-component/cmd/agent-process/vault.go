@@ -80,6 +80,8 @@ type VaultExecutor struct {
 	mu                sync.Mutex
 	pending           map[string]chan types.VaultOperationResult    // requestID → result channel
 	progressCallbacks map[string]func(types.VaultOperationProgress) // requestID → onUpdate; at-most-once
+
+	pendingAudits sync.WaitGroup // tracks in-flight emitAudit goroutines; drained before Close
 }
 
 // agentEnvelope is the outbound wire format required by the Orchestrator (mirrors
@@ -277,9 +279,17 @@ func (ve *VaultExecutor) routeResult(data []byte) {
 // EmitSkillInvocation publishes a skill_invocation audit event for the given
 // tool call outcome. It is nil-safe — when ve == nil (NATS absent) it is a
 // no-op so telemetry never affects the ReAct loop.
-func (ve *VaultExecutor) EmitSkillInvocation(domain, command, depth string, elapsedMS int64, outcome string) {
+//
+// vaultDelegated is true when the tool required vault execution (non-empty
+// RequiredCredentialTypes). The orchestrator uses this flag to apply the
+// notability filter for UI skill-activity toasts.
+func (ve *VaultExecutor) EmitSkillInvocation(domain, command, depth string, elapsedMS int64, outcome string, vaultDelegated bool) {
 	if ve == nil {
 		return
+	}
+	vaultDelegatedStr := "false"
+	if vaultDelegated {
+		vaultDelegatedStr = "true"
 	}
 	ve.emitAudit(types.AuditEventSkillInvocation, map[string]string{
 		"domain":           domain,
@@ -287,12 +297,17 @@ func (ve *VaultExecutor) EmitSkillInvocation(domain, command, depth string, elap
 		"drill_down_depth": depth,
 		"elapsed_ms":       fmt.Sprintf("%d", elapsedMS),
 		"outcome":          outcome,
+		"vault_delegated":  vaultDelegatedStr,
 	})
 }
 
 // emitAudit publishes an audit event to aegis.orchestrator.audit.event in a
 // background goroutine. Failures are logged and never propagated — audit
 // emission must not affect the vault execute flow.
+//
+// pendingAudits tracks these goroutines so Close() can drain them before tearing
+// down the NATS connection; without the WaitGroup, fast tasks exit before the
+// goroutine schedules and the publish silently fails with "connection closed".
 func (ve *VaultExecutor) emitAudit(eventType string, details map[string]string) {
 	event := types.AuditEvent{
 		EventID:   newUUID(),
@@ -303,7 +318,9 @@ func (ve *VaultExecutor) emitAudit(eventType string, details map[string]string) 
 		Timestamp: time.Now().UTC(),
 		Details:   details,
 	}
+	ve.pendingAudits.Add(1)
 	go func() {
+		defer ve.pendingAudits.Done()
 		env := agentEnvelope{
 			MessageID:       newUUID(),
 			MessageType:     comms.MsgTypeAuditEvent,
@@ -663,8 +680,11 @@ func (ve *VaultExecutor) PublishMetricsEvent(eventType, operationType string, el
 	}
 }
 
-// Close drains the NATS connection used by the vault executor.
+// Close waits for all pending audit goroutines to publish, then closes the NATS
+// connection. The WaitGroup drain is bounded by the goroutines' own JetStream
+// publish timeouts (~2s each), so this never hangs indefinitely.
 func (ve *VaultExecutor) Close() {
+	ve.pendingAudits.Wait()
 	if ve.nc != nil {
 		ve.nc.Close()
 	}

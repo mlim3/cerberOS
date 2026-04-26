@@ -322,7 +322,7 @@ func vaultWebFetchTool(ve *VaultExecutor) SkillTool {
 	return SkillTool{
 		Label:                   "Vault Web Fetch",
 		RequiredCredentialTypes: []string{"web_api_key"},
-		TimeoutSeconds:          35, // must be >= vault TimeoutSeconds (30) + 5s buffer
+		TimeoutSeconds:          40, // must be > VaultExecutor local timer (30+5=35s) to ensure timer.C fires before ctx.Done()
 		Definition: anthropic.ToolParam{
 			Name: "vault_web_fetch",
 			Description: anthropic.String(
