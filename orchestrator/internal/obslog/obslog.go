@@ -3,15 +3,18 @@ package obslog
 
 import (
 	"log/slog"
-	"os"
+
+	"github.com/mlim3/cerberOS/orchestrator/internal/observability"
 )
 
-const Service = "orchestrator"
+// Component is the canonical component name for orchestrator logs.
+// Sub-units within the orchestrator are emitted as the `module` field.
+const Component = "orchestrator"
 
-// NewLogger returns a slog JSON logger with service + component attributes.
-func NewLogger(component string) *slog.Logger {
-	h := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})
-	return slog.New(h).With("service", Service, "component", component)
+// NewLogger returns a slog JSON logger with the canonical component attribute
+// and the supplied module name.
+func NewLogger(module string) *slog.Logger {
+	return observability.LoggerWithModule(module)
 }
 
 // AppendTrace appends trace_id when non-empty (W3C 32-hex from I/O).

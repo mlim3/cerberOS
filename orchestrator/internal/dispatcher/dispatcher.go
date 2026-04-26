@@ -91,6 +91,7 @@ type TaskMonitor interface {
 type PlanExecutor interface {
 	Execute(ctx context.Context, plan types.ExecutionPlan, ts *types.TaskState) error
 	HandleSubtaskResult(ctx context.Context, result types.TaskResult) error
+	UserIDForSubtask(orchRef string) (string, bool)
 }
 
 // ── Dispatcher ────────────────────────────────────────────────────────────────
@@ -153,7 +154,7 @@ func New(
 		monitor:  monitor,
 		executor: executor,
 		io:       io,
-		logger:   slog.Default().With("module", "dispatcher"),
+		logger:   observability.LoggerWithModule("dispatcher"),
 	}
 }
 
@@ -296,6 +297,10 @@ func (d *Dispatcher) HandleInboundTask(ctx context.Context, task types.UserTask)
 	d.monitor.TrackTask(ts)
 	atomic.AddInt64(&d.queueDepth, 1)
 
+	rawInput := extractRawInput(task.Payload)
+	systemPrompt := extractSystemPrompt(task.Payload)
+	maintenance := isMaintenancePayload(task.Payload)
+
 	// ── Early task_accepted to User I/O ────────────────────────────────────
 	// Fires right after policy + memory persist so the user sees acknowledgement
 	// in ~tens of ms instead of waiting a full planner-LLM round-trip. The second
@@ -312,15 +317,17 @@ func (d *Dispatcher) HandleInboundTask(ctx context.Context, task types.UserTask)
 	}
 
 	// ── Notify IO: task received, planning underway ────────────────────────
-	expectedMins := 2
-	_ = d.io.PushStatus(task.TaskID, ioclient.StatusWorking, "Planning your task...", &expectedMins)
+	if !maintenance {
+		expectedMins := 2
+		_ = d.io.PushStatus(task.TaskID, ioclient.StatusWorking, "Planning your task...", &expectedMins)
+	}
 
 	// ── Step 6: Publish planner task via standard task.inbound ─────────────
-	rawInput := extractRawInput(task.Payload)
 	// Personalization: fetch user facts from Memory (best-effort). A failure
 	// or empty result is non-fatal — the prompt is emitted without facts.
+	// Cron / maintenance tasks skip personalization to avoid noisy Memory reads.
 	var userFacts []string
-	if d.personalization != nil && task.UserID != "" {
+	if !maintenance && d.personalization != nil && task.UserID != "" {
 		facts, ferr := d.personalization.FetchFacts(ctx, task.UserID, 8)
 		if ferr != nil {
 			log.Warn("personalization fetch failed — continuing without facts", "error", ferr)
@@ -337,9 +344,9 @@ func (d *Dispatcher) HandleInboundTask(ctx context.Context, task types.UserTask)
 		PolicyScope:          scope,
 		TimeoutSeconds:       minInt(task.TimeoutSeconds, d.cfg.DecompositionTimeoutSeconds),
 		Payload:              task.Payload,
-		Instructions:         buildDecompositionInstructionsWithFacts(task.TaskID, rawInput, scope, userFacts),
+		Instructions:         buildDecompositionInstructionsWithFacts(task.TaskID, rawInput, scope, userFacts, systemPrompt),
 		Metadata: map[string]string{
-			"task_kind":      "decomposition",
+			"task_kind":      taskKindForPlannerSpec(maintenance),
 			"parent_task_id": task.TaskID,
 		},
 		CallbackTopic:   task.CallbackTopic,
@@ -455,7 +462,8 @@ func (d *Dispatcher) HandleDecompositionResponse(ctx context.Context, resp types
 	ts.PlanID = resp.Plan.PlanID
 	d.pendingDecompositions.Delete(ts.OrchestratorTaskRef)
 
-	if d.planApprovalRequired(resp.Plan) {
+	// Cron / maintenance runs must not block on human plan approval.
+	if d.planApprovalRequired(resp.Plan) && !isMaintenancePayload(ts.Payload) {
 		return d.enterAwaitingApproval(ctx, ts, resp.Plan, now)
 	}
 
@@ -514,23 +522,25 @@ func (d *Dispatcher) enterAwaitingApproval(ctx context.Context, ts *types.TaskSt
 			Domains:      s.RequiredSkillDomains,
 		})
 	}
-	if err := d.io.PushPlanPreview(ioclient.PlanPreviewPayload{
-		TaskID:              ts.TaskID,
-		OrchestratorTaskRef: ts.OrchestratorTaskRef,
-		PlanID:              plan.PlanID,
-		Subtasks:            previewSubtasks,
-		ExpiresInSeconds:    timeoutSec,
-	}); err != nil {
-		log.Warn("push plan_preview to IO failed — will still await decision", "error", err)
-	}
+	if !isMaintenancePayload(ts.Payload) {
+		if err := d.io.PushPlanPreview(ioclient.PlanPreviewPayload{
+			TaskID:              ts.TaskID,
+			OrchestratorTaskRef: ts.OrchestratorTaskRef,
+			PlanID:              plan.PlanID,
+			Subtasks:            previewSubtasks,
+			ExpiresInSeconds:    timeoutSec,
+		}); err != nil {
+			log.Warn("push plan_preview to IO failed — will still await decision", "error", err)
+		}
 
-	// Also surface a status-line so users without the preview UI see something.
-	minsLeft := int(time.Duration(timeoutSec) * time.Second / time.Minute)
-	if minsLeft < 1 {
-		minsLeft = 1
+		// Also surface a status-line so users without the preview UI see something.
+		minsLeft := int(time.Duration(timeoutSec) * time.Second / time.Minute)
+		if minsLeft < 1 {
+			minsLeft = 1
+		}
+		_ = d.io.PushStatus(ts.TaskID, ioclient.StatusAwaitingFeedback,
+			fmt.Sprintf("Awaiting your approval for a %d-step plan...", len(plan.Subtasks)), &minsLeft)
 	}
-	_ = d.io.PushStatus(ts.TaskID, ioclient.StatusAwaitingFeedback,
-		fmt.Sprintf("Awaiting your approval for a %d-step plan...", len(plan.Subtasks)), &minsLeft)
 
 	// Arm the timeout.
 	timerCtx, cancel := context.WithCancel(context.Background())
@@ -588,12 +598,14 @@ func (d *Dispatcher) startPlanExecution(ctx context.Context, ts *types.TaskState
 	}
 
 	subtaskCount := len(plan.Subtasks)
-	expectedMins := subtaskCount / 2
-	if expectedMins < 1 {
-		expectedMins = 1
+	if !isMaintenancePayload(ts.Payload) {
+		expectedMins := subtaskCount / 2
+		if expectedMins < 1 {
+			expectedMins = 1
+		}
+		_ = d.io.PushStatus(ts.TaskID, ioclient.StatusWorking,
+			fmt.Sprintf("Executing %d subtasks...", subtaskCount), &expectedMins)
 	}
-	_ = d.io.PushStatus(ts.TaskID, ioclient.StatusWorking,
-		fmt.Sprintf("Executing %d subtasks...", subtaskCount), &expectedMins)
 
 	planCtx := observability.WithPlanID(ctx, plan.PlanID)
 	if err := d.executor.Execute(planCtx, plan, ts); err != nil {
@@ -654,6 +666,35 @@ func (d *Dispatcher) HandlePlanDecision(ctx context.Context, decision types.Plan
 	return d.startPlanExecution(ctx, ts, pending.plan, now)
 }
 
+// HandleVaultExecuteRequest is registered with the Gateway to handle vault.execute.request messages.
+// It resolves user_id from in-flight task state (the orchestrator adds it — agents never provide it)
+// and forwards the operation to the Vault engine for execution.
+func (d *Dispatcher) HandleVaultExecuteRequest(ctx context.Context, req types.VaultExecuteRequest) (types.VaultExecuteResult, error) {
+	// Resolve user_id from trusted task state — never from the agent's request.
+	// First try the parent task (req.TaskID == parent task_id), then fall back
+	// to the executor's subtask-orchRef → plan → user_id path (req.TaskID == subtask orchRef).
+	var userID string
+	if tsVal, ok := d.activeTasks.Load(req.TaskID); ok {
+		userID = tsVal.(*types.TaskState).UserID
+	} else if uid, ok := d.executor.UserIDForSubtask(req.TaskID); ok {
+		userID = uid
+	} else {
+		return types.VaultExecuteResult{
+			RequestID:    req.RequestID,
+			AgentID:      req.AgentID,
+			Status:       types.VaultExecStatusScopeViolation,
+			ErrorCode:    "UNKNOWN_TASK",
+			ErrorMessage: "task_id not found in active tasks",
+		}, nil
+	}
+
+	log := observability.LogFromContext(ctx)
+	log.Info("vault execute: forwarding to vault engine", "request_id", req.RequestID, "operation_type", req.OperationType, "user_id", userID)
+	result, err := d.vault.Execute(ctx, userID, req)
+	log.Info("vault execute: result from vault engine", "request_id", req.RequestID, "status", result.Status, "elapsed_ms", result.ElapsedMS, "error", err)
+	return result, err
+}
+
 // HandlePlanComplete is called by the Plan Executor when all subtasks complete successfully.
 // Writes COMPLETED state, delivers aggregated result to User I/O, revokes credentials.
 func (d *Dispatcher) HandlePlanComplete(ts *types.TaskState, aggregatedResults []types.PriorResult) {
@@ -694,8 +735,10 @@ func (d *Dispatcher) HandlePlanComplete(ts *types.TaskState, aggregatedResults [
 	}
 
 	// Notify IO: task complete.
-	zero := 0
-	_ = d.io.PushStatus(ts.TaskID, ioclient.StatusCompleted, "Task complete", &zero)
+	if !isMaintenancePayload(ts.Payload) {
+		zero := 0
+		_ = d.io.PushStatus(ts.TaskID, ioclient.StatusCompleted, "Task complete", &zero)
+	}
 
 	if err := d.policy.RevokeCredentials(ctx, ts.OrchestratorTaskRef); err != nil {
 		log.Error("credential revocation failed", "error", err)
@@ -755,12 +798,14 @@ func (d *Dispatcher) HandlePlanFailed(ts *types.TaskState, errorCode string, par
 	}
 
 	// Notify IO: task failed (partial or full failure).
-	zero := 0
-	lastUpdate := humanReadableError(errorCode)
-	if partial {
-		lastUpdate = "Partially completed — some subtasks failed"
+	if !isMaintenancePayload(ts.Payload) {
+		zero := 0
+		lastUpdate := humanReadableError(errorCode)
+		if partial {
+			lastUpdate = "Partially completed — some subtasks failed"
+		}
+		_ = d.io.PushStatus(ts.TaskID, ioclient.StatusCompleted, lastUpdate, &zero)
 	}
-	_ = d.io.PushStatus(ts.TaskID, ioclient.StatusCompleted, lastUpdate, &zero)
 
 	if err := d.policy.RevokeCredentials(ctx, ts.OrchestratorTaskRef); err != nil {
 		log.Error("credential revocation failed", "error", err)
@@ -873,8 +918,10 @@ func (d *Dispatcher) failTaskWithState(ctx context.Context, ts *types.TaskState,
 	})
 
 	// Notify IO: task failed during decomposition.
-	zero := 0
-	_ = d.io.PushStatus(ts.TaskID, ioclient.StatusCompleted, userMessage, &zero)
+	if !isMaintenancePayload(ts.Payload) {
+		zero := 0
+		_ = d.io.PushStatus(ts.TaskID, ioclient.StatusCompleted, userMessage, &zero)
+	}
 
 	d.activeTasks.Delete(ts.TaskID)
 	d.monitor.UntrackTask(ts.TaskID)
@@ -889,6 +936,7 @@ func ctxFromTaskState(ts *types.TaskState, module string) context.Context {
 		ctx = observability.WithTraceID(ctx, ts.TraceID)
 	}
 	ctx = observability.WithTaskID(ctx, ts.TaskID)
+	ctx = observability.WithConversationID(ctx, ts.ConversationID)
 	if ts.PlanID != "" {
 		ctx = observability.WithPlanID(ctx, ts.PlanID)
 	}
@@ -1078,7 +1126,14 @@ func extractRawInput(payload []byte) string {
 }
 
 func buildDecompositionInstructions(taskID, rawInput string, scope types.PolicyScope) string {
-	return buildDecompositionInstructionsWithFacts(taskID, rawInput, scope, nil)
+	return buildDecompositionInstructionsWithFacts(taskID, rawInput, scope, nil, "")
+}
+
+func taskKindForPlannerSpec(maintenance bool) string {
+	if maintenance {
+		return "maintenance"
+	}
+	return "decomposition"
 }
 
 // allSkillDomains is the full set of registered skill domains in the agents component.
@@ -1090,7 +1145,9 @@ var allSkillDomains = []string{"web", "data", "comms", "storage", "logs", "gener
 // optional list of user facts (from personal_info via the Memory service).
 // When facts is empty the prompt is byte-identical to the historic output so
 // existing tests keep passing.
-func buildDecompositionInstructionsWithFacts(taskID, rawInput string, scope types.PolicyScope, facts []string) string {
+// systemPrompt is optional; when non-empty it is prepended as scheduled maintenance
+// directives for the planner (cron wake / batch jobs).
+func buildDecompositionInstructionsWithFacts(taskID, rawInput string, scope types.PolicyScope, facts []string, systemPrompt string) string {
 	allowedDomains := scope.Domains
 	if len(allowedDomains) == 0 {
 		// Empty scope.Domains means "no restriction" — grant the planner access to
@@ -1106,6 +1163,21 @@ func buildDecompositionInstructionsWithFacts(taskID, rawInput string, scope type
 		domains = string(raw)
 	}
 
+	systemSection := ""
+	if strings.TrimSpace(systemPrompt) != "" {
+		systemSection = "Scheduled maintenance directives (follow in addition to the rules below):\n" +
+			strings.TrimSpace(systemPrompt) + "\n\n"
+	}
+
+	credSection := ""
+	if len(scope.AvailableCredTypes) > 0 {
+		raw, _ := json.Marshal(scope.AvailableCredTypes)
+		credSection = fmt.Sprintf(
+			"Available credential types (this user has registered these API keys in the Vault — only use credentialed skills for these types):\n%s\n",
+			string(raw),
+		)
+	}
+
 	factsSection := ""
 	if len(facts) > 0 {
 		var b strings.Builder
@@ -1118,7 +1190,7 @@ func buildDecompositionInstructionsWithFacts(taskID, rawInput string, scope type
 		factsSection = b.String()
 	}
 
-	return factsSection + fmt.Sprintf(
+	return systemSection + factsSection + credSection + fmt.Sprintf(
 		"Decompose the user's task into a JSON execution plan for downstream agents.\n"+
 			"Return JSON only. Do not wrap the result in markdown fences. Do not include commentary.\n"+
 			"The JSON schema is:\n"+
@@ -1129,7 +1201,8 @@ func buildDecompositionInstructionsWithFacts(taskID, rawInput string, scope type
 			"- Do not invent new skill domain names outside the allowed list\n"+
 			"- Use an empty array for depends_on when a subtask has no dependencies\n"+
 			"- Keep the plan concise and executable\n"+
-			"Skill domain guide: use \"web\" for search/fetch, \"data\" for transforms/reads/writes, \"comms\" for messaging, \"storage\" for file operations, \"logs\" for log queries, \"general\" for reasoning/summarization with no external tools.\n"+
+			"Skill domain guide: use \"web\" for search/fetch/web_search, \"data\" for transforms/reads/writes, \"comms\" for messaging, \"storage\" for file operations, \"logs\" for log queries, \"google_search\" for Google search via Serper, \"general\" for reasoning/summarization with no external tools.\n"+
+			"- Only assign a credentialed domain (google_search, github, web, data, comms, storage) to a subtask if the corresponding credential type appears in the available credential types list above\n"+
 			"Ambiguity handling (CRITICAL):\n"+
 			"- You MUST return a valid execution plan JSON object. NEVER reply with a clarifying question, free-form text, an apology, or anything that is not JSON matching the schema above.\n"+
 			"- If the user's message is ambiguous, conversational, a greeting, or a follow-up that depends on prior context, produce a SINGLE-subtask plan where one general-domain agent composes a direct natural-language answer using the conversation context provided.\n"+

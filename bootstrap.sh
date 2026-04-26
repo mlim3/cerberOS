@@ -326,15 +326,12 @@ cmd_up() {
   log "  Service token created."
 
   upsert_env_var "$ROOT/.env" "BAO_TOKEN" "$SERVICE_TOKEN"
-  BAO_TOKEN="$SERVICE_TOKEN"
+  export BAO_TOKEN="$SERVICE_TOKEN"
   log "  .env updated with BAO_TOKEN."
 
   # Seed application secrets into OpenBao.
   # TAVILY_API_KEY powers the web_search skill. If present in .env, write it
   # now so vault engine can resolve it at runtime without manual intervention.
-  #
-  # bootstrap.sh never sources .env (set -euo pipefail — no implicit sourcing),
-  # so we read the key directly from the file when it is not already exported.
   if [[ -z "${TAVILY_API_KEY:-}" ]] && [[ -f "$ROOT/.env" ]]; then
     _tavily_val=$(grep -E "^TAVILY_API_KEY=" "$ROOT/.env" 2>/dev/null | head -1 | cut -d'=' -f2-)
     [[ -n "$_tavily_val" ]] && TAVILY_API_KEY="$_tavily_val"
@@ -355,8 +352,19 @@ cmd_up() {
     log "  Add TAVILY_API_KEY=<key> to .env and re-run bootstrap.sh to enable it."
   fi
 
-  log "Restarting vault service (recreating to pick up BAO_TOKEN)..."
-  docker compose up --detach --force-recreate vault
+  log "Recreating vault service with updated BAO_TOKEN..."
+  docker compose up -d --no-deps --force-recreate vault
+
+  log "Waiting for vault engine to be ready..."
+  for _ in $(seq 1 30); do
+    if curl -sf "http://127.0.0.1:8000/healthz" -o /dev/null 2>/dev/null; then
+      log "  Vault engine ready."
+      break
+    fi
+    sleep 1
+  done
+  curl -sf "http://127.0.0.1:8000/healthz" -o /dev/null 2>/dev/null \
+    || die "Vault engine did not become ready on :8000"
 
   # Smoke test
   log "Running smoke test..."

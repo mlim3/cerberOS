@@ -61,17 +61,17 @@ const (
 	TopicPlanDecision            = "aegis.orchestrator.plan.decision"
 	TopicAgentStateWrite         = "aegis.orchestrator.state.write"
 	TopicAgentStateReadRequest   = "aegis.orchestrator.state.read.request"
+	TopicVaultExecuteRequest     = "aegis.orchestrator.vault.execute.request"
 	TopicAgentTasksInbound       = "aegis.agents.task.inbound"
 	TopicCapabilityQuery         = "aegis.agents.capability.query"
 	TopicAgentTerminate          = "aegis.agents.lifecycle.terminate"
 	TopicTaskCancel              = "aegis.agents.tasks.cancel"
 	TopicAgentStateWriteAck      = "aegis.agents.state.write.ack"
 	TopicAgentStateReadResponse  = "aegis.agents.state.read.response"
+	TopicVaultExecuteResult      = "aegis.agents.vault.execute.result"
 	TopicOrchestratorErrors      = "aegis.orchestrator.errors"
 	TopicAuditEvents             = "aegis.orchestrator.audit.events"
 	TopicAgentAuditEvent         = "aegis.orchestrator.audit.event" // agents publish skill_invocation events here
-	TopicVaultExecuteRequest     = "aegis.orchestrator.vault.execute.request"
-	TopicVaultExecuteResult      = "aegis.agents.vault.execute.result"
 	TopicMetrics                 = "aegis.orchestrator.metrics"
 	TopicDeadLetter              = "aegis.orchestrator.tasks.deadletter"
 	TopicStatusEvents            = "aegis.orchestrator.status.events"
@@ -117,6 +117,11 @@ type PlanDecisionHandler func(ctx context.Context, decision types.PlanDecision) 
 // or command == "logs_search".
 type SkillActivityHandler func(agentID, taskID, domain, command, outcome string, elapsedMS int64, vaultDelegated bool)
 
+// VaultExecuteHandler is called when an agent publishes a vault.execute.request.
+// The handler resolves user_id from task state and forwards to the vault engine.
+// Returns the VaultExecuteResult to publish back to the agent.
+type VaultExecuteHandler func(ctx context.Context, req types.VaultExecuteRequest) (types.VaultExecuteResult, error)
+
 // ── Gateway ───────────────────────────────────────────────────────────────────
 
 // Gateway is M1: Communications Gateway.
@@ -130,6 +135,7 @@ type Gateway struct {
 	credentialRequestHandler CredentialRequestHandler
 	planDecisionHandler      PlanDecisionHandler
 	skillActivityHandler     SkillActivityHandler
+	vaultExecuteHandler      VaultExecuteHandler
 
 	// pendingCapabilityQueries tracks in-flight capability query requests.
 	// key: query_id, value: chan *types.CapabilityResponse
@@ -232,6 +238,11 @@ func (g *Gateway) RegisterSkillActivityHandler(h SkillActivityHandler) {
 	g.skillActivityHandler = h
 }
 
+// RegisterVaultExecuteHandler registers the callback for vault.execute.request messages.
+func (g *Gateway) RegisterVaultExecuteHandler(h VaultExecuteHandler) {
+	g.vaultExecuteHandler = h
+}
+
 // Start subscribes to all inbound NATS topics and begins message processing.
 // Must be called after all handlers are registered.
 func (g *Gateway) Start() error {
@@ -303,6 +314,9 @@ func (g *Gateway) handleRawInboundTask(subject string, data []byte) error {
 		_ = g.publishDeadLetter(data, fmt.Sprintf("payload deserialize error: %v", err))
 		return fmt.Errorf("deserialize user_task: %w", err)
 	}
+	if task.TraceID == "" && strings.TrimSpace(envelope.TraceID) != "" {
+		task.TraceID = strings.TrimSpace(envelope.TraceID)
+	}
 
 	// Merge envelope trace_id into the UserTask so handlers can propagate it downstream.
 	if task.TraceID == "" && envelope.TraceID != "" {
@@ -311,6 +325,7 @@ func (g *Gateway) handleRawInboundTask(subject string, data []byte) error {
 
 	ctx := extractOrCreateCtx(envelope, "comms_gateway")
 	ctx = observability.WithTaskID(ctx, task.TaskID)
+	ctx = observability.WithConversationID(ctx, task.ConversationID)
 
 	ctx, span := observability.StartSpan(ctx, "task_received")
 	defer span.End()
@@ -427,12 +442,11 @@ func (g *Gateway) handleRawTaskResult(subject string, data []byte) error {
 		return err
 	}
 
-	ctx := extractOrCreateCtx(envelope, "comms_gateway")
-
 	var payload struct {
 		TaskID      string          `json:"task_id"`
 		AgentID     string          `json:"agent_id"`
 		Success     bool            `json:"success"`
+		TraceID     string          `json:"trace_id"`
 		Result      json.RawMessage `json:"result"`
 		Output      json.RawMessage `json:"output"`
 		ErrorCode   string          `json:"error_code"`
@@ -442,6 +456,9 @@ func (g *Gateway) handleRawTaskResult(subject string, data []byte) error {
 	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
 		return fmt.Errorf("deserialize task.result: %w", err)
 	}
+
+	// Agents-component omits envelope.trace_id; trace_id lives on the payload only.
+	ctx := inboundObservabilityCtx(envelope, "comms_gateway", payload.TraceID)
 
 	if payload.TaskID != "" {
 		ctx = observability.WithTaskID(ctx, payload.TaskID)
@@ -476,17 +493,18 @@ func (g *Gateway) handleRawTaskFailed(subject string, data []byte) error {
 		return err
 	}
 
-	ctx := extractOrCreateCtx(envelope, "comms_gateway")
-
 	var payload struct {
 		TaskID       string `json:"task_id"`
 		AgentID      string `json:"agent_id"`
 		ErrorCode    string `json:"error_code"`
 		ErrorMessage string `json:"error_message"`
+		TraceID      string `json:"trace_id"`
 	}
 	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
 		return fmt.Errorf("deserialize task.failed: %w", err)
 	}
+
+	ctx := inboundObservabilityCtx(envelope, "comms_gateway", payload.TraceID)
 	if payload.TaskID != "" {
 		ctx = observability.WithTaskID(ctx, payload.TaskID)
 	}
@@ -1147,115 +1165,6 @@ func buildAgentMetadata(spec types.TaskSpec) map[string]string {
 	return meta
 }
 
-// ── Vault Execute Bridge ──────────────────────────────────────────────────────
-
-// handleRawVaultExecuteRequest receives vault.execute.request messages from the
-// Agents Component, POSTs them to the Vault Engine's HTTP /execute endpoint, and
-// publishes the OperationResult back on aegis.agents.vault.execute.result so the
-// agent's VaultExecutor can match it by request_id.
-//
-// If the vault engine endpoint is not configured, an execution_error result is
-// returned immediately rather than leaving the agent waiting to time out.
-func (g *Gateway) handleRawVaultExecuteRequest(subject string, data []byte) error {
-	ctx := observability.WithModule(context.Background(), "vault_execute_bridge")
-
-	// Unwrap the agents-component message envelope.
-	var envelope struct {
-		CorrelationID string          `json:"correlation_id"`
-		Payload       json.RawMessage `json:"payload"`
-	}
-	if err := json.Unmarshal(data, &envelope); err != nil {
-		observability.LogFromContext(ctx).Warn("vault execute: unmarshal envelope failed", "error", err)
-		return nil // non-fatal
-	}
-
-	// Peek at request_id and agent_id for routing the result.
-	var peek struct {
-		RequestID string `json:"request_id"`
-		AgentID   string `json:"agent_id"`
-	}
-	if err := json.Unmarshal(envelope.Payload, &peek); err != nil || peek.RequestID == "" || peek.AgentID == "" {
-		observability.LogFromContext(ctx).Warn("vault execute: missing request_id or agent_id")
-		return nil
-	}
-
-	log := observability.LogFromContext(ctx).With("request_id", peek.RequestID, "agent_id", peek.AgentID)
-
-	// Publish an immediate error result if vault engine is not configured.
-	if g.vaultEngineEndpoint == "" {
-		log.Warn("vault execute: vault engine endpoint not configured — returning execution_error")
-		return g.publishVaultResult(ctx, peek.RequestID, peek.AgentID, map[string]interface{}{
-			"request_id":    peek.RequestID,
-			"agent_id":      peek.AgentID,
-			"status":        "execution_error",
-			"error_code":    "VAULT_ENGINE_UNAVAILABLE",
-			"error_message": "vault engine endpoint is not configured on the orchestrator",
-			"elapsed_ms":    0,
-		})
-	}
-
-	// POST the raw payload to vault engine POST /execute.
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		g.vaultEngineEndpoint+"/execute",
-		strings.NewReader(string(envelope.Payload)),
-	)
-	if err != nil {
-		log.Warn("vault execute: build HTTP request failed", "error", err)
-		return g.publishVaultResult(ctx, peek.RequestID, peek.AgentID, map[string]interface{}{
-			"request_id": peek.RequestID, "agent_id": peek.AgentID,
-			"status": "execution_error", "error_code": "INTERNAL",
-			"error_message": fmt.Sprintf("orchestrator: build vault request: %v", err),
-			"elapsed_ms":    0,
-		})
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(httpReq)
-	if err != nil {
-		log.Warn("vault execute: HTTP request failed", "error", err)
-		return g.publishVaultResult(ctx, peek.RequestID, peek.AgentID, map[string]interface{}{
-			"request_id": peek.RequestID, "agent_id": peek.AgentID,
-			"status": "execution_error", "error_code": "VAULT_ENGINE_UNREACHABLE",
-			"error_message": fmt.Sprintf("orchestrator: vault engine unreachable: %v", err),
-			"elapsed_ms":    0,
-		})
-	}
-	defer resp.Body.Close()
-
-	resultBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1MB cap
-	if err != nil {
-		log.Warn("vault execute: read response failed", "error", err)
-		return g.publishVaultResult(ctx, peek.RequestID, peek.AgentID, map[string]interface{}{
-			"request_id": peek.RequestID, "agent_id": peek.AgentID,
-			"status": "execution_error", "error_code": "INTERNAL",
-			"error_message": fmt.Sprintf("orchestrator: read vault response: %v", err),
-			"elapsed_ms":    0,
-		})
-	}
-
-	// Vault engine always returns 200; operation-level failures are in the JSON body.
-	// Publish the raw result JSON directly (it already matches VaultOperationResult shape).
-	var result interface{}
-	if err := json.Unmarshal(resultBytes, &result); err != nil {
-		log.Warn("vault execute: unmarshal vault result failed", "error", err)
-		return g.publishVaultResult(ctx, peek.RequestID, peek.AgentID, map[string]interface{}{
-			"request_id": peek.RequestID, "agent_id": peek.AgentID,
-			"status": "execution_error", "error_code": "INTERNAL",
-			"error_message": "orchestrator: vault result was not valid JSON",
-			"elapsed_ms":    0,
-		})
-	}
-
-	log.Info("vault execute: proxied to vault engine", "http_status", resp.StatusCode)
-	return g.publishVaultResult(ctx, peek.RequestID, peek.AgentID, result)
-}
-
-// publishVaultResult wraps a vault operation result in a message envelope and
-// publishes it to aegis.agents.vault.execute.result.
-func (g *Gateway) publishVaultResult(ctx context.Context, requestID, agentID string, result interface{}) error {
-	return g.publishEnvelope(ctx, TopicVaultExecuteResult, "vault.execute.result", requestID, result)
-}
-
 // ── Agent Audit Event Handler ─────────────────────────────────────────────────
 
 // agentAuditPayload mirrors the AuditEvent published by the agents-component to
@@ -1407,6 +1316,44 @@ func (g *Gateway) PublishAuditEvent(ctx context.Context, event types.AuditEvent)
 	return g.publishEnvelope(ctx, TopicAuditEvents, "audit_event", event.OrchestratorTaskRef, event)
 }
 
+// ── Vault Execute ─────────────────────────────────────────────────────────────
+
+// handleRawVaultExecuteRequest handles aegis.orchestrator.vault.execute.request.
+func (g *Gateway) handleRawVaultExecuteRequest(subject string, data []byte) error {
+	envelope, err := validateEnvelope(data)
+	if err != nil {
+		observability.LogFromContext(context.Background()).
+			Warn("rejected malformed vault.execute.request envelope", "error", err)
+		return nil
+	}
+
+	ctx := extractOrCreateCtx(envelope, "comms_gateway")
+
+	var req types.VaultExecuteRequest
+	if err := json.Unmarshal(envelope.Payload, &req); err != nil {
+		observability.LogFromContext(ctx).Warn("failed to deserialize vault.execute.request", "error", err)
+		return nil
+	}
+
+	if g.vaultExecuteHandler == nil {
+		observability.LogFromContext(ctx).Warn("vault.execute.request received but no handler registered")
+		return nil
+	}
+
+	result, err := g.vaultExecuteHandler(ctx, req)
+	if err != nil {
+		result = types.VaultExecuteResult{
+			RequestID:    req.RequestID,
+			AgentID:      req.AgentID,
+			Status:       types.VaultExecStatusExecutionError,
+			ErrorCode:    "EXECUTION_ERROR",
+			ErrorMessage: err.Error(),
+		}
+	}
+
+	return g.publishEnvelope(ctx, TopicVaultExecuteResult, "vault.execute.result", req.RequestID, result)
+}
+
 // ── Envelope Helpers ──────────────────────────────────────────────────────────
 
 // publishEnvelope wraps any payload in a signed MessageEnvelope and publishes it (§13.5).
@@ -1482,7 +1429,16 @@ func validateEnvelope(data []byte) (*types.MessageEnvelope, error) {
 // extractOrCreateCtx builds a context from the envelope's trace_id (or creates a new one)
 // and attaches the given module name. Used by inbound NATS message handlers.
 func extractOrCreateCtx(envelope *types.MessageEnvelope, module string) context.Context {
-	traceID := envelope.TraceID
+	return inboundObservabilityCtx(envelope, module)
+}
+
+// inboundObservabilityCtx prefers envelope.TraceID, then optional fallbacks (e.g. payload
+// trace_id when the agents-component envelope has no top-level trace_id field).
+func inboundObservabilityCtx(envelope *types.MessageEnvelope, module string, payloadTraceFallbacks ...string) context.Context {
+	traceID := strings.TrimSpace(envelope.TraceID)
+	if traceID == "" {
+		traceID = firstNonEmpty(payloadTraceFallbacks...)
+	}
 	if traceID == "" {
 		traceID = newUUID()
 	}

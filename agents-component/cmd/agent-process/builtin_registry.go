@@ -46,4 +46,10 @@ var builtinRegistry = map[string]ToolFactory{
 	"vault_storage_read":  func(ve *VaultExecutor) SkillTool { return vaultStorageReadTool(ve) },
 	"vault_storage_write": func(ve *VaultExecutor) SkillTool { return vaultStorageWriteTool(ve) },
 	"vault_storage_list":  func(ve *VaultExecutor) SkillTool { return vaultStorageListTool(ve) },
+
+	// google_search domain
+	"vault_google_search": func(ve *VaultExecutor) SkillTool { return vaultGoogleSearchTool(ve) },
+
+	// github domain
+	"vault_github_request": func(ve *VaultExecutor) SkillTool { return vaultGitHubRequestTool(ve) },
 }

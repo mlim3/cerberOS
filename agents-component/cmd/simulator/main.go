@@ -212,6 +212,14 @@ func (s *simulator) handleCredentialRequest(msg *nats.Msg) {
 }
 
 func (s *simulator) handleVaultExecuteRequest(msg *nats.Msg) {
+	// When SIMULATE_VAULT_EXECUTE=false the real orchestrator handles vault
+	// execution. Ack immediately so the message is not redelivered, but skip
+	// the mock response so the orchestrator's result reaches the agent.
+	if os.Getenv("SIMULATE_VAULT_EXECUTE") == "false" {
+		_ = msg.Ack()
+		return
+	}
+
 	env := s.unwrap(msg)
 	if env == nil {
 		_ = msg.Nak()
@@ -344,7 +352,8 @@ func newID() string {
 // ── main ──────────────────────────────────────────────────────────────────────
 
 func main() {
-	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	log := slog.New(slog.NewJSONHandler(os.Stdout, nil)).
+		With("component", "agents", "module", "simulator")
 
 	natsURL := os.Getenv("AEGIS_NATS_URL")
 	if natsURL == "" {

@@ -1,0 +1,34 @@
+image:
+  repository: ghcr.io/mlim3/cerberos-memory-api
+  tag: latest
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+service:
+  port: 8081
+
+db:
+  host: memory-db
+  port: "5432"
+  name: memory_db
+  user: user
+  # Supply actual password via --set memoryApi.db.password=<value> or a sealed-secret
+  password: password
+
+# 32-char ASCII key — MUST be overridden at install time
+vaultMasterKey: "CHANGE_ME_32_ASCII_CHARS_EXACTLY!"
+# Internal API key for vault↔memory auth
+internalVaultApiKey: "CHANGE_ME_INTERNAL_VAULT_KEY"
+
+observability:
+  otlpEndpoint: "http://tempo:4318"
+  serviceName: "memory-api"
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 256Mi

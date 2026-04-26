@@ -1,0 +1,9 @@
+apiVersion: v2
+name: network-policies
+description: |
+  cerberOS NetworkPolicies — enforces the AGENTS.md rule:
+  all inter-component traffic routes through NATS; direct HTTP only where
+  explicitly required (orchestrator→memory-api, orchestrator→io, etc.).
+  Disabled by default; enable in values-prod.yaml.
+type: application
+version: 0.1.0

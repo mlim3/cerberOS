@@ -6,7 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"os"
 	"sync/atomic"
 	"time"
@@ -18,9 +18,9 @@ import (
 )
 
 const (
-	defaultNatsURL   = "nats://127.0.0.1:4222"
-	defaultInterval  = 2 * time.Second
-	monitorInterval  = 5 * time.Second
+	defaultNatsURL    = "nats://127.0.0.1:4222"
+	defaultInterval   = 2 * time.Second
+	monitorInterval   = 5 * time.Second
 	stubComponentName = "aegis-stubs"
 )
 
@@ -38,11 +38,13 @@ type CloudEvent struct {
 
 func main() {
 	ctx := context.Background()
-	logger := log.New(os.Stdout, "stubs ", log.LstdFlags)
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).
+		With("component", "databus", "module", "stubs")
 
 	nc, js, err := connect(ctx, logger)
 	if err != nil {
-		logger.Fatalf("connect failed: %v", err)
+		logger.Error("connect failed", "error", err, "exit_code", 1)
+		os.Exit(1)
 	}
 	defer nc.Drain()
 
@@ -55,7 +57,7 @@ func main() {
 	select {}
 }
 
-func connect(ctx context.Context, logger *log.Logger) (*nats.Conn, nats.JetStreamContext, error) {
+func connect(ctx context.Context, logger *slog.Logger) (*nats.Conn, nats.JetStreamContext, error) {
 	_ = ctx
 	url := os.Getenv("AEGIS_NATS_URL")
 	if url == "" {
@@ -87,7 +89,7 @@ func connect(ctx context.Context, logger *log.Logger) (*nats.Conn, nats.JetStrea
 	if err != nil {
 		return nil, nil, err
 	}
-	logger.Printf("connected nats url=%s", url)
+	logger.Info("connected to NATS", "url", url)
 	return nc, js, nil
 }
 
@@ -106,7 +108,7 @@ func nkeyAuthOption(seed string) (nats.Option, error) {
 	return nats.Nkey(pub, sign), nil
 }
 
-func runTaskRouter(ctx context.Context, logger *log.Logger, js nats.JetStreamContext) {
+func runTaskRouter(ctx context.Context, logger *slog.Logger, js nats.JetStreamContext) {
 	ticker := time.NewTicker(defaultInterval)
 	defer ticker.Stop()
 
@@ -132,27 +134,28 @@ func runTaskRouter(ctx context.Context, logger *log.Logger, js nats.JetStreamCon
 
 			data, err := json.Marshal(payload)
 			if err != nil {
-				logger.Printf("task-router marshal failed: %v", err)
+				logger.Error("task router marshal failed", "task_id", taskIDFromPayload(payload), "trace_id", payload.TraceID, "error", err)
 				continue
 			}
 
 			if _, err := bus.PublishWithACL(js, stubComponentName, bus.SubjectTasksRouted, data); err != nil {
-				logger.Printf("task-router publish failed subject=%s size=%d err=%v", bus.SubjectTasksRouted, len(data), err)
+				logger.Error("task router publish failed", "task_id", taskIDFromPayload(payload), "trace_id", payload.TraceID, "subject", bus.SubjectTasksRouted, "size_bytes", len(data), "error", err)
 				continue
 			}
-			logger.Printf("task-router published subject=%s size=%d correlation=%s", bus.SubjectTasksRouted, len(data), payload.CorrelationID)
+			logger.Info("task router published", "task_id", taskIDFromPayload(payload), "trace_id", payload.TraceID, "subject", bus.SubjectTasksRouted, "size_bytes", len(data), "request_id", payload.CorrelationID)
 		}
 	}
 }
 
-func runOrchestrator(ctx context.Context, logger *log.Logger, js nats.JetStreamContext) {
+func runOrchestrator(ctx context.Context, logger *slog.Logger, js nats.JetStreamContext) {
 	sub, err := bus.SubscribeWithACL(js, stubComponentName, bus.SubjectTasksRouted, func(msg *nats.Msg) {
 		correlation := extractCorrelationID(msg.Data)
 		traceID := extractTraceID(msg.Data)
+		taskID := extractTaskID(msg.Data)
 		if traceID == "" {
 			traceID = correlation
 		}
-		logger.Printf("orchestrator received subject=%s size=%d correlation=%s traceid=%s", msg.Subject, len(msg.Data), correlation, traceID)
+		logger.Info("orchestrator received", "task_id", taskID, "trace_id", traceID, "subject", msg.Subject, "size_bytes", len(msg.Data), "request_id", correlation)
 		msg.Ack()
 
 		payload := CloudEvent{
@@ -171,17 +174,17 @@ func runOrchestrator(ctx context.Context, logger *log.Logger, js nats.JetStreamC
 		}
 		data, err := json.Marshal(payload)
 		if err != nil {
-			logger.Printf("orchestrator marshal failed: %v", err)
+			logger.Error("orchestrator marshal failed", "task_id", taskIDFromPayload(payload), "trace_id", traceID, "error", err)
 			return
 		}
 		if _, err := bus.PublishWithACL(js, stubComponentName, bus.SubjectAgentsCreated, data); err != nil {
-			logger.Printf("orchestrator publish failed subject=%s size=%d err=%v", bus.SubjectAgentsCreated, len(data), err)
+			logger.Error("orchestrator publish failed", "task_id", taskIDFromPayload(payload), "trace_id", traceID, "subject", bus.SubjectAgentsCreated, "size_bytes", len(data), "error", err)
 			return
 		}
-		logger.Printf("orchestrator published subject=%s size=%d correlation=%s", bus.SubjectAgentsCreated, len(data), payload.CorrelationID)
+		logger.Info("orchestrator published", "task_id", taskIDFromPayload(payload), "trace_id", traceID, "subject", bus.SubjectAgentsCreated, "size_bytes", len(data), "request_id", payload.CorrelationID)
 	}, nats.Durable("orchestrator"), nats.ManualAck())
 	if err != nil {
-		logger.Printf("orchestrator subscribe failed: %v", err)
+		logger.Error("orchestrator subscribe failed", "error", err)
 		return
 	}
 	defer sub.Unsubscribe()
@@ -189,14 +192,15 @@ func runOrchestrator(ctx context.Context, logger *log.Logger, js nats.JetStreamC
 	<-ctx.Done()
 }
 
-func runAgentFactory(ctx context.Context, logger *log.Logger, js nats.JetStreamContext) {
+func runAgentFactory(ctx context.Context, logger *slog.Logger, js nats.JetStreamContext) {
 	sub, err := bus.SubscribeWithACL(js, stubComponentName, bus.SubjectAgentsCreated, func(msg *nats.Msg) {
 		correlation := extractCorrelationID(msg.Data)
 		traceID := extractTraceID(msg.Data)
+		taskID := extractTaskID(msg.Data)
 		if traceID == "" {
 			traceID = correlation
 		}
-		logger.Printf("agent-factory received subject=%s size=%d correlation=%s traceid=%s", msg.Subject, len(msg.Data), correlation, traceID)
+		logger.Info("agent factory received", "task_id", taskID, "trace_id", traceID, "subject", msg.Subject, "size_bytes", len(msg.Data), "request_id", correlation)
 		msg.Ack()
 
 		payload := CloudEvent{
@@ -215,17 +219,17 @@ func runAgentFactory(ctx context.Context, logger *log.Logger, js nats.JetStreamC
 		}
 		data, err := json.Marshal(payload)
 		if err != nil {
-			logger.Printf("agent-factory marshal failed: %v", err)
+			logger.Error("agent factory marshal failed", "trace_id", traceID, "error", err)
 			return
 		}
 		if _, err := bus.PublishWithACL(js, stubComponentName, bus.SubjectRuntimeCompleted, data); err != nil {
-			logger.Printf("agent-factory publish failed subject=%s size=%d err=%v", bus.SubjectRuntimeCompleted, len(data), err)
+			logger.Error("agent factory publish failed", "trace_id", traceID, "subject", bus.SubjectRuntimeCompleted, "size_bytes", len(data), "error", err)
 			return
 		}
-		logger.Printf("agent-factory published subject=%s size=%d correlation=%s", bus.SubjectRuntimeCompleted, len(data), payload.CorrelationID)
+		logger.Info("agent factory published", "trace_id", traceID, "subject", bus.SubjectRuntimeCompleted, "size_bytes", len(data), "request_id", payload.CorrelationID)
 	}, nats.Durable("agent-factory"), nats.ManualAck())
 	if err != nil {
-		logger.Printf("agent-factory subscribe failed: %v", err)
+		logger.Error("agent factory subscribe failed", "error", err)
 		return
 	}
 	defer sub.Unsubscribe()
@@ -233,18 +237,19 @@ func runAgentFactory(ctx context.Context, logger *log.Logger, js nats.JetStreamC
 	<-ctx.Done()
 }
 
-func runVault(ctx context.Context, logger *log.Logger, js nats.JetStreamContext) {
+func runVault(ctx context.Context, logger *slog.Logger, js nats.JetStreamContext) {
 	sub, err := bus.SubscribeWithACL(js, stubComponentName, bus.SubjectVault, func(msg *nats.Msg) {
 		correlation := extractCorrelationID(msg.Data)
 		traceID := extractTraceID(msg.Data)
+		taskID := extractTaskID(msg.Data)
 		if traceID == "" {
 			traceID = correlation
 		}
-		logger.Printf("vault received subject=%s size=%d correlation=%s traceid=%s", msg.Subject, len(msg.Data), correlation, traceID)
+		logger.Info("vault received", "task_id", taskID, "trace_id", traceID, "subject", msg.Subject, "size_bytes", len(msg.Data), "request_id", correlation)
 		msg.Ack()
 	}, nats.Durable("vault"), nats.ManualAck())
 	if err != nil {
-		logger.Printf("vault subscribe failed: %v", err)
+		logger.Error("vault subscribe failed", "error", err)
 		return
 	}
 	defer sub.Unsubscribe()
@@ -252,7 +257,7 @@ func runVault(ctx context.Context, logger *log.Logger, js nats.JetStreamContext)
 	<-ctx.Done()
 }
 
-func runMonitoring(ctx context.Context, logger *log.Logger, js nats.JetStreamContext) {
+func runMonitoring(ctx context.Context, logger *slog.Logger, js nats.JetStreamContext) {
 	var total uint64
 	type subDef struct{ subj, dura string }
 	for _, s := range []subDef{
@@ -264,7 +269,7 @@ func runMonitoring(ctx context.Context, logger *log.Logger, js nats.JetStreamCon
 			msg.Ack()
 		}, nats.Durable(s.dura), nats.ManualAck())
 		if err != nil {
-			logger.Printf("monitoring subscribe %s failed: %v", s.subj, err)
+			logger.Error("monitoring subscribe failed", "subject", s.subj, "error", err)
 			continue
 		}
 		defer sub.Unsubscribe()
@@ -278,7 +283,7 @@ func runMonitoring(ctx context.Context, logger *log.Logger, js nats.JetStreamCon
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			logger.Printf("monitoring summary total_messages=%d", atomic.LoadUint64(&total))
+			logger.Info("monitoring summary", "total_messages", atomic.LoadUint64(&total))
 		}
 	}
 }
@@ -299,6 +304,27 @@ func extractTraceID(payload []byte) string {
 	}
 	raw, _ := msg["traceid"].(string)
 	return raw
+}
+
+func extractTaskID(payload []byte) string {
+	var msg map[string]interface{}
+	if err := json.Unmarshal(payload, &msg); err != nil {
+		return ""
+	}
+	data, _ := msg["data"].(map[string]interface{})
+	if data == nil {
+		return ""
+	}
+	raw, _ := data["taskId"].(string)
+	return raw
+}
+
+func taskIDFromPayload(payload CloudEvent) string {
+	data, _ := payload.Data.(map[string]string)
+	if data == nil {
+		return ""
+	}
+	return data["taskId"]
 }
 
 // traceID32Hex returns 32 lowercase hex chars (W3C trace_id length).

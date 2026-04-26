@@ -1,0 +1,36 @@
+cerberOS has been installed in namespace {{ .Release.Namespace }}.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  QUICK ACCESS (kind cluster with NodePort mappings)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  IO API / Web UI   →  http://localhost:3001
+  Orchestrator      →  http://localhost:8080/healthz
+  Grafana           →  http://localhost:3000  (admin/admin)
+  NATS              →  nats://localhost:4222
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  USEFUL COMMANDS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  # Check all pods (should spread across worker nodes)
+  kubectl get pods -n {{ .Release.Namespace }} -o wide
+
+  # Port-forward if not using kind NodePorts
+  kubectl port-forward -n {{ .Release.Namespace }} svc/io 3001:3001
+  kubectl port-forward -n {{ .Release.Namespace }} svc/grafana 3000:80
+
+  # Tail logs from orchestrator
+  kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/name=orchestrator -f
+
+  # Uninstall
+  helm uninstall {{ .Release.Name }} -n {{ .Release.Namespace }}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  OPENBAO NOTE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Dev mode is ON by default (in-memory storage, auto-unsealed).
+  For persistent storage set openbao.devMode=false and provide
+  a BAO_TOKEN after init:  see deploy/k8s-README.md for the
+  unseal runbook.

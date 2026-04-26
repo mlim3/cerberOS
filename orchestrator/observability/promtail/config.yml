@@ -1,6 +1,7 @@
 # Promtail: ship Docker container logs → Loki.
 # Expects compose-managed containers (label com.docker.compose.service).
-# JSON fields (service, trace_id, component) stay in the log line — query with Grafana: | json
+# App JSON fields are parsed into Loki labels where cardinality is bounded.
+# task_id / trace_id stay in the log line for LogQL `| json` queries and Tempo links.
 
 server:
   http_listen_port: 9080
@@ -48,6 +49,27 @@ scrape_configs:
         regex: /(.*)
         target_label: container_name
 
-    # Unwrap Docker json-file log lines ({"log":"...","stream":"stdout",...}) into plain text for Loki.
+    # Unwrap Docker json-file log lines ({"log":"...","stream":"stdout",...}) into plain text for Loki,
+    # then parse the standardized cerberOS JSON log schema (see docs/logging.md).
+    #
+    # `component` is one of the six top-level components (agents, orchestrator,
+    # io, memory, vault, databus). `module` is the sub-unit within a component
+    # (server, dispatcher, http, ...). Both are bounded enough to be Loki labels.
+    # task_id / trace_id stay in the log body for LogQL `| json` queries and
+    # Tempo links.
     pipeline_stages:
       - docker: {}
+      - json:
+          expressions:
+            component: component
+            module: module
+            level: level
+            msg: msg
+            task_id: task_id
+            trace_id: trace_id
+            request_id: request_id
+            message_id: message_id
+      - labels:
+          component:
+          module:
+          level:

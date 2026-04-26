@@ -145,6 +145,12 @@ func (e *executorMock) HandleSubtaskResult(_ context.Context, result types.TaskR
 	return nil
 }
 
+// UserIDForSubtask satisfies the PlanExecutor interface added on main; tests
+// don't exercise per-user credential routing so an empty/false return is fine.
+func (e *executorMock) UserIDForSubtask(_ string) (string, bool) {
+	return "", false
+}
+
 // ── Test Helpers ─────────────────────────────────────────────────────────────
 
 // newDispatcher builds a fully wired Dispatcher with fresh mocks.
@@ -321,6 +327,43 @@ func TestHandleInboundTask_HappyPath_Decomposing(t *testing.T) {
 		t.Fatalf("unexpected errors published: %+v", gw.ErrorCalls)
 	}
 	_ = exec
+}
+
+func TestHandleInboundTask_MaintenancePayload_SystemPromptAndMetadata(t *testing.T) {
+	d, gw, _, _, _, _ := newDispatcher(t)
+	payload := map[string]any{
+		"raw_input":     "kick off decay",
+		"system_prompt": "SYS: extract facts",
+		"maintenance":   true,
+	}
+	pb, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := types.UserTask{
+		TaskID:         "550e8400-e29b-41d4-a716-4466554400aa",
+		UserID:         "system",
+		Priority:       5,
+		TimeoutSeconds: 60,
+		Payload:        pb,
+		CallbackTopic:  "aegis.orchestrator.cron.wake.results",
+	}
+	if err := d.HandleInboundTask(context.Background(), task); err != nil {
+		t.Fatalf("HandleInboundTask() error = %v", err)
+	}
+	if len(gw.TaskSpecCalls) != 1 {
+		t.Fatalf("planner task publishes = %d, want 1", len(gw.TaskSpecCalls))
+	}
+	req := gw.TaskSpecCalls[0]
+	if req.Metadata["task_kind"] != "maintenance" {
+		t.Fatalf("task_kind = %q, want maintenance", req.Metadata["task_kind"])
+	}
+	if !strings.Contains(req.Instructions, "SYS: extract facts") {
+		t.Fatalf("planner instructions missing system prompt: %q", req.Instructions)
+	}
+	if !strings.Contains(req.Instructions, "kick off decay") {
+		t.Fatalf("planner instructions missing raw_input: %q", req.Instructions)
+	}
 }
 
 // ── Happy Path: DecompositionResponse → PLAN_ACTIVE ──────────────────────────

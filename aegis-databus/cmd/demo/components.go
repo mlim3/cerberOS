@@ -4,7 +4,7 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"sync/atomic"
 	"time"
 
@@ -16,14 +16,15 @@ import (
 
 // runIO simulates UI Layer: publishes user actions, subscribes to task updates.
 // comp is the ACL component id (e.g. io, orchestrator) per EDD §9.2.
-func runIO(ctx context.Context, nc *nats.Conn, js nats.JetStreamContext, logger *log.Logger, comp string) {
+func runIO(ctx context.Context, nc *nats.Conn, js nats.JetStreamContext, logger *slog.Logger, comp string) {
 	// Subscribe to task updates (FR-DB-001, FR-DB-005 wildcard) — SubscribeWithACL enforces SR-DB-006
 	if _, err := bus.SubscribeWithACL(js, comp, bus.SubjectTasks, func(m *nats.Msg) {
 		corr := extractCorr(m.Data)
-		logger.Printf("[I/O] received subject=%s size=%d correlation=%s", m.Subject, len(m.Data), corr)
+		taskID := extractTaskID(m.Data)
+		logger.Info("message received", "task_id", taskID, "subject", m.Subject, "size_bytes", len(m.Data), "request_id", corr)
 		m.Ack()
 	}, nats.Durable("io-tasks"), nats.ManualAck()); err != nil {
-		logger.Printf("[I/O] subscribe failed: %v", err)
+		logger.Error("subscribe failed", "subject", bus.SubjectTasks, "error", err)
 		return
 	}
 	time.Sleep(100 * time.Millisecond)
@@ -39,26 +40,27 @@ func runIO(ctx context.Context, nc *nats.Conn, js nats.JetStreamContext, logger 
 				"taskId": envelope.NewID(), "userId": "demo-user", "goal": "research task",
 			})
 			if err := envelope.Validate(ev.MustMarshal()); err != nil {
-				logger.Printf("[I/O] validation failed: %v", err)
+				logger.Error("validation failed", "task_id", taskIDFromEvent(ev), "error", err)
 				continue
 			}
 			if _, err := bus.PublishWithACL(js, comp, bus.SubjectUIAction, ev.MustMarshal()); err != nil {
-				logger.Printf("[I/O] publish failed: %v", err)
+				logger.Error("publish failed", "task_id", taskIDFromEvent(ev), "subject", bus.SubjectUIAction, "error", err)
 				continue
 			}
-			logger.Printf("[I/O] published aegis.ui.action correlation=%s", ev.CorrelationID)
+			logger.Info("message published", "task_id", taskIDFromEvent(ev), "subject", bus.SubjectUIAction, "request_id", ev.CorrelationID)
 		}
 	}
 }
 
 // runOrchestrator simulates Task Router + Task Planner + Agent Manager.
-func runOrchestrator(ctx context.Context, nc *nats.Conn, js nats.JetStreamContext, logger *log.Logger, comp string) {
+func runOrchestrator(ctx context.Context, nc *nats.Conn, js nats.JetStreamContext, logger *slog.Logger, comp string) {
 	var planCorr string
 
 	// Subscribe to UI actions
 	bus.SubscribeWithACL(js, comp, bus.SubjectUIAction, func(m *nats.Msg) {
 		corr := extractCorr(m.Data)
-		logger.Printf("[Orchestrator] received ui.action correlation=%s", corr)
+		taskID := extractTaskID(m.Data)
+		logger.Info("ui action received", "task_id", taskID, "request_id", corr)
 		m.Ack()
 		planCorr = corr
 
@@ -68,9 +70,9 @@ func runOrchestrator(ctx context.Context, nc *nats.Conn, js nats.JetStreamContex
 		reply, err := bus.Request(reqCtx, nc, bus.SubjectPersonalization, reqPayload, 5*time.Second)
 		cancel()
 		if err != nil {
-			logger.Printf("[Orchestrator] personalization request failed: %v", err)
+			logger.Error("personalization request failed", "task_id", taskID, "error", err)
 		} else {
-			logger.Printf("[Orchestrator] FR-DB-002 request-reply: personalization=%s", string(reply))
+			logger.Info("personalization request completed", "task_id", taskID, "reply_bytes", len(reply))
 		}
 		_ = reply
 
@@ -80,7 +82,7 @@ func runOrchestrator(ctx context.Context, nc *nats.Conn, js nats.JetStreamContex
 		})
 		ev.SetCorrelationID(corr)
 		bus.PublishWithACL(js, comp, bus.SubjectTasksRouted, ev.MustMarshal())
-		logger.Printf("[Orchestrator] published tasks.routed correlation=%s", corr)
+		logger.Info("tasks routed", "task_id", taskIDFromEvent(ev), "subject", bus.SubjectTasksRouted, "request_id", corr)
 	}, nats.Durable("orch-ui"), nats.ManualAck())
 
 	// Subscribe to plan (self-loop for demo - in real system Task Planner publishes)
@@ -92,7 +94,7 @@ func runOrchestrator(ctx context.Context, nc *nats.Conn, js nats.JetStreamContex
 		})
 		ev.SetCorrelationID(corr)
 		bus.PublishWithACL(js, comp, bus.SubjectTasksPlanCreated, ev.MustMarshal())
-		logger.Printf("[Orchestrator] published plan_created subtasks=3 correlation=%s", corr)
+		logger.Info("plan created", "subject", bus.SubjectTasksPlanCreated, "subtasks", 3, "request_id", corr)
 	}, nats.Durable("orch-router"), nats.ManualAck())
 
 	// Subscribe to plan_created, publish agents.created (queue group - FR-DB-004)
@@ -106,7 +108,7 @@ func runOrchestrator(ctx context.Context, nc *nats.Conn, js nats.JetStreamContex
 			ev.SetCorrelationID(corr)
 			bus.PublishWithACL(js, comp, bus.SubjectAgentsCreated, ev.MustMarshal())
 		}
-		logger.Printf("[Orchestrator] published agents.created x3 correlation=%s", corr)
+		logger.Info("agents created", "task_id", planCorr, "subject", bus.SubjectAgentsCreated, "count", 3, "request_id", corr)
 	}, nats.Durable("orch-agents"), nats.ManualAck())
 
 	<-ctx.Done()
@@ -114,12 +116,12 @@ func runOrchestrator(ctx context.Context, nc *nats.Conn, js nats.JetStreamContex
 }
 
 // runMemory simulates Memory & Context Manager.
-func runMemory(ctx context.Context, nc *nats.Conn, js nats.JetStreamContext, logger *log.Logger, comp string) {
+func runMemory(ctx context.Context, nc *nats.Conn, js nats.JetStreamContext, logger *slog.Logger, comp string) {
 	// FR-DB-002: Request-reply — Personalization responder (ACL enforced)
 	bus.SubscribeRequestReplyWithACL(ctx, nc, comp, bus.SubjectPersonalization, func(subject string, request []byte) ([]byte, error) {
 		_ = subject
 		_ = request
-		logger.Printf("[Memory] FR-DB-002 request-reply: handling personalization get")
+		logger.Info("personalization request received")
 		return json.Marshal(map[string]string{"userId": "demo-user", "preferences": "{}"})
 	})
 	time.Sleep(50 * time.Millisecond)
@@ -127,60 +129,63 @@ func runMemory(ctx context.Context, nc *nats.Conn, js nats.JetStreamContext, log
 	// Subscribe to agents.created, publish memory.saved
 	bus.SubscribeWithACL(js, comp, bus.SubjectAgentsCreated, func(m *nats.Msg) {
 		corr := extractCorr(m.Data)
+		taskID := extractTaskID(m.Data)
 		m.Ack()
 		ev := envelope.Build("aegis/memory", "aegis.memory.saved", map[string]string{
 			"agentId": envelope.NewID(),
 		})
 		ev.SetCorrelationID(corr)
 		bus.PublishWithACL(js, comp, bus.SubjectMemorySaved, ev.MustMarshal())
-		logger.Printf("[Memory] received agents.created, published memory.saved correlation=%s", corr)
+		logger.Info("memory saved", "task_id", taskID, "subject", bus.SubjectMemorySaved, "request_id", corr)
 	}, nats.Durable("memory-agents"), nats.ManualAck())
 
 	<-ctx.Done()
 }
 
 // runVault simulates Permission Manager / Vault.
-func runVault(ctx context.Context, nc *nats.Conn, js nats.JetStreamContext, logger *log.Logger, comp string) {
+func runVault(ctx context.Context, nc *nats.Conn, js nats.JetStreamContext, logger *slog.Logger, comp string) {
 	bus.SubscribeWithACL(js, comp, bus.SubjectVault, func(m *nats.Msg) {
 		corr := extractCorr(m.Data)
-		logger.Printf("[Vault] received subject=%s size=%d correlation=%s", m.Subject, len(m.Data), corr)
+		taskID := extractTaskID(m.Data)
+		logger.Info("vault message received", "task_id", taskID, "subject", m.Subject, "size_bytes", len(m.Data), "request_id", corr)
 		m.Ack()
 	}, nats.Durable("vault"), nats.ManualAck())
 	<-ctx.Done()
 }
 
 // runAgent simulates Agent runtime (Web Search, Doc Analysis, etc.).
-func runAgent(ctx context.Context, nc *nats.Conn, js nats.JetStreamContext, logger *log.Logger, comp string) {
+func runAgent(ctx context.Context, nc *nats.Conn, js nats.JetStreamContext, logger *slog.Logger, comp string) {
 	// EDD §9.2 / M3: sensitive subjects — Agents consumer group only (queue aegis-agents).
 	if _, err := bus.QueueSubscribeWithACL(js, comp, bus.SubjectAgentsVaultExecuteResult, security.QueueAgentsComponent, func(m *nats.Msg) {
 		m.Ack()
-		logger.Printf("[Agent] M3 received vault execute result subject=%s", m.Subject)
+		logger.Info("vault execute result received", "subject", m.Subject)
 	}, nats.Durable("agent-m3-vault-exec"), nats.ManualAck()); err != nil {
-		logger.Printf("[Agent] queue subscribe vault result: %v", err)
+		logger.Error("vault result queue subscribe failed", "error", err)
 	}
 	if _, err := bus.QueueSubscribeWithACL(js, comp, bus.SubjectAgentsCredentialResponse, security.QueueAgentsComponent, func(m *nats.Msg) {
 		m.Ack()
-		logger.Printf("[Agent] M3 received credential response subject=%s", m.Subject)
+		logger.Info("credential response received", "subject", m.Subject)
 	}, nats.Durable("agent-m3-cred"), nats.ManualAck()); err != nil {
-		logger.Printf("[Agent] queue subscribe credential response: %v", err)
+		logger.Error("credential response queue subscribe failed", "error", err)
 	}
 
 	bus.SubscribeWithACL(js, comp, bus.SubjectAgentsCreated, func(m *nats.Msg) {
 		corr := extractCorr(m.Data)
+		taskID := extractTaskID(m.Data)
 		m.Ack()
 		ev := envelope.Build("aegis/agent", "aegis.runtime.completed", map[string]string{
 			"agentId": envelope.NewID(), "result": "completed", "status": "ok",
 		})
 		ev.SetCorrelationID(corr)
 		bus.PublishWithACL(js, comp, bus.SubjectRuntimeCompleted, ev.MustMarshal())
-		logger.Printf("[Agent] received agents.created, published runtime.completed correlation=%s", corr)
+		logger.Info("runtime completed", "task_id", taskID, "subject", bus.SubjectRuntimeCompleted, "request_id", corr)
 	}, nats.Durable("agent-runtime"), nats.ManualAck())
 	<-ctx.Done()
 }
 
 // runMonitoring subscribes to all streams (FR-DB-005 wildcard per domain).
 // Uses SubjectAgentsLeafWildcard (aegis.agents.*) so M3 nested subjects are not observed here.
-func runMonitoring(ctx context.Context, nc *nats.Conn, js nats.JetStreamContext, logger *log.Logger, comp string) {
+func runMonitoring(ctx context.Context, nc *nats.Conn, js nats.JetStreamContext, logger *slog.Logger, comp string) {
 	var total uint64
 	subs := []struct {
 		subj string
@@ -204,7 +209,7 @@ func runMonitoring(ctx context.Context, nc *nats.Conn, js nats.JetStreamContext,
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			logger.Printf("[Monitoring] total_messages=%d", atomic.LoadUint64(&total))
+			logger.Info("monitoring summary", "total_messages", atomic.LoadUint64(&total))
 		}
 	}
 }
@@ -216,4 +221,25 @@ func extractCorr(data []byte) string {
 	}
 	s, _ := m["correlationid"].(string)
 	return s
+}
+
+func extractTaskID(data []byte) string {
+	var m map[string]interface{}
+	if json.Unmarshal(data, &m) != nil {
+		return ""
+	}
+	payload, _ := m["data"].(map[string]interface{})
+	if payload == nil {
+		return ""
+	}
+	taskID, _ := payload["taskId"].(string)
+	return taskID
+}
+
+func taskIDFromEvent(ev envelope.CloudEvent) string {
+	payload, _ := ev.Data.(map[string]string)
+	if payload == nil {
+		return ""
+	}
+	return payload["taskId"]
 }

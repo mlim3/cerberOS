@@ -254,7 +254,7 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 					// so the next task in this conversation includes the full exchange.
 					history = append(history, resp.ToParam())
 					if err := sl.WriteConversationSnapshot(spawnCtx.ConversationID, spawnCtx.TaskID, history, totalTokens); err != nil {
-						log.Warn("conversation snapshot write failed", "error", err, "conversation_id", spawnCtx.ConversationID)
+						log.Warn("conversation snapshot write failed", "error", err)
 					}
 					return block.Text, history, nil
 				}
@@ -279,7 +279,7 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 					attemptSkillSynthesis(ctx, client, log, spawnCtx, sl, history, toolCallCount)
 					history = append(history, resp.ToParam())
 					if err := sl.WriteConversationSnapshot(spawnCtx.ConversationID, spawnCtx.TaskID, history, totalTokens); err != nil {
-						log.Warn("conversation snapshot write failed", "error", err, "conversation_id", spawnCtx.ConversationID)
+						log.Warn("conversation snapshot write failed", "error", err)
 					}
 					const truncationNotice = "\n\n_[Response truncated — output token limit reached. Send a follow-up message to continue.]_"
 					return block.Text + truncationNotice, history, nil
@@ -483,7 +483,7 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 			}
 
 			if err := sl.WriteConversationSnapshot(spawnCtx.ConversationID, spawnCtx.TaskID, history, totalTokens); err != nil {
-				log.Warn("conversation snapshot write failed", "error", err, "conversation_id", spawnCtx.ConversationID)
+				log.Warn("conversation snapshot write failed", "error", err)
 			}
 			return finalResult, history, nil
 		}

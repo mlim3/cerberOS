@@ -12,6 +12,7 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/mlim3/cerberOS/vault/engine/audit"
+	"github.com/mlim3/cerberOS/vault/engine/handlers/credentials"
 	"github.com/mlim3/cerberOS/vault/engine/handlers/execute"
 	"github.com/mlim3/cerberOS/vault/engine/handlers/healthz"
 	"github.com/mlim3/cerberOS/vault/engine/handlers/inject"
@@ -35,11 +36,14 @@ func main() {
 	secHandler := &secrets.Handler{Manager: manager, Auditor: auditor}
 	secHandler.Register(mux)
 
+	credHandler := &credentials.Handler{Manager: manager, Auditor: auditor}
+	credHandler.Register(mux)
+
+	execHandler := &execute.Handler{Manager: manager, Auditor: auditor}
+	execHandler.Register(mux)
+
 	hzHandler := &healthz.Handler{Auditor: auditor}
 	hzHandler.Register(mux)
-
-	execHandler := execute.New(manager, auditor)
-	execHandler.Register(mux)
 
 	httpSrv := &http.Server{Addr: ":8000", Handler: mux}
 
@@ -47,7 +51,7 @@ func main() {
 	defer cancel()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).
-		With("service", "vault", "component", "server")
+		With("component", "vault", "module", "server")
 
 	// Heartbeat emitter — non-fatal if NATS is unavailable.
 	if natsURL := os.Getenv("NATS_URL"); natsURL != "" {

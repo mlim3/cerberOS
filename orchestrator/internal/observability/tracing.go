@@ -2,6 +2,7 @@ package observability
 
 import (
 	"context"
+	"strings"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -15,13 +16,37 @@ import (
 
 var tracer = otel.Tracer("aegis-orchestrator")
 
+// NormalizeOTLPGRPCEndpoint converts common OTLP URL forms into host:port for
+// otlptracegrpc.WithEndpoint (no scheme, no path).
+func NormalizeOTLPGRPCEndpoint(s string) string {
+	s = strings.TrimSpace(s)
+	for _, p := range []string{"http://", "https://"} {
+		if strings.HasPrefix(s, p) {
+			s = strings.TrimPrefix(s, p)
+			break
+		}
+	}
+	if i := strings.Index(s, "/"); i != -1 {
+		s = s[:i]
+	}
+	return s
+}
+
 // InitTracer sets up the OTLP gRPC trace exporter and registers it as the
 // global OTel TracerProvider. Call once from main.go on startup.
+//
+// If endpoint is empty, tracing is disabled and a no-op shutdown is returned
+// (no background export errors).
 //
 // Returns a shutdown function that must be called on graceful exit to flush
 // pending spans. The orchestrator continues to start even if Tempo is
 // unreachable — the OTLP exporter retries in the background.
 func InitTracer(ctx context.Context, endpoint string, nodeID string) (func(context.Context) error, error) {
+	endpoint = NormalizeOTLPGRPCEndpoint(endpoint)
+	if endpoint == "" {
+		return func(context.Context) error { return nil }, nil
+	}
+
 	exporter, err := otlptracegrpc.New(ctx,
 		otlptracegrpc.WithEndpoint(endpoint),
 		otlptracegrpc.WithInsecure(),

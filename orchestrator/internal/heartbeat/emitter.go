@@ -85,9 +85,11 @@ func NewEmitter(client interfaces.NATSClient, service string) *Emitter {
 
 // Start publishes beats until ctx is done.
 func (e *Emitter) Start(ctx context.Context) {
-	log := observability.LogFromContext(ctx).With(
-		"component", "heartbeat_emitter",
-		"service", e.service,
+	// The orchestrator binary owns this emitter, so component stays as
+	// "orchestrator". `peer_service` is the heartbeat subject's service token,
+	// which for the orchestrator's own beats equals "orchestrator".
+	log := observability.LogFromContext(observability.WithModule(ctx, "heartbeat_emitter")).With(
+		"peer_service", e.service,
 	)
 
 	ticker := time.NewTicker(e.interval)

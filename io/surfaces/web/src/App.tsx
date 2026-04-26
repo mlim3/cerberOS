@@ -398,6 +398,7 @@ function App() {
   // effect must re-run to resubscribe to the new task's SSE stream.
   const activeTaskId = tasks.find(t => t.id === selectedTaskId)?.currentTaskId
 
+
   useEffect(() => {
     if (!orchestratorSseEnabled()) return
     if (!activeTaskId) return
@@ -449,6 +450,7 @@ function App() {
       }
     }
 
+    if (!activeTaskId) return
     const unsub = subscribeOrchestratorTaskStream(activeTaskId, {
       onOpen: () => {
         if (!cancelled) setUseMockHeartbeat(false)
@@ -612,15 +614,13 @@ function App() {
     // Keep tasks in sync
     const unsubscribe = surface.onStatusUpdate((update) => {
       // When status updates come in, we could update tasks here
-      // For now, just log
-      console.log('[App] Surface status update:', update.taskId, update.status)
+      void update
     })
 
     // Expose the adapter globally for orchestrator integration
     // @ts-expect-error - Adding to window for external access
     window.__cerberosSurface = surface
 
-    console.log('[App] SurfaceAdapter initialized')
     return () => {
       unsubscribe()
       surface.shutdown()

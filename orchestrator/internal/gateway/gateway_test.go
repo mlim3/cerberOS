@@ -57,7 +57,7 @@ func TestGatewayStart_SubscribesToInboundTopics(t *testing.T) {
 
 	// tasks.inbound, agent.status, capability.response, task.accepted, task.result,
 	// task.failed, credential.request, plan.decision, state.write, state.read.request,
-	// audit.event (agent skill_invocation events)
+	// audit.event, vault.execute.request
 	if nats.SubscribeCallCount != 12 {
 		t.Fatalf("SubscribeCallCount = %d, want 12", nats.SubscribeCallCount)
 	}
@@ -72,6 +72,53 @@ func TestGatewayIsConnected_ReflectsNATSState(t *testing.T) {
 	nats.ShouldBeDisconnected = true
 	if gw.IsConnected() {
 		t.Fatal("IsConnected() = true, want false after disconnect")
+	}
+}
+
+// Agents-component publishes task.result with trace_id on the payload only (no envelope field).
+func TestHandleTaskResult_UsesPayloadTraceIDWhenEnvelopeTraceIDEmpty(t *testing.T) {
+	nats := mocks.NewNATSMock()
+	gw := gateway.New(nats, "test-node")
+
+	wantTrace := "ab39fcf8-7872-4836-8001-acb3bc1e7bc2"
+	var gotTrace string
+	gw.RegisterTaskResultHandler(func(ctx context.Context, result types.TaskResult) error {
+		gotTrace = observability.TraceIDFrom(ctx)
+		return nil
+	})
+	if err := gw.Start(); err != nil {
+		t.Fatalf("gateway.Start() error = %v", err)
+	}
+
+	payload, err := json.Marshal(map[string]any{
+		"task_id":  "cefc6a71-7fa7-459f-8fef-0e4afe20544f",
+		"agent_id": "agent-1",
+		"success":  true,
+		"trace_id": wantTrace,
+		"result":   map[string]any{"plan_id": "p1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := types.MessageEnvelope{
+		MessageID:       "msg-task-result-1",
+		MessageType:     "task.result",
+		SourceComponent: "agents",
+		CorrelationID:   "cefc6a71-7fa7-459f-8fef-0e4afe20544f",
+		Timestamp:       time.Now().UTC(),
+		SchemaVersion:   "1.0",
+		Payload:         payload,
+	}
+	data, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := nats.Deliver(gateway.TopicTaskResult, data); err != nil {
+		t.Fatalf("Deliver(task.result) error = %v", err)
+	}
+	if gotTrace != wantTrace {
+		t.Fatalf("TraceIDFrom(handler ctx) = %q, want %q", gotTrace, wantTrace)
 	}
 }
 
@@ -346,7 +393,8 @@ func TestPublishTaskSpec_WirePrefersW3CTraceID(t *testing.T) {
 		TraceID:              "0123456789abcdef0123456789abcdef",
 	}
 
-	if err := gw.PublishTaskSpec(context.Background(), spec); err != nil {
+	specCtx := observability.WithTraceID(context.Background(), spec.TraceID)
+	if err := gw.PublishTaskSpec(specCtx, spec); err != nil {
 		t.Fatalf("PublishTaskSpec() error = %v", err)
 	}
 
@@ -392,7 +440,8 @@ func TestPublishCapabilityQuery_MessageEnvelopeTraceID(t *testing.T) {
 		RequiredSkillDomains: []string{"web"},
 		TraceID:              traceID,
 	}
-	if _, err := gw.PublishCapabilityQuery(context.Background(), query); err != nil {
+	qctx := observability.WithTraceID(context.Background(), traceID)
+	if _, err := gw.PublishCapabilityQuery(qctx, query); err != nil {
 		t.Fatalf("PublishCapabilityQuery() error = %v", err)
 	}
 
@@ -557,10 +606,7 @@ func TestGatewayDemoFlow(t *testing.T) {
 	t.Log("demo setup: no real NATS connection — all publish/subscribe calls go through the mock")
 
 	// ── Step 1: Startup — Subscribe to inbound topics ─────────────────────
-	// The Gateway must subscribe to exactly 3 inbound topics on Start():
-	//   aegis.orchestrator.tasks.inbound
-	//   aegis.agents.status.events
-	//   aegis.agents.capability.response
+	// The Gateway subscribes to all inbound orchestrator topics on Start().
 	t.Log("─────────────────────────────────────────────────────")
 	t.Log("step 1: startup — calling gw.Start() and verifying subscriptions")
 
