@@ -392,8 +392,15 @@ function App() {
   }, [DEMO_MODE, selectedTaskId])
 
   // Orchestrator → IO push stream (SSE) for status + credential_request
+  // activeTaskId is derived here so it can be a useEffect dependency: when the
+  // user sends a follow-up in the same conversation the task's currentTaskId
+  // changes (new task submitted) while selectedTaskId stays the same, so the
+  // effect must re-run to resubscribe to the new task's SSE stream.
+  const activeTaskId = tasks.find(t => t.id === selectedTaskId)?.currentTaskId
+
   useEffect(() => {
     if (!orchestratorSseEnabled()) return
+    if (!activeTaskId) return
 
     let cancelled = false
 
@@ -434,7 +441,7 @@ function App() {
           ...prev,
           [p.taskId]: { preview: p, status: 'pending' },
         }))
-      } else if (ev.type === 'skill_activity' && uiSettings.showSkillToasts) {
+      } else if (ev.type === 'skill_activity' && uiSettingsRef.current.showSkillToasts) {
         setSkillToasts(prev => [
           ...prev.slice(-9), // keep at most 10 toasts
           { id: nextId(), activity: ev.payload, createdAt: Date.now() },
@@ -442,8 +449,6 @@ function App() {
       }
     }
 
-    const activeTaskId = tasks.find(t => t.id === selectedTaskId)?.currentTaskId
-    if (!activeTaskId) return
     const unsub = subscribeOrchestratorTaskStream(activeTaskId, {
       onOpen: () => {
         if (!cancelled) setUseMockHeartbeat(false)
@@ -458,7 +463,7 @@ function App() {
       cancelled = true
       unsub()
     }
-  }, [selectedTaskId])
+  }, [selectedTaskId, activeTaskId])
 
   // Offline / API-down: still show credential demo for task 13 (matches IO API demo push)
   useEffect(() => {

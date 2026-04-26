@@ -423,6 +423,15 @@ func (s *Simulator) handleStateReadRequest(msg *nats.Msg) {
 		return
 	}
 
+	// system_log reads are answered by the orchestrator (Loki bridge). If the
+	// simulator responds first with empty records it races and beats the real
+	// answer, so skip these entirely.
+	if req.DataType == "system_log" {
+		_ = msg.Ack()
+		s.log.Info("simulator: skipping system_log read (routed to Loki via orchestrator)", "agent_id", req.AgentID)
+		return
+	}
+
 	resp := types.MemoryResponse{
 		AgentID: req.AgentID,
 		Records: []types.MemoryWrite{},

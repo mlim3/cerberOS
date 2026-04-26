@@ -658,25 +658,43 @@ func (g *Gateway) handleRawStateReadRequest(subject string, data []byte) error {
 
 	// Route system_log queries to the Memory Component HTTP API.
 	if req.DataType == "system_log" {
-		var records []json.RawMessage
+		var rawRecords []json.RawMessage
 		if strings.HasPrefix(g.memoryEndpoint, "http://") || strings.HasPrefix(g.memoryEndpoint, "https://") {
 			var fetchErr error
-			records, fetchErr = g.fetchMemoryLogs(ctx, req.ContextTag, req.AgentID, req.QueryParams)
+			rawRecords, fetchErr = g.fetchMemoryLogs(ctx, req.ContextTag, req.AgentID, req.QueryParams)
 			if fetchErr != nil {
 				observability.LogFromContext(ctx).Warn("memory logs fetch failed",
 					"context_tag", req.ContextTag, "error", fetchErr)
-				// Return an error record rather than silently returning empty.
-				errRec, _ := json.Marshal(map[string]string{
-					"error": fetchErr.Error(),
-				})
-				records = []json.RawMessage{errRec}
+				errRec, _ := json.Marshal(map[string]string{"error": fetchErr.Error()})
+				rawRecords = []json.RawMessage{errRec}
 			}
 		} else {
 			observability.LogFromContext(ctx).Warn("system_log read requested but memory endpoint not configured")
 		}
-		if records == nil {
-			records = []json.RawMessage{}
+
+		observability.LogFromContext(ctx).Info("system_log fetch complete",
+			"context_tag", req.ContextTag, "record_count", len(rawRecords))
+
+		// Wrap each raw log record inside a MemoryWrite-compatible JSON envelope so
+		// the agent can unmarshal records as []MemoryWrite with Payload holding the
+		// actual log data. Without this wrapping the Loki JSON fields don't match
+		// MemoryWrite field names and all records deserialise as zero-value structs.
+		records := make([]json.RawMessage, 0, len(rawRecords))
+		for _, raw := range rawRecords {
+			wrapped, err := json.Marshal(struct {
+				AgentID  string          `json:"agent_id"`
+				DataType string          `json:"data_type"`
+				Payload  json.RawMessage `json:"payload"`
+			}{
+				AgentID:  req.AgentID,
+				DataType: "system_log",
+				Payload:  raw,
+			})
+			if err == nil {
+				records = append(records, wrapped)
+			}
 		}
+
 		resp := struct {
 			AgentID string            `json:"agent_id"`
 			Records []json.RawMessage `json:"records"`
@@ -925,7 +943,7 @@ func (g *Gateway) fetchMemoryLogs(ctx context.Context, contextTag, agentID strin
 func (g *Gateway) fetchLokiLogs(ctx context.Context, serviceName, severity, keyword string, limit int) ([]json.RawMessage, error) {
 	// Build LogQL stream selector.
 	if serviceName == "" {
-		serviceName = ".*"
+		serviceName = ".+"
 	}
 	logQL := fmt.Sprintf(`{compose_service=~"%s"}`, serviceName)
 	if keyword != "" {
