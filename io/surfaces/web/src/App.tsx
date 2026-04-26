@@ -7,11 +7,13 @@ import type {
   OrchestratorStreamEvent,
   PlanPreview,
   PlanDecisionStatus,
+  PlanStep,
 } from '@cerberos/io-core'
 import TaskSidebar from './components/TaskSidebar'
 import ChatWindow from './components/ChatWindow'
 import CredentialModal from './components/CredentialModal'
 import PlanPreviewCard from './components/PlanPreviewCard'
+import PlanPipeline from './components/PlanPipeline'
 import SettingsButton from './components/SettingsButton'
 import SettingsPanel, { defaultUISettings } from './components/SettingsPanel'
 import type { UISettings } from './components/SettingsPanel'
@@ -296,6 +298,11 @@ function App() {
     Record<string, { preview: PlanPreview; status: PlanDecisionStatus; error?: string }>
   >({})
 
+  // Plan execution pipeline state — tracks step progression after approval.
+  const [planExecution, setPlanExecution] = useState<
+    Record<string, { steps: PlanStep[]; currentStepIndex: number }>
+  >({})
+
   const selectedTask = tasks.find(t => t.id === selectedTaskId)
 
   const addLogEntry = useCallback((entry: Omit<LogEntry, 'id' | 'timestamp'>) => {
@@ -462,6 +469,22 @@ function App() {
       }
     })
   }, [DEMO_MODE, useMockHeartbeat, selectedTaskId])
+
+  // Demo mode: show a mock plan execution pipeline for task 4 (API endpoint testing)
+  useEffect(() => {
+    if (!DEMO_MODE) return
+    setPlanExecution({
+      '4': {
+        steps: [
+          { id: 's1', label: 'Fetch schema diff', status: 'completed', output: '3 tables, 12 columns changed' },
+          { id: 's2', label: 'Validate migration', status: 'completed', output: 'All constraints satisfied' },
+          { id: 's3', label: 'Run integration tests', status: 'active', description: 'Running test suite...' },
+          { id: 's4', label: 'Generate coverage report', status: 'upcoming' },
+        ],
+        currentStepIndex: 2,
+      },
+    })
+  }, [])
 
   // Refs to hold callbacks for SurfaceAdapter integration
   const tasksRef = useRef(tasks)
@@ -1025,6 +1048,14 @@ function App() {
                 onApprove={() => selectedTask.currentTaskId && handlePlanDecision(selectedTask.currentTaskId, true)}
                 onReject={reason => selectedTask.currentTaskId && handlePlanDecision(selectedTask.currentTaskId, false, reason)}
               />
+            )}
+            {planExecution[selectedTask.id] && (
+              <div style={{ padding: '0 40px' }}>
+                <PlanPipeline
+                  steps={planExecution[selectedTask.id].steps}
+                  currentStepIndex={planExecution[selectedTask.id].currentStepIndex}
+                />
+              </div>
             )}
             <ChatWindow
               task={selectedTask}

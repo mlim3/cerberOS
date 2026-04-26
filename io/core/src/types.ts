@@ -146,6 +146,16 @@ export interface PlanPreview {
 
 export type PlanDecisionStatus = 'pending' | 'submitting' | 'approved' | 'rejected' | 'error';
 
+export type PlanStepStatus = 'completed' | 'active' | 'upcoming';
+
+export interface PlanStep {
+  id: string;
+  label: string;
+  description?: string;
+  status: PlanStepStatus;
+  output?: string;
+}
+
 /** IO → Orchestrator: user's decision on a plan preview. */
 export interface PlanDecisionSubmission {
   taskId: string;
