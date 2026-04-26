@@ -24,6 +24,14 @@ var builtinRegistry = map[string]ToolFactory{
 	// web domain
 	"web_fetch":       func(_ *VaultExecutor) SkillTool { return webFetchTool() },
 	"vault_web_fetch": func(ve *VaultExecutor) SkillTool { return vaultWebFetchTool(ve) },
+	"web_search":      func(ve *VaultExecutor) SkillTool { return webSearchTool(ve) },
+	"web_extract":     func(_ *VaultExecutor) SkillTool { return webExtractTool() },
+
+	// logs domain
+	"logs_query":  func(_ *VaultExecutor) SkillTool { return logsQueryTool(nil) },
+	"logs_search": func(_ *VaultExecutor) SkillTool { return logsSearchTool(nil) },
+	"logs_tail":   func(_ *VaultExecutor) SkillTool { return logsTailTool(nil) },
+	"logs_agent":  func(_ *VaultExecutor) SkillTool { return logsAgentTool(nil) },
 
 	// data domain
 	"data_transform":   func(_ *VaultExecutor) SkillTool { return dataTransformTool() },
@@ -38,4 +46,10 @@ var builtinRegistry = map[string]ToolFactory{
 	"vault_storage_read":  func(ve *VaultExecutor) SkillTool { return vaultStorageReadTool(ve) },
 	"vault_storage_write": func(ve *VaultExecutor) SkillTool { return vaultStorageWriteTool(ve) },
 	"vault_storage_list":  func(ve *VaultExecutor) SkillTool { return vaultStorageListTool(ve) },
+
+	// google_search domain
+	"vault_google_search": func(ve *VaultExecutor) SkillTool { return vaultGoogleSearchTool(ve) },
+
+	// github domain
+	"vault_github_request": func(ve *VaultExecutor) SkillTool { return vaultGitHubRequestTool(ve) },
 }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 )
 
 // VaultFailureMode controls Orchestrator behavior when Vault is unreachable (§FR-PE-04).
@@ -19,6 +20,7 @@ const (
 type OrchestratorConfig struct {
 	// External dependencies
 	VaultAddr      string // VAULT_ADDR — OpenBao API endpoint
+	VaultEngineURL string // VAULT_ENGINE_URL — credential broker HTTP base URL (e.g. http://vault:8000)
 	NATSUrl        string // NATS_URL — NATS JetStream server URL
 	NATSCredsPath  string // NATS_CREDS_PATH — optional path to NATS credentials file
 	MemoryEndpoint string // MEMORY_ENDPOINT — Memory Component write/read API
@@ -65,6 +67,14 @@ type OrchestratorConfig struct {
 
 	// Identity
 	NodeID string // NODE_ID — default: os.Hostname()
+
+	// Cron wake — POST /v1/cron/wake wakes the planner with a maintenance task (optional).
+	CronWakeSecret         string // CRON_WAKE_SECRET — empty disables the endpoint
+	CronWakeSystemPrompt   string // CRON_WAKE_SYSTEM_PROMPT — extra planner directives
+	CronWakeRawInput       string // CRON_WAKE_RAW_INPUT — maintenance work description
+	CronWakeUserID         string // CRON_WAKE_USER_ID — default: system
+	CronWakeCallbackTopic  string // CRON_WAKE_CALLBACK_TOPIC — NATS topic for results
+	CronWakeTimeoutSeconds int    // CRON_WAKE_TIMEOUT_SECONDS — default: 3600
 }
 
 // Load reads all environment variables and returns a validated OrchestratorConfig.
@@ -78,6 +88,9 @@ func Load() (*OrchestratorConfig, error) {
 	if cfg.VaultAddr == "" {
 		missing = append(missing, "VAULT_ADDR")
 	}
+
+	// VAULT_ENGINE_URL is optional — falls back to mock execute when unset.
+	cfg.VaultEngineURL = strings.TrimRight(os.Getenv("VAULT_ENGINE_URL"), "/")
 
 	cfg.NATSUrl = os.Getenv("NATS_URL")
 	if cfg.NATSUrl == "" {
@@ -151,6 +164,14 @@ func Load() (*OrchestratorConfig, error) {
 			cfg.NodeID = hostname
 		}
 	}
+
+	// ── Cron wake (optional) ─────────────────────────────────────────────────
+	cfg.CronWakeSecret = os.Getenv("CRON_WAKE_SECRET")
+	cfg.CronWakeSystemPrompt = os.Getenv("CRON_WAKE_SYSTEM_PROMPT")
+	cfg.CronWakeRawInput = os.Getenv("CRON_WAKE_RAW_INPUT")
+	cfg.CronWakeUserID = envString("CRON_WAKE_USER_ID", "system")
+	cfg.CronWakeCallbackTopic = envString("CRON_WAKE_CALLBACK_TOPIC", "aegis.orchestrator.cron.wake.results")
+	cfg.CronWakeTimeoutSeconds = envInt("CRON_WAKE_TIMEOUT_SECONDS", 3600)
 
 	return cfg, nil
 }

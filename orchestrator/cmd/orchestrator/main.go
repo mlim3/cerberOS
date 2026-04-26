@@ -27,6 +27,7 @@ import (
 
 	"github.com/mlim3/cerberOS/orchestrator/internal/api"
 	"github.com/mlim3/cerberOS/orchestrator/internal/config"
+	"github.com/mlim3/cerberOS/orchestrator/internal/cronwake"
 	"github.com/mlim3/cerberOS/orchestrator/internal/databusproxy"
 	"github.com/mlim3/cerberOS/orchestrator/internal/dispatcher"
 	"github.com/mlim3/cerberOS/orchestrator/internal/executor"
@@ -44,6 +45,7 @@ import (
 	"github.com/mlim3/cerberOS/orchestrator/internal/policy"
 	"github.com/mlim3/cerberOS/orchestrator/internal/recovery"
 	"github.com/mlim3/cerberOS/orchestrator/internal/types"
+	"github.com/mlim3/cerberOS/orchestrator/internal/vaultclient"
 )
 
 func main() {
@@ -123,7 +125,7 @@ func main() {
 
 type runtime struct {
 	memory     *memoryiface.Interface
-	vault      *mocks.VaultMock
+	vault      interfaces.VaultClient
 	nats       interfaces.NATSClient
 	mockNATS   *mocks.NATSMock
 	mockMemory *mocks.MemoryMock
@@ -145,7 +147,14 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 		return nil, err
 	}
 
-	vaultClient := &mocks.VaultMock{}
+	var vaultClient interfaces.VaultClient
+	if cfg.VaultEngineURL != "" {
+		observability.LogFromContext(context.Background()).Info("using real vault engine", "url", cfg.VaultEngineURL)
+		vaultClient = vaultclient.New(cfg.VaultEngineURL)
+	} else {
+		observability.LogFromContext(context.Background()).Info("vault engine URL not set — using mock vault")
+		vaultClient = &mocks.VaultMock{}
+	}
 	policyEnforcer := policy.New(cfg, vaultClient, memClient)
 
 	natsClient, mockNATS, err := buildNATSClient(cfg)
@@ -153,6 +162,15 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 		return nil, err
 	}
 	gw := gateway.New(natsClient, cfg.NodeID)
+	if isHTTPMemoryEndpoint(cfg.MemoryEndpoint) {
+		gw.SetMemoryEndpoint(cfg.MemoryEndpoint)
+	}
+	if cfg.VaultEngineURL != "" {
+		gw.SetVaultEngineEndpoint(cfg.VaultEngineURL)
+	}
+	if cfg.LokiURL != "" {
+		gw.SetLokiURL(cfg.LokiURL)
+	}
 
 	recoveryBridge := &recoveryProxy{}
 	taskMonitor := monitor.New(cfg, memClient, recoveryBridge)
@@ -206,6 +224,7 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 	gw.RegisterTaskResultHandler(taskDispatcher.HandleTaskResult)
 	gw.RegisterPlanDecisionHandler(taskDispatcher.HandlePlanDecision)
 	gw.RegisterAgentSpawnHandler(taskDispatcher.HandleAgentSpawnRequest)
+	gw.RegisterVaultExecuteHandler(taskDispatcher.HandleVaultExecuteRequest)
 
 	// Forward agent user_input credential requests to the IO Component.
 	gw.RegisterCredentialRequestHandler(func(agentID, taskID, requestID, keyName, label string) error {
@@ -215,6 +234,30 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 			KeyName:   keyName,
 			Label:     label,
 		})
+	})
+
+	// Forward notable skill_invocation audit events to the IO Component so
+	// the web dashboard can display skill-activity toasts.
+	gw.RegisterSkillActivityHandler(func(agentID, taskID, domain, command, outcome string, elapsedMS int64, vaultDelegated bool) {
+		// taskID here is the subtask's orchRef (internal UUID). Resolve it to the
+		// frontend-visible parent task ID so broadcastStreamEvent in IO can match
+		// the SSE client registered at /api/events/{parentTaskID}.
+		parentTaskID := planExecutor.ParentTaskIDForOrchRef(taskID)
+		if parentTaskID == "" {
+			parentTaskID = taskID // fallback: planner task or already-completed plan
+		}
+		if err := ioClient.PushSkillActivity(ioclient.SkillActivityPayload{
+			TaskID:         parentTaskID,
+			AgentID:        agentID,
+			Domain:         domain,
+			Command:        command,
+			ElapsedMS:      elapsedMS,
+			VaultDelegated: vaultDelegated,
+			Outcome:        outcome,
+			Timestamp:      time.Now().UnixMilli(),
+		}); err != nil {
+			observability.LogFromContext(context.Background()).Warn("skill_activity push to IO failed", "error", err)
+		}
 	})
 
 	healthHandler := health.New(vaultClient, memClient, natsClient, taskMonitor, cfg.NodeID)
@@ -230,6 +273,11 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 	mux.Handle("GET /heartbeats", &heartbeat.HTTPHandler{Sweeper: hbSweeper})
 	mux.HandleFunc("GET /debug/trace/{trace_id}", debugHandler.GetTrace)
 	mux.Handle("GET /metrics", metricsHandler)
+
+	if strings.TrimSpace(cfg.CronWakeSecret) != "" {
+		mux.Handle("POST /v1/cron/wake", cronwake.NewHandler(cfg, taskDispatcher))
+		observability.LogFromContext(context.Background()).Info("cron wake endpoint enabled", "path", "/v1/cron/wake")
+	}
 
 	// Databus proxy: forward /v1/databus/* to Memory API if endpoint is HTTP-based.
 	if isHTTPMemoryEndpoint(cfg.MemoryEndpoint) {
@@ -294,6 +342,39 @@ func applyEnvOverrides(cfg *config.OrchestratorConfig) {
 		if parsed, err := strconv.Atoi(v); err == nil {
 			cfg.DecompositionTimeoutSeconds = parsed
 		}
+	}
+	if v := os.Getenv("CRON_WAKE_SECRET"); v != "" {
+		cfg.CronWakeSecret = v
+	}
+	if v := os.Getenv("CRON_WAKE_SYSTEM_PROMPT"); v != "" {
+		cfg.CronWakeSystemPrompt = v
+	}
+	if v := os.Getenv("CRON_WAKE_RAW_INPUT"); v != "" {
+		cfg.CronWakeRawInput = v
+	}
+	if v := os.Getenv("CRON_WAKE_USER_ID"); v != "" {
+		cfg.CronWakeUserID = v
+	}
+	if v := os.Getenv("CRON_WAKE_CALLBACK_TOPIC"); v != "" {
+		cfg.CronWakeCallbackTopic = v
+	}
+	if v := os.Getenv("CRON_WAKE_TIMEOUT_SECONDS"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			cfg.CronWakeTimeoutSeconds = parsed
+		}
+	}
+	// Observability (esp. when falling back to demoConfig — full Load() already sets these).
+	if v := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")); v != "" {
+		cfg.OTELEndpoint = observability.NormalizeOTLPGRPCEndpoint(v)
+	}
+	if v := os.Getenv("LOG_LEVEL"); v != "" {
+		cfg.LogLevel = v
+	}
+	if v := os.Getenv("LOG_FORMAT"); v != "" {
+		cfg.LogFormat = v
+	}
+	if v := os.Getenv("LOKI_URL"); v != "" {
+		cfg.LokiURL = v
 	}
 }
 
@@ -378,5 +459,7 @@ func demoConfig() *config.OrchestratorConfig {
 		QueueHighWaterMark:          500,
 		MemoryWriteBufferSeconds:    30,
 		NodeID:                      "demo-node",
+		LogLevel:                    "info",
+		LogFormat:                   "json",
 	}
 }

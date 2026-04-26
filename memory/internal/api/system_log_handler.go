@@ -123,6 +123,88 @@ func (h *SystemLogHandler) HandleCreateSystemEvent(w http.ResponseWriter, r *htt
 	}))
 }
 
+// HandleSearchSystemEvents performs a full-text search on system event log messages.
+// @Summary Full-text search system events
+// @Description Searches system event log messages using PostgreSQL full-text search
+// @Tags system_events
+// @Produce json
+// @Param q query string true "Search query (plain text)"
+// @Param serviceName query string false "Filter by service name"
+// @Param limit query int false "Max results (default: 20, max: 100)"
+// @Success 200 {object} map[string][]SystemEventResponse "OK"
+// @Failure 400 {object} map[string]interface{} "Bad Request"
+// @Failure 500 {object} map[string]interface{} "Internal Server Error"
+// @Router /api/v1/system/events/search [get]
+func (h *SystemLogHandler) HandleSearchSystemEvents(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	query := r.URL.Query().Get("q")
+	if query == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "q is required", nil))
+		return
+	}
+
+	limit := int32(20)
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		l, err := strconv.ParseInt(limitStr, 10, 32)
+		if err == nil && l > 0 {
+			limit = int32(l)
+		}
+	}
+
+	params := storage.SearchSystemEventsParams{
+		Query: query,
+		Limit: limit,
+	}
+	if svc := r.URL.Query().Get("serviceName"); svc != "" {
+		params.ServiceName = pgtype.Text{String: svc, Valid: true}
+	}
+
+	events, err := h.repo.SearchSystemEvents(ctx, params)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(ErrorResponse("internal", "failed to search system events", err.Error()))
+		return
+	}
+
+	var respEvents []SystemEventResponse
+	for _, event := range events {
+		respEvent := SystemEventResponse{
+			EventID:   event.ID.Bytes,
+			Message:   event.Message,
+			CreatedAt: event.CreatedAt.Time,
+		}
+		if event.TraceID.Valid {
+			traceID := uuid.UUID(event.TraceID.Bytes)
+			respEvent.TraceID = &traceID
+		}
+		if event.ServiceName.Valid {
+			svc := event.ServiceName.String
+			respEvent.ServiceName = &svc
+		}
+		if event.Severity.Valid {
+			sev := event.Severity.String
+			respEvent.Severity = &sev
+		}
+		if len(event.Metadata) > 0 {
+			var metadata map[string]any
+			if err := json.Unmarshal(event.Metadata, &metadata); err == nil {
+				respEvent.Metadata = metadata
+			}
+		}
+		respEvents = append(respEvents, respEvent)
+	}
+	if respEvents == nil {
+		respEvents = []SystemEventResponse{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(SuccessResponse(map[string]any{"events": respEvents}))
+}
+
 // HandleListSystemEvents lists system event logs
 // @Summary List system events
 // @Description Retrieves a list of system event logs

@@ -34,6 +34,8 @@ Autonomous AI operating system with NATS-based messaging, memory, credential vau
   openssl rand -base64 24 | head -c 32  # → VAULT_MASTER_KEY
   openssl rand -hex 32                  # → INTERNAL_VAULT_API_KEY
   ```
+- **`ANTHROPIC_API_KEY`** — required for agent task execution. Set in `.env` before starting the stack.
+- **`TAVILY_API_KEY`** — required for the `web_search` skill. Obtain a key from [tavily.com](https://tavily.com), add it to `.env`, then run `./bootstrap.sh` so it is seeded into OpenBao. Without it, any agent task that invokes web search will fail with a scope/credential error. Free-tier keys work.
 
 ## Quick start
 
@@ -147,5 +149,6 @@ cerberOS/
 | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
 | Orchestrator/IO crash-loops with "connection refused" | NATS not ready — wait for healthcheck or check `curl http://localhost:8222/healthz`                |
 | memory-api exits immediately                          | Missing `VAULT_MASTER_KEY` or `INTERNAL_VAULT_API_KEY` in `.env`                                   |
+| `web_search` skill returns credential error           | `TAVILY_API_KEY` not set in `.env` or not seeded into OpenBao — add the key then re-run `./bootstrap.sh` |
 | OpenBao sealed after restart                          | Re-run `./bootstrap.sh` or manually unseal with key from `vault/.openbao-init.json` |
 | Port conflicts                                        | Run `docker compose ps` to check bindings; see `skills/cerberos-service-ports.md` for full map     |

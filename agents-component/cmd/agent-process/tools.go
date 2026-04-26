@@ -322,7 +322,7 @@ func vaultWebFetchTool(ve *VaultExecutor) SkillTool {
 	return SkillTool{
 		Label:                   "Vault Web Fetch",
 		RequiredCredentialTypes: []string{"web_api_key"},
-		TimeoutSeconds:          35, // must be >= vault TimeoutSeconds (30) + 5s buffer
+		TimeoutSeconds:          40, // must be > VaultExecutor local timer (30+5=35s) to ensure timer.C fires before ctx.Done()
 		Definition: anthropic.ToolParam{
 			Name: "vault_web_fetch",
 			Description: anthropic.String(
@@ -393,6 +393,121 @@ func executeVaultWebFetch(ctx context.Context, ve *VaultExecutor, raw json.RawMe
 
 	// vault TimeoutSeconds = 30; local deadline = 30 + 5 = 35s (matches TimeoutSeconds above).
 	return ve.Execute(ctx, "web_fetch", "web_api_key", opParams, 30, onUpdate)
+}
+
+// vaultGoogleSearchTool searches the web using Google Custom Search API via the Vault.
+func vaultGoogleSearchTool(ve *VaultExecutor) SkillTool {
+	return SkillTool{
+		Label:                   "Vault Google Search",
+		RequiredCredentialTypes: []string{"serper_api_key"},
+		TimeoutSeconds:          40,
+		Definition: anthropic.ToolParam{
+			Name: "vault_google_search",
+			Description: anthropic.String(
+				"Search the web using Google Custom Search API via the Vault. " +
+					"Returns titles, URLs, and snippets for the top results. " +
+					"Use for current information, research, and fact-finding. " +
+					"Do NOT use for private or internal data — use vault_data_read for that. " +
+					"Do NOT include credential values in any parameter."),
+			InputSchema: anthropic.ToolInputSchemaParam{
+				Properties: map[string]interface{}{
+					"query": map[string]interface{}{
+						"type":        "string",
+						"description": "The search query string. Be specific and concise.",
+					},
+					"num_results": map[string]interface{}{
+						"type":        "integer",
+						"description": "Number of results to return. Defaults to 5 when omitted; maximum 10.",
+					},
+				},
+				Required: []string{"query"},
+			},
+		},
+		Execute: func(ctx context.Context, raw json.RawMessage) ToolResult {
+			return executeVaultGoogleSearch(ctx, ve, raw)
+		},
+	}
+}
+
+func executeVaultGoogleSearch(ctx context.Context, ve *VaultExecutor, raw json.RawMessage) ToolResult {
+	var params struct {
+		Query      string `json:"query"`
+		NumResults int    `json:"num_results"`
+	}
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return ToolResult{Content: fmt.Sprintf("invalid parameters: %v", err), IsError: true}
+	}
+	if params.NumResults == 0 {
+		params.NumResults = 5
+	}
+	opParams, err := json.Marshal(params)
+	if err != nil {
+		return ToolResult{Content: fmt.Sprintf("failed to encode params: %v", err), IsError: true}
+	}
+	onUpdate := func(p types.VaultOperationProgress) {
+		ve.log.Info("vault execute: progress", "request_id", p.RequestID, "message", p.Message)
+	}
+	return ve.Execute(ctx, "vault_google_search", "serper_api_key", opParams, 35, onUpdate)
+}
+
+// vaultGitHubRequestTool makes an authenticated request to the GitHub REST API via the Vault.
+func vaultGitHubRequestTool(ve *VaultExecutor) SkillTool {
+	return SkillTool{
+		Label:                   "Vault GitHub Request",
+		RequiredCredentialTypes: []string{"github_token"},
+		TimeoutSeconds:          40,
+		Definition: anthropic.ToolParam{
+			Name: "vault_github_request",
+			Description: anthropic.String(
+				"Make an authenticated request to the GitHub REST API via the Vault. " +
+					"Use for reading repos, issues, pull requests, code, and user data. " +
+					"Do NOT use for public unauthenticated GitHub data — use web_fetch instead. " +
+					"Do NOT include credential values in any parameter."),
+			InputSchema: anthropic.ToolInputSchemaParam{
+				Properties: map[string]interface{}{
+					"path": map[string]interface{}{
+						"type":        "string",
+						"description": "GitHub API path (e.g. \"/repos/owner/repo/issues\"). Must start with \"/\".",
+					},
+					"method": map[string]interface{}{
+						"type":        "string",
+						"description": "HTTP method. Allowed: GET, POST, PATCH, DELETE. Defaults to GET when omitted.",
+						"enum":        []string{"GET", "POST", "PATCH", "DELETE"},
+					},
+					"body": map[string]interface{}{
+						"type":        "string",
+						"description": "Request body as a JSON-encoded string. Only used for POST and PATCH.",
+					},
+				},
+				Required: []string{"path"},
+			},
+		},
+		Execute: func(ctx context.Context, raw json.RawMessage) ToolResult {
+			return executeVaultGitHubRequest(ctx, ve, raw)
+		},
+	}
+}
+
+func executeVaultGitHubRequest(ctx context.Context, ve *VaultExecutor, raw json.RawMessage) ToolResult {
+	var params struct {
+		Path   string `json:"path"`
+		Method string `json:"method"`
+		Body   string `json:"body,omitempty"`
+	}
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return ToolResult{Content: fmt.Sprintf("invalid parameters: %v", err), IsError: true}
+	}
+	if params.Method == "" {
+		params.Method = "GET"
+	}
+	opParams, err := json.Marshal(params)
+	if err != nil {
+		return ToolResult{Content: fmt.Sprintf("failed to encode params: %v", err), IsError: true}
+	}
+	onUpdate := func(p types.VaultOperationProgress) {
+		ve.log.Info("vault execute: progress", "request_id", p.RequestID, "message", p.Message)
+	}
+	return ve.Execute(ctx, "vault_github_request", "github_token", opParams, 35, onUpdate)
 }
 
 // taskCompleteTool is the agent's explicit terminal signal. When the agent calls

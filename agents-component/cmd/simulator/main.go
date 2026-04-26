@@ -121,9 +121,17 @@ func (s *simulator) start() error {
 
 	subs := []sub{
 		{subjectCredentialRequest, consumerCredentialRequest, s.handleCredentialRequest},
-		{subjectVaultExecuteRequest, consumerVaultExecuteRequest, s.handleVaultExecuteRequest},
 		{subjectStateWrite, consumerStateWrite, s.handleStateWrite},
 		{subjectStateReadRequest, consumerStateReadRequest, s.handleStateReadRequest},
+	}
+
+	// When SIMULATOR_SKIP_VAULT_EXECUTE=true a real vault engine is handling
+	// vault.execute.request — skip the mock handler to avoid a race where the
+	// simulator's empty {} result wins over the real vault's response.
+	if os.Getenv("SIMULATOR_SKIP_VAULT_EXECUTE") != "true" {
+		subs = append(subs, sub{subjectVaultExecuteRequest, consumerVaultExecuteRequest, s.handleVaultExecuteRequest})
+	} else {
+		s.log.Info("simulator: vault execute simulation disabled (SIMULATOR_SKIP_VAULT_EXECUTE=true)")
 	}
 
 	for _, entry := range subs {
@@ -204,6 +212,14 @@ func (s *simulator) handleCredentialRequest(msg *nats.Msg) {
 }
 
 func (s *simulator) handleVaultExecuteRequest(msg *nats.Msg) {
+	// When SIMULATE_VAULT_EXECUTE=false the real orchestrator handles vault
+	// execution. Ack immediately so the message is not redelivered, but skip
+	// the mock response so the orchestrator's result reaches the agent.
+	if os.Getenv("SIMULATE_VAULT_EXECUTE") == "false" {
+		_ = msg.Ack()
+		return
+	}
+
 	env := s.unwrap(msg)
 	if env == nil {
 		_ = msg.Nak()
@@ -273,6 +289,13 @@ func (s *simulator) handleStateReadRequest(msg *nats.Msg) {
 	if err := json.Unmarshal(env.Payload, &req); err != nil {
 		s.log.Error("simulator: unmarshal state.read.request", "error", err)
 		_ = msg.Nak()
+		return
+	}
+	// system_log reads are served by the orchestrator's Loki bridge.
+	// Responding here with empty records would race and beat the real answer.
+	if req.DataType == "system_log" {
+		s.log.Info("simulator: skipping system_log read (routed to Loki via orchestrator)", "agent_id", req.AgentID)
+		_ = msg.Ack()
 		return
 	}
 	resp := types.MemoryResponse{

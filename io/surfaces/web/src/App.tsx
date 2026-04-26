@@ -17,6 +17,8 @@ import SettingsPanel, { defaultUISettings } from './components/SettingsPanel'
 import type { UISettings } from './components/SettingsPanel'
 import ActivityLog from './components/ActivityLog'
 import type { LogEntry } from './components/ActivityLog'
+import SkillActivityToast from './components/SkillActivityToast'
+import type { SkillToastItem } from './components/SkillActivityToast'
 import {
   streamOrchestratorReply,
   submitCredential,
@@ -293,6 +295,13 @@ function App() {
     Record<string, { preview: PlanPreview; status: PlanDecisionStatus; error?: string }>
   >({})
 
+  // Skill-activity toast state — populated by orchestrator 'skill_activity' SSE events.
+  const [skillToasts, setSkillToasts] = useState<SkillToastItem[]>([])
+
+  const dismissSkillToast = useCallback((id: string) => {
+    setSkillToasts(prev => prev.filter(t => t.id !== id))
+  }, [])
+
   const selectedTask = tasks.find(t => t.id === selectedTaskId)
 
   const addLogEntry = useCallback((entry: Omit<LogEntry, 'id' | 'timestamp'>) => {
@@ -383,8 +392,16 @@ function App() {
   }, [DEMO_MODE, selectedTaskId])
 
   // Orchestrator → IO push stream (SSE) for status + credential_request
+  // activeTaskId is derived here so it can be a useEffect dependency: when the
+  // user sends a follow-up in the same conversation the task's currentTaskId
+  // changes (new task submitted) while selectedTaskId stays the same, so the
+  // effect must re-run to resubscribe to the new task's SSE stream.
+  const activeTaskId = tasks.find(t => t.id === selectedTaskId)?.currentTaskId
+
+
   useEffect(() => {
     if (!orchestratorSseEnabled()) return
+    if (!activeTaskId) return
 
     let cancelled = false
 
@@ -425,10 +442,14 @@ function App() {
           ...prev,
           [p.taskId]: { preview: p, status: 'pending' },
         }))
+      } else if (ev.type === 'skill_activity' && uiSettingsRef.current.showSkillToasts) {
+        setSkillToasts(prev => [
+          ...prev.slice(-9), // keep at most 10 toasts
+          { id: nextId(), activity: ev.payload, createdAt: Date.now() },
+        ])
       }
     }
 
-    const activeTaskId = tasks.find(t => t.id === selectedTaskId)?.currentTaskId
     if (!activeTaskId) return
     const unsub = subscribeOrchestratorTaskStream(activeTaskId, {
       onOpen: () => {
@@ -444,7 +465,7 @@ function App() {
       cancelled = true
       unsub()
     }
-  }, [selectedTaskId])
+  }, [selectedTaskId, activeTaskId])
 
   // Offline / API-down: still show credential demo for task 13 (matches IO API demo push)
   useEffect(() => {
@@ -1077,6 +1098,11 @@ function App() {
           isSubmitting={credentialRequests[activeCredentialTaskId].status === 'submitting'}
         />
       )}
+
+      <SkillActivityToast
+        toasts={skillToasts}
+        onDismiss={dismissSkillToast}
+      />
     </div>
   )
 }
