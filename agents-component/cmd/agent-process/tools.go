@@ -399,7 +399,7 @@ func executeVaultWebFetch(ctx context.Context, ve *VaultExecutor, raw json.RawMe
 func vaultGoogleSearchTool(ve *VaultExecutor) SkillTool {
 	return SkillTool{
 		Label:                   "Vault Google Search",
-		RequiredCredentialTypes: []string{"google_search_api_key"},
+		RequiredCredentialTypes: []string{"serper_api_key"},
 		TimeoutSeconds:          40,
 		Definition: anthropic.ToolParam{
 			Name: "vault_google_search",
@@ -447,7 +447,7 @@ func executeVaultGoogleSearch(ctx context.Context, ve *VaultExecutor, raw json.R
 	onUpdate := func(p types.VaultOperationProgress) {
 		ve.log.Info("vault execute: progress", "request_id", p.RequestID, "message", p.Message)
 	}
-	return ve.Execute(ctx, "vault_google_search", "google_search_api_key", opParams, 35, onUpdate)
+	return ve.Execute(ctx, "vault_google_search", "serper_api_key", opParams, 35, onUpdate)
 }
 
 // vaultGitHubRequestTool makes an authenticated request to the GitHub REST API via the Vault.

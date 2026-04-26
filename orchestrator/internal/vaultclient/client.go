@@ -29,7 +29,7 @@ var domainCredTypes = map[string][]string{
 	"data":          {"data_read_key", "data_write_key"},
 	"comms":         {"comms_api_key"},
 	"storage":       {"storage_credential"},
-	"google_search": {"google_search_api_key"},
+	"google_search": {"serper_api_key"},
 	"github":        {"github_token"},
 }
 
