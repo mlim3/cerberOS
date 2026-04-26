@@ -108,6 +108,53 @@ func TestHandler_DisabledWithoutSecret(t *testing.T) {
 	}
 }
 
+// TestHandler_RejectsMalformedJSON ensures a non-empty, non-JSON body fails
+// loudly with 400 rather than silently falling back to defaults.
+func TestHandler_RejectsMalformedJSON(t *testing.T) {
+	t.Parallel()
+	cfg := &config.OrchestratorConfig{CronWakeSecret: "s3cret"}
+	ing := &fakeIngester{}
+	h := NewHandler(cfg, ing)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/cron/wake", bytes.NewReader([]byte(`{not-json`)))
+	req.Header.Set(headerCronSecret, "s3cret")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	if ing.lastTask.TaskID != "" {
+		t.Fatalf("expected no task dispatched on malformed body, got task_id=%q", ing.lastTask.TaskID)
+	}
+}
+
+// TestHandler_AcceptsEmptyBodyUsesDefaults preserves the cron-friendly path
+// where the caller sends no body at all and the handler uses configured defaults.
+func TestHandler_AcceptsEmptyBodyUsesDefaults(t *testing.T) {
+	t.Parallel()
+	cfg := &config.OrchestratorConfig{
+		CronWakeSecret:        "s3cret",
+		CronWakeUserID:        "system",
+		CronWakeCallbackTopic: "aegis.orchestrator.cron.wake.results",
+		CronWakeRawInput:      "configured maintenance work",
+	}
+	ing := &fakeIngester{}
+	h := NewHandler(cfg, ing)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/cron/wake", http.NoBody)
+	req.Header.Set(headerCronSecret, "s3cret")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", rec.Code)
+	}
+	if !isValidUUID(ing.lastTask.TaskID) {
+		t.Fatalf("task_id not uuid: %q", ing.lastTask.TaskID)
+	}
+}
+
 func isValidUUID(s string) bool {
 	if len(s) != 36 {
 		return false

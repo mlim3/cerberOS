@@ -70,9 +70,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	body := wakeRequestBody{}
 	if r.Body != nil {
-		raw, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		if err != nil {
+			http.Error(w, "read body failed", http.StatusBadRequest)
+			return
+		}
+		// Empty body is allowed (cron callers often send no body);
+		// non-empty bodies must be valid JSON matching wakeRequestBody.
 		if len(strings.TrimSpace(string(raw))) > 0 {
-			_ = json.Unmarshal(raw, &body)
+			if err := json.Unmarshal(raw, &body); err != nil {
+				http.Error(w, "invalid json body", http.StatusBadRequest)
+				return
+			}
 		}
 	}
 
