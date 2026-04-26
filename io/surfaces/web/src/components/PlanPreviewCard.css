@@ -8,6 +8,11 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
+  /* Cap height so tall plans scroll internally instead of pushing the chat
+     window out of view and making half the UI non-interactive. */
+  max-height: 40vh;
+  overflow-y: auto;
+  flex-shrink: 0;
 }
 
 @keyframes plan-preview-in {

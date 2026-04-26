@@ -1,0 +1,66 @@
+apiVersion: v2
+name: cerberos
+description: |
+  cerberOS umbrella chart — deploys the full stack as independent pods
+  across a Kubernetes cluster (NATS, Postgres, OpenBao, Vault engine,
+  Memory API, Orchestrator, IO, DataBus, Agents, Simulator, Observability,
+  NetworkPolicies).
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+
+dependencies:
+  # ── Messaging ──────────────────────────────────────────────────────────
+  - name: nats
+    version: "0.1.0"
+    repository: "file://../charts/nats"
+
+  # ── Data plane ─────────────────────────────────────────────────────────
+  - name: postgres
+    version: "0.1.0"
+    repository: "file://../charts/postgres"
+
+  - name: openbao
+    version: "0.1.0"
+    repository: "file://../charts/openbao"
+
+  # ── Application services ───────────────────────────────────────────────
+  - name: vault-engine
+    version: "0.1.0"
+    repository: "file://../charts/vault-engine"
+
+  - name: memory-api
+    version: "0.1.0"
+    repository: "file://../charts/memory-api"
+
+  - name: orchestrator
+    version: "0.1.0"
+    repository: "file://../charts/orchestrator"
+
+  - name: io
+    version: "0.1.0"
+    repository: "file://../charts/io"
+
+  - name: aegis-databus
+    version: "0.1.0"
+    repository: "file://../charts/aegis-databus"
+
+  - name: simulator
+    version: "0.1.0"
+    repository: "file://../charts/simulator"
+
+  - name: aegis-agents
+    version: "0.1.0"
+    repository: "file://../charts/aegis-agents"
+
+  # ── Observability ──────────────────────────────────────────────────────
+  - name: observability
+    version: "0.1.0"
+    repository: "file://../charts/observability"
+    condition: observability.enabled
+
+  # ── Networking (opt-in) ────────────────────────────────────────────────
+  - name: network-policies
+    version: "0.1.0"
+    repository: "file://../charts/network-policies"
+    condition: network-policies.enabled

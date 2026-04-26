@@ -114,7 +114,7 @@ func NewSweeper(client interfaces.NATSClient, opts ...Option) *Sweeper {
 // Returns an error if subscription fails; otherwise runs until ctx is
 // done.
 func (s *Sweeper) Start(ctx context.Context) error {
-	log := observability.LogFromContext(ctx).With("component", "heartbeat_sweeper")
+	log := observability.LogFromContext(observability.WithModule(ctx, "heartbeat_sweeper"))
 
 	if err := s.client.Subscribe(SubjectWildcard, s.handleMessage); err != nil {
 		return err
@@ -159,9 +159,11 @@ func (s *Sweeper) handleMessage(subject string, data []byte) error {
 	s.mu.Unlock()
 
 	if had && prev.stale {
-		observability.LogFromContext(context.Background()).Info(
+		observability.LogFromContext(
+			observability.WithModule(context.Background(), "heartbeat_sweeper"),
+		).Info(
 			"heartbeat: service recovered",
-			"service", beat.Service,
+			"peer_service", beat.Service,
 			"instance_id", beat.InstanceID,
 		)
 	}
@@ -169,7 +171,7 @@ func (s *Sweeper) handleMessage(subject string, data []byte) error {
 }
 
 func (s *Sweeper) sweepLoop(ctx context.Context) {
-	log := observability.LogFromContext(ctx).With("component", "heartbeat_sweeper")
+	log := observability.LogFromContext(observability.WithModule(ctx, "heartbeat_sweeper"))
 	ticker := time.NewTicker(s.sweepInterval)
 	defer ticker.Stop()
 
@@ -202,7 +204,7 @@ func (s *Sweeper) sweep(log *slog.Logger) {
 
 	for _, sh := range newlyStale {
 		log.Warn("heartbeat: service stale",
-			"service", sh.Service,
+			"peer_service", sh.Service,
 			"instance_id", sh.InstanceID,
 			"last_seen", sh.LastSeen.Format(time.RFC3339),
 			"age_seconds", sh.AgeSeconds,

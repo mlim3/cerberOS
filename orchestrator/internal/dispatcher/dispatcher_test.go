@@ -145,6 +145,12 @@ func (e *executorMock) HandleSubtaskResult(_ context.Context, result types.TaskR
 	return nil
 }
 
+// UserIDForSubtask satisfies the PlanExecutor interface added on main; tests
+// don't exercise per-user credential routing so an empty/false return is fine.
+func (e *executorMock) UserIDForSubtask(_ string) (string, bool) {
+	return "", false
+}
+
 // ── Test Helpers ─────────────────────────────────────────────────────────────
 
 // newDispatcher builds a fully wired Dispatcher with fresh mocks.

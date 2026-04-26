@@ -119,6 +119,26 @@ func New(
 	}
 }
 
+// UserIDForSubtask resolves user_id from a subtask's orchestrator_task_ref.
+// Returns ("", false) when the orchRef is not found in any active plan.
+// Used by the dispatcher to authorize vault.execute.request messages from agents.
+func (e *PlanExecutor) UserIDForSubtask(orchRef string) (string, bool) {
+	planIDVal, ok := e.orchRefToPlan.Load(orchRef)
+	if !ok {
+		return "", false
+	}
+	planID, _ := planIDVal.(string)
+	execVal, ok := e.activePlans.Load(planID)
+	if !ok {
+		return "", false
+	}
+	exec, _ := execVal.(*planExecution)
+	if exec == nil || exec.ts == nil {
+		return "", false
+	}
+	return exec.ts.UserID, true
+}
+
 // ── Execute — entry point from Task Dispatcher ────────────────────────────────
 
 // Execute initializes all subtasks as PENDING and dispatches those with no dependencies.
@@ -427,6 +447,7 @@ func (e *PlanExecutor) checkPlanCompletion(exec *planExecution) {
 		planCtx = observability.WithTraceID(planCtx, exec.ts.TraceID)
 	}
 	planCtx = observability.WithTaskID(planCtx, exec.ts.TaskID)
+	planCtx = observability.WithConversationID(planCtx, exec.ts.ConversationID)
 	planCtx = observability.WithPlanID(planCtx, exec.plan.PlanID)
 	planCtx = observability.WithModule(planCtx, "plan_executor")
 	log := observability.LogFromContext(planCtx)

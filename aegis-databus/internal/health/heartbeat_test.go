@@ -2,7 +2,8 @@ package health
 
 import (
 	"context"
-	"log"
+	"io"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 )
 
 func TestNewHeartbeat(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	hb := NewHeartbeat(nil, nil)
 	if hb == nil {
 		t.Fatal("NewHeartbeat returned nil")
@@ -19,8 +21,8 @@ func TestNewHeartbeat(t *testing.T) {
 		t.Error("logger should be set when nil passed")
 	}
 
-	hb2 := NewHeartbeat(nil, log.Default())
-	if hb2.logger != log.Default() {
+	hb2 := NewHeartbeat(nil, logger)
+	if hb2.logger != logger {
 		t.Error("logger should use provided value")
 	}
 }
@@ -40,7 +42,7 @@ func TestHeartbeat_Start(t *testing.T) {
 	}
 	defer nc.Close()
 
-	hb := NewHeartbeat(nc, log.New(nil, "", 0))
+	hb := NewHeartbeat(nc, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	runCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	done := make(chan struct{})

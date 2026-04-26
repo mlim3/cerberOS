@@ -14,17 +14,18 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
-	"os"
 	"time"
+
+	"github.com/mlim3/cerberOS/orchestrator/internal/observability"
 )
 
 // TaskStatus values match the IO component's TaskStatus type.
 const (
-	StatusWorking         = "working"
+	StatusWorking          = "working"
 	StatusAwaitingFeedback = "awaiting_feedback"
-	StatusCompleted       = "completed"
+	StatusCompleted        = "completed"
 )
 
 // streamEventsPath is the IO endpoint that accepts orchestrator-pushed events.
@@ -38,18 +39,18 @@ type statusEvent struct {
 }
 
 type statusPayload struct {
-	TaskID                   string  `json:"taskId"`
-	Status                   string  `json:"status"`
-	LastUpdate               string  `json:"lastUpdate"`
-	ExpectedNextInputMinutes *int    `json:"expectedNextInputMinutes"`
-	Timestamp                int64   `json:"timestamp"` // Unix ms
+	TaskID                   string `json:"taskId"`
+	Status                   string `json:"status"`
+	LastUpdate               string `json:"lastUpdate"`
+	ExpectedNextInputMinutes *int   `json:"expectedNextInputMinutes"`
+	Timestamp                int64  `json:"timestamp"` // Unix ms
 }
 
 // credentialRequestEvent is the envelope for a credential request pushed to IO.
 // Matches: { type: 'credential_request', payload: CredentialRequest } in io/core/src/types.ts
 type credentialRequestEvent struct {
-	Type    string                    `json:"type"`
-	Payload CredentialRequestPayload  `json:"payload"`
+	Type    string                   `json:"type"`
+	Payload CredentialRequestPayload `json:"payload"`
 }
 
 // planPreviewEvent is the envelope for a plan preview pushed to IO.
@@ -96,7 +97,7 @@ type CredentialRequestPayload struct {
 type Client struct {
 	baseURL    string
 	httpClient *http.Client
-	logger     *log.Logger
+	logger     *slog.Logger
 }
 
 // New returns a new Client targeting baseURL (e.g. "http://localhost:3001").
@@ -107,7 +108,7 @@ func New(baseURL string) *Client {
 		httpClient: &http.Client{
 			Timeout: 5 * time.Second,
 		},
-		logger: log.New(os.Stdout, "[io-client] ", log.LstdFlags|log.LUTC),
+		logger: observability.LoggerWithModule("io-client"),
 	}
 }
 
@@ -172,13 +173,26 @@ func (c *Client) post(body any) error {
 	resp, err := c.httpClient.Post(url, "application/json", bytes.NewReader(data))
 	if err != nil {
 		// IO may be down — log but do not return an error that would fail the task.
-		c.logger.Printf("POST %s failed (IO may be down): %v", url, err)
+		c.logger.Warn("IO post failed", "task_id", taskIDFromEvent(body), "url", url, "error", err)
 		return nil
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		c.logger.Printf("POST %s returned %d", url, resp.StatusCode)
+		c.logger.Warn("IO post returned non-OK", "task_id", taskIDFromEvent(body), "url", url, "status", resp.StatusCode)
 	}
 	return nil
+}
+
+func taskIDFromEvent(body any) string {
+	switch evt := body.(type) {
+	case statusEvent:
+		return evt.Payload.TaskID
+	case planPreviewEvent:
+		return evt.Payload.TaskID
+	case credentialRequestEvent:
+		return evt.Payload.TaskID
+	default:
+		return ""
+	}
 }

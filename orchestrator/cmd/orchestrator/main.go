@@ -17,7 +17,6 @@ package main
 
 import (
 	"context"
-	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -46,14 +45,14 @@ import (
 	"github.com/mlim3/cerberOS/orchestrator/internal/policy"
 	"github.com/mlim3/cerberOS/orchestrator/internal/recovery"
 	"github.com/mlim3/cerberOS/orchestrator/internal/types"
+	"github.com/mlim3/cerberOS/orchestrator/internal/vaultclient"
 )
 
 func main() {
 	cfg, err := loadRuntimeConfig()
 	if err != nil {
-		slog.New(slog.NewJSONHandler(os.Stdout, nil)).
-			With("service", "orchestrator", "component", "main").
-			Error("config load failed", "error", err)
+		observability.LoggerWithModule("main").
+			Error("config load failed", "error", err, "exit_code", 1)
 		os.Exit(1)
 	}
 
@@ -126,7 +125,7 @@ func main() {
 
 type runtime struct {
 	memory     *memoryiface.Interface
-	vault      *mocks.VaultMock
+	vault      interfaces.VaultClient
 	nats       interfaces.NATSClient
 	mockNATS   *mocks.NATSMock
 	mockMemory *mocks.MemoryMock
@@ -148,7 +147,14 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 		return nil, err
 	}
 
-	vaultClient := &mocks.VaultMock{}
+	var vaultClient interfaces.VaultClient
+	if cfg.VaultEngineURL != "" {
+		observability.LogFromContext(context.Background()).Info("using real vault engine", "url", cfg.VaultEngineURL)
+		vaultClient = vaultclient.New(cfg.VaultEngineURL)
+	} else {
+		observability.LogFromContext(context.Background()).Info("vault engine URL not set — using mock vault")
+		vaultClient = &mocks.VaultMock{}
+	}
 	policyEnforcer := policy.New(cfg, vaultClient, memClient)
 
 	natsClient, mockNATS, err := buildNATSClient(cfg)
@@ -208,6 +214,7 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 	gw.RegisterAgentStatusHandler(taskMonitor.HandleAgentStatusUpdate)
 	gw.RegisterTaskResultHandler(taskDispatcher.HandleTaskResult)
 	gw.RegisterPlanDecisionHandler(taskDispatcher.HandlePlanDecision)
+	gw.RegisterVaultExecuteHandler(taskDispatcher.HandleVaultExecuteRequest)
 
 	// Forward agent user_input credential requests to the IO Component.
 	gw.RegisterCredentialRequestHandler(func(agentID, taskID, requestID, keyName, label string) error {
@@ -268,8 +275,7 @@ func loadRuntimeConfig() (*config.OrchestratorConfig, error) {
 	cfg, err := config.Load()
 	if err != nil {
 		cfg = demoConfig()
-		slog.New(slog.NewJSONHandler(os.Stdout, nil)).
-			With("service", "orchestrator", "component", "main").
+		observability.LoggerWithModule("main").
 			Warn("config incomplete, starting from demo defaults", "error", err)
 	}
 	applyEnvOverrides(cfg)

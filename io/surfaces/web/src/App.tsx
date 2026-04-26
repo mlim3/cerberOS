@@ -383,6 +383,7 @@ function App() {
   }, [DEMO_MODE, selectedTaskId])
 
   // Orchestrator → IO push stream (SSE) for status + credential_request
+  const activeOrchestratorTaskId = tasks.find(t => t.id === selectedTaskId)?.currentTaskId
   useEffect(() => {
     if (!orchestratorSseEnabled()) return
 
@@ -428,9 +429,8 @@ function App() {
       }
     }
 
-    const activeTaskId = tasks.find(t => t.id === selectedTaskId)?.currentTaskId
-    if (!activeTaskId) return
-    const unsub = subscribeOrchestratorTaskStream(activeTaskId, {
+    if (!activeOrchestratorTaskId) return
+    const unsub = subscribeOrchestratorTaskStream(activeOrchestratorTaskId, {
       onOpen: () => {
         if (!cancelled) setUseMockHeartbeat(false)
       },
@@ -444,7 +444,7 @@ function App() {
       cancelled = true
       unsub()
     }
-  }, [selectedTaskId])
+  }, [selectedTaskId, activeOrchestratorTaskId])
 
   // Offline / API-down: still show credential demo for task 13 (matches IO API demo push)
   useEffect(() => {
@@ -593,15 +593,13 @@ function App() {
     // Keep tasks in sync
     const unsubscribe = surface.onStatusUpdate((update) => {
       // When status updates come in, we could update tasks here
-      // For now, just log
-      console.log('[App] Surface status update:', update.taskId, update.status)
+      void update
     })
 
     // Expose the adapter globally for orchestrator integration
     // @ts-expect-error - Adding to window for external access
     window.__cerberosSurface = surface
 
-    console.log('[App] SurfaceAdapter initialized')
     return () => {
       unsubscribe()
       surface.shutdown()
