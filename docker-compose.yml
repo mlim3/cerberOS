@@ -75,6 +75,9 @@ services:
       LOG_LEVEL: info
       LOG_FORMAT: json
       LOKI_URL: http://loki:3100
+      # POST /v1/cron/wake (optional). Set on the host, e.g.:
+      #   export CRON_WAKE_SECRET=$(openssl rand -hex 16) && docker compose up -d orchestrator
+      CRON_WAKE_SECRET: ${CRON_WAKE_SECRET:-}
     ports:
       - "8080:8080"
     restart: unless-stopped

@@ -27,6 +27,7 @@ import (
 
 	"github.com/mlim3/cerberOS/orchestrator/internal/api"
 	"github.com/mlim3/cerberOS/orchestrator/internal/config"
+	"github.com/mlim3/cerberOS/orchestrator/internal/cronwake"
 	"github.com/mlim3/cerberOS/orchestrator/internal/databusproxy"
 	"github.com/mlim3/cerberOS/orchestrator/internal/dispatcher"
 	"github.com/mlim3/cerberOS/orchestrator/internal/executor"
@@ -123,20 +124,20 @@ func main() {
 }
 
 type runtime struct {
-	memory         *memoryiface.Interface
-	vault          interfaces.VaultClient
-	nats           interfaces.NATSClient
-	mockNATS       *mocks.NATSMock
-	mockMemory     *mocks.MemoryMock
-	gateway        *gateway.Gateway
-	monitor        *monitor.Monitor
-	recovery       *recovery.Manager
-	dispatcher     *dispatcher.Dispatcher
-	executor       *executor.PlanExecutor
-	health         *health.Handler
-	hbEmitter      *heartbeat.Emitter
-	hbSweeper      *heartbeat.Sweeper
-	mux            *http.ServeMux
+	memory     *memoryiface.Interface
+	vault      interfaces.VaultClient
+	nats       interfaces.NATSClient
+	mockNATS   *mocks.NATSMock
+	mockMemory *mocks.MemoryMock
+	gateway    *gateway.Gateway
+	monitor    *monitor.Monitor
+	recovery   *recovery.Manager
+	dispatcher *dispatcher.Dispatcher
+	executor   *executor.PlanExecutor
+	health     *health.Handler
+	hbEmitter  *heartbeat.Emitter
+	hbSweeper  *heartbeat.Sweeper
+	mux        *http.ServeMux
 }
 
 func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
@@ -239,6 +240,11 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 	mux.HandleFunc("GET /debug/trace/{trace_id}", debugHandler.GetTrace)
 	mux.Handle("GET /metrics", metricsHandler)
 
+	if strings.TrimSpace(cfg.CronWakeSecret) != "" {
+		mux.Handle("POST /v1/cron/wake", cronwake.NewHandler(cfg, taskDispatcher))
+		observability.LogFromContext(context.Background()).Info("cron wake endpoint enabled", "path", "/v1/cron/wake")
+	}
+
 	// Databus proxy: forward /v1/databus/* to Memory API if endpoint is HTTP-based.
 	if isHTTPMemoryEndpoint(cfg.MemoryEndpoint) {
 		mux.Handle("/v1/databus/", databusproxy.New(cfg.MemoryEndpoint))
@@ -302,6 +308,39 @@ func applyEnvOverrides(cfg *config.OrchestratorConfig) {
 		if parsed, err := strconv.Atoi(v); err == nil {
 			cfg.DecompositionTimeoutSeconds = parsed
 		}
+	}
+	if v := os.Getenv("CRON_WAKE_SECRET"); v != "" {
+		cfg.CronWakeSecret = v
+	}
+	if v := os.Getenv("CRON_WAKE_SYSTEM_PROMPT"); v != "" {
+		cfg.CronWakeSystemPrompt = v
+	}
+	if v := os.Getenv("CRON_WAKE_RAW_INPUT"); v != "" {
+		cfg.CronWakeRawInput = v
+	}
+	if v := os.Getenv("CRON_WAKE_USER_ID"); v != "" {
+		cfg.CronWakeUserID = v
+	}
+	if v := os.Getenv("CRON_WAKE_CALLBACK_TOPIC"); v != "" {
+		cfg.CronWakeCallbackTopic = v
+	}
+	if v := os.Getenv("CRON_WAKE_TIMEOUT_SECONDS"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			cfg.CronWakeTimeoutSeconds = parsed
+		}
+	}
+	// Observability (esp. when falling back to demoConfig — full Load() already sets these).
+	if v := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")); v != "" {
+		cfg.OTELEndpoint = observability.NormalizeOTLPGRPCEndpoint(v)
+	}
+	if v := os.Getenv("LOG_LEVEL"); v != "" {
+		cfg.LogLevel = v
+	}
+	if v := os.Getenv("LOG_FORMAT"); v != "" {
+		cfg.LogFormat = v
+	}
+	if v := os.Getenv("LOKI_URL"); v != "" {
+		cfg.LokiURL = v
 	}
 }
 
@@ -386,5 +425,7 @@ func demoConfig() *config.OrchestratorConfig {
 		QueueHighWaterMark:          500,
 		MemoryWriteBufferSeconds:    30,
 		NodeID:                      "demo-node",
+		LogLevel:                    "info",
+		LogFormat:                   "json",
 	}
 }

@@ -66,6 +66,14 @@ type OrchestratorConfig struct {
 
 	// Identity
 	NodeID string // NODE_ID — default: os.Hostname()
+
+	// Cron wake — POST /v1/cron/wake wakes the planner with a maintenance task (optional).
+	CronWakeSecret         string // CRON_WAKE_SECRET — empty disables the endpoint
+	CronWakeSystemPrompt   string // CRON_WAKE_SYSTEM_PROMPT — extra planner directives
+	CronWakeRawInput       string // CRON_WAKE_RAW_INPUT — maintenance work description
+	CronWakeUserID         string // CRON_WAKE_USER_ID — default: system
+	CronWakeCallbackTopic  string // CRON_WAKE_CALLBACK_TOPIC — NATS topic for results
+	CronWakeTimeoutSeconds int    // CRON_WAKE_TIMEOUT_SECONDS — default: 3600
 }
 
 // Load reads all environment variables and returns a validated OrchestratorConfig.
@@ -155,6 +163,14 @@ func Load() (*OrchestratorConfig, error) {
 			cfg.NodeID = hostname
 		}
 	}
+
+	// ── Cron wake (optional) ─────────────────────────────────────────────────
+	cfg.CronWakeSecret = os.Getenv("CRON_WAKE_SECRET")
+	cfg.CronWakeSystemPrompt = os.Getenv("CRON_WAKE_SYSTEM_PROMPT")
+	cfg.CronWakeRawInput = os.Getenv("CRON_WAKE_RAW_INPUT")
+	cfg.CronWakeUserID = envString("CRON_WAKE_USER_ID", "system")
+	cfg.CronWakeCallbackTopic = envString("CRON_WAKE_CALLBACK_TOPIC", "aegis.orchestrator.cron.wake.results")
+	cfg.CronWakeTimeoutSeconds = envInt("CRON_WAKE_TIMEOUT_SECONDS", 3600)
 
 	return cfg, nil
 }

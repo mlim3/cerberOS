@@ -249,6 +249,9 @@ func (g *Gateway) handleRawInboundTask(subject string, data []byte) error {
 		_ = g.publishDeadLetter(data, fmt.Sprintf("payload deserialize error: %v", err))
 		return fmt.Errorf("deserialize user_task: %w", err)
 	}
+	if task.TraceID == "" && strings.TrimSpace(envelope.TraceID) != "" {
+		task.TraceID = strings.TrimSpace(envelope.TraceID)
+	}
 
 	ctx := extractOrCreateCtx(envelope, "comms_gateway")
 	ctx = observability.WithTaskID(ctx, task.TaskID)
@@ -369,12 +372,11 @@ func (g *Gateway) handleRawTaskResult(subject string, data []byte) error {
 		return err
 	}
 
-	ctx := extractOrCreateCtx(envelope, "comms_gateway")
-
 	var payload struct {
 		TaskID      string          `json:"task_id"`
 		AgentID     string          `json:"agent_id"`
 		Success     bool            `json:"success"`
+		TraceID     string          `json:"trace_id"`
 		Result      json.RawMessage `json:"result"`
 		Output      json.RawMessage `json:"output"`
 		ErrorCode   string          `json:"error_code"`
@@ -384,6 +386,9 @@ func (g *Gateway) handleRawTaskResult(subject string, data []byte) error {
 	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
 		return fmt.Errorf("deserialize task.result: %w", err)
 	}
+
+	// Agents-component omits envelope.trace_id; trace_id lives on the payload only.
+	ctx := inboundObservabilityCtx(envelope, "comms_gateway", payload.TraceID)
 
 	if payload.TaskID != "" {
 		ctx = observability.WithTaskID(ctx, payload.TaskID)
@@ -418,17 +423,18 @@ func (g *Gateway) handleRawTaskFailed(subject string, data []byte) error {
 		return err
 	}
 
-	ctx := extractOrCreateCtx(envelope, "comms_gateway")
-
 	var payload struct {
 		TaskID       string `json:"task_id"`
 		AgentID      string `json:"agent_id"`
 		ErrorCode    string `json:"error_code"`
 		ErrorMessage string `json:"error_message"`
+		TraceID      string `json:"trace_id"`
 	}
 	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
 		return fmt.Errorf("deserialize task.failed: %w", err)
 	}
+
+	ctx := inboundObservabilityCtx(envelope, "comms_gateway", payload.TraceID)
 	if payload.TaskID != "" {
 		ctx = observability.WithTaskID(ctx, payload.TaskID)
 	}
@@ -893,7 +899,16 @@ func validateEnvelope(data []byte) (*types.MessageEnvelope, error) {
 // extractOrCreateCtx builds a context from the envelope's trace_id (or creates a new one)
 // and attaches the given module name. Used by inbound NATS message handlers.
 func extractOrCreateCtx(envelope *types.MessageEnvelope, module string) context.Context {
-	traceID := envelope.TraceID
+	return inboundObservabilityCtx(envelope, module)
+}
+
+// inboundObservabilityCtx prefers envelope.TraceID, then optional fallbacks (e.g. payload
+// trace_id when the agents-component envelope has no top-level trace_id field).
+func inboundObservabilityCtx(envelope *types.MessageEnvelope, module string, payloadTraceFallbacks ...string) context.Context {
+	traceID := strings.TrimSpace(envelope.TraceID)
+	if traceID == "" {
+		traceID = firstNonEmpty(payloadTraceFallbacks...)
+	}
 	if traceID == "" {
 		traceID = newUUID()
 	}
