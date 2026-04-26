@@ -13,7 +13,7 @@
   font-family: 'SF Mono', Monaco, 'Courier New', monospace;
   font-size: 1.5px;
   line-height: 1.1;
-  color: #ffffff;
+  color: var(--text-primary);
   white-space: pre;
   opacity: 0.3;
   margin: 0;

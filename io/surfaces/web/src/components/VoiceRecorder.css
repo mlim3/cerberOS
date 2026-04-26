@@ -16,7 +16,10 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: all 0.2s;
+  transition:
+    color 0.2s ease,
+    background-color 0.2s ease,
+    opacity 0.2s ease;
 }
 
 .voice-btn:hover:not(:disabled) {
@@ -24,8 +27,8 @@
 }
 
 .voice-btn.recording {
-  background: rgba(239, 68, 68, 0.1);
-  color: #ef4444;
+  background: var(--error-bg);
+  color: var(--error);
   animation: voicePulse 1.5s infinite;
 }
 
@@ -35,18 +38,26 @@
 }
 
 .voice-btn:disabled {
-  opacity: 0.3;
+  opacity: 0.35;
   cursor: not-allowed;
+}
+
+.voice-btn:focus {
+  outline: none;
+}
+
+.voice-btn:focus-visible {
+  box-shadow: var(--focus-ring);
 }
 
 .voice-error {
   font-size: 10px;
-  color: #ef4444;
+  color: var(--error);
 }
 
 @keyframes voicePulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.2); }
-  50% { box-shadow: 0 0 0 6px rgba(239, 68, 68, 0); }
+  0%, 100% { box-shadow: 0 0 0 0 var(--error-pulse); }
+  50% { box-shadow: 0 0 0 6px transparent; }
 }
 
 @keyframes spin {

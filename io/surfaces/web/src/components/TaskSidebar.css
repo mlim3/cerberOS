@@ -81,9 +81,10 @@
   padding: 6px 10px;
   background-color: transparent;
   border: var(--border-subtle);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--text-primary);
   font-size: 12px;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
 }
 
 .search-input::placeholder {
@@ -92,7 +93,11 @@
 
 .search-input:focus {
   outline: none;
-  border-color: rgba(100, 149, 237, 0.3);
+}
+
+.search-input:focus-visible {
+  border-color: var(--accent-border);
+  box-shadow: var(--focus-ring);
 }
 
 .task-list {
@@ -133,19 +138,27 @@
   padding: var(--sp-2) var(--sp-3);
   background: transparent;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   text-align: left;
   color: var(--text-primary);
-  transition: background-color 0.15s ease;
+  transition: background-color 0.18s ease;
 }
 
 .task-item:hover {
-  background-color: rgba(255, 255, 255, 0.03);
+  background-color: var(--surface-hover);
 }
 
 .task-item.selected {
-  background-color: rgba(255, 255, 255, 0.03);
+  background-color: var(--surface-selected);
+}
+
+.task-item:focus {
+  outline: none;
+}
+
+.task-item:focus-visible {
+  box-shadow: var(--focus-ring);
 }
 
 .task-item.awaiting,
@@ -154,13 +167,13 @@
 }
 
 .task-item.awaiting.selected {
-  background-color: rgba(255, 255, 255, 0.03);
+  background-color: var(--surface-selected);
 }
 
 .new-task-button {
   padding: 4px 10px;
   font-size: 11px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   border: var(--border-subtle);
   background-color: transparent;
   color: var(--text-secondary);
@@ -169,12 +182,23 @@
   align-items: center;
   justify-content: center;
   white-space: nowrap;
-  transition: all 0.15s ease;
+  transition:
+    border-color 0.18s ease,
+    color 0.18s ease;
 }
 
 .new-task-button:hover {
-  border-color: rgba(100, 149, 237, 0.3);
+  border-color: var(--accent-border);
   color: var(--text-primary);
+}
+
+.new-task-button:focus {
+  outline: none;
+}
+
+.new-task-button:focus-visible {
+  border-color: var(--accent-border);
+  box-shadow: var(--focus-ring);
 }
 
 .task-status {
