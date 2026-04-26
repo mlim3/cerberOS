@@ -3,83 +3,46 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  /* Allow this flex child to shrink below its content's intrinsic minimum
-     height so the PlanPreviewCard sibling doesn't push it out of view. */
   min-height: 0;
   font-size: calc(14px * var(--font-scale, 1));
 }
 
 .chat-status-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 24px;
-  background-color: var(--bg-dark);
-  border-bottom: var(--border);
-  font-size: 13px;
+  display: none;
 }
 
-.status-indicator {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.streaming-progress-bar {
+  height: 2px;
+  background-color: transparent;
+  overflow: hidden;
+  flex-shrink: 0;
 }
 
-.status-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
+.streaming-progress-fill {
+  height: 100%;
+  width: 30%;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  animation: progress 1.5s ease-in-out infinite;
 }
 
-.status-dot.warning {
-  background-color: var(--warning);
-  animation: pulse 2s ease-in-out infinite;
-}
-
-.status-dot.working {
-  background-color: var(--success);
-  animation: pulse 1.5s ease-in-out infinite;
-}
-
-.status-dot.completed {
-  background-color: var(--success);
-}
-
-@keyframes pulse {
-
-  0%,
-  100% {
-    opacity: 1;
-    transform: scale(1);
-  }
-
-  50% {
-    opacity: 0.6;
-    transform: scale(1.2);
-  }
-}
-
-.next-input {
-  color: var(--text-secondary);
-}
-
-.next-input strong {
-  color: var(--text-primary);
+@keyframes progress {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(400%); }
 }
 
 .messages-container {
   flex: 1;
   overflow-y: auto;
-  padding: 24px;
+  padding: var(--sp-6) var(--sp-7);
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: var(--sp-5);
 }
 
 .message {
   display: flex;
-  gap: 12px;
-  max-width: 80%;
+  gap: var(--sp-3);
+  max-width: 85%;
 }
 
 .message.user {
@@ -88,33 +51,13 @@
 }
 
 .message-avatar {
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  background-color: var(--bg-tertiary);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 18px;
-  flex-shrink: 0;
-  overflow: hidden;
-}
-
-.avatar-glyph {
-  font-weight: 700;
-  font-size: 16px;
-  color: #00ffc8;
-  line-height: 1;
+  display: none;
 }
 
 .message-content {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  /* `min-width: 0` is required for flex children whose content (long URLs,
-     JSON error payloads) would otherwise push the column wider than the
-     parent .message max-width. Without this the wrap rules on .message-text
-     cannot take effect. */
+  gap: var(--sp-1);
   min-width: 0;
   flex: 1 1 auto;
 }
@@ -126,8 +69,8 @@
 .message-header {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 12px;
+  gap: var(--sp-2);
+  font-size: 10px;
 }
 
 .message.user .message-header {
@@ -135,80 +78,84 @@
 }
 
 .message-sender {
-  font-weight: 600;
-  color: var(--text-primary);
+  font-weight: 500;
+  color: var(--text-muted);
 }
 
 .message-time {
-  color: var(--text-secondary);
+  color: var(--text-muted);
+  opacity: 0.6;
 }
 
 .message-text {
-  background-color: var(--bg-tertiary);
-  padding: 12px 16px;
-  border-radius: 12px;
-  font-size: 14px;
-  line-height: 1.5;
-  /* Force-wrap arbitrarily long unbroken strings (URLs, JSON error payloads,
-     stack traces) so they stay inside the message bubble instead of blowing
-     out the layout. `overflow-wrap: anywhere` breaks on any character when
-     no whitespace boundary is available; `word-break: break-word` is the
-     Safari-compatible alias. `min-width: 0` lets this flex child actually
-     shrink below its intrinsic content size. */
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.6;
   overflow-wrap: anywhere;
   word-break: break-word;
   min-width: 0;
   max-width: 100%;
 }
 
+/* Agent messages: prominent */
+.message.agent .message-text {
+  background-color: transparent;
+  padding: var(--sp-1) 0;
+  color: var(--text-primary);
+}
+
+/* User messages: subdued */
 .message.user .message-text {
-  background-color: var(--accent);
-  color: white;
+  background-color: rgba(100, 149, 237, 0.08);
+  color: var(--text-secondary);
+  border: 1px solid rgba(100, 149, 237, 0.1);
 }
 
 .chat-input-form {
   display: flex;
-  gap: 12px;
-  padding: 16px 24px;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-7) var(--sp-5);
 }
 
 .chat-input {
   flex: 1;
-  padding: 14px 18px;
-  background-color: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  padding: var(--sp-3) var(--sp-4);
+  background-color: transparent;
+  border: var(--border-subtle);
+  border-radius: 10px;
   color: var(--text-primary);
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .chat-input:focus {
   outline: none;
-  border-color: var(--accent);
+  border-color: rgba(100, 149, 237, 0.3);
 }
 
 .chat-input::placeholder {
-  color: var(--text-secondary);
+  color: var(--text-muted);
 }
 
 .send-button {
-  padding: 14px 28px;
-  background-color: var(--accent);
-  color: white;
-  border: none;
-  border-radius: 8px;
-  font-size: 14px;
-  font-weight: 600;
+  padding: var(--sp-3) var(--sp-5);
+  background-color: transparent;
+  color: var(--text-secondary);
+  border: var(--border-subtle);
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 500;
   cursor: pointer;
-  transition: background-color 0.15s ease;
+  transition: all 0.15s ease;
 }
 
 .send-button:hover {
-  background-color: var(--accent-hover);
+  border-color: rgba(100, 149, 237, 0.3);
+  color: var(--text-primary);
 }
 
 .send-button:disabled {
-  opacity: 0.5;
+  opacity: 0.3;
   cursor: not-allowed;
 }
 
@@ -216,99 +163,73 @@
   display: inline-block;
   animation: blink 1s step-end infinite;
   margin-left: 2px;
+  color: var(--accent);
 }
 
 @keyframes blink {
-  50% {
-    opacity: 0;
-  }
-}
-
-.streaming-progress-bar {
-  height: 3px;
-  background-color: var(--bg-tertiary);
-  overflow: hidden;
-}
-
-.streaming-progress-fill {
-  height: 100%;
-  width: 30%;
-  background: linear-gradient(90deg, var(--accent), var(--accent-hover), var(--accent));
-  animation: progress 1.5s ease-in-out infinite;
-}
-
-@keyframes progress {
-  0% {
-    transform: translateX(-100%);
-  }
-
-  100% {
-    transform: translateX(400%);
-  }
+  50% { opacity: 0; }
 }
 
 .message.streaming .message-text {
-  background: linear-gradient(135deg, var(--bg-tertiary), rgba(233, 69, 96, 0.1));
+  background: transparent;
 }
 
 .streaming-badge {
-  font-size: 10px;
+  font-size: 9px;
   padding: 2px 6px;
-  background-color: var(--accent);
-  color: white;
-  border-radius: 4px;
+  background-color: rgba(100, 149, 237, 0.1);
+  color: var(--accent);
+  border-radius: 3px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  animation: pulse 2s ease-in-out infinite;
 }
 
 .chat-input-area {
   background-color: var(--bg-primary);
-  border-top: 1px solid var(--border);
+  border-top: var(--border);
 }
 
 .suggestion-chips {
   display: flex;
-  gap: 8px;
-  padding: 12px 24px 0;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-7) 0;
   flex-wrap: wrap;
 }
 
 .suggestion-chip {
-  padding: 6px 12px;
-  background-color: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  color: var(--text-secondary);
-  font-size: 12px;
+  padding: 4px 10px;
+  background-color: transparent;
+  border: var(--border-subtle);
+  border-radius: 4px;
+  color: var(--text-muted);
+  font-size: 11px;
   cursor: pointer;
   transition: all 0.15s ease;
 }
 
 .suggestion-chip:hover {
-  background-color: var(--bg-tertiary);
-  border-color: var(--accent);
-  color: var(--text-primary);
-}
-
-/* ── Redacted / credential system messages ── */
-
-.message.redacted .message-text {
-  font-style: italic;
+  border-color: rgba(100, 149, 237, 0.3);
   color: var(--text-secondary);
 }
 
+/* Redacted / credential system messages */
+.message.redacted .message-text {
+  font-style: italic;
+  color: var(--text-muted);
+}
+
 .message.user.redacted .message-text {
-  background-color: rgba(46, 204, 113, 0.3);
-  color: rgba(255, 255, 255, 0.85);
+  background-color: rgba(126, 231, 135, 0.05);
+  color: var(--text-secondary);
+  border-color: rgba(126, 231, 135, 0.1);
 }
 
 .redacted-badge {
-  font-size: 10px;
+  font-size: 9px;
   padding: 2px 6px;
-  background-color: rgba(46, 204, 113, 0.15);
-  color: #2ecc71;
-  border-radius: 4px;
+  background-color: rgba(126, 231, 135, 0.08);
+  color: var(--success);
+  border-radius: 3px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
@@ -318,21 +239,21 @@
   margin: 0.6em 0 0.3em;
   line-height: 1.3;
 }
-.markdown-body h1 { font-size: 1.25em; }
-.markdown-body h2 { font-size: 1.1em; }
+.markdown-body h1 { font-size: 1.15em; }
+.markdown-body h2 { font-size: 1.05em; }
 .markdown-body h3 { font-size: 1em; }
 .markdown-body p { margin: 0.4em 0; }
 .markdown-body ul, .markdown-body ol { margin: 0.3em 0; padding-left: 1.4em; }
 .markdown-body li { margin: 0.15em 0; }
-.markdown-body strong { color: #fff; }
+.markdown-body strong { color: var(--text-primary); }
 .markdown-body code {
-  background: rgba(255,255,255,0.08);
+  background: rgba(255, 255, 255, 0.04);
   padding: 0.15em 0.35em;
   border-radius: 3px;
   font-size: 0.9em;
 }
 .markdown-body pre {
-  background: rgba(0,0,0,0.3);
+  background: rgba(0, 0, 0, 0.3);
   padding: 0.6em;
   border-radius: 6px;
   overflow-x: auto;
