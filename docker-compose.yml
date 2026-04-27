@@ -79,7 +79,7 @@ services:
       #   export CRON_WAKE_SECRET=$(openssl rand -hex 16) && docker compose up -d orchestrator
       CRON_WAKE_SECRET: ${CRON_WAKE_SECRET:-}
     ports:
-      - "8090:8080"
+      - "8080:8080"
     restart: unless-stopped
     networks:
       - cerberos
