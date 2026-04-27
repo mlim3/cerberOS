@@ -17,6 +17,8 @@ prometheus:
       servicePort: 9090
     persistentVolume:
       enabled: false
+    extraFlags:
+      - web.enable-remote-write-receiver
     extraConfigmapMounts:
       - name: alert-rules
         mountPath: /etc/prometheus/rules
@@ -68,10 +70,10 @@ grafana:
           isDefault: true
         - name: Loki
           type: loki
-          url: http://loki:3100
+          url: http://cerberos-loki:3100
         - name: Tempo
           type: tempo
-          url: http://tempo:3200
+          url: http://tempo:3100
   dashboardProviders:
     dashboardproviders.yaml:
       apiVersion: 1
