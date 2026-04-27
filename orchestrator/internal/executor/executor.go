@@ -173,12 +173,32 @@ func (e *PlanExecutor) UserIDForSubtask(orchRef string) (string, bool) {
 // Called by Task Dispatcher after plan validation succeeds (§17.3).
 // ctx carries the trace_id, task_id, and plan_id from the dispatcher.
 func (e *PlanExecutor) Execute(ctx context.Context, plan types.ExecutionPlan, ts *types.TaskState) error {
+	// The planner agent (LLM) is not a trusted source of unique IDs. In
+	// practice it routinely hallucinates plan_ids by copying example values
+	// from the prompt (e.g. "550e8400-e29b-41d4-a716-446655440000") or
+	// emitting non-UUID strings ("plan-pong-reply", "plan_001"). Because
+	// activePlans is keyed by plan_id, two concurrent tasks landing on the
+	// same plan_id would have the second Execute call overwrite the first
+	// in activePlans — silently orphaning the first plan's subtask routing
+	// (orchRefIndex) and causing its task_result to be dropped, which
+	// surfaced as a ~50% timeout rate at the io layer under concurrency.
+	// Always re-key the plan with a server-generated UUID; preserve the
+	// LLM-supplied id in logs for traceability.
+	llmPlanID := plan.PlanID
+	plan.PlanID = newUUID()
+
 	ctx = observability.WithModule(ctx, "plan_executor")
 	ctx = observability.WithPlanID(ctx, plan.PlanID)
 	ctx, planSpan := observability.StartSpan(ctx, "plan_execution")
 	observability.SpanSetTaskAttributes(planSpan, ts.TaskID, ts.UserID)
 	defer planSpan.End()
 	log := observability.LogFromContext(ctx)
+	if llmPlanID != "" && llmPlanID != plan.PlanID {
+		log.Info("plan_id re-keyed by orchestrator",
+			"llm_plan_id", llmPlanID,
+			"plan_id", plan.PlanID,
+		)
+	}
 
 	exec := &planExecution{
 		plan:         plan,
@@ -220,10 +240,11 @@ func (e *PlanExecutor) Execute(ctx context.Context, plan types.ExecutionPlan, ts
 // pipes result to dependents, checks plan completion (§17.3).
 // ctx is rebuilt from the envelope's trace_id in the inbound handler.
 func (e *PlanExecutor) HandleSubtaskResult(ctx context.Context, result types.TaskResult) error {
+	log := observability.LogFromContext(observability.WithModule(ctx, "plan_executor"))
 	// Resolve which plan/subtask this result belongs to.
 	planIDVal, ok := e.orchRefToPlan.Load(result.OrchestratorTaskRef)
 	if !ok {
-		observability.LogFromContext(ctx).Debug("task result for unknown orchRef — stale or already completed",
+		log.Debug("task result for unknown orchRef — stale or already completed",
 			"orchestrator_task_ref", result.OrchestratorTaskRef)
 		return nil // stale result; ignore
 	}
@@ -231,7 +252,16 @@ func (e *PlanExecutor) HandleSubtaskResult(ctx context.Context, result types.Tas
 
 	execVal, ok := e.activePlans.Load(planID)
 	if !ok {
-		return nil // plan already completed
+		// Plan already terminated (completed/failed/expired). The orchRef→plan
+		// mapping should have been removed at terminal-state cleanup; if we
+		// hit this branch it usually means the cleanup ordering allowed a
+		// late result through. Logged at INFO to make late-arriving results
+		// visible without alarming.
+		log.Info("task result arrived for already-completed plan",
+			"orchestrator_task_ref", result.OrchestratorTaskRef,
+			"plan_id", planID,
+		)
+		return nil
 	}
 	exec := execVal.(*planExecution)
 
@@ -241,6 +271,17 @@ func (e *PlanExecutor) HandleSubtaskResult(ctx context.Context, result types.Tas
 	// Find the subtask by orchRef.
 	subtaskID, ok := exec.orchRefIndex[result.OrchestratorTaskRef]
 	if !ok {
+		// Reaching this branch indicates the orchRef→plan mapping pointed at
+		// a plan whose orchRefIndex no longer contains the orchRef. Prior to
+		// the orchestrator-side plan_id re-keying this was the dominant
+		// cause of silent task_result loss under concurrency (a duplicate
+		// hallucinated plan_id from the planner LLM caused a later plan to
+		// overwrite an earlier one in activePlans). Keep this WARN so any
+		// future regression is loud rather than silent.
+		log.Warn("task result orchRef not in plan index — silent drop prevented",
+			"orchestrator_task_ref", result.OrchestratorTaskRef,
+			"plan_id", planID,
+		)
 		return nil
 	}
 	sub := exec.subtasks[subtaskID]
@@ -249,7 +290,7 @@ func (e *PlanExecutor) HandleSubtaskResult(ctx context.Context, result types.Tas
 	subCtx := observability.WithPlanID(ctx, planID)
 	subCtx = observability.WithSubtaskID(subCtx, subtaskID)
 	subCtx = observability.WithModule(subCtx, "plan_executor")
-	log := observability.LogFromContext(subCtx)
+	log = observability.LogFromContext(subCtx)
 
 	// Revoke credentials for this subtask's agent.
 	if err := e.policy.RevokeCredentials(subCtx, result.OrchestratorTaskRef); err != nil {
