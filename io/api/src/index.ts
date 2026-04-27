@@ -16,6 +16,8 @@ import {
   getTask,
   getConversationLogs,
   listConversations,
+  deleteConversation,
+  renameConversation,
   type MemoryLogEntry,
 } from '@cerberos/io-core/memory-client'
 import { transcribe, warmupTranscription } from './transcription/runner'
@@ -853,6 +855,25 @@ app.get('/api/conversations', async (c) => {
   logFromContext(c, 'info', 'http', 'GET /api/conversations', { user_id: userId })
   const conversations = await listConversations(userId)
   return c.json({ conversations })
+})
+
+app.delete('/api/conversations/:conversationId', async (c) => {
+  const conversationId = c.req.param('conversationId')
+  const userId = requestUserId(c)
+  logFromContext(c, 'info', 'http', 'DELETE /api/conversations/:conversationId', { user_id: userId })
+  await deleteConversation(conversationId, userId)
+  return c.json({ ok: true })
+})
+
+app.patch('/api/conversations/:conversationId', async (c) => {
+  const conversationId = c.req.param('conversationId')
+  const userId = requestUserId(c)
+  const body = await c.req.json() as { title?: string }
+  logFromContext(c, 'info', 'http', 'PATCH /api/conversations/:conversationId', { user_id: userId })
+  if (body.title) {
+    await renameConversation(conversationId, userId, body.title)
+  }
+  return c.json({ ok: true })
 })
 
 app.get('/api/conversations/:conversationId/logs', async (c) => {
