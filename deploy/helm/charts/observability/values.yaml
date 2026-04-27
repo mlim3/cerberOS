@@ -109,9 +109,7 @@ loki:
     replicas: 0
   backend:
     replicas: 0
-  # K8s-native log collection via Promtail DaemonSet (replaces docker.sock approach)
-  promtail:
-    enabled: true
+  # Promtail is a separate dependency (Loki 6.x removed it from this chart)
 
 tempo:
   fullnameOverride: tempo
@@ -128,3 +126,17 @@ tempo:
         memory: 512Mi
   service:
     type: ClusterIP
+
+# ---------------------------------------------------------------------------
+# Promtail — DaemonSet log shipper (standalone; Loki 6.x removed it)
+# ---------------------------------------------------------------------------
+promtail:
+  config:
+    clients:
+      - url: http://cerberos-loki-gateway:80/loki/api/v1/push
+    snippets:
+      extraRelabelConfigs:
+        # Pods use app.kubernetes.io/name (not `app`), which Promtail SD exposes
+        # as __meta_kubernetes_pod_label_app_kubernetes_io_name.
+        - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+          target_label: service_name
