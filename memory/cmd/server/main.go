@@ -143,7 +143,7 @@ func main() {
 	logRepo := storage.NewLogRepository(pool)
 	vaultRepo := storage.NewVaultRepository(pool)
 	agentLogsRepo := storage.NewAgentLogsRepository(pool)
-	schedulerRepo := storage.NewSchedulerRepository(pool)
+	scheduledJobsRepo := storage.NewScheduledJobsRepository(pool)
 
 	// Initialize Vault Manager
 	vaultManager, err := logic.NewVaultManager()
@@ -172,7 +172,7 @@ func main() {
 	piHandler := api.NewPersonalInfoHandler(piProcessor, piRepo)
 	vaultHandler := api.NewVaultHandler(vaultRepo, vaultManager, logRepo)
 	agentHandler := api.NewAgentHandler(agentLogsRepo)
-	scheduledJobsHandler := api.NewScheduledJobsHandler(schedulerRepo)
+	scheduledJobsHandler := api.NewScheduledJobsHandler(scheduledJobsRepo)
 
 	// Set up the router using Go 1.22's enhanced mux
 	mux := http.NewServeMux()

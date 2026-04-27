@@ -319,7 +319,7 @@ func (d *Dispatcher) HandleInboundTask(ctx context.Context, task types.UserTask)
 	// ── Notify IO: task received, planning underway ────────────────────────
 	if !maintenance {
 		expectedMins := 2
-		_ = d.io.PushStatus(task.TaskID, ioclient.StatusWorking, "Planning your task...", &expectedMins)
+		_ = d.io.PushStatus(task.TaskID, ioclient.StatusWorking, "Planning your task...", &expectedMins, observability.TraceIDFrom(ctx))
 	}
 
 	// ── Step 6: Publish planner task via standard task.inbound ─────────────
@@ -539,7 +539,7 @@ func (d *Dispatcher) enterAwaitingApproval(ctx context.Context, ts *types.TaskSt
 			minsLeft = 1
 		}
 		_ = d.io.PushStatus(ts.TaskID, ioclient.StatusAwaitingFeedback,
-			fmt.Sprintf("Awaiting your approval for a %d-step plan...", len(plan.Subtasks)), &minsLeft)
+			fmt.Sprintf("Awaiting your approval for a %d-step plan...", len(plan.Subtasks)), &minsLeft, ts.TraceID)
 	}
 
 	// Arm the timeout.
@@ -604,7 +604,7 @@ func (d *Dispatcher) startPlanExecution(ctx context.Context, ts *types.TaskState
 			expectedMins = 1
 		}
 		_ = d.io.PushStatus(ts.TaskID, ioclient.StatusWorking,
-			fmt.Sprintf("Executing %d subtasks...", subtaskCount), &expectedMins)
+			fmt.Sprintf("Executing %d subtasks...", subtaskCount), &expectedMins, ts.TraceID)
 	}
 
 	planCtx := observability.WithPlanID(ctx, plan.PlanID)
@@ -737,7 +737,7 @@ func (d *Dispatcher) HandlePlanComplete(ts *types.TaskState, aggregatedResults [
 	// Notify IO: task complete.
 	if !isMaintenancePayload(ts.Payload) {
 		zero := 0
-		_ = d.io.PushStatus(ts.TaskID, ioclient.StatusCompleted, "Task complete", &zero)
+		_ = d.io.PushStatus(ts.TaskID, ioclient.StatusCompleted, "Task complete", &zero, ts.TraceID)
 	}
 
 	if err := d.policy.RevokeCredentials(ctx, ts.OrchestratorTaskRef); err != nil {
@@ -804,7 +804,7 @@ func (d *Dispatcher) HandlePlanFailed(ts *types.TaskState, errorCode string, par
 		if partial {
 			lastUpdate = "Partially completed — some subtasks failed"
 		}
-		_ = d.io.PushStatus(ts.TaskID, ioclient.StatusCompleted, lastUpdate, &zero)
+		_ = d.io.PushStatus(ts.TaskID, ioclient.StatusCompleted, lastUpdate, &zero, ts.TraceID)
 	}
 
 	if err := d.policy.RevokeCredentials(ctx, ts.OrchestratorTaskRef); err != nil {
@@ -920,7 +920,7 @@ func (d *Dispatcher) failTaskWithState(ctx context.Context, ts *types.TaskState,
 	// Notify IO: task failed during decomposition.
 	if !isMaintenancePayload(ts.Payload) {
 		zero := 0
-		_ = d.io.PushStatus(ts.TaskID, ioclient.StatusCompleted, userMessage, &zero)
+		_ = d.io.PushStatus(ts.TaskID, ioclient.StatusCompleted, userMessage, &zero, ts.TraceID)
 	}
 
 	d.activeTasks.Delete(ts.TaskID)

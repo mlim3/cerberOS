@@ -70,6 +70,11 @@ func TestMain(m *testing.M) {
 	defer db.Close()
 	dbPool = db.GetPool()
 
+	if _, err := dbPool.Exec(ctx, schedulingSchemaDDL); err != nil {
+		logger.Error("failed to ensure scheduling_schema (for integration tests against older DB volumes)", "error", err)
+		os.Exit(1)
+	}
+
 	chatRepo := storage.NewChatRepository(dbPool)
 	if err := chatRepo.EnsureSchema(ctx); err != nil {
 		logger.Error("failed to ensure chat schema for testing", "error", err)
@@ -83,7 +88,7 @@ func TestMain(m *testing.M) {
 	logRepo := storage.NewLogRepository(dbPool)
 	vaultRepo := storage.NewVaultRepository(dbPool)
 	agentLogsRepo := storage.NewAgentLogsRepository(dbPool)
-	schedulerRepo := storage.NewSchedulerRepository(dbPool)
+	scheduledJobsRepo := storage.NewScheduledJobsRepository(dbPool)
 
 	vaultManager, err := logic.NewVaultManager()
 	if err != nil {
@@ -101,7 +106,7 @@ func TestMain(m *testing.M) {
 	piHandler := api.NewPersonalInfoHandler(piProcessor, piRepo)
 	vaultHandler := api.NewVaultHandler(vaultRepo, vaultManager, logRepo)
 	agentHandler := api.NewAgentHandler(agentLogsRepo)
-	scheduledJobsHandler := api.NewScheduledJobsHandler(schedulerRepo)
+	scheduledJobsHandler := api.NewScheduledJobsHandler(scheduledJobsRepo)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/conversations", chatHandler.HandleListConversations)
@@ -198,6 +203,45 @@ func parseResponse(t *testing.T, resp *http.Response, target interface{}) {
 		t.Fatalf("Failed to decode response: %v", err)
 	}
 }
+
+// schedulingSchemaDDL matches memory/scripts/init-db.sql so tests pass if Postgres was created before scheduling landed.
+const schedulingSchemaDDL = `
+CREATE SCHEMA IF NOT EXISTS scheduling_schema;
+
+CREATE TABLE IF NOT EXISTS scheduling_schema.scheduled_jobs (
+    id UUID PRIMARY KEY,
+    job_type VARCHAR(100) NOT NULL,
+    target_kind VARCHAR(50) NOT NULL,
+    target_service VARCHAR(100) NOT NULL,
+    status VARCHAR(50) NOT NULL DEFAULT 'active',
+    schedule_kind VARCHAR(50) NOT NULL,
+    interval_seconds INT,
+    name VARCHAR(255) NOT NULL,
+    payload JSONB,
+    next_run_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_next_run
+    ON scheduling_schema.scheduled_jobs (next_run_at)
+    WHERE status = 'active';
+
+CREATE TABLE IF NOT EXISTS scheduling_schema.scheduled_job_runs (
+    id UUID PRIMARY KEY,
+    job_id UUID NOT NULL REFERENCES scheduling_schema.scheduled_jobs(id) ON DELETE CASCADE,
+    status VARCHAR(50) NOT NULL,
+    target_service VARCHAR(100) NOT NULL,
+    detail JSONB,
+    trace_id UUID,
+    started_at TIMESTAMPTZ NOT NULL,
+    finished_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_scheduled_job_runs_job_id ON scheduling_schema.scheduled_job_runs(job_id);
+CREATE INDEX IF NOT EXISTS idx_scheduled_job_runs_started_at ON scheduling_schema.scheduled_job_runs(started_at DESC);
+`
 
 func seedUser(t *testing.T, userID string) {
 	t.Helper()

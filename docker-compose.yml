@@ -97,6 +97,8 @@ services:
     depends_on:
       nats-1:
         condition: service_healthy
+      orchestrator:
+        condition: service_started
     environment:
       NODE_ENV: production
       DEMO_MODE: "false"
@@ -392,8 +394,9 @@ services:
 # NETWORKS
 # =============================================================================
 networks:
+  # No explicit `name:` — Compose uses `{project}_{network}` so we never clash with a
+  # manually created or legacy Docker network also called `cerberos`.
   cerberos:
-    name: cerberos
 
 # =============================================================================
 # VOLUMES

@@ -97,7 +97,7 @@ type TaskResultHandler func(ctx context.Context, result types.TaskResult) error
 // CredentialRequestHandler is called when an agent publishes a credential.request
 // that requires user input (operation: "user_input"). Registered by main.go to
 // forward the request to the IO Component.
-type CredentialRequestHandler func(agentID, taskID, requestID, keyName, label string) error
+type CredentialRequestHandler func(agentID, taskID, requestID, keyName, label, traceID string) error
 
 // PlanDecisionHandler is called when User I/O forwards the user's approve/reject
 // decision for a proposed execution plan. Registered by main.go → Dispatcher.
@@ -493,6 +493,7 @@ func (g *Gateway) handleRawCredentialRequest(subject string, data []byte) error 
 	}
 	return g.credentialRequestHandler(
 		payload.AgentID, payload.TaskID, payload.RequestID, payload.KeyName, payload.Label,
+		envelope.TraceID,
 	)
 }
 
@@ -910,7 +911,7 @@ func inboundObservabilityCtx(envelope *types.MessageEnvelope, module string, pay
 		traceID = firstNonEmpty(payloadTraceFallbacks...)
 	}
 	if traceID == "" {
-		traceID = newUUID()
+		traceID = observability.NewRandomTraceID()
 	}
 	ctx := context.Background()
 	ctx = observability.WithTraceID(ctx, traceID)
