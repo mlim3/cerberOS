@@ -345,6 +345,45 @@ export async function getConversationLogs(
   }
 }
 
+export async function deleteConversation(conversationId: string, userId: string): Promise<boolean> {
+  if (DEMO_MODE) {
+    demoConversations.delete(conversationId)
+    return true
+  }
+
+  try {
+    const url = new URL(`${MEMORY_API_BASE}/api/v1/conversations/${conversationId}`)
+    url.searchParams.set('userId', userId)
+    const res = await fetch(url.toString(), {
+      method: 'DELETE',
+      headers: { 'X-Internal-API-Key': MEMORY_API_KEY },
+    })
+    return res.ok
+  } catch (err) {
+    memoryClientLog('error', 'delete conversation network error', { conversation_id: conversationId, error: String(err) })
+    return false
+  }
+}
+
+export async function renameConversation(conversationId: string, userId: string, title: string): Promise<boolean> {
+  if (DEMO_MODE) {
+    touchDemoConversation(conversationId, { title })
+    return true
+  }
+
+  try {
+    const res = await fetch(`${MEMORY_API_BASE}/api/v1/conversations/${conversationId}`, {
+      method: 'PATCH',
+      headers: authHeaders(),
+      body: JSON.stringify({ userId, title }),
+    })
+    return res.ok
+  } catch (err) {
+    memoryClientLog('error', 'rename conversation network error', { conversation_id: conversationId, error: String(err) })
+    return false
+  }
+}
+
 export async function listConversations(
   userId: string,
   options?: { limit?: number }

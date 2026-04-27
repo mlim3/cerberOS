@@ -107,10 +107,6 @@
   padding: var(--sp-1);
 }
 
-.task-list-header {
-  display: none;
-}
-
 .task-list-empty {
   display: flex;
   flex-direction: column;
@@ -130,18 +126,14 @@
   color: var(--text-muted);
 }
 
+/* ── Task item container ── */
+
 .task-item {
+  position: relative;
   width: 100%;
   display: flex;
   align-items: center;
-  gap: var(--sp-3);
-  padding: var(--sp-2) var(--sp-3);
-  background: transparent;
-  border: none;
   border-radius: var(--radius-sm);
-  cursor: pointer;
-  text-align: left;
-  color: var(--text-primary);
   transition: background-color 0.18s ease;
 }
 
@@ -153,14 +145,6 @@
   background-color: var(--surface-selected);
 }
 
-.task-item:focus {
-  outline: none;
-}
-
-.task-item:focus-visible {
-  box-shadow: var(--focus-ring);
-}
-
 .task-item.awaiting,
 .task-item.stuck {
   background: transparent;
@@ -169,6 +153,146 @@
 .task-item.awaiting.selected {
   background-color: var(--surface-selected);
 }
+
+/* ── Main clickable area ── */
+
+.task-item-btn {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  text-align: left;
+  color: var(--text-primary);
+}
+
+.task-item-btn:focus {
+  outline: none;
+}
+
+.task-item-btn:focus-visible {
+  box-shadow: var(--focus-ring);
+}
+
+/* ── ··· menu trigger ── */
+
+.task-menu-trigger {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin-right: var(--sp-1);
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 14px;
+  letter-spacing: 1px;
+  opacity: 0;
+  transition: opacity 0.15s ease, background-color 0.15s ease, color 0.15s ease;
+}
+
+.task-item:hover .task-menu-trigger,
+.task-item.selected .task-menu-trigger {
+  opacity: 1;
+}
+
+.task-menu-trigger:hover {
+  background-color: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.task-menu-trigger:focus {
+  outline: none;
+}
+
+.task-menu-trigger:focus-visible {
+  box-shadow: var(--focus-ring);
+}
+
+/* ── Dropdown menu ── */
+
+.task-dropdown {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 2px);
+  z-index: 50;
+  min-width: 120px;
+  background-color: var(--bg-card);
+  border: var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-elevated);
+  padding: var(--sp-1);
+  display: flex;
+  flex-direction: column;
+}
+
+.task-dropdown-item {
+  width: 100%;
+  padding: 6px var(--sp-2);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  text-align: left;
+  font-size: 12px;
+  color: var(--text-secondary);
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.task-dropdown-item:hover {
+  background-color: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.task-dropdown-item.danger {
+  color: var(--error);
+}
+
+.task-dropdown-item.danger:hover {
+  background-color: var(--error-bg);
+  color: var(--error);
+}
+
+.task-dropdown-item:focus {
+  outline: none;
+}
+
+.task-dropdown-item:focus-visible {
+  box-shadow: var(--focus-ring);
+}
+
+/* ── Inline rename input ── */
+
+.task-rename-input {
+  flex: 1;
+  margin: var(--sp-1) var(--sp-2);
+  padding: 4px 8px;
+  background: transparent;
+  border: var(--border-subtle);
+  border-radius: var(--radius-xs);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 500;
+  min-width: 0;
+}
+
+.task-rename-input:focus {
+  outline: none;
+  border-color: var(--accent-border);
+  box-shadow: var(--focus-ring);
+}
+
+/* ── Status ── */
 
 .new-task-button {
   padding: 4px 10px;
@@ -284,4 +408,91 @@
 
 .task-eta {
   display: none;
+}
+
+/* ── Delete confirmation modal ── */
+
+.confirm-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background-color: oklch(0.1 0.01 160 / 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.confirm-modal {
+  background-color: var(--bg-card);
+  border: var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-elevated);
+  padding: var(--sp-5);
+  width: 280px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.confirm-message {
+  font-size: 13px;
+  color: var(--text-primary);
+  line-height: 1.4;
+}
+
+.confirm-message strong {
+  font-weight: 600;
+}
+
+.confirm-subtext {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+}
+
+.confirm-cancel,
+.confirm-delete {
+  padding: 5px 14px;
+  font-size: 12px;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.confirm-cancel {
+  background: transparent;
+  border: var(--border-subtle);
+  color: var(--text-secondary);
+}
+
+.confirm-cancel:hover {
+  border-color: var(--accent-border);
+  color: var(--text-primary);
+}
+
+.confirm-delete {
+  background-color: var(--error-bg);
+  border: 1px solid var(--error-border);
+  color: var(--error);
+}
+
+.confirm-delete:hover {
+  background-color: var(--error);
+  color: oklch(0.98 0.005 160);
+}
+
+.confirm-cancel:focus,
+.confirm-delete:focus {
+  outline: none;
+}
+
+.confirm-cancel:focus-visible,
+.confirm-delete:focus-visible {
+  box-shadow: var(--focus-ring);
 }
