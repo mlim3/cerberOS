@@ -369,7 +369,6 @@ func (sl *SessionLog) WriteConversationSnapshot(conversationID, taskID string, h
 		return fmt.Errorf("session log: conversation snapshot: publish: %w", err)
 	}
 	sl.log.Info("session log: conversation snapshot written",
-		"conversation_id", conversationID,
 		"turn_count", len(turns),
 		"total_tokens", totalTokens,
 	)

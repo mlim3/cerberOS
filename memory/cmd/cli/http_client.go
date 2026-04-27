@@ -164,8 +164,8 @@ func (c *httpClient) SaveFact(ctx context.Context, userID uuid.UUID, fact string
 	return nil
 }
 
-func (c *httpClient) GetChatHistory(ctx context.Context, sessionID uuid.UUID, limit int) ([]Message, error) {
-	url := fmt.Sprintf("%s/api/v1/chat/%s/messages?limit=%d", c.baseURL, sessionID.String(), limit)
+func (c *httpClient) GetConversationHistory(ctx context.Context, conversationID uuid.UUID, limit int) ([]Message, error) {
+	url := fmt.Sprintf("%s/api/v1/chat/%s/messages?limit=%d", c.baseURL, conversationID.String(), limit)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {

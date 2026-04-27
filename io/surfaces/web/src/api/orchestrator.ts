@@ -167,13 +167,14 @@ export async function submitCredential(
     return { ok: true, keyName: params.keyName }
   } catch (err) {
     // In demo mode the endpoint won't exist — simulate success
-    console.log('[credential] Demo mode: simulating credential storage')
     return { ok: true, keyName: params.keyName }
   }
 }
 
 export async function* streamOrchestratorReply(
   taskId: string,
+  conversationId: string,
+  userId: string,
   userContent: string,
   conversationHistory: OrchestratorMessage[],
 ): AsyncGenerator<string, void, unknown> {
@@ -185,13 +186,10 @@ export async function* streamOrchestratorReply(
     },
     body: JSON.stringify({
       taskId,
+      userId,
       content: userContent,
       conversationHistory,
-      // The task ID is stable across all follow-up messages in the same chat
-      // window, making it the natural conversation identifier.  The IO API uses
-      // this to suppress text-based history injection and instead lets the agent
-      // fetch its ConversationSnapshot from memory for native multi-turn context.
-      conversationId: taskId,
+      conversationId,
     }),
   })
 

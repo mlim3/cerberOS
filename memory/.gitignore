@@ -2,6 +2,7 @@
 /bin/
 /build/
 /dist/
+memory-cli
 *.exe
 *.exe~
 *.dll

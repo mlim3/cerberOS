@@ -136,8 +136,8 @@ func (h *ScheduledJobsHandler) HandleCreateScheduledJob(w http.ResponseWriter, r
 	json.NewEncoder(w).Encode(SuccessResponse(scheduledJobToMap(row)))
 }
 
-// HandleRunDue POST /api/v1/scheduled_jobs/run_due
-func (h *ScheduledJobsHandler) HandleRunDue(w http.ResponseWriter, r *http.Request) {
+// HandleRunDueJobs POST /api/v1/scheduled_jobs/run_due
+func (h *ScheduledJobsHandler) HandleRunDueJobs(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -287,14 +287,14 @@ func (h *ScheduledJobsHandler) runExternalJob(ctx context.Context, job storage.S
 	return out, "failed"
 }
 
-// HandleListRuns GET /api/v1/scheduled_jobs/{id}/runs
-func (h *ScheduledJobsHandler) HandleListRuns(w http.ResponseWriter, r *http.Request) {
+// HandleListScheduledJobRuns GET /api/v1/scheduled_jobs/{jobId}/runs
+func (h *ScheduledJobsHandler) HandleListScheduledJobRuns(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	idStr := strings.TrimSpace(r.PathValue("id"))
+	idStr := strings.TrimSpace(r.PathValue("jobId"))
 	jobID, err := uuid.Parse(idStr)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")

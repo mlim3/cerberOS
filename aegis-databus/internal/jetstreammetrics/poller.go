@@ -2,7 +2,7 @@ package jetstreammetrics
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"os"
 	"time"
 
@@ -16,7 +16,7 @@ const DefaultPollInterval = 30 * time.Second
 
 // Start runs a background loop that updates Prometheus gauges from JetStream StreamInfo
 // until ctx is done.
-func Start(ctx context.Context, nc *nats.Conn, interval time.Duration, logger *log.Logger) {
+func Start(ctx context.Context, nc *nats.Conn, interval time.Duration, logger *slog.Logger) {
 	if nc == nil {
 		return
 	}
@@ -24,11 +24,12 @@ func Start(ctx context.Context, nc *nats.Conn, interval time.Duration, logger *l
 		interval = DefaultPollInterval
 	}
 	if logger == nil {
-		logger = log.New(os.Stdout, "jetstream-metrics ", log.LstdFlags)
+		logger = slog.New(slog.NewJSONHandler(os.Stdout, nil)).
+			With("component", "databus", "module", "jetstream-metrics")
 	}
 	js, err := nc.JetStream()
 	if err != nil {
-		logger.Printf("JetStream: %v", err)
+		logger.Error("jetstream context failed", "error", err)
 		return
 	}
 
@@ -40,7 +41,7 @@ func Start(ctx context.Context, nc *nats.Conn, interval time.Duration, logger *l
 			info, err := js.StreamInfo(name)
 			if err != nil {
 				metrics.JetStreamPollErrors.Inc()
-				logger.Printf("StreamInfo %s: %v", name, err)
+				logger.Warn("stream info failed", "stream", name, "error", err)
 				continue
 			}
 			if info == nil {

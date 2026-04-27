@@ -7,6 +7,17 @@ import { readFile, writeFile, mkdir } from 'fs/promises'
 import { dirname } from 'path'
 import type { Task, StatusUpdate } from '@cerberos/io-core'
 
+function sessionLog(msg: string, fields: Record<string, unknown> = {}): void {
+  console.error(JSON.stringify({
+    time: new Date().toISOString(),
+    level: 'ERROR',
+    component: 'io',
+    module: 'cli-session-store',
+    msg,
+    ...fields,
+  }))
+}
+
 export interface StoredSession {
   version: number
   surfaceId: string
@@ -69,7 +80,7 @@ export class SessionStore {
     } else {
       this.tasks.unshift(task as Task)
     }
-    this.save().catch(console.error) // fire-and-forget
+    this.save().catch(err => sessionLog('session save failed', { task_id: task.id, error: String(err) })) // fire-and-forget
   }
 
   updateTaskStatus(update: StatusUpdate): void {
@@ -79,14 +90,14 @@ export class SessionStore {
     task.status = update.status
     task.lastUpdate = update.lastUpdate
     task.expectedNextInput = formatExpectedNextInput(update.expectedNextInputMinutes)
-    this.save().catch(console.error)
+    this.save().catch(err => sessionLog('session save failed', { task_id: update.taskId, error: String(err) }))
   }
 
   addMessage(taskId: string, role: 'user' | 'assistant', content: string): void {
     const history = this.conversationHistory.get(taskId) ?? []
     history.push({ role, content })
     this.conversationHistory.set(taskId, history)
-    this.save().catch(console.error)
+    this.save().catch(err => sessionLog('session save failed', { task_id: taskId, error: String(err) }))
   }
 
   getConversationHistory(taskId: string): Array<{ role: 'user' | 'assistant'; content: string }> {
@@ -95,7 +106,7 @@ export class SessionStore {
 
   setActiveTask(taskId: string): void {
     this.lastActiveTaskId = taskId
-    this.save().catch(console.error)
+    this.save().catch(err => sessionLog('session save failed', { task_id: taskId, error: String(err) }))
   }
 
   getActiveTaskId(): string | undefined {

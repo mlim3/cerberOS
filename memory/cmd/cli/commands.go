@@ -93,7 +93,8 @@ func handleFactsCmd(ctx context.Context, client MemoryClient, args []string) {
 
 func handleChatCmd(ctx context.Context, client MemoryClient, args []string) {
 	fs := flag.NewFlagSet("chat", flag.ExitOnError)
-	sessionIDStr := fs.String("session", "", "Session UUID")
+	conversationIDStr := fs.String("conversation", "", "Conversation UUID")
+	sessionIDStr := fs.String("session", "", "Session UUID (deprecated alias)")
 	limit := fs.Int("limit", 100, "Number of messages to return")
 
 	fs.Usage = func() {
@@ -110,21 +111,26 @@ func handleChatCmd(ctx context.Context, client MemoryClient, args []string) {
 	subcmd := args[0]
 	fs.Parse(args[1:])
 
-	if *sessionIDStr == "" {
-		fmt.Fprintf(os.Stderr, "Error: --session flag is required\n")
+	conversationIDValue := *conversationIDStr
+	if conversationIDValue == "" {
+		conversationIDValue = *sessionIDStr
+	}
+
+	if conversationIDValue == "" {
+		fmt.Fprintf(os.Stderr, "Error: --conversation flag is required\n")
 		fs.Usage()
 		os.Exit(1)
 	}
 
-	sessionID, err := uuid.Parse(*sessionIDStr)
+	conversationID, err := uuid.Parse(conversationIDValue)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: invalid session UUID: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: invalid conversation UUID: %v\n", err)
 		os.Exit(1)
 	}
 
 	switch subcmd {
 	case "history":
-		messages, err := client.GetChatHistory(ctx, sessionID, *limit)
+		messages, err := client.GetConversationHistory(ctx, conversationID, *limit)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error getting chat history: %v\n", err)
 			os.Exit(1)

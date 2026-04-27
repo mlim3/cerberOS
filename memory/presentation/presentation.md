@@ -190,7 +190,7 @@ How do we give agents **useful memory** and provide a clean API to the other ser
 
 ## Vault Security Model
 
-- Vault endpoints are internal-only and require `X-API-KEY` (`INTERNAL_VAULT_API_KEY`).
+- Vault endpoints are internal-only and require `X-Internal-API-Key` (`INTERNAL_VAULT_API_KEY`).
 - Secret values are never stored as plaintext in Postgres.
 - Encryption uses AES-256-GCM in the service layer (`VaultManager`).
 - `VAULT_MASTER_KEY` is required at startup and kept outside the database.

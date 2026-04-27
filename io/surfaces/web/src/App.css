@@ -6,6 +6,13 @@
 
 .main-content {
   flex: 1;
+  /* Flex items default to `min-width: auto`, which means their minimum size is
+     the intrinsic width of their content. Wide chat content (long URLs, code
+     fences, JSON) would therefore force `.main-content` to grow past its flex
+     share and push the sidebar to zero width. Setting `min-width: 0` lets this
+     flex child actually shrink to its allotted share and keeps overflow
+     contained inside `ChatWindow` instead of leaking into the row layout. */
+  min-width: 0;
   display: flex;
   flex-direction: column;
   background-color: var(--bg-main);

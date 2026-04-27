@@ -30,6 +30,7 @@ import { createWebSurface, type SurfaceAdapter } from './surface'
 import './App.css'
 
 const DEMO_MODE = import.meta.env.VITE_DEMO_MODE === 'true'
+const UI_USER_ID = (import.meta.env.VITE_IO_USER_ID as string | undefined) ?? '00000000-0000-0000-0000-000000000001'
 
 const SETTINGS_STORAGE_KEY = 'cerberos-io-settings'
 
@@ -59,6 +60,10 @@ export type { Task, ChatMessage } from '@cerberos/io-core'
 /** @deprecated Use ChatMessage from @cerberos/io-core */
 export type Message = ChatMessage
 
+type UITask = Task & {
+  currentTaskId?: string
+}
+
 function nextId(): string {
   return Math.random().toString(36).slice(2, 11)
 }
@@ -83,7 +88,7 @@ const FALLBACK_TASK_13_CREDENTIAL: CredentialRequest = {
   description: 'Required to execute the migration on the production cluster.',
 }
 
-const mockTasks: Task[] = [
+const mockTasks: UITask[] = [
   {
     id: '1',
     title: 'Implement authentication flow',
@@ -229,8 +234,38 @@ const mockTasks: Task[] = [
   },
 ]
 
+type ConversationSummary = {
+  conversationId: string
+  title: string
+  updatedAt: string
+  lastMessagePreview?: string
+  latestTaskId?: string
+  latestTaskStatus?: string
+}
+
+function taskFromConversation(c: ConversationSummary): UITask {
+  return {
+    id: c.conversationId,
+    currentTaskId: c.latestTaskId,
+    title: c.title || 'New Conversation',
+    status: c.latestTaskStatus === 'working' || c.latestTaskStatus === 'awaiting_feedback'
+      ? c.latestTaskStatus
+      : 'completed',
+    lastUpdate: c.lastMessagePreview || 'Open the conversation to continue.',
+    expectedNextInput: 'Done',
+    messages: [],
+  }
+}
+
+function deriveConversationTitle(task: Pick<UITask, 'title' | 'messages'>, userContent: string): string {
+  if (task.title === 'New Task' && task.messages.length === 0) {
+    return userContent.length > 60 ? `${userContent.slice(0, 57)}…` : userContent
+  }
+  return task.title
+}
+
 function App() {
-  const [tasks, setTasks] = useState<Task[]>(DEMO_MODE ? mockTasks : [])
+  const [tasks, setTasks] = useState<UITask[]>(DEMO_MODE ? mockTasks : [])
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(
     DEMO_MODE ? mockTasks[0].id : null
   )
@@ -278,7 +313,77 @@ function App() {
     document.documentElement.setAttribute('data-high-contrast', uiSettings.highContrast ? 'true' : 'false')
   }, [uiSettings.fontSizeScale, uiSettings.highContrast])
 
+  useEffect(() => {
+    if (DEMO_MODE) return
+    let cancelled = false
+
+    ;(async () => {
+      try {
+        const res = await fetch(buildApiUrl(`/api/conversations?userId=${encodeURIComponent(UI_USER_ID)}`), {
+          headers: { 'X-User-Id': UI_USER_ID },
+        })
+        if (!res.ok) return
+        const json = await res.json() as { conversations?: ConversationSummary[] }
+        const conversations = json.conversations ?? []
+        if (cancelled) return
+        const loadedTasks = conversations.map(taskFromConversation)
+        setTasks(prev => {
+          const existing = new Map(prev.map(task => [task.id, task]))
+          for (const task of loadedTasks) {
+            if (!existing.has(task.id)) {
+              existing.set(task.id, task)
+            }
+          }
+          return Array.from(existing.values()).sort((a, b) => a.id.localeCompare(b.id)).reverse()
+        })
+      } catch {
+        // ignore bootstrap failures; the app can still create new tasks
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [DEMO_MODE])
+
+  useEffect(() => {
+    if (DEMO_MODE) return
+    if (!selectedTaskId) return
+    const task = tasks.find(t => t.id === selectedTaskId)
+    if (!task || task.messages.length > 0) return
+    if (!task.id) return
+
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await fetch(
+          buildApiUrl(`/api/conversations/${encodeURIComponent(task.id)}/logs?userId=${encodeURIComponent(UI_USER_ID)}`),
+          { headers: { 'X-User-Id': UI_USER_ID } },
+        )
+        if (!res.ok) return
+        const json = await res.json() as { logs?: Array<{ role: 'user' | 'orchestrator'; content: string; at: string }> }
+        if (cancelled) return
+        const messages: ChatMessage[] = (json.logs ?? []).map((log, index) => ({
+          id: `${selectedTaskId}-${index}`,
+          role: log.role === 'user' ? 'user' : 'agent',
+          content: log.content,
+          timestamp: new Date(log.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        }))
+        setTasks(prev =>
+          prev.map(t => (t.id === selectedTaskId ? { ...t, messages } : t))
+        )
+      } catch {
+        // ignore load failures for now
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [DEMO_MODE, selectedTaskId])
+
   // Orchestrator → IO push stream (SSE) for status + credential_request
+  const activeOrchestratorTaskId = tasks.find(t => t.id === selectedTaskId)?.currentTaskId
   useEffect(() => {
     if (!orchestratorSseEnabled()) return
 
@@ -290,7 +395,7 @@ function App() {
         const p = ev.payload
         setTasks(prev =>
           prev.map(t =>
-            t.id === p.taskId
+            t.currentTaskId === p.taskId
               ? {
                   ...t,
                   status: p.status,
@@ -324,8 +429,8 @@ function App() {
       }
     }
 
-    if (!selectedTaskId) return
-    const unsub = subscribeOrchestratorTaskStream(selectedTaskId, {
+    if (!activeOrchestratorTaskId) return
+    const unsub = subscribeOrchestratorTaskStream(activeOrchestratorTaskId, {
       onOpen: () => {
         if (!cancelled) setUseMockHeartbeat(false)
       },
@@ -339,7 +444,7 @@ function App() {
       cancelled = true
       unsub()
     }
-  }, [selectedTaskId])
+  }, [selectedTaskId, activeOrchestratorTaskId])
 
   // Offline / API-down: still show credential demo for task 13 (matches IO API demo push)
   useEffect(() => {
@@ -375,10 +480,35 @@ function App() {
     const surface = createWebSurface({ surfaceId: 'cerberos-web-dashboard' })
 
     // Create wrapper that has access to current state
-    const handleSendMessageWrapper = async (taskId: string, userContent: string) => {
+    const handleSendMessageWrapper = async (conversationId: string, userContent: string) => {
       const currentTasks = tasksRef.current
-      const task = currentTasks.find(t => t.id === taskId)
+      const task = currentTasks.find(t => t.id === conversationId)
       if (!task) return
+      const conversationTitle = deriveConversationTitle(task, userContent)
+      let activeTaskId = task.currentTaskId
+      try {
+        const res = await fetch(buildApiUrl('/api/tasks'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-User-Id': UI_USER_ID },
+          body: JSON.stringify({
+            userId: UI_USER_ID,
+            conversationId,
+            title: conversationTitle,
+            inputSummary: userContent,
+          }),
+        })
+        if (res.ok) {
+          const data = await res.json() as { taskId?: string }
+          if (data.taskId) {
+            activeTaskId = data.taskId
+            setTasks(prev =>
+              prev.map(t => (t.id === conversationId ? { ...t, currentTaskId: activeTaskId } : t)),
+            )
+          }
+        }
+      } catch {
+        // keep prior task id in demo/offline mode
+      }
       const userMsg: ChatMessage = {
         id: nextId(),
         role: 'user',
@@ -387,7 +517,9 @@ function App() {
       }
       setTasks(prev =>
         prev.map(t =>
-          t.id === taskId ? { ...t, messages: [...t.messages, userMsg] } : t
+          t.id === conversationId
+            ? { ...t, title: conversationTitle, messages: [...t.messages, userMsg] }
+            : t
         )
       )
 
@@ -395,13 +527,13 @@ function App() {
       if (settings.showActivityLog) {
         addLogEntryRef.current?.({
           type: 'user_message',
-          taskId,
+          taskId: activeTaskId ?? conversationId,
           taskTitle: task.title.slice(0, 20),
           message: `User: "${userContent.slice(0, 50)}${userContent.length > 50 ? '…' : ''}"`,
         })
       }
 
-      setStreamingForTaskId(taskId)
+      setStreamingForTaskId(conversationId)
       setStreamingContent('')
       const history = task.messages.map(m => ({
         role: m.role as 'user' | 'assistant',
@@ -409,8 +541,11 @@ function App() {
       }))
       let full = ''
       try {
+        if (!activeTaskId) return
         for await (const chunk of streamOrchestratorReply(
-          taskId,
+          activeTaskId,
+          conversationId,
+          UI_USER_ID,
           userContent,
           [...history, { role: 'user', content: userContent }]
         )) {
@@ -429,14 +564,14 @@ function App() {
           }
           setTasks(prev =>
             prev.map(t =>
-              t.id === taskId ? { ...t, messages: [...t.messages, agentMsg] } : t
+              t.id === conversationId ? { ...t, messages: [...t.messages, agentMsg] } : t
             )
           )
 
           if (settings.showActivityLog) {
             addLogEntryRef.current?.({
               type: 'agent_response',
-              taskId,
+              taskId: activeTaskId ?? conversationId,
               taskTitle: task.title.slice(0, 20),
               message: `Agent replied (${full.length} chars)`,
             })
@@ -458,15 +593,13 @@ function App() {
     // Keep tasks in sync
     const unsubscribe = surface.onStatusUpdate((update) => {
       // When status updates come in, we could update tasks here
-      // For now, just log
-      console.log('[App] Surface status update:', update.taskId, update.status)
+      void update
     })
 
     // Expose the adapter globally for orchestrator integration
     // @ts-expect-error - Adding to window for external access
     window.__cerberosSurface = surface
 
-    console.log('[App] SurfaceAdapter initialized')
     return () => {
       unsubscribe()
       surface.shutdown()
@@ -535,23 +668,23 @@ function App() {
   }, [uiSettings.showActivityLog, tasks, addLogEntry, useMockHeartbeat])
 
   const handleCreateTask = async () => {
-    let newTaskId: string
+    let newConversationId: string
 
     try {
-      const res = await fetch(buildApiUrl('/api/tasks'), {
+      const res = await fetch(buildApiUrl('/api/conversations'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: '', userId: '00000000-0000-0000-0000-000000000001' }),
+        body: JSON.stringify({ title: 'New Conversation', userId: UI_USER_ID }),
       })
       const data = await res.json()
-      newTaskId = data.taskId
+      newConversationId = data.conversationId
     } catch {
       // API unreachable — fall back to local ID
-      newTaskId = nextId()
+      newConversationId = nextId()
     }
 
     const newTask: Task = {
-      id: newTaskId,
+      id: newConversationId,
       title: 'New Task',
       status: 'awaiting_feedback',
       lastUpdate: 'Describe what you want the agent to work on.',
@@ -560,12 +693,12 @@ function App() {
     }
 
     setTasks(prev => [newTask, ...prev])
-    setSelectedTaskId(newTaskId)
+    setSelectedTaskId(newConversationId)
 
     if (uiSettings.showActivityLog) {
       addLogEntry({
         type: 'status_change',
-        taskId: newTaskId,
+        taskId: newConversationId,
         taskTitle: newTask.title.slice(0, 20),
         message: 'New task created. Awaiting your description.',
       })
@@ -612,9 +745,34 @@ function App() {
   }, [tasks])
 
   const onSendMessage = useCallback(
-    async (taskId: string, userContent: string) => {
-      const task = tasks.find(t => t.id === taskId)
+    async (conversationId: string, userContent: string) => {
+      const task = tasks.find(t => t.id === conversationId)
       if (!task) return
+      const conversationTitle = deriveConversationTitle(task, userContent)
+      let activeTaskId = task.currentTaskId
+      try {
+        const res = await fetch(buildApiUrl('/api/tasks'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-User-Id': UI_USER_ID },
+          body: JSON.stringify({
+            userId: UI_USER_ID,
+            conversationId,
+            title: conversationTitle,
+            inputSummary: userContent,
+          }),
+        })
+        if (res.ok) {
+          const data = await res.json() as { taskId?: string }
+          if (data.taskId) {
+            activeTaskId = data.taskId
+            setTasks(prev =>
+              prev.map(t => (t.id === conversationId ? { ...t, currentTaskId: activeTaskId } : t)),
+            )
+          }
+        }
+      } catch {
+        // keep prior task id in demo/offline mode
+      }
       const userMsg: ChatMessage = {
         id: nextId(),
         role: 'user',
@@ -623,30 +781,22 @@ function App() {
       }
       setTasks(prev =>
         prev.map(t =>
-          t.id === taskId ? { ...t, messages: [...t.messages, userMsg] } : t
+          t.id === conversationId
+            ? { ...t, title: conversationTitle, messages: [...t.messages, userMsg] }
+            : t
         )
       )
 
       if (uiSettings.showActivityLog) {
         addLogEntry({
           type: 'user_message',
-          taskId,
+          taskId: activeTaskId ?? conversationId,
           taskTitle: task.title.slice(0, 20),
           message: `User: "${userContent.slice(0, 50)}${userContent.length > 50 ? '…' : ''}"`,
         })
       }
 
-      // For a brand-new task, set the title from the first message content.
-      if (task.title === 'New Task' && task.messages.length === 0) {
-        const titleSnippet = userContent.length > 60 ? `${userContent.slice(0, 57)}…` : userContent
-        setTasks(prev =>
-          prev.map(t =>
-            t.id === taskId ? { ...t, title: titleSnippet } : t
-          )
-        )
-      }
-
-      setStreamingForTaskId(taskId)
+      setStreamingForTaskId(conversationId)
       setStreamingContent('')
       const history = task.messages.map(m => ({
         role: m.role as 'user' | 'assistant',
@@ -654,8 +804,11 @@ function App() {
       }))
       let full = ''
       try {
+        if (!activeTaskId) return
         for await (const chunk of streamOrchestratorReply(
-          taskId,
+          activeTaskId,
+          conversationId,
+          UI_USER_ID,
           userContent,
           [...history, { role: 'user', content: userContent }]
         )) {
@@ -674,14 +827,14 @@ function App() {
           }
           setTasks(prev =>
             prev.map(t =>
-              t.id === taskId ? { ...t, messages: [...t.messages, agentMsg] } : t
+              t.id === conversationId ? { ...t, messages: [...t.messages, agentMsg] } : t
             )
           )
 
           if (uiSettings.showActivityLog) {
             addLogEntry({
               type: 'agent_response',
-              taskId,
+              taskId: activeTaskId ?? conversationId,
               taskTitle: task.title.slice(0, 20),
               message: `Agent replied (${full.length} chars)`,
             })
@@ -695,12 +848,14 @@ function App() {
   // ── Credential handlers (completely separate from chat) ──
 
   const selectedTaskCredential = selectedTask
-    ? credentialRequests[selectedTask.id] ?? null
+    ? selectedTask.currentTaskId
+      ? credentialRequests[selectedTask.currentTaskId] ?? null
+      : null
     : null
 
   const handleOpenCredentialModal = useCallback(() => {
-    if (!selectedTask) return
-    setActiveCredentialTaskId(selectedTask.id)
+    if (!selectedTask?.currentTaskId) return
+    setActiveCredentialTaskId(selectedTask.currentTaskId)
     setShowCredentialModal(true)
   }, [selectedTask])
 
@@ -741,7 +896,7 @@ function App() {
         }
         setTasks(prev =>
           prev.map(t =>
-            t.id === taskId ? { ...t, messages: [...t.messages, sysMsg] } : t
+            t.currentTaskId === taskId ? { ...t, messages: [...t.messages, sysMsg] } : t
           )
         )
 
@@ -749,7 +904,7 @@ function App() {
           addLogEntry({
             type: 'status_change',
             taskId,
-            taskTitle: tasks.find(t => t.id === taskId)?.title.slice(0, 20) ?? '',
+            taskTitle: tasks.find(t => t.currentTaskId === taskId)?.title.slice(0, 20) ?? '',
             message: 'Credential submitted through secure channel (content not logged)',
           })
         }
@@ -764,7 +919,7 @@ function App() {
           }
           setTasks(prev =>
             prev.map(t =>
-              t.id === taskId
+              t.currentTaskId === taskId
                 ? {
                     ...t,
                     status: 'working',
@@ -821,7 +976,9 @@ function App() {
   )
 
   const selectedPlanPreview =
-    selectedTask && planPreviews[selectedTask.id] ? planPreviews[selectedTask.id] : null
+    selectedTask?.currentTaskId && planPreviews[selectedTask.currentTaskId]
+      ? planPreviews[selectedTask.currentTaskId]
+      : null
 
   return (
     <div className="app">
@@ -870,8 +1027,8 @@ function App() {
                 preview={selectedPlanPreview.preview}
                 status={selectedPlanPreview.status}
                 error={selectedPlanPreview.error}
-                onApprove={() => handlePlanDecision(selectedTask.id, true)}
-                onReject={reason => handlePlanDecision(selectedTask.id, false, reason)}
+                onApprove={() => selectedTask.currentTaskId && handlePlanDecision(selectedTask.currentTaskId, true)}
+                onReject={reason => selectedTask.currentTaskId && handlePlanDecision(selectedTask.currentTaskId, false, reason)}
               />
             )}
             <ChatWindow

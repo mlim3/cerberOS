@@ -14,9 +14,11 @@ func TestScheduledJobsContract_BlackBox(t *testing.T) {
 	baseURL := strings.TrimRight(blackboxBaseURL(), "/")
 	jobName := "fact-decay-scan"
 	nextRunAt := time.Now().Add(-1 * time.Minute).UTC().Format(time.RFC3339)
+	futureRunAt := time.Now().Add(30 * time.Minute).UTC().Format(time.RFC3339)
 
 	var internalJobID string
 	var externalJobID string
+	var futureJobID string
 
 	t.Run("create_internal_scheduled_job", func(t *testing.T) {
 		status, env := apiJSONRequest(t, http.MethodPost, baseURL+"/api/v1/scheduled_jobs", map[string]any{
@@ -69,6 +71,58 @@ func TestScheduledJobsContract_BlackBox(t *testing.T) {
 		assertJSONContainsStringField(t, env.Data, "targetService", "orchestrator")
 	})
 
+	t.Run("create_job_with_invalid_timestamp_returns_bad_request", func(t *testing.T) {
+		status, env := apiJSONRequest(t, http.MethodPost, baseURL+"/api/v1/scheduled_jobs", map[string]any{
+			"jobType":       "fact_decay_scan",
+			"targetKind":    "internal",
+			"targetService": "memory",
+			"status":        "active",
+			"scheduleKind":  "interval",
+			"name":          "bad-timestamp",
+			"nextRunAt":     "not-a-timestamp",
+		}, nil)
+
+		if status != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", status, http.StatusBadRequest)
+		}
+		assertErrorCode(t, env, "invalid_argument")
+	})
+
+	t.Run("create_job_missing_required_field_returns_bad_request", func(t *testing.T) {
+		status, env := apiJSONRequest(t, http.MethodPost, baseURL+"/api/v1/scheduled_jobs", map[string]any{
+			"jobType":    "fact_decay_scan",
+			"targetKind": "internal",
+			"status":     "active",
+			"name":       "missing-target-service",
+			"nextRunAt":  nextRunAt,
+		}, nil)
+
+		if status != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", status, http.StatusBadRequest)
+		}
+		assertErrorCode(t, env, "invalid_argument")
+	})
+
+	t.Run("create_future_scheduled_job", func(t *testing.T) {
+		status, env := apiJSONRequest(t, http.MethodPost, baseURL+"/api/v1/scheduled_jobs", map[string]any{
+			"jobType":         "fact_decay_scan",
+			"targetKind":      "internal",
+			"targetService":   "memory",
+			"status":          "active",
+			"scheduleKind":    "interval",
+			"intervalSeconds": 600,
+			"name":            "future-job",
+			"payload":         map[string]any{},
+			"nextRunAt":       futureRunAt,
+		}, nil)
+
+		if status != http.StatusCreated {
+			t.Fatalf("status = %d, want %d", status, http.StatusCreated)
+		}
+		assertSuccessEnvelope(t, env)
+		futureJobID = assertAndExtractNonEmptyStringField(t, env.Data, "id")
+	})
+
 	t.Run("run_due_executes_jobs_and_returns_run_history", func(t *testing.T) {
 		status, env := apiJSONRequest(t, http.MethodPost, baseURL+"/api/v1/scheduled_jobs/run_due", map[string]any{}, nil)
 
@@ -115,5 +169,35 @@ func TestScheduledJobsContract_BlackBox(t *testing.T) {
 		if strings.TrimSpace(asString(firstRun["targetService"])) == "" {
 			t.Fatalf("targetService was empty: %#v", firstRun)
 		}
+	})
+
+	t.Run("future_job_run_history_is_empty_before_due", func(t *testing.T) {
+		status, env := apiJSONRequest(t, http.MethodGet, baseURL+"/api/v1/scheduled_jobs/"+futureJobID+"/runs", nil, nil)
+
+		if status != http.StatusOK {
+			t.Fatalf("status = %d, want %d", status, http.StatusOK)
+		}
+		assertSuccessEnvelope(t, env)
+
+		var payload map[string]any
+		if err := json.Unmarshal(env.Data, &payload); err != nil {
+			t.Fatalf("unmarshal future runs payload: %v", err)
+		}
+		runs, ok := payload["runs"].([]any)
+		if !ok {
+			t.Fatalf("runs missing or not an array: %s", string(env.Data))
+		}
+		if len(runs) != 0 {
+			t.Fatalf("future job runs length = %d, want 0", len(runs))
+		}
+	})
+
+	t.Run("invalid_job_id_returns_bad_request", func(t *testing.T) {
+		status, env := apiJSONRequest(t, http.MethodGet, baseURL+"/api/v1/scheduled_jobs/not-a-uuid/runs", nil, nil)
+
+		if status != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", status, http.StatusBadRequest)
+		}
+		assertErrorCode(t, env, "invalid_argument")
 	})
 }

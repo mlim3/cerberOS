@@ -1,22 +1,31 @@
 /**
- * Memory service client for IO component logging.
- *
- * Interface mirrors what the real Memory HTTP service would provide.
- * Current implementation uses in-memory storage as a fallback when
- * MEMORY_API_BASE is not configured. When Memory is connected, only
- * this file needs to change — the interface stays the same.
+ * Memory service client for IO component logging and conversation/task metadata.
  */
 
 const MEMORY_API_BASE = process.env.MEMORY_API_BASE ?? ''
 const MEMORY_API_KEY = process.env.MEMORY_API_KEY ?? ''
 
-// ─── In-memory storage (demo / no Memory service) ───────────────────────────────────
-
 const DEMO_MODE = !MEMORY_API_BASE
+
+type CoreLogLevel = 'debug' | 'info' | 'warn' | 'error'
+
+function memoryClientLog(level: CoreLogLevel, msg: string, fields: Record<string, unknown> = {}): void {
+  const rec = {
+    time: new Date().toISOString(),
+    level: level.toUpperCase(),
+    component: 'io',
+    module: 'memory-client',
+    msg,
+    ...fields,
+  }
+  const line = JSON.stringify(rec)
+  if (level === 'error') console.error(line)
+  else console.log(line)
+}
 
 interface DemoLogEntry {
   messageId: string
-  sessionId: string
+  conversationId: string
   userId: string
   role: 'user' | 'assistant'
   content: string
@@ -24,16 +33,34 @@ interface DemoLogEntry {
   createdAt: string
 }
 
-const demoLogs: DemoLogEntry[] = []
+export interface MemoryConversation {
+  conversationId: string
+  userId: string
+  title: string
+  createdAt: string
+  updatedAt: string
+  lastMessagePreview?: string
+  messageCount: number
+  latestTaskId?: string
+  latestTaskStatus?: string
+}
 
-/** Maps taskId → sessionId (in-memory for now; persists for the server process lifetime) */
-const taskSessionMap = new Map<string, string>()
-
-// ─── Public types ───────────────────────────────────────────────────────────────────
+export interface MemoryTask {
+  taskId: string
+  conversationId: string
+  userId: string
+  orchestratorTaskRef?: string
+  traceId?: string
+  status: string
+  inputSummary?: string
+  createdAt: string
+  updatedAt: string
+  completedAt?: string
+}
 
 export interface MemoryLogEntry {
   messageId: string
-  sessionId: string
+  conversationId: string
   userId: string
   role: 'user' | 'assistant'
   content: string
@@ -41,8 +68,25 @@ export interface MemoryLogEntry {
   createdAt: string
 }
 
+export interface CreateConversationParams {
+  userId: string
+  conversationId?: string
+  title?: string
+}
+
+export interface CreateTaskParams {
+  userId: string
+  conversationId?: string
+  taskId?: string
+  title?: string
+  orchestratorTaskRef?: string
+  traceId?: string
+  status?: string
+  inputSummary?: string
+}
+
 export interface AppendLogParams {
-  sessionId: string
+  conversationId: string
   userId: string
   role: 'user' | 'assistant'
   content: string
@@ -52,28 +96,149 @@ export interface AppendLogParams {
   traceId?: string
 }
 
-// ─── Helpers ───────────────────────────────────────────────────────────────────────
+const demoLogs: DemoLogEntry[] = []
+const demoConversations = new Map<string, MemoryConversation>()
+const demoTasks = new Map<string, MemoryTask>()
 
-export function getOrCreateSessionId(taskId: string, _userId: string): string {
-  let sessionId = taskSessionMap.get(taskId)
-  if (!sessionId) {
-    sessionId = crypto.randomUUID()
-    taskSessionMap.set(taskId, sessionId)
+function authHeaders(): HeadersInit {
+  return {
+    'Content-Type': 'application/json',
+    'X-Internal-API-Key': MEMORY_API_KEY,
   }
-  return sessionId
 }
 
-// ─── Append ────────────────────────────────────────────────────────────────────────
+function ensureDemoConversation(params: CreateConversationParams): MemoryConversation {
+  const conversationId = params.conversationId ?? crypto.randomUUID()
+  const now = new Date().toISOString()
+  const existing = demoConversations.get(conversationId)
+  if (existing) {
+    return existing
+  }
+  const conversation: MemoryConversation = {
+    conversationId,
+    userId: params.userId,
+    title: params.title?.trim() || 'New Conversation',
+    createdAt: now,
+    updatedAt: now,
+    lastMessagePreview: '',
+    messageCount: 0,
+  }
+  demoConversations.set(conversationId, conversation)
+  return conversation
+}
 
-/**
- * Append a log entry. When MEMORY_API_BASE is set, proxies to the Memory HTTP service.
- * Otherwise, stores in the in-memory demo array.
- */
+function touchDemoConversation(conversationId: string, update: Partial<MemoryConversation>): void {
+  const existing = demoConversations.get(conversationId)
+  if (!existing) return
+  demoConversations.set(conversationId, { ...existing, ...update, updatedAt: update.updatedAt ?? existing.updatedAt })
+}
+
+export async function createConversation(params: CreateConversationParams): Promise<MemoryConversation | null> {
+  if (DEMO_MODE) {
+    return ensureDemoConversation(params)
+  }
+
+  try {
+    const res = await fetch(`${MEMORY_API_BASE}/api/v1/conversations`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify(params),
+    })
+    if (!res.ok) {
+      const text = await res.text()
+      memoryClientLog('error', 'create conversation failed', { status: res.status, response_bytes: text.length })
+      return null
+    }
+    const json = await res.json() as { data: { conversation: MemoryConversation } }
+    return json.data?.conversation ?? null
+  } catch (err) {
+    memoryClientLog('error', 'create conversation network error', { error: String(err) })
+    return null
+  }
+}
+
+export async function createTask(params: CreateTaskParams): Promise<MemoryTask | null> {
+  if (DEMO_MODE) {
+    const conversation = ensureDemoConversation({
+      userId: params.userId,
+      conversationId: params.conversationId,
+      title: params.title,
+    })
+    const taskId = params.taskId ?? crypto.randomUUID()
+    const now = new Date().toISOString()
+    const task: MemoryTask = {
+      taskId,
+      conversationId: conversation.conversationId,
+      userId: params.userId,
+      orchestratorTaskRef: params.orchestratorTaskRef,
+      traceId: params.traceId,
+      status: params.status ?? 'awaiting_feedback',
+      inputSummary: params.inputSummary,
+      createdAt: now,
+      updatedAt: now,
+    }
+    demoTasks.set(taskId, task)
+    touchDemoConversation(conversation.conversationId, {
+      latestTaskId: taskId,
+      latestTaskStatus: task.status,
+      updatedAt: now,
+    })
+    return task
+  }
+
+  try {
+    const res = await fetch(`${MEMORY_API_BASE}/api/v1/tasks`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify(params),
+    })
+    if (!res.ok) {
+      const text = await res.text()
+      memoryClientLog('error', 'create task failed', { task_id: params.taskId, status: res.status, response_bytes: text.length })
+      return null
+    }
+    const json = await res.json() as { data: { task: MemoryTask } }
+    return json.data?.task ?? null
+  } catch (err) {
+    memoryClientLog('error', 'create task network error', { task_id: params.taskId, error: String(err) })
+    return null
+  }
+}
+
+export async function getTask(taskId: string, userId: string): Promise<MemoryTask | null> {
+  if (DEMO_MODE) {
+    const task = demoTasks.get(taskId)
+    if (!task || task.userId !== userId) return null
+    return task
+  }
+
+  try {
+    const url = new URL(`${MEMORY_API_BASE}/api/v1/tasks/${taskId}`)
+    url.searchParams.set('userId', userId)
+    const res = await fetch(url.toString(), {
+      headers: { 'X-Internal-API-Key': MEMORY_API_KEY },
+    })
+    if (!res.ok) {
+      memoryClientLog('error', 'fetch task failed', { task_id: taskId, status: res.status })
+      return null
+    }
+    const json = await res.json() as { data: { task: MemoryTask } }
+    return json.data?.task ?? null
+  } catch (err) {
+    memoryClientLog('error', 'fetch task network error', { task_id: taskId, error: String(err) })
+    return null
+  }
+}
+
 export async function appendLogEntry(params: AppendLogParams): Promise<MemoryLogEntry | null> {
   if (DEMO_MODE) {
+    const conversation = ensureDemoConversation({
+      userId: params.userId,
+      conversationId: params.conversationId,
+    })
     const entry: DemoLogEntry = {
       messageId: crypto.randomUUID(),
-      sessionId: params.sessionId,
+      conversationId: conversation.conversationId,
       userId: params.userId,
       role: params.role,
       content: params.content,
@@ -81,6 +246,25 @@ export async function appendLogEntry(params: AppendLogParams): Promise<MemoryLog
       createdAt: new Date().toISOString(),
     }
     demoLogs.push(entry)
+    touchDemoConversation(conversation.conversationId, {
+      lastMessagePreview: params.content,
+      messageCount: (conversation.messageCount ?? 0) + 1,
+      updatedAt: entry.createdAt,
+    })
+    if (params.taskId) {
+      const task = demoTasks.get(params.taskId)
+      if (task) {
+        demoTasks.set(params.taskId, {
+          ...task,
+          updatedAt: entry.createdAt,
+        })
+        touchDemoConversation(conversation.conversationId, {
+          latestTaskId: params.taskId,
+          latestTaskStatus: task.status,
+          updatedAt: entry.createdAt,
+        })
+      }
+    }
     return entry
   }
 
@@ -89,50 +273,49 @@ export async function appendLogEntry(params: AppendLogParams): Promise<MemoryLog
     role: params.role,
     content: params.content,
   }
-  if (params.taskId) body['taskId'] = params.taskId
   if (params.idempotencyKey) body['idempotencyKey'] = params.idempotencyKey
 
   try {
     const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      'X-API-KEY': MEMORY_API_KEY,
+      ...authHeaders() as Record<string, string>,
     }
     if (params.traceId) {
       headers['X-Trace-ID'] = params.traceId
     }
 
-    const res = await fetch(`${MEMORY_API_BASE}/api/v1/chat/${params.sessionId}/messages`, {
+    const res = await fetch(`${MEMORY_API_BASE}/api/v1/chat/${params.conversationId}/messages`, {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
     })
 
     if (!res.ok) {
-      console.error('[MemoryClient] Failed to append log:', res.status, await res.text())
+      const text = await res.text()
+      memoryClientLog('error', 'append log failed', { task_id: params.taskId, status: res.status, response_bytes: text.length })
       return null
     }
 
     const json = await res.json() as { data: { message: MemoryLogEntry } }
-    return json.data.message
+    const entry = json.data?.message ?? null
+    if (entry) {
+      entry.taskId = params.taskId
+    }
+    return entry
   } catch (err) {
-    console.error('[MemoryClient] Network error appending log:', err)
+    memoryClientLog('error', 'append log network error', { task_id: params.taskId, error: String(err) })
     return null
   }
 }
 
-// ─── Retrieve ─────────────────────────────────────────────────────────────────────
-
-/**
- * Retrieve log entries for a session, optionally filtered by taskId.
- * When MEMORY_API_BASE is set, fetches from the Memory HTTP service.
- * Otherwise, queries the in-memory demo array.
- */
-export async function getSessionLogs(
-  sessionId: string,
-  options?: { taskId?: string; limit?: number; traceId?: string }
+export async function getConversationLogs(
+  conversationId: string,
+  options?: { userId?: string; taskId?: string; limit?: number; traceId?: string }
 ): Promise<MemoryLogEntry[]> {
   if (DEMO_MODE) {
-    let entries = demoLogs.filter(m => m.sessionId === sessionId)
+    let entries = demoLogs.filter(m => m.conversationId === conversationId)
+    if (options?.userId) {
+      entries = entries.filter(m => m.userId === options.userId)
+    }
     if (options?.taskId) {
       entries = entries.filter(m => m.taskId === options.taskId)
     }
@@ -143,11 +326,12 @@ export async function getSessionLogs(
   }
 
   try {
-    const url = new URL(`${MEMORY_API_BASE}/api/v1/chat/${sessionId}/messages`)
+    const url = new URL(`${MEMORY_API_BASE}/api/v1/chat/${conversationId}/messages`)
+    if (options?.userId) url.searchParams.set('userId', options.userId)
     if (options?.limit) url.searchParams.set('limit', String(options.limit))
 
     const headers: Record<string, string> = {
-      'X-API-KEY': MEMORY_API_KEY,
+      'X-Internal-API-Key': MEMORY_API_KEY,
     }
     if (options?.traceId) {
       headers['X-Trace-ID'] = options.traceId
@@ -158,7 +342,7 @@ export async function getSessionLogs(
     })
 
     if (!res.ok) {
-      console.error('[MemoryClient] Failed to fetch logs:', res.status)
+      memoryClientLog('error', 'fetch logs failed', { task_id: options?.taskId, status: res.status })
       return []
     }
 
@@ -170,7 +354,42 @@ export async function getSessionLogs(
     }
     return messages
   } catch (err) {
-    console.error('[MemoryClient] Network error fetching logs:', err)
+    memoryClientLog('error', 'fetch logs network error', { task_id: options?.taskId, error: String(err) })
+    return []
+  }
+}
+
+export async function listConversations(
+  userId: string,
+  options?: { limit?: number }
+): Promise<MemoryConversation[]> {
+  if (DEMO_MODE) {
+    const conversations = Array.from(demoConversations.values())
+      .filter(c => c.userId === userId)
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    if (options?.limit) {
+      return conversations.slice(0, options.limit)
+    }
+    return conversations
+  }
+
+  try {
+    const url = new URL(`${MEMORY_API_BASE}/api/v1/conversations`)
+    url.searchParams.set('userId', userId)
+    if (options?.limit) url.searchParams.set('limit', String(options.limit))
+    const res = await fetch(url.toString(), {
+      headers: {
+        'X-Internal-API-Key': MEMORY_API_KEY,
+      },
+    })
+    if (!res.ok) {
+      memoryClientLog('error', 'list conversations failed', { status: res.status })
+      return []
+    }
+    const json = await res.json() as { data: { conversations: MemoryConversation[] } }
+    return json.data?.conversations ?? []
+  } catch (err) {
+    memoryClientLog('error', 'list conversations network error', { error: String(err) })
     return []
   }
 }

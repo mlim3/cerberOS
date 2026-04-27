@@ -1,5 +1,12 @@
 .sidebar {
   width: var(--sidebar-width);
+  /* Pin the sidebar's width inside the `.app` flex row. Without this, any
+     intrinsic-width content in `.main-content` (long URLs, wide <pre> blocks,
+     rendered JSON payloads, markdown tables) grows that sibling and flex
+     redistribution squashes the sidebar — in extreme cases all the way to 0,
+     making it look like it disappeared when selecting a task with real chat
+     history. `flex-shrink: 0` keeps the sidebar at its declared width. */
+  flex-shrink: 0;
   background-color: var(--bg-sidebar);
   border-right: var(--border);
   display: flex;

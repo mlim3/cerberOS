@@ -143,9 +143,10 @@ func (h *AgentHandler) HandleCreateTaskExecution(w http.ResponseWriter, r *http.
 // @Tags agents
 // @Produce json
 // @Param taskId path string true "Task ID"
-// @Success 200 {array} storage.AgentLogsSchemaTaskExecution "List of task executions"
-// @Failure 400 "Bad Request"
-// @Failure 500 "Internal Server Error"
+// @Param limit query int false "Limit number of executions (default: 100)"
+// @Success 200 {object} map[string]interface{} "OK"
+// @Failure 400 {object} map[string]interface{} "Bad Request"
+// @Failure 500 {object} map[string]interface{} "Internal Server Error"
 // @Router /api/v1/agent/{taskId}/executions [get]
 // @Router /api/v1/agents/tasks/{taskId}/executions [get]
 func (h *AgentHandler) HandleGetExecutions(w http.ResponseWriter, r *http.Request) {

@@ -17,7 +17,6 @@ package main
 
 import (
 	"context"
-	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -28,30 +27,32 @@ import (
 
 	"github.com/mlim3/cerberOS/orchestrator/internal/api"
 	"github.com/mlim3/cerberOS/orchestrator/internal/config"
+	"github.com/mlim3/cerberOS/orchestrator/internal/cronwake"
 	"github.com/mlim3/cerberOS/orchestrator/internal/databusproxy"
 	"github.com/mlim3/cerberOS/orchestrator/internal/dispatcher"
 	"github.com/mlim3/cerberOS/orchestrator/internal/executor"
 	"github.com/mlim3/cerberOS/orchestrator/internal/gateway"
 	"github.com/mlim3/cerberOS/orchestrator/internal/health"
+	"github.com/mlim3/cerberOS/orchestrator/internal/heartbeat"
 	"github.com/mlim3/cerberOS/orchestrator/internal/interfaces"
 	ioclient "github.com/mlim3/cerberOS/orchestrator/internal/io"
 	memoryiface "github.com/mlim3/cerberOS/orchestrator/internal/memory"
 	"github.com/mlim3/cerberOS/orchestrator/internal/mocks"
-	"github.com/mlim3/cerberOS/orchestrator/internal/personalization"
 	"github.com/mlim3/cerberOS/orchestrator/internal/monitor"
 	natsclient "github.com/mlim3/cerberOS/orchestrator/internal/nats"
 	"github.com/mlim3/cerberOS/orchestrator/internal/observability"
+	"github.com/mlim3/cerberOS/orchestrator/internal/personalization"
 	"github.com/mlim3/cerberOS/orchestrator/internal/policy"
 	"github.com/mlim3/cerberOS/orchestrator/internal/recovery"
 	"github.com/mlim3/cerberOS/orchestrator/internal/types"
+	"github.com/mlim3/cerberOS/orchestrator/internal/vaultclient"
 )
 
 func main() {
 	cfg, err := loadRuntimeConfig()
 	if err != nil {
-		slog.New(slog.NewJSONHandler(os.Stdout, nil)).
-			With("service", "orchestrator", "component", "main").
-			Error("config load failed", "error", err)
+		observability.LoggerWithModule("main").
+			Error("config load failed", "error", err, "exit_code", 1)
 		os.Exit(1)
 	}
 
@@ -99,6 +100,13 @@ func main() {
 
 	go emitMetrics(cfg, rt.gateway, rt.dispatcher, rt.health)
 
+	// Heartbeat: publish orchestrator's own beat and run the sweeper
+	// that scans cross-service beats on a 30s cron-style interval.
+	go rt.hbEmitter.Start(ctx)
+	if err := rt.hbSweeper.Start(ctx); err != nil {
+		startLog.Warn("heartbeat sweeper failed to start — continuing", "error", err)
+	}
+
 	if err := rt.gateway.Start(); err != nil {
 		startLog.Error("gateway start failed", "error", err)
 		os.Exit(1)
@@ -117,7 +125,7 @@ func main() {
 
 type runtime struct {
 	memory     *memoryiface.Interface
-	vault      *mocks.VaultMock
+	vault      interfaces.VaultClient
 	nats       interfaces.NATSClient
 	mockNATS   *mocks.NATSMock
 	mockMemory *mocks.MemoryMock
@@ -127,6 +135,8 @@ type runtime struct {
 	dispatcher *dispatcher.Dispatcher
 	executor   *executor.PlanExecutor
 	health     *health.Handler
+	hbEmitter  *heartbeat.Emitter
+	hbSweeper  *heartbeat.Sweeper
 	mux        *http.ServeMux
 }
 
@@ -137,7 +147,14 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 		return nil, err
 	}
 
-	vaultClient := &mocks.VaultMock{}
+	var vaultClient interfaces.VaultClient
+	if cfg.VaultEngineURL != "" {
+		observability.LogFromContext(context.Background()).Info("using real vault engine", "url", cfg.VaultEngineURL)
+		vaultClient = vaultclient.New(cfg.VaultEngineURL)
+	} else {
+		observability.LogFromContext(context.Background()).Info("vault engine URL not set — using mock vault")
+		vaultClient = &mocks.VaultMock{}
+	}
 	policyEnforcer := policy.New(cfg, vaultClient, memClient)
 
 	natsClient, mockNATS, err := buildNATSClient(cfg)
@@ -197,6 +214,7 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 	gw.RegisterAgentStatusHandler(taskMonitor.HandleAgentStatusUpdate)
 	gw.RegisterTaskResultHandler(taskDispatcher.HandleTaskResult)
 	gw.RegisterPlanDecisionHandler(taskDispatcher.HandlePlanDecision)
+	gw.RegisterVaultExecuteHandler(taskDispatcher.HandleVaultExecuteRequest)
 
 	// Forward agent user_input credential requests to the IO Component.
 	gw.RegisterCredentialRequestHandler(func(_, taskID, requestID, keyName, label, traceID string) error {
@@ -210,12 +228,22 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 
 	healthHandler := health.New(vaultClient, memClient, natsClient, taskMonitor, cfg.NodeID)
 
+	// Heartbeat: own emitter + cross-service sweeper ("cron" loop).
+	hbEmitter := heartbeat.NewEmitter(natsClient, "orchestrator")
+	hbSweeper := heartbeat.NewSweeper(natsClient)
+
 	debugHandler := &api.DebugHandler{LokiURL: cfg.LokiURL}
 	metricsHandler := &api.MetricsHandler{Provider: taskDispatcher}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler.ServeHTTP)
+	mux.Handle("GET /heartbeats", &heartbeat.HTTPHandler{Sweeper: hbSweeper})
 	mux.HandleFunc("GET /debug/trace/{trace_id}", debugHandler.GetTrace)
 	mux.Handle("GET /metrics", metricsHandler)
+
+	if strings.TrimSpace(cfg.CronWakeSecret) != "" {
+		mux.Handle("POST /v1/cron/wake", cronwake.NewHandler(cfg, taskDispatcher))
+		observability.LogFromContext(context.Background()).Info("cron wake endpoint enabled", "path", "/v1/cron/wake")
+	}
 
 	// Databus proxy: forward /v1/databus/* to Memory API if endpoint is HTTP-based.
 	if isHTTPMemoryEndpoint(cfg.MemoryEndpoint) {
@@ -237,6 +265,8 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 		dispatcher: taskDispatcher,
 		executor:   planExecutor,
 		health:     healthHandler,
+		hbEmitter:  hbEmitter,
+		hbSweeper:  hbSweeper,
 		mux:        mux,
 	}, nil
 }
@@ -245,8 +275,7 @@ func loadRuntimeConfig() (*config.OrchestratorConfig, error) {
 	cfg, err := config.Load()
 	if err != nil {
 		cfg = demoConfig()
-		slog.New(slog.NewJSONHandler(os.Stdout, nil)).
-			With("service", "orchestrator", "component", "main").
+		observability.LoggerWithModule("main").
 			Warn("config incomplete, starting from demo defaults", "error", err)
 	}
 	applyEnvOverrides(cfg)
@@ -279,6 +308,39 @@ func applyEnvOverrides(cfg *config.OrchestratorConfig) {
 		if parsed, err := strconv.Atoi(v); err == nil {
 			cfg.DecompositionTimeoutSeconds = parsed
 		}
+	}
+	if v := os.Getenv("CRON_WAKE_SECRET"); v != "" {
+		cfg.CronWakeSecret = v
+	}
+	if v := os.Getenv("CRON_WAKE_SYSTEM_PROMPT"); v != "" {
+		cfg.CronWakeSystemPrompt = v
+	}
+	if v := os.Getenv("CRON_WAKE_RAW_INPUT"); v != "" {
+		cfg.CronWakeRawInput = v
+	}
+	if v := os.Getenv("CRON_WAKE_USER_ID"); v != "" {
+		cfg.CronWakeUserID = v
+	}
+	if v := os.Getenv("CRON_WAKE_CALLBACK_TOPIC"); v != "" {
+		cfg.CronWakeCallbackTopic = v
+	}
+	if v := os.Getenv("CRON_WAKE_TIMEOUT_SECONDS"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			cfg.CronWakeTimeoutSeconds = parsed
+		}
+	}
+	// Observability (esp. when falling back to demoConfig — full Load() already sets these).
+	if v := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")); v != "" {
+		cfg.OTELEndpoint = observability.NormalizeOTLPGRPCEndpoint(v)
+	}
+	if v := os.Getenv("LOG_LEVEL"); v != "" {
+		cfg.LogLevel = v
+	}
+	if v := os.Getenv("LOG_FORMAT"); v != "" {
+		cfg.LogFormat = v
+	}
+	if v := os.Getenv("LOKI_URL"); v != "" {
+		cfg.LokiURL = v
 	}
 }
 
@@ -363,5 +425,7 @@ func demoConfig() *config.OrchestratorConfig {
 		QueueHighWaterMark:          500,
 		MemoryWriteBufferSeconds:    30,
 		NodeID:                      "demo-node",
+		LogLevel:                    "info",
+		LogFormat:                   "json",
 	}
 }

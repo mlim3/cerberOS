@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -82,25 +81,33 @@ func (h *VaultHandler) logAccessEvent(ctx context.Context, userID, status, path 
 func (h *VaultHandler) HandleSaveSecret(w http.ResponseWriter, r *http.Request) {
 	userIdStr := r.PathValue("userId")
 	if userIdStr == "" {
-		http.Error(w, "userId is required", http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "userId is required", nil))
 		return
 	}
 
 	userUUID, err := uuid.Parse(userIdStr)
 	if err != nil {
 		h.logAccessEvent(r.Context(), userIdStr, "denied", r.URL.Path)
-		http.Error(w, "invalid userId format", http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "invalid userId format", nil))
 		return
 	}
 	exists, err := h.validateUserExists(r.Context(), userUUID)
 	if err != nil {
 		h.logAccessEvent(r.Context(), userIdStr, "denied", r.URL.Path)
-		http.Error(w, "failed to validate user", http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(ErrorResponse("internal", "failed to validate user", nil))
 		return
 	}
 	if !exists {
 		h.logAccessEvent(r.Context(), userIdStr, "denied", r.URL.Path)
-		http.Error(w, "user not found", http.StatusNotFound)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(ErrorResponse("not_found", "user not found", nil))
 		return
 	}
 
@@ -110,20 +117,26 @@ func (h *VaultHandler) HandleSaveSecret(w http.ResponseWriter, r *http.Request) 
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		h.logAccessEvent(r.Context(), userIdStr, "denied", r.URL.Path)
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "invalid request body", nil))
 		return
 	}
 
 	if req.KeyName == "" || req.Value == "" {
 		h.logAccessEvent(r.Context(), userIdStr, "denied", r.URL.Path)
-		http.Error(w, "key_name and value are required", http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "key_name and value are required", nil))
 		return
 	}
 
 	ciphertext, nonce, err := h.manager.Encrypt(req.Value)
 	if err != nil {
 		h.logAccessEvent(r.Context(), userIdStr, "denied", r.URL.Path)
-		http.Error(w, "failed to encrypt secret", http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(ErrorResponse("internal", "failed to encrypt secret", nil))
 		return
 	}
 
@@ -139,12 +152,19 @@ func (h *VaultHandler) HandleSaveSecret(w http.ResponseWriter, r *http.Request) 
 
 	if err := h.repo.SaveSecret(r.Context(), params); err != nil {
 		h.logAccessEvent(r.Context(), userIdStr, "denied", r.URL.Path)
-		http.Error(w, fmt.Sprintf("failed to save secret: %v", err), http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(ErrorResponse("internal", "failed to save secret", nil))
 		return
 	}
 
 	h.logAccessEvent(r.Context(), userIdStr, "granted", r.URL.Path)
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(SuccessResponse(map[string]any{
+		"key_name": req.KeyName,
+		"created":  true,
+	}))
 }
 
 // HandleGetSecret retrieves a secret
@@ -163,32 +183,42 @@ func (h *VaultHandler) HandleSaveSecret(w http.ResponseWriter, r *http.Request) 
 func (h *VaultHandler) HandleGetSecret(w http.ResponseWriter, r *http.Request) {
 	userIdStr := r.PathValue("userId")
 	if userIdStr == "" {
-		http.Error(w, "userId is required", http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "userId is required", nil))
 		return
 	}
 
 	userUUID, err := uuid.Parse(userIdStr)
 	if err != nil {
 		h.logAccessEvent(r.Context(), userIdStr, "denied", r.URL.Path)
-		http.Error(w, "invalid userId format", http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "invalid userId format", nil))
 		return
 	}
 	exists, err := h.validateUserExists(r.Context(), userUUID)
 	if err != nil {
 		h.logAccessEvent(r.Context(), userIdStr, "denied", r.URL.Path)
-		http.Error(w, "failed to validate user", http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(ErrorResponse("internal", "failed to validate user", nil))
 		return
 	}
 	if !exists {
 		h.logAccessEvent(r.Context(), userIdStr, "denied", r.URL.Path)
-		http.Error(w, "user not found", http.StatusNotFound)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(ErrorResponse("not_found", "user not found", nil))
 		return
 	}
 
 	keyName := r.URL.Query().Get("key_name")
 	if keyName == "" {
 		h.logAccessEvent(r.Context(), userIdStr, "denied", r.URL.Path)
-		http.Error(w, "key_name query parameter is required", http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "key_name query parameter is required", nil))
 		return
 	}
 
@@ -198,23 +228,28 @@ func (h *VaultHandler) HandleGetSecret(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		h.logAccessEvent(r.Context(), userIdStr, "denied", r.URL.Path)
-		http.Error(w, "secret not found", http.StatusNotFound)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(ErrorResponse("not_found", "secret not found", nil))
 		return
 	}
 
 	plaintext, err := h.manager.Decrypt(secret.EncryptedValue, secret.Nonce)
 	if err != nil {
 		h.logAccessEvent(r.Context(), userIdStr, "denied", r.URL.Path)
-		http.Error(w, "failed to decrypt secret", http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(ErrorResponse("internal", "failed to decrypt secret", nil))
 		return
 	}
 
 	h.logAccessEvent(r.Context(), userIdStr, "granted", r.URL.Path)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(SuccessResponse(map[string]string{
 		"key_name": keyName,
 		"value":    plaintext,
-	})
+	}))
 }
 
 // HandleUpdateSecret updates an existing secret
@@ -234,32 +269,42 @@ func (h *VaultHandler) HandleGetSecret(w http.ResponseWriter, r *http.Request) {
 func (h *VaultHandler) HandleUpdateSecret(w http.ResponseWriter, r *http.Request) {
 	userIdStr := r.PathValue("userId")
 	if userIdStr == "" {
-		http.Error(w, "userId is required", http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "userId is required", nil))
 		return
 	}
 
 	userUUID, err := uuid.Parse(userIdStr)
 	if err != nil {
 		h.logAccessEvent(r.Context(), userIdStr, "denied", r.URL.Path)
-		http.Error(w, "invalid userId format", http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "invalid userId format", nil))
 		return
 	}
 	exists, err := h.validateUserExists(r.Context(), userUUID)
 	if err != nil {
 		h.logAccessEvent(r.Context(), userIdStr, "denied", r.URL.Path)
-		http.Error(w, "failed to validate user", http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(ErrorResponse("internal", "failed to validate user", nil))
 		return
 	}
 	if !exists {
 		h.logAccessEvent(r.Context(), userIdStr, "denied", r.URL.Path)
-		http.Error(w, "user not found", http.StatusNotFound)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(ErrorResponse("not_found", "user not found", nil))
 		return
 	}
 
 	keyName := r.PathValue("keyName")
 	if keyName == "" {
 		h.logAccessEvent(r.Context(), userIdStr, "denied", r.URL.Path)
-		http.Error(w, "keyName is required", http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "keyName is required", nil))
 		return
 	}
 
@@ -268,20 +313,26 @@ func (h *VaultHandler) HandleUpdateSecret(w http.ResponseWriter, r *http.Request
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		h.logAccessEvent(r.Context(), userIdStr, "denied", r.URL.Path)
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "invalid request body", nil))
 		return
 	}
 
 	if req.Value == "" {
 		h.logAccessEvent(r.Context(), userIdStr, "denied", r.URL.Path)
-		http.Error(w, "value is required", http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "value is required", nil))
 		return
 	}
 
 	ciphertext, nonce, err := h.manager.Encrypt(req.Value)
 	if err != nil {
 		h.logAccessEvent(r.Context(), userIdStr, "denied", r.URL.Path)
-		http.Error(w, "failed to encrypt secret", http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(ErrorResponse("internal", "failed to encrypt secret", nil))
 		return
 	}
 
@@ -298,12 +349,19 @@ func (h *VaultHandler) HandleUpdateSecret(w http.ResponseWriter, r *http.Request
 	// SaveSecret does an upsert on conflict
 	if err := h.repo.SaveSecret(r.Context(), params); err != nil {
 		h.logAccessEvent(r.Context(), userIdStr, "denied", r.URL.Path)
-		http.Error(w, "failed to update secret", http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(ErrorResponse("internal", "failed to update secret", nil))
 		return
 	}
 
 	h.logAccessEvent(r.Context(), userIdStr, "granted", r.URL.Path)
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(SuccessResponse(map[string]any{
+		"key_name": keyName,
+		"updated":  true,
+	}))
 }
 
 // HandleDeleteSecret deletes an existing secret
@@ -320,32 +378,42 @@ func (h *VaultHandler) HandleUpdateSecret(w http.ResponseWriter, r *http.Request
 func (h *VaultHandler) HandleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 	userIdStr := r.PathValue("userId")
 	if userIdStr == "" {
-		http.Error(w, "userId is required", http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "userId is required", nil))
 		return
 	}
 
 	userUUID, err := uuid.Parse(userIdStr)
 	if err != nil {
 		h.logAccessEvent(r.Context(), userIdStr, "denied", r.URL.Path)
-		http.Error(w, "invalid userId format", http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "invalid userId format", nil))
 		return
 	}
 	exists, err := h.validateUserExists(r.Context(), userUUID)
 	if err != nil {
 		h.logAccessEvent(r.Context(), userIdStr, "denied", r.URL.Path)
-		http.Error(w, "failed to validate user", http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(ErrorResponse("internal", "failed to validate user", nil))
 		return
 	}
 	if !exists {
 		h.logAccessEvent(r.Context(), userIdStr, "denied", r.URL.Path)
-		http.Error(w, "user not found", http.StatusNotFound)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(ErrorResponse("not_found", "user not found", nil))
 		return
 	}
 
 	keyName := r.PathValue("keyName")
 	if keyName == "" {
 		h.logAccessEvent(r.Context(), userIdStr, "denied", r.URL.Path)
-		http.Error(w, "keyName is required", http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "keyName is required", nil))
 		return
 	}
 
@@ -356,10 +424,17 @@ func (h *VaultHandler) HandleDeleteSecret(w http.ResponseWriter, r *http.Request
 
 	if err := h.repo.DeleteSecret(r.Context(), params); err != nil {
 		h.logAccessEvent(r.Context(), userIdStr, "denied", r.URL.Path)
-		http.Error(w, "failed to delete secret", http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(ErrorResponse("internal", "failed to delete secret", nil))
 		return
 	}
 
 	h.logAccessEvent(r.Context(), userIdStr, "granted", r.URL.Path)
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(SuccessResponse(map[string]any{
+		"key_name": keyName,
+		"deleted":  true,
+	}))
 }

@@ -144,9 +144,10 @@ func (m *Manager) HandleRecovery(ctx context.Context, ts *types.TaskState, reaso
 // HandleComponentFailure is called by Memory Interface when all write retries are exhausted.
 // Terminates the affected task if it can be identified (§4.1 M5).
 func (m *Manager) HandleComponentFailure(ctx context.Context, payload types.OrchestratorMemoryWritePayload, writeErr error) {
-	observability.LogFromContext(ctx).Error("CRITICAL: memory write failed after all retries",
+	observability.LogFromContext(ctx).Error("memory write failed after all retries",
 		"task_id", payload.TaskID,
 		"orchestrator_task_ref", payload.OrchestratorTaskRef,
+		"severity", "critical",
 		"error", writeErr,
 	)
 	// Best-effort: attempt credential revocation even without a full TaskState.

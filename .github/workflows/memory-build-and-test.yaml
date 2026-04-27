@@ -1,0 +1,51 @@
+name: Memory Build & Test
+
+on:
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - "memory/**"
+      - "docker-compose.yml"
+
+jobs:
+  test:
+    name: Memory Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./memory
+    env:
+      DB_HOST: localhost
+      DB_PORT: "5432"
+      DB_USER: user
+      DB_PASSWORD: password
+      DB_NAME: memory_db
+      VAULT_MASTER_KEY: 0123456789abcdef0123456789abcdef
+      INTERNAL_VAULT_API_KEY: test-vault-key
+      GOCACHE: /tmp/go-build
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: "memory/go.mod"
+          cache-dependency-path: "memory/go.sum"
+      - name: Start Memory DB
+        working-directory: .
+        run: docker compose up -d memory-db
+      - name: Wait for DB
+        working-directory: .
+        run: |
+          for i in {1..30}; do
+            docker compose exec -T memory-db pg_isready -U user -d memory_db && exit 0
+            sleep 2
+          done
+          exit 1
+      - name: Build CLI
+        run: go build -o memory-cli ./cmd/cli
+      - name: Build
+        run: go build ./...
+      - name: Test API packages
+        run: go test -v ./internal/api ./cmd/server
+      - name: Test full Memory suite
+        run: go test -v ./tests -count=1

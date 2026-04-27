@@ -25,7 +25,7 @@ type Querier interface {
 	GetSecretByKey(ctx context.Context, arg GetSecretByKeyParams) (VaultSchemaSecret, error)
 	GetSourceReferencesByTarget(ctx context.Context, arg GetSourceReferencesByTargetParams) ([]PersonalInfoSchemaSourceReference, error)
 	InsertChunk(ctx context.Context, arg InsertChunkParams) (PersonalInfoSchemaPersonalInfoChunk, error)
-	ListChatMessagesBySession(ctx context.Context, arg ListChatMessagesBySessionParams) ([]ChatSchemaMessage, error)
+	ListChatMessagesByConversation(ctx context.Context, arg ListChatMessagesByConversationParams) ([]ChatSchemaMessage, error)
 	ListSystemEvents(ctx context.Context, arg ListSystemEventsParams) ([]ServiceLogSchemaSystemEvent, error)
 	QueryChunks(ctx context.Context, arg QueryChunksParams) ([]PersonalInfoSchemaPersonalInfoChunk, error)
 	SaveSecret(ctx context.Context, arg SaveSecretParams) error

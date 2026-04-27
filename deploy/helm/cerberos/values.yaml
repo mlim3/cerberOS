@@ -1,0 +1,60 @@
+# =============================================================================
+# cerberOS Umbrella Chart — default values
+# =============================================================================
+# All component sub-charts are namespaced by their chart name.
+# Override in values-dev.yaml or values-prod.yaml as needed.
+# Secrets (passwords, tokens, API keys) MUST be overridden at install time:
+#   helm install cerberos . -f values-dev.yaml \
+#     --set memory-api.vaultMasterKey=<32chars> \
+#     --set memory-api.internalVaultApiKey=<key> \
+#     --set aegis-agents.anthropicApiKey=<key> \
+#     --set postgres.auth.password=<pw>
+# =============================================================================
+
+# ── Messaging ────────────────────────────────────────────────────────────────
+nats: {}   # All defaults from charts/nats/values.yaml
+
+# ── Data plane ───────────────────────────────────────────────────────────────
+postgres:
+  auth:
+    user: user
+    password: changeme
+    database: memory_db
+
+openbao:
+  postgres:
+    user: user
+    password: changeme
+  devMode: false
+  baoToken: ""
+
+# ── Application services ─────────────────────────────────────────────────────
+vault-engine:
+  baoToken: ""
+
+memory-api:
+  db:
+    user: user
+    password: changeme
+    name: memory_db
+  vaultMasterKey: "CHANGE_ME_32_ASCII_CHARS_EXACTLY!"
+  internalVaultApiKey: "CHANGE_ME_INTERNAL_VAULT_KEY"
+
+orchestrator: {}
+
+io: {}
+
+aegis-databus: {}
+
+simulator: {}
+
+aegis-agents:
+  anthropicApiKey: ""
+
+# ── Observability ─────────────────────────────────────────────────────────────
+observability:
+  enabled: true
+
+# ── Networking (opt-in) ───────────────────────────────────────────────────────
+network-policies:
+  enabled: false

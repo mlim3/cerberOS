@@ -1,0 +1,32 @@
+image:
+  repository: ghcr.io/mlim3/cerberos-orchestrator
+  tag: latest
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+service:
+  port: 8080
+  # NodePort for kind extraPortMappings (30080 → host 8080)
+  nodePort: 30080
+
+natsUrl: "nats://nats:4222"
+vaultAddr: "http://openbao:8200"
+memoryEndpoint: "http://memory-api:8081"
+ioApiBase: "http://io:3001"
+
+decompositionTimeoutSeconds: "120"
+logLevel: "info"
+logFormat: "json"
+
+observability:
+  otlpEndpoint: "tempo:4317"
+  lokiUrl: "http://loki:3100"
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
