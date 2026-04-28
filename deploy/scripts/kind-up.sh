@@ -59,14 +59,23 @@ if [ "$SKIP_INSTALL" = false ]; then
   done
   helm dependency update "${REPO_ROOT}/deploy/helm/cerberos" >/dev/null
   HELM_SET_ARGS=()
+  echo ""
+  echo "    Anthropic configuration:"
   if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+    echo "      ANTHROPIC_API_KEY  ✓ set (injecting into aegis-agents)"
     HELM_SET_ARGS+=(--set "aegis-agents.anthropicApiKey=${ANTHROPIC_API_KEY}")
   else
-    echo "    (warning: ANTHROPIC_API_KEY not set — aegis-agents will start without it)"
+    echo "      ANTHROPIC_API_KEY  ✗ not set — aegis-agents will start without it"
+    echo "        To inject: export ANTHROPIC_API_KEY=<your-key> then re-run this script"
   fi
   if [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
+    echo "      ANTHROPIC_BASE_URL ✓ set (injecting into aegis-agents): ${ANTHROPIC_BASE_URL}"
     HELM_SET_ARGS+=(--set "aegis-agents.anthropicBaseUrl=${ANTHROPIC_BASE_URL}")
+  else
+    echo "      ANTHROPIC_BASE_URL ✗ not set — using Anthropic default endpoint"
+    echo "        To inject: export ANTHROPIC_BASE_URL=<your-url> then re-run this script"
   fi
+  echo ""
 
   helm upgrade --install cerberos "${REPO_ROOT}/deploy/helm/cerberos" \
     --namespace "${NAMESPACE}" \
