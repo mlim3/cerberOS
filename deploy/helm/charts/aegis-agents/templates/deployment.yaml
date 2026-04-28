@@ -66,6 +66,10 @@ spec:
                   name: aegis-agents-secrets
                   key: ANTHROPIC_API_KEY
             {{- end }}
+            {{- if .Values.anthropicBaseUrl }}
+            - name: ANTHROPIC_BASE_URL
+              value: {{ .Values.anthropicBaseUrl | quote }}
+            {{- end }}
           {{- if .Values.firecracker.enabled }}
           securityContext:
             privileged: true

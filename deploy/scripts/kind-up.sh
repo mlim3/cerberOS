@@ -58,9 +58,20 @@ if [ "$SKIP_INSTALL" = false ]; then
     fi
   done
   helm dependency update "${REPO_ROOT}/deploy/helm/cerberos" >/dev/null
+  HELM_SET_ARGS=()
+  if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+    HELM_SET_ARGS+=(--set "aegis-agents.anthropicApiKey=${ANTHROPIC_API_KEY}")
+  else
+    echo "    (warning: ANTHROPIC_API_KEY not set — aegis-agents will start without it)"
+  fi
+  if [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
+    HELM_SET_ARGS+=(--set "aegis-agents.anthropicBaseUrl=${ANTHROPIC_BASE_URL}")
+  fi
+
   helm upgrade --install cerberos "${REPO_ROOT}/deploy/helm/cerberos" \
     --namespace "${NAMESPACE}" \
-    --values "${REPO_ROOT}/deploy/helm/cerberos/values-dev.yaml"
+    --values "${REPO_ROOT}/deploy/helm/cerberos/values-dev.yaml" \
+    "${HELM_SET_ARGS[@]}"
 
   echo ""
   echo "    Waiting for core workloads to be ready (up to 5 min) ..."
