@@ -110,14 +110,16 @@ if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
   echo "    ANTHROPIC_API_KEY  ✓ injected"
 else
   echo "    ANTHROPIC_API_KEY  ✗ not set"
-  echo "      Live cluster:  kubectl set env deployment/aegis-agents ANTHROPIC_API_KEY=<key> -n ${NAMESPACE}"
-  echo "      Fresh start:   export ANTHROPIC_API_KEY=<key> && ./deploy/scripts/kind-up.sh --skip-build"
+  echo "      How to inject:"
+  echo "        Live cluster:  kubectl set env deployment/aegis-agents ANTHROPIC_API_KEY=<key> -n ${NAMESPACE}"
+  echo "        Fresh start:   export ANTHROPIC_API_KEY=<key> && ./deploy/scripts/kind-up.sh --skip-build"
 fi
 if [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
   echo "    ANTHROPIC_BASE_URL ✓ injected: ${ANTHROPIC_BASE_URL}"
 else
   echo "    ANTHROPIC_BASE_URL ✗ not set (using Anthropic default endpoint)"
-  echo "      Live cluster:  kubectl set env deployment/aegis-agents ANTHROPIC_BASE_URL=<url> -n ${NAMESPACE}"
-  echo "      Fresh start:   export ANTHROPIC_BASE_URL=<url> && ./deploy/scripts/kind-up.sh --skip-build"
+  echo "      How to inject:"
+  echo "        Live cluster:  kubectl set env deployment/aegis-agents ANTHROPIC_BASE_URL=<url> -n ${NAMESPACE}"
+  echo "        Fresh start:   export ANTHROPIC_BASE_URL=<url> && ./deploy/scripts/kind-up.sh --skip-build"
 fi
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
