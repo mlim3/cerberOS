@@ -59,25 +59,12 @@ if [ "$SKIP_INSTALL" = false ]; then
   done
   helm dependency update "${REPO_ROOT}/deploy/helm/cerberos" >/dev/null
   HELM_SET_ARGS=()
-  echo ""
-  echo "    Anthropic configuration:"
   if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-    echo "      ANTHROPIC_API_KEY  ✓ set (injecting into aegis-agents)"
     HELM_SET_ARGS+=(--set "aegis-agents.anthropicApiKey=${ANTHROPIC_API_KEY}")
-  else
-    echo "      ANTHROPIC_API_KEY  ✗ not set — aegis-agents will start without it"
-    echo "        If cluster already up:  kubectl set env deployment/aegis-agents ANTHROPIC_API_KEY=<key> -n ${NAMESPACE}"
-    echo "        If starting fresh:      export ANTHROPIC_API_KEY=<key>  then re-run with --skip-build"
   fi
   if [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
-    echo "      ANTHROPIC_BASE_URL ✓ set (injecting into aegis-agents): ${ANTHROPIC_BASE_URL}"
     HELM_SET_ARGS+=(--set "aegis-agents.anthropicBaseUrl=${ANTHROPIC_BASE_URL}")
-  else
-    echo "      ANTHROPIC_BASE_URL ✗ not set — using Anthropic default endpoint"
-    echo "        If cluster already up:  kubectl set env deployment/aegis-agents ANTHROPIC_BASE_URL=<url> -n ${NAMESPACE}"
-    echo "        If starting fresh:      export ANTHROPIC_BASE_URL=<url>  then re-run with --skip-build"
   fi
-  echo ""
 
   helm upgrade --install cerberos "${REPO_ROOT}/deploy/helm/cerberos" \
     --namespace "${NAMESPACE}" \
@@ -117,4 +104,20 @@ echo "                  root token: root"
 echo ""
 echo "  All pods:       kubectl get pods -n ${NAMESPACE} -o wide"
 echo "  Tear down:      ./deploy/scripts/kind-down.sh"
+echo ""
+echo "  Anthropic (aegis-agents):"
+if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+  echo "    ANTHROPIC_API_KEY  ✓ injected"
+else
+  echo "    ANTHROPIC_API_KEY  ✗ not set"
+  echo "      Live cluster:  kubectl set env deployment/aegis-agents ANTHROPIC_API_KEY=<key> -n ${NAMESPACE}"
+  echo "      Fresh start:   export ANTHROPIC_API_KEY=<key> && ./deploy/scripts/kind-up.sh --skip-build"
+fi
+if [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
+  echo "    ANTHROPIC_BASE_URL ✓ injected: ${ANTHROPIC_BASE_URL}"
+else
+  echo "    ANTHROPIC_BASE_URL ✗ not set (using Anthropic default endpoint)"
+  echo "      Live cluster:  kubectl set env deployment/aegis-agents ANTHROPIC_BASE_URL=<url> -n ${NAMESPACE}"
+  echo "      Fresh start:   export ANTHROPIC_BASE_URL=<url> && ./deploy/scripts/kind-up.sh --skip-build"
+fi
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
