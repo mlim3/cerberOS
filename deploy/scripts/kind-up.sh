@@ -14,6 +14,26 @@ for arg in "$@"; do
   case $arg in
     --skip-build) SKIP_BUILD=true ;;
     --skip-install) SKIP_INSTALL=true ;;
+    -h|--help)
+      echo "Usage: ./deploy/scripts/kind-up.sh [OPTIONS]"
+      echo ""
+      echo "Create the kind cluster, build & load images, and install the cerberOS Helm chart."
+      echo ""
+      echo "Options:"
+      echo "  --skip-build    Skip Docker image builds (use already-loaded images)"
+      echo "  --skip-install  Skip Helm chart install/upgrade"
+      echo "  -h, --help      Show this help message"
+      echo ""
+      echo "Environment variables (auto-injected into aegis-agents if set):"
+      echo "  ANTHROPIC_API_KEY   Anthropic API key"
+      echo "  ANTHROPIC_BASE_URL  Anthropic API base URL (defaults to Anthropic's standard endpoint)"
+      echo ""
+      echo "Examples:"
+      echo "  ./deploy/scripts/kind-up.sh                   # full setup"
+      echo "  ./deploy/scripts/kind-up.sh --skip-build      # reinstall chart without rebuilding images"
+      echo "  ./deploy/scripts/kind-up.sh --skip-install    # rebuild & reload images only"
+      exit 0
+      ;;
   esac
 done
 
