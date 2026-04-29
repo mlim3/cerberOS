@@ -1,0 +1,97 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "aegis-agents.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "aegis-agents.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "aegis-agents.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "aegis-agents.selectorLabels" . | nindent 8 }}
+    spec:
+      initContainers:
+        - name: wait-for-nats
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z nats 4222; do
+                echo "Waiting for nats..."; sleep 3;
+              done
+      {{- if .Values.firecracker.enabled }}
+      nodeSelector:
+        {{ .Values.firecracker.nodeSelectorKey }}: {{ .Values.firecracker.nodeSelectorValue | quote }}
+      tolerations:
+        - key: {{ .Values.firecracker.nodeSelectorKey | quote }}
+          operator: Equal
+          value: {{ .Values.firecracker.nodeSelectorValue | quote }}
+          effect: NoSchedule
+      {{- end }}
+      containers:
+        - name: aegis-agents
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.service.metricsPort }}
+          env:
+            - name: AEGIS_NATS_URL
+              value: {{ .Values.natsUrl | quote }}
+            {{- if .Values.firecracker.enabled }}
+            - name: AEGIS_FIRECRACKER_SOCKET_DIR
+              value: {{ .Values.firecracker.socketDir | quote }}
+            {{- else }}
+            - name: AEGIS_AGENT_PROCESS_PATH
+              value: {{ .Values.agentProcessPath | quote }}
+            {{- end }}
+            - name: AEGIS_AGENTS_MAX_CONCURRENT_TASKS
+              value: {{ .Values.maxConcurrentTasks | quote }}
+            - name: AEGIS_IDLE_SUSPEND_TIMEOUT
+              value: {{ .Values.idleSuspendTimeout | quote }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.observability.otlpEndpoint | quote }}
+            - name: OTEL_SERVICE_NAME
+              value: {{ .Values.observability.serviceName | quote }}
+            {{- if .Values.anthropicApiKey }}
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: aegis-agents-secrets
+                  key: ANTHROPIC_API_KEY
+            {{- end }}
+            {{- if .Values.anthropicBaseUrl }}
+            - name: ANTHROPIC_BASE_URL
+              value: {{ .Values.anthropicBaseUrl | quote }}
+            {{- end }}
+          {{- if .Values.firecracker.enabled }}
+          securityContext:
+            privileged: true
+          {{- else }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: ["ALL"]
+          {{- end }}
+          readinessProbe:
+            tcpSocket:
+              port: {{ .Values.service.metricsPort }}
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            tcpSocket:
+              port: {{ .Values.service.metricsPort }}
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}

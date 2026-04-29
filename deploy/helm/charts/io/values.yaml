@@ -1,0 +1,52 @@
+image:
+  repository: ghcr.io/mlim3/cerberos-io
+  tag: latest
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+service:
+  port: 3001
+  # NodePort for kind extraPortMappings (30001 → host 3001)
+  nodePort: 30001
+
+natsUrl: "nats://nats:4222"
+memoryApiBase: "http://memory-api:8081"
+logLevel: "info"
+demoMode: "false"
+sttProvider: "disabled"
+
+observability:
+  otlpEndpoint: "http://tempo:4318"
+  serviceName: "io-api"
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# ---------------------------------------------------------------------------
+# Extension hook: Ingress (off by default)
+# Enable in values-prod.yaml with a real host and TLS secret.
+#
+# ingress:
+#   enabled: true
+#   className: nginx
+#   host: cerberos.example.com
+#   tls:
+#     enabled: true
+#     secretName: cerberos-tls
+#   annotations:
+#     cert-manager.io/cluster-issuer: letsencrypt-prod
+# ---------------------------------------------------------------------------
+ingress:
+  enabled: false
+  className: ""
+  host: ""
+  tls:
+    enabled: false
+    secretName: ""
+  annotations: {}

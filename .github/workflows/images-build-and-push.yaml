@@ -1,0 +1,90 @@
+name: Build & Push Service Images
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "orchestrator/**"
+      - "io/**"
+      - "memory/**"
+      - "vault/engine/**"
+      - "aegis-databus/**"
+      - "agents-component/**"
+      - ".github/workflows/images-build-and-push.yaml"
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  ORG: ${{ github.repository_owner }}
+
+jobs:
+  build-and-push:
+    name: ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: orchestrator
+            context: ./orchestrator
+            image: cerberos-orchestrator
+
+          - service: io
+            context: ./io
+            image: cerberos-io
+
+          - service: memory-api
+            context: ./memory
+            image: cerberos-memory-api
+
+          - service: vault-engine
+            context: ./vault/engine
+            image: cerberos-vault-engine
+
+          - service: aegis-databus
+            context: ./aegis-databus
+            image: cerberos-aegis-databus
+            build_args: ""
+            target: aegis-databus
+
+          - service: aegis-agents
+            context: ./agents-component
+            image: cerberos-aegis-agents
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.ORG }}/${{ matrix.image }}
+          tags: |
+            type=sha,prefix=,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.context }}
+          target: ${{ matrix.target || '' }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

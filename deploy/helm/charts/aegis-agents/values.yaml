@@ -1,0 +1,52 @@
+image:
+  repository: ghcr.io/mlim3/cerberos-aegis-agents
+  tag: latest
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+service:
+  metricsPort: 9090
+
+natsUrl: "nats://nats:4222"
+
+# Lifecycle mode: process-manager (default, works on any K8s node)
+# The agent-process binary is bundled in the same image at /app/agent-process
+agentProcessPath: "/app/agent-process"
+
+anthropicApiKey: ""
+anthropicBaseUrl: ""
+
+maxConcurrentTasks: "8"
+idleSuspendTimeout: "10m"
+
+observability:
+  otlpEndpoint: "http://tempo:4318"
+  serviceName: "aegis-agents"
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 256Mi
+  limits:
+    cpu: 2000m
+    memory: 2Gi
+
+# ---------------------------------------------------------------------------
+# Extension hook: Firecracker microVM lifecycle (off by default)
+# To enable:
+#   1. Provision a node pool with /dev/kvm + kata-runtime / firecracker device plugin
+#   2. Taint the nodes: kubectl taint nodes <node> firecracker=true:NoSchedule
+#   3. Set firecracker.enabled: true and provide the socket directory
+#
+# firecracker:
+#   enabled: true
+#   socketDir: "/run/firecracker-containerd"
+#   nodeSelectorKey: "firecracker"
+#   nodeSelectorValue: "true"
+# ---------------------------------------------------------------------------
+firecracker:
+  enabled: false
+  socketDir: ""
+  nodeSelectorKey: "firecracker"
+  nodeSelectorValue: "true"

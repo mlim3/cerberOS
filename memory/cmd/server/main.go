@@ -26,9 +26,11 @@ import (
 	"github.com/joho/godotenv"
 	docs "github.com/mlim3/cerberOS/memory/docs"
 	"github.com/mlim3/cerberOS/memory/internal/api"
+	"github.com/mlim3/cerberOS/memory/internal/heartbeat"
 	"github.com/mlim3/cerberOS/memory/internal/logic"
 	"github.com/mlim3/cerberOS/memory/internal/storage"
 	"github.com/mlim3/cerberOS/memory/internal/telemetry"
+	"github.com/nats-io/nats.go"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	httpSwagger "github.com/swaggo/http-swagger"
 )
@@ -71,7 +73,7 @@ func newHealthzHandler(db *storage.PostgresDB, logger *slog.Logger) http.Handler
 func main() {
 	// Initialize structured logging
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).
-		With("service", "memory", "component", "server")
+		With("component", "memory", "module", "server")
 	slog.SetDefault(logger)
 
 	// Load .env file if it exists
@@ -141,7 +143,7 @@ func main() {
 	logRepo := storage.NewLogRepository(pool)
 	vaultRepo := storage.NewVaultRepository(pool)
 	agentLogsRepo := storage.NewAgentLogsRepository(pool)
-	schedulerRepo := storage.NewSchedulerRepository(pool)
+	scheduledJobsRepo := storage.NewScheduledJobsRepository(pool)
 
 	// Initialize Vault Manager
 	vaultManager, err := logic.NewVaultManager()
@@ -170,7 +172,7 @@ func main() {
 	piHandler := api.NewPersonalInfoHandler(piProcessor, piRepo)
 	vaultHandler := api.NewVaultHandler(vaultRepo, vaultManager, logRepo)
 	agentHandler := api.NewAgentHandler(agentLogsRepo)
-	scheduledJobsHandler := api.NewScheduledJobsHandler(schedulerRepo)
+	scheduledJobsHandler := api.NewScheduledJobsHandler(scheduledJobsRepo)
 
 	// Set up the router using Go 1.22's enhanced mux
 	mux := http.NewServeMux()
@@ -249,6 +251,28 @@ func main() {
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%s", port),
 		Handler: telemetry.WrapHandler(handler, "memory-api"),
+	}
+
+	// Heartbeat emitter — non-fatal if NATS is unavailable or unset.
+	// The orchestrator's heartbeat sweeper subscribes to
+	// aegis.heartbeat.service.* and uses these beats to track memory's
+	// liveness. See docs/heartbeat.md.
+	if natsURL := os.Getenv("NATS_URL"); natsURL != "" {
+		nc, err := nats.Connect(natsURL,
+			nats.Name("memory-heartbeat"),
+			nats.RetryOnFailedConnect(true),
+			nats.MaxReconnects(-1),
+			nats.ReconnectWait(500*time.Millisecond),
+		)
+		if err != nil {
+			logger.Warn("heartbeat: NATS connect failed — liveness will not be published", "error", err)
+		} else {
+			defer nc.Close()
+			emitter := heartbeat.New(nc, "memory", logger)
+			go emitter.Start(ctx)
+		}
+	} else {
+		logger.Info("heartbeat: NATS_URL unset — emitter disabled")
 	}
 
 	// Start server in a goroutine

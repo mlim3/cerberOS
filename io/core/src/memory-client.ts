@@ -7,6 +7,22 @@ const MEMORY_API_KEY = process.env.MEMORY_API_KEY ?? ''
 
 const DEMO_MODE = !MEMORY_API_BASE
 
+type CoreLogLevel = 'debug' | 'info' | 'warn' | 'error'
+
+function memoryClientLog(level: CoreLogLevel, msg: string, fields: Record<string, unknown> = {}): void {
+  const rec = {
+    time: new Date().toISOString(),
+    level: level.toUpperCase(),
+    component: 'io',
+    module: 'memory-client',
+    msg,
+    ...fields,
+  }
+  const line = JSON.stringify(rec)
+  if (level === 'error') console.error(line)
+  else console.log(line)
+}
+
 interface DemoLogEntry {
   messageId: string
   conversationId: string
@@ -76,6 +92,8 @@ export interface AppendLogParams {
   content: string
   taskId?: string
   idempotencyKey?: string
+  /** W3C trace_id (32 hex) — same as HTTP / NATS user_task; keeps Memory rows aligned with IO + orchestrator */
+  traceId?: string
 }
 
 const demoLogs: DemoLogEntry[] = []
@@ -127,13 +145,14 @@ export async function createConversation(params: CreateConversationParams): Prom
       body: JSON.stringify(params),
     })
     if (!res.ok) {
-      console.error('[MemoryClient] Failed to create conversation:', res.status, await res.text())
+      const text = await res.text()
+      memoryClientLog('error', 'create conversation failed', { status: res.status, response_bytes: text.length })
       return null
     }
     const json = await res.json() as { data: { conversation: MemoryConversation } }
     return json.data?.conversation ?? null
   } catch (err) {
-    console.error('[MemoryClient] Network error creating conversation:', err)
+    memoryClientLog('error', 'create conversation network error', { error: String(err) })
     return null
   }
 }
@@ -174,13 +193,14 @@ export async function createTask(params: CreateTaskParams): Promise<MemoryTask |
       body: JSON.stringify(params),
     })
     if (!res.ok) {
-      console.error('[MemoryClient] Failed to create task:', res.status, await res.text())
+      const text = await res.text()
+      memoryClientLog('error', 'create task failed', { task_id: params.taskId, status: res.status, response_bytes: text.length })
       return null
     }
     const json = await res.json() as { data: { task: MemoryTask } }
     return json.data?.task ?? null
   } catch (err) {
-    console.error('[MemoryClient] Network error creating task:', err)
+    memoryClientLog('error', 'create task network error', { task_id: params.taskId, error: String(err) })
     return null
   }
 }
@@ -199,13 +219,13 @@ export async function getTask(taskId: string, userId: string): Promise<MemoryTas
       headers: { 'X-Internal-API-Key': MEMORY_API_KEY },
     })
     if (!res.ok) {
-      console.error('[MemoryClient] Failed to fetch task:', res.status)
+      memoryClientLog('error', 'fetch task failed', { task_id: taskId, status: res.status })
       return null
     }
     const json = await res.json() as { data: { task: MemoryTask } }
     return json.data?.task ?? null
   } catch (err) {
-    console.error('[MemoryClient] Network error fetching task:', err)
+    memoryClientLog('error', 'fetch task network error', { task_id: taskId, error: String(err) })
     return null
   }
 }
@@ -256,14 +276,22 @@ export async function appendLogEntry(params: AppendLogParams): Promise<MemoryLog
   if (params.idempotencyKey) body['idempotencyKey'] = params.idempotencyKey
 
   try {
+    const headers: Record<string, string> = {
+      ...authHeaders() as Record<string, string>,
+    }
+    if (params.traceId) {
+      headers['X-Trace-ID'] = params.traceId
+    }
+
     const res = await fetch(`${MEMORY_API_BASE}/api/v1/chat/${params.conversationId}/messages`, {
       method: 'POST',
-      headers: authHeaders(),
+      headers,
       body: JSON.stringify(body),
     })
 
     if (!res.ok) {
-      console.error('[MemoryClient] Failed to append log:', res.status, await res.text())
+      const text = await res.text()
+      memoryClientLog('error', 'append log failed', { task_id: params.taskId, status: res.status, response_bytes: text.length })
       return null
     }
 
@@ -274,14 +302,14 @@ export async function appendLogEntry(params: AppendLogParams): Promise<MemoryLog
     }
     return entry
   } catch (err) {
-    console.error('[MemoryClient] Network error appending log:', err)
+    memoryClientLog('error', 'append log network error', { task_id: params.taskId, error: String(err) })
     return null
   }
 }
 
 export async function getConversationLogs(
   conversationId: string,
-  options?: { userId?: string; taskId?: string; limit?: number }
+  options?: { userId?: string; taskId?: string; limit?: number; traceId?: string }
 ): Promise<MemoryLogEntry[]> {
   if (DEMO_MODE) {
     let entries = demoLogs.filter(m => m.conversationId === conversationId)
@@ -302,14 +330,19 @@ export async function getConversationLogs(
     if (options?.userId) url.searchParams.set('userId', options.userId)
     if (options?.limit) url.searchParams.set('limit', String(options.limit))
 
+    const headers: Record<string, string> = {
+      'X-Internal-API-Key': MEMORY_API_KEY,
+    }
+    if (options?.traceId) {
+      headers['X-Trace-ID'] = options.traceId
+    }
+
     const res = await fetch(url.toString(), {
-      headers: {
-        'X-Internal-API-Key': MEMORY_API_KEY,
-      },
+      headers,
     })
 
     if (!res.ok) {
-      console.error('[MemoryClient] Failed to fetch logs:', res.status)
+      memoryClientLog('error', 'fetch logs failed', { task_id: options?.taskId, status: res.status })
       return []
     }
 
@@ -321,8 +354,47 @@ export async function getConversationLogs(
     }
     return messages
   } catch (err) {
-    console.error('[MemoryClient] Network error fetching logs:', err)
+    memoryClientLog('error', 'fetch logs network error', { task_id: options?.taskId, error: String(err) })
     return []
+  }
+}
+
+export async function deleteConversation(conversationId: string, userId: string): Promise<boolean> {
+  if (DEMO_MODE) {
+    demoConversations.delete(conversationId)
+    return true
+  }
+
+  try {
+    const url = new URL(`${MEMORY_API_BASE}/api/v1/conversations/${conversationId}`)
+    url.searchParams.set('userId', userId)
+    const res = await fetch(url.toString(), {
+      method: 'DELETE',
+      headers: { 'X-Internal-API-Key': MEMORY_API_KEY },
+    })
+    return res.ok
+  } catch (err) {
+    memoryClientLog('error', 'delete conversation network error', { conversation_id: conversationId, error: String(err) })
+    return false
+  }
+}
+
+export async function renameConversation(conversationId: string, userId: string, title: string): Promise<boolean> {
+  if (DEMO_MODE) {
+    touchDemoConversation(conversationId, { title })
+    return true
+  }
+
+  try {
+    const res = await fetch(`${MEMORY_API_BASE}/api/v1/conversations/${conversationId}`, {
+      method: 'PATCH',
+      headers: authHeaders(),
+      body: JSON.stringify({ userId, title }),
+    })
+    return res.ok
+  } catch (err) {
+    memoryClientLog('error', 'rename conversation network error', { conversation_id: conversationId, error: String(err) })
+    return false
   }
 }
 
@@ -350,13 +422,13 @@ export async function listConversations(
       },
     })
     if (!res.ok) {
-      console.error('[MemoryClient] Failed to list conversations:', res.status)
+      memoryClientLog('error', 'list conversations failed', { status: res.status })
       return []
     }
     const json = await res.json() as { data: { conversations: MemoryConversation[] } }
     return json.data?.conversations ?? []
   } catch (err) {
-    console.error('[MemoryClient] Network error listing conversations:', err)
+    memoryClientLog('error', 'list conversations network error', { error: String(err) })
     return []
   }
 }

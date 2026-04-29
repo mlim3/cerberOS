@@ -40,7 +40,6 @@ function isoNow(): string {
 export function logUserResponse(taskId: string, content: string): void {
   const entry: LogEntry = { taskId, role: 'user', content, at: isoNow() }
   memoryLog.push(entry)
-  console.log('[LOG user]', taskId, content)
 }
 
 /**
@@ -49,7 +48,6 @@ export function logUserResponse(taskId: string, content: string): void {
 export function logOrchestratorResponse(taskId: string, content: string): void {
   const entry: LogEntry = { taskId, role: 'orchestrator', content, at: isoNow() }
   memoryLog.push(entry)
-  console.log('[LOG orchestrator]', taskId, content)
 }
 
 /**

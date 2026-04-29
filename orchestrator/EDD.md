@@ -4,7 +4,7 @@
 | Field | Value |
 |---|---|
 | Document ID | EDD-AEGIS-ORC-002 |
-| Version | 3.1 |
+| Version | 3.2 |
 | Status | Draft — For Review |
 | Date | April 2026 |
 | Component | Orchestrator Component |
@@ -26,7 +26,7 @@
 8. [Sequence Diagrams](#8-sequence-diagrams)
 9. [Task Lifecycle State Machine](#9-task-lifecycle-state-machine)
 10. [Data Models](#10-data-models)
-11. [Interface Specifications](#11-interface-specifications) *(updated: IO Component HTTP bridge added)*
+11. [Interface Specifications](#11-interface-specifications) *(updated: IO Component HTTP bridge, Vault Engine HTTP interface)*
 12. [Heartbeat & Health Monitoring](#12-heartbeat--health-monitoring)
 13. [Security Design](#13-security-design)
 14. [Error Handling & Resilience](#14-error-handling--resilience)
@@ -106,6 +106,7 @@ The Orchestrator sits at the center of the Aegis OS control plane, interfacing w
 | User I/O Component | Bidirectional | NATS / Comms Interface | Inbound: `user_task` (with raw NL input in payload). Outbound: `task_result`, `task_status_update`, `clarification_request`, `error_response` |
 | Agents Component | Bidirectional | NATS / Comms Interface | Outbound: `task.inbound` (planner + subtasks), `capability_query`, `agent_terminate`. Inbound: `task.accepted`, `task.result`, `task.failed`, `agent.status`, `capability.response`, `credential.request` |
 | Vault (OpenBao) | Bidirectional | OpenBao HTTP API | Outbound: `policy_validation_request`, `token_revoke`. Inbound: `policy_result`, `scoped_token` |
+| Vault Engine | Bidirectional | HTTP REST | Outbound: `POST /execute` (credentialed operation execution), `POST /credentials/get` (resolve user credential), `POST /credentials/set`, `DELETE /credentials/delete`. Inbound: operation result JSON with status, elapsed_ms, and operation-specific data. |
 | Memory Component | Bidirectional | Memory Interface abstraction | Outbound: tagged task state writes, plan state writes, subtask state writes, audit events. Inbound: task state reads for recovery and deduplication |
 | Communications (NATS) | Bidirectional | NATS JetStream | All inter-component messages routed through NATS streams. Orchestrator publishes and subscribes via defined topic hierarchy. |
 | IO Component | Outbound | HTTP (JSON POST) | Orchestrator pushes real-time task status updates and credential requests to the IO Component's HTTP bridge endpoint (`POST /api/orchestrator/stream-events`). Optional — disabled when `IO_API_BASE` is not set. |
@@ -122,7 +123,7 @@ The Orchestrator consists of **seven internal modules**. Each module has a singl
 
 | | |
 |---|---|
-| **Responsibilities** | Single inbound/outbound gateway for all NATS messaging. Receives `user_task` from User I/O Component. Routes outbound messages (results, status, errors, planner tasks, subtask tasks) to User I/O and Agents Component. Enforces message envelope validation — rejects malformed messages before they enter the pipeline. Adapts internal Orchestrator structs to the real Agents Component wire schema. Manages NATS consumer ACK/NAK and dead-letter queue monitoring. Subscribes to `aegis.orchestrator.credential.request` and forwards `user_input` credential requests to the registered handler (IO Component bridge); vault `authorize`/`revoke` operations are filtered out and not forwarded. |
+| **Responsibilities** | Single inbound/outbound gateway for all NATS messaging. Receives `user_task` from User I/O Component. Routes outbound messages (results, status, errors, planner tasks, subtask tasks) to User I/O and Agents Component. Enforces message envelope validation — rejects malformed messages before they enter the pipeline. Adapts internal Orchestrator structs to the real Agents Component wire schema. Manages NATS consumer ACK/NAK and dead-letter queue monitoring. Subscribes to `aegis.orchestrator.credential.request` and forwards `user_input` credential requests to the registered handler (IO Component bridge); vault `authorize`/`revoke` operations are filtered out and not forwarded. Subscribes to `aegis.orchestrator.vault.execute.request` from the Agents Component and dispatches each request to the Task Dispatcher's vault execute handler. Publishes vault execute results to `aegis.agents.vault.execute.result` after the Vault Engine HTTP call completes. |
 | **Inputs** | `user_task` from User I/O (via NATS); `task.result`, `task.failed`, `agent.status`, and `credential.request` from Agents Component (via NATS); internal messages from Task Dispatcher and Plan Executor |
 | **Outputs** | Parsed `user_task` to Task Dispatcher; routed responses to User I/O and Agents Component; planner `task.inbound` to Agents Component; subtask `task.inbound` to Agents Component; `credential_request` events forwarded to IO Component HTTP bridge |
 | **Interfaces With** | Task Dispatcher (internal), Plan Executor (internal), NATS / Communications Component (external), IO Component (external — HTTP) |
@@ -131,7 +132,7 @@ The Orchestrator consists of **seven internal modules**. Each module has a singl
 
 | | |
 |---|---|
-| **Responsibilities** | Central coordinator for all incoming task routing decisions. Validates `user_task` envelope; rejects invalid specs immediately. Performs deduplication check via Memory Component using `task_id`. Routes to Policy Enforcer for permission validation before any agent interaction. **After policy validation, dispatches a standard `task.inbound` request to the Agents Component targeting the `general` skill domain with planner-specific instructions.** When the planner task returns a JSON execution plan through the normal `task.result` path, the Task Dispatcher validates the plan and passes it to the Plan Executor (M7) for subtask-level dispatch. Tracks top-level task status and correlates plan results back to the originating `user_task`. Persists `DECOMPOSING` before publishing the planner task. **Pushes real-time status updates to the IO Component at key lifecycle transitions:** task received (DECOMPOSING → `working`), plan active (PLAN_ACTIVE → `working` with subtask count), task completed (`completed`), and task failed (`completed` with error detail). |
+| **Responsibilities** | Central coordinator for all incoming task routing decisions. Validates `user_task` envelope; rejects invalid specs immediately. Performs deduplication check via Memory Component using `task_id`. Routes to Policy Enforcer for permission validation before any agent interaction. **After policy validation, dispatches a standard `task.inbound` request to the Agents Component targeting the `general` skill domain with planner-specific instructions.** When the planner task returns a JSON execution plan through the normal `task.result` path, the Task Dispatcher validates the plan and passes it to the Plan Executor (M7) for subtask-level dispatch. Tracks top-level task status and correlates plan results back to the originating `user_task`. Persists `DECOMPOSING` before publishing the planner task. **Pushes real-time status updates to the IO Component at key lifecycle transitions:** task received (DECOMPOSING → `working`), plan active (PLAN_ACTIVE → `working` with subtask count), task completed (`completed`), and task failed (`completed` with error detail). **Handles vault execute requests** from the Agents Component (`aegis.orchestrator.vault.execute.request`): resolves the submitting agent's `user_id` by traversing `orchRefToPlan → activePlans → TaskState.UserID` (falls back to looking up the plan by agent's active orchRef), calls the Vault Engine `POST /execute` over HTTP, and publishes the `VaultExecuteResult` to `aegis.agents.vault.execute.result`. |
 | **Inputs** | Parsed `user_task` from Communications Gateway; `policy_result` from Policy Enforcer; planner `task.result` / `task.failed` from Comms Gateway (via Agents Component); `plan_completed`/`plan_failed` from Plan Executor; `dedup_result` from Memory Interface |
 | **Outputs** | `policy_check_request` to Policy Enforcer; planner `task.inbound` to Communications Gateway; `execution_plan` to Plan Executor (M7); `task_accepted`/`task_failed`/`policy_violation` to Communications Gateway (for User I/O); `status_update` events to IO Component HTTP bridge (fire-and-forget; failures logged but not fatal) |
 | **Interfaces With** | Communications Gateway, Policy Enforcer, Plan Executor (M7), Memory Interface, Recovery Manager, IO Component (external — HTTP) |
@@ -249,7 +250,19 @@ The Orchestrator consists of **seven internal modules**. Each module has a singl
 | FR-SH-05 | On Orchestrator startup, the Task Monitor SHALL rehydrate its active task map, plan state, and subtask state map from the Memory Component and resume monitoring any tasks that were DECOMPOSING, RUNNING, or RECOVERING at the time of shutdown. | MUST |
 | FR-SH-06 | Recovery decisions SHALL be policy-checked with the Vault before re-dispatching. A re-dispatched subtask cannot receive a broader scope than the original `policy_scope`. | MUST |
 
-### 5.6 Observability & Audit
+### 5.6 Vault Execute
+
+| ID | Requirement | Priority |
+|---|---|---|
+| FR-VE-01 | The Communications Gateway SHALL subscribe to `aegis.orchestrator.vault.execute.request` and route each request to the Task Dispatcher's vault execute handler. | MUST |
+| FR-VE-02 | On receiving a vault execute request, the Task Dispatcher SHALL resolve the `user_id` associated with the requesting agent by traversing the active plan state map using the agent's `orchRef`. The resolved `user_id` is required to retrieve the user's stored credential from the Vault Engine. | MUST |
+| FR-VE-03 | The Task Dispatcher SHALL forward the resolved `user_id` and operation parameters to the Vault Engine's `POST /execute` HTTP endpoint. The Vault Engine SHALL retrieve the user's credential from OpenBao, execute the external operation, and return only the operation result — never the raw credential. | MUST |
+| FR-VE-04 | After receiving the Vault Engine's response, the Orchestrator SHALL publish a `VaultExecuteResult` envelope to `aegis.agents.vault.execute.result` over NATS. The result SHALL include: `request_id`, `agent_id`, `status` (`success` \| `execution_error` \| `scope_violation` \| `timed_out`), `operation_result`, `error_code`, `error_message`, and `elapsed_ms`. | MUST |
+| FR-VE-05 | The Orchestrator SHALL NOT log, persist, or echo the user's raw credential value at any point in the vault execute flow. The credential is resolved inside the Vault Engine and only the operation result leaves the Vault Engine boundary. | MUST |
+| FR-VE-06 | If the Vault Engine is unreachable or returns a non-2xx response, the Orchestrator SHALL publish a `VaultExecuteResult` with `status: execution_error` and a safe, non-credential-exposing `error_message`. | MUST |
+| FR-VE-07 | The vault execute path SHALL be independent of the task decomposition flow — a vault execute request may arrive for any in-flight subtask agent, at any time during plan execution. The Orchestrator MUST handle concurrent vault execute requests across multiple agents simultaneously. | MUST |
+
+### 5.7 Observability & Audit
 
 | ID | Requirement | Priority |
 |---|---|---|
@@ -349,6 +362,27 @@ The Orchestrator pushes real-time status events to the IO Component over HTTP so
 | COMPLETED | `completed` |
 | FAILED, PARTIAL_COMPLETE, DECOMPOSITION_FAILED, POLICY_VIOLATION, TIMED_OUT | `completed` (with error detail in `lastUpdate`) |
 
+### Flow 7: Vault Execute Request Flow (NEW in v3.2)
+
+This flow is triggered at any time during subtask execution when a running agent needs to perform a credentialed external operation (e.g., a web search, GitHub API call, or arbitrary HTTP request authenticated with a user-stored API key).
+
+1. A running agent process calls the `vault_google_search` (or similar) built-in tool.
+2. The agent process publishes a `vault.execute.request` envelope to `aegis.orchestrator.vault.execute.request` over NATS JetStream. The envelope contains: `request_id` (UUID, idempotency key), `agent_id`, `task_id`, `permission_token` (from prior authorize phase), `operation_type` (e.g. `vault_google_search`), `operation_params` (e.g. `{"query": "..."}`), `timeout_seconds`, and `credential_type`.
+3. The Communications Gateway receives the JetStream message and routes it to the Task Dispatcher's vault execute handler (`HandleVaultExecuteRequest`).
+4. The Task Dispatcher resolves the `user_id` for the requesting agent by calling `UserIDForSubtask`: it traverses the in-memory `orchRefToPlan` → `activePlans` map using the orchRef embedded in the task spec. If not found directly, it falls back to looking up the agent's current orchRef from the registry.
+5. The Task Dispatcher calls the Vault Engine's `POST /execute` HTTP endpoint with the resolved `user_id`, `operation_type`, and `operation_params`.
+6. The Vault Engine queries OpenBao (`POST /credentials/get`) to retrieve the user's stored credential (e.g., Serper API key) using the `user_id` and `credential_type`. The raw credential never leaves the Vault Engine process.
+7. The Vault Engine executes the external operation (e.g., calls `https://google.serper.dev/search`) and returns the result as `{ status, result, elapsed_ms }` to the Orchestrator.
+8. The Task Dispatcher constructs a `VaultExecuteResult` with the operation output and publishes it to `aegis.agents.vault.execute.result` over NATS (core publish, captured by the AEGIS_AGENTS JetStream stream).
+9. The agent process's `VaultExecutor` consumer (`agent-vault-result-{agentID}` durable consumer) receives the result, matches it to the pending `request_id`, and unblocks the waiting goroutine.
+10. The tool call returns the result to the LLM context and the ReAct loop continues.
+
+**Error paths:**
+- Vault Engine unreachable: Orchestrator publishes `VaultExecuteResult{status: "execution_error", error_code: "VAULT_ENGINE_UNAVAILABLE"}`.
+- User has no credential stored: Vault Engine returns 404; Orchestrator publishes `{status: "execution_error", error_code: "CREDENTIAL_NOT_FOUND"}`.
+- External API failure (non-2xx): Vault Engine returns `{status: "execution_error", error_code: "UPSTREAM_ERROR"}`.
+- Agent does not have a resolvable `user_id` (orphaned agent): Orchestrator publishes `{status: "execution_error", error_code: "USER_NOT_FOUND"}`.
+
 ### Flow 6: Subtask Recovery Flow
 1. Agent RECOVERING event received from Agents Component for a specific subtask.
 2. Recovery Manager treats `RECOVERING` as a self-healing signal and does not immediately re-dispatch. The existing agent may return to `ACTIVE`; otherwise timeout remains the safety net.
@@ -447,6 +481,38 @@ Steps 1–15 identical to 8.1 (schema validation, dedup, policy check, decomposi
 13. Agents Component responds with `task_accepted` — monitoring resumes at Task Monitor
 
 > **🔴 CRITICAL:** On `max_retries` exceeded for a subtask: Recovery Manager issues `agent_terminate`, writes FAILED state for the subtask, triggers credential revocation. If the failed subtask has dependents, those are marked BLOCKED. Plan Executor reports partial completion or `plan_failed` to Task Dispatcher.
+
+### 8.6 Vault Execute Flow (NEW in v3.2)
+
+*Participants: Agent Process → NATS (AEGIS_ORCHESTRATOR stream) → Communications Gateway → Task Dispatcher → Vault Engine (HTTP) → OpenBao (HTTP) → External API → NATS (AEGIS_AGENTS stream) → Agent Process*
+
+1. Agent process calls `vault_google_search` tool with `{ "query": "latest AI news" }`.
+2. Agent process → NATS JetStream: publish `vault.execute.request` to `aegis.orchestrator.vault.execute.request`
+   ```json
+   { "request_id": "uuid-A", "agent_id": "agent-XYZ", "task_id": "task-123",
+     "permission_token": "sim-token-agent-XYZ", "operation_type": "vault_google_search",
+     "operation_params": { "query": "latest AI news" }, "timeout_seconds": 30,
+     "credential_type": "serper_api_key" }
+   ```
+3. Communications Gateway (core NATS subscription) receives the message, unwraps envelope, calls `dispatcher.HandleVaultExecuteRequest(req)`.
+4. Task Dispatcher: calls `executor.UserIDForSubtask(orchRef)` → resolves `user_id = "00000000-0000-0000-0000-000000000001"`.
+5. Task Dispatcher → Vault Engine: `POST http://vault:8000/execute`
+   ```json
+   { "user_id": "00000000-0000-0000-0000-000000000001", "operation_type": "vault_google_search",
+     "operation_params": { "query": "latest AI news" }, "request_id": "uuid-A", "agent_id": "agent-XYZ" }
+   ```
+6. Vault Engine → OpenBao: `POST /v1/kv/data/users/00000000.../serper_api_key` → resolves `credential = "<serper-key>"`.
+7. Vault Engine → External API: `POST https://google.serper.dev/search` with `X-API-KEY: <serper-key>`, body `{ "q": "latest AI news", "num": 5 }`.
+8. External API → Vault Engine: `200 OK` with organic search results JSON.
+9. Vault Engine → Task Dispatcher: `200 OK { "status": "success", "result": { "results": [...], "total_results": 5 }, "elapsed_ms": 929 }`.
+10. Task Dispatcher → NATS (core publish): `aegis.agents.vault.execute.result`
+    ```json
+    { "request_id": "uuid-A", "agent_id": "agent-XYZ", "status": "success",
+      "operation_result": { "results": [...], "total_results": 5 }, "elapsed_ms": 929 }
+    ```
+11. JetStream (AEGIS_AGENTS stream) captures and delivers the message to `agent-vault-result-agent-XYZ` durable consumer.
+12. Agent process `VaultExecutor.routeResult` matches `request_id = "uuid-A"` → unblocks pending goroutine.
+13. Tool call returns `{ "results": [...] }` to LLM context. ReAct loop continues with real search data.
 
 ### 8.4 Policy Violation Flow
 
@@ -602,7 +668,36 @@ Stored in the Memory Component via Memory Interface. One record per subtask, upd
 | `result` | object \| null | Subtask output on COMPLETED. Used for piping into dependents. |
 | `error_code` | string \| null | Set on any non-COMPLETED terminal state. |
 
-### 10.5 Orchestrator Audit Log Schema
+### 10.5 Vault Execute Request Schema (NEW in v3.2)
+
+Published by the Agents Component to `aegis.orchestrator.vault.execute.request`. Received by the Communications Gateway and routed to the Task Dispatcher.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `request_id` | UUID string | YES | Idempotency key for this vault execute call. Used to match response on the agent side. |
+| `agent_id` | string | YES | ID of the requesting agent. Used to filter the vault execute result on delivery. |
+| `task_id` | string | YES | ID of the subtask this agent is executing. Used to resolve `user_id` via plan state. |
+| `permission_token` | string | YES | Opaque token reference from the prior credential pre-authorization phase. Never a raw secret. |
+| `operation_type` | string | YES | Logical operation name. Supported: `vault_google_search`, `vault_github_request`, `vault_web_fetch`. |
+| `operation_params` | JSON object | YES | Operation-specific parameters (e.g., `{ "query": "..." }` for `vault_google_search`). Schema is operation-type-specific and validated by the Vault Engine. |
+| `timeout_seconds` | integer | NO | Max time for the external operation. Default 30. Hard max 300. |
+| `credential_type` | string | NO | Logical credential type (e.g., `serper_api_key`). Used by the Vault Engine to select the correct stored credential. |
+
+### 10.6 Vault Execute Result Schema (NEW in v3.2)
+
+Published by the Orchestrator to `aegis.agents.vault.execute.result` after the Vault Engine call completes.
+
+| Field | Type | Description |
+|---|---|---|
+| `request_id` | UUID string | Echoed from the originating `VaultExecuteRequest`. |
+| `agent_id` | string | Echoed from the originating `VaultExecuteRequest`. Used by consumers to filter results intended for them. |
+| `status` | enum | `success` \| `execution_error` \| `scope_violation` \| `timed_out` |
+| `operation_result` | JSON object \| null | Present on `success`. Contains operation output only — never the raw credential value. Schema is operation-type-specific. |
+| `error_code` | string \| null | Set on any non-`success` status. E.g., `CREDENTIAL_NOT_FOUND`, `UPSTREAM_ERROR`, `VAULT_ENGINE_UNAVAILABLE`, `USER_NOT_FOUND`. |
+| `error_message` | string \| null | Human-readable error description. MUST NOT expose credential internals, OpenBao paths, or raw API keys. |
+| `elapsed_ms` | integer | Wall-clock time from request dispatch to result receipt (covers Vault Engine HTTP call + external API round-trip). |
+
+### 10.7 Orchestrator Audit Log Schema
 
 Stored in Memory Component, **append-only**. Every state transition and policy decision writes one record.
 
@@ -756,8 +851,68 @@ All interactions are mediated by M6 (Memory Interface). **Direct Memory Componen
 | `aegis.orchestrator.audit.events` | OUTBOUND | Persistent (no TTL) | 16 KB |
 | `aegis.orchestrator.metrics` | OUTBOUND | At-most-once | 8 KB |
 | `aegis.orchestrator.tasks.deadletter` | OUTBOUND | Persistent | 1 MB |
+| `aegis.orchestrator.vault.execute.request` | INBOUND | At-least-once (JetStream) | 64 KB |
+| `aegis.agents.vault.execute.result` | OUTBOUND | At-least-once (JetStream) | 2 MB |
 
 > **🔴 CRITICAL:** All NATS connections MUST use mutual TLS (mTLS). The Orchestrator's NATS credentials MUST only permit publish/subscribe on authorized topics. Cross-component topic access requires explicit authorization.
+
+---
+
+### 11.10 Outbound: Orchestrator → Vault Engine (NEW in v3.2)
+
+The Orchestrator communicates with the Vault Engine over HTTP when `VAULT_ENGINE_URL` is configured. When `VAULT_ENGINE_URL` is not set, the Orchestrator falls back to a no-op vault mock that returns an `execution_error`.
+
+**Base URL:** `{VAULT_ENGINE_URL}` (e.g. `http://vault:8000`)
+
+**Execute operation:**
+
+`POST {VAULT_ENGINE_URL}/execute`
+
+Request body:
+```json
+{
+  "user_id": "<resolved user UUID>",
+  "operation_type": "vault_google_search | vault_github_request | vault_web_fetch",
+  "operation_params": {},
+  "request_id": "<uuid>",
+  "agent_id": "<agent uuid>"
+}
+```
+
+Response body (success):
+```json
+{
+  "status": "success",
+  "result": {},
+  "elapsed_ms": 929
+}
+```
+
+Response body (error):
+```json
+{
+  "status": "error",
+  "error": "human-readable description (must not expose raw credential)"
+}
+```
+
+**Supported operation types and their `operation_params` schemas:**
+
+| Operation Type | Required Params | Optional Params | Description |
+|---|---|---|---|
+| `vault_google_search` | `query` (string) | `num_results` (int, 1–10, default 5) | Google Search via Serper API |
+| `vault_github_request` | `path` (string, must start with `/`) | `method` (string, default GET), `body` (string) | Authenticated GitHub REST API call |
+| `vault_web_fetch` | `url` (string) | `method` (string, default GET) | Arbitrary HTTP request with Bearer token auth |
+
+**Error handling:** HTTP errors and timeouts from the Vault Engine are mapped to `VaultExecuteResult{status: "execution_error"}`. The 25-second HTTP client timeout on the Vault Engine's external calls is covered by the agent-side `timeout_seconds`.
+
+**Credential management endpoints** (used by the IO Component directly, not the Orchestrator):
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/credentials/set` | Store a credential for a user (`{ user_id, credential_type, value }`) |
+| `GET` | `/credentials/get` | Retrieve a credential for a user (internal use by Vault Engine `POST /execute` only) |
+| `DELETE` | `/credentials/delete` | Remove a user credential |
 
 ---
 
@@ -950,6 +1105,7 @@ All Orchestrator configuration is injected via environment variables. No configu
 | `MEMORY_WRITE_BUFFER_SECONDS` | integer | 30 | How long to buffer writes locally if Memory Component is unreachable. |
 | `NODE_ID` | string | hostname | Unique identifier for this Orchestrator instance. Included in all audit events. |
 | `IO_API_BASE` | URL | _(empty — disabled)_ | Base URL of the IO Component HTTP server (e.g. `http://localhost:3001`). When set, the Orchestrator pushes real-time status and credential request events to the IO dashboard. When empty, the IO client is a no-op and the Orchestrator runs normally without a connected UI. |
+| `VAULT_ENGINE_URL` | URL | _(empty — disabled)_ | Base URL of the Vault Engine HTTP server (e.g. `http://vault:8000`). When set, the Orchestrator forwards vault execute requests to the real Vault Engine for credentialed external operations. When empty, a no-op mock is used and all vault execute requests return `execution_error`. |
 
 ---
 
@@ -1319,5 +1475,6 @@ func (o *Orchestrator) failTask(ts *TaskState, reason string) {
 |---|---|---|---|
 | 1.0 | February 2026 | Junyu Ding | Initial draft. High-level concepts. Missing NFRs, security detail, and PoC rigor. |
 | 2.0 | February 2026 | Junyu Ding | Full EDD. Added: module inventory, full requirements (FR + NFR), complete sequence diagrams, data models, interface specs, heartbeat design, security model, error handling, observability, configuration table, complete PoC with Go implementation, and open questions. |
+| 3.2 | April 2026 | Junyu Ding | **Vault Execute Pipeline (per-user credentialed operations).** Added: Vault Engine as external component in §3.1; M1 vault execute subscription and result publishing; M2 `HandleVaultExecuteRequest` and `UserIDForSubtask` user resolution; new §5.6 Vault Execute functional requirements (FR-VE-01 through FR-VE-07); new Flow 7 (Vault Execute Request Flow) in §7; new Sequence Diagram 8.6 (Vault Execute Flow) in §8; new §10.5 VaultExecuteRequest and §10.6 VaultExecuteResult data model schemas; two new NATS topics in §11.9 (`aegis.orchestrator.vault.execute.request` INBOUND, `aegis.agents.vault.execute.result` OUTBOUND); new §11.10 Vault Engine HTTP interface spec (POST /execute, POST /credentials/set, GET /credentials/get, DELETE /credentials/delete) with supported operation types (vault_google_search, vault_github_request, vault_web_fetch); `VAULT_ENGINE_URL` env var added to §16. End-to-end flow: agent calls vault tool → Orchestrator resolves user_id → Vault Engine retrieves credential from OpenBao → calls external API → returns result to agent via JetStream. Simulator's mock vault execute gated behind `SIMULATE_VAULT_EXECUTE` env var. |
 | 3.1 | April 2026 | Junyu Ding | **IO Component Integration.** Added: IO Component to system context (§3.1); M1 now subscribes to `aegis.orchestrator.credential.request` and routes `user_input` operations to IO (vault authorize/revoke filtered out); M2 now pushes real-time status updates to IO at DECOMPOSING, PLAN_ACTIVE, COMPLETED, and FAILED transitions; new `internal/io/client.go` package (HTTP client, disabled when `IO_API_BASE` unset); new data flow §6.5 (IO Component Status Push) with state→status mapping table; new interface spec §11.6 (Orchestrator → IO Component HTTP bridge) with full event envelope schemas and error-handling contract; `aegis.orchestrator.credential.request` added to NATS topic table (§11.9); `IO_API_BASE` added to configuration table (§16). |
 | 3.0 | April 2026 | Junyu Ding | **Task Decomposition via Planner Agent.** Added: M7 Plan Executor module; LLM-Free Orchestrator Principle (§2.5); task decomposition coordination as 4th core concern; new functional requirements FR-TD-01 through FR-TD-07; new task states DECOMPOSING, PLAN_ACTIVE, DECOMPOSITION_FAILED, PARTIAL_COMPLETE; new subtask state machine (§9.2); Execution Plan Schema (§10.3); Subtask State Record Schema (§10.4); new NATS topics for decomposition; Flow 3.5 (Task Decomposition); Sequence Diagram 8.5 (Decomposition Failure); new env vars (DECOMPOSITION_TIMEOUT_SECONDS, MAX_SUBTASKS_PER_PLAN, PLAN_EXECUTOR_MAX_PARALLEL); updated PoC with decomposition scenarios; subtask-level metrics; Planner Agent scope enforcement. FR-TRK-04 updated to accept empty `required_skill_domains[]`. Resolved OQ-05. New OQ-06 through OQ-08. Design rationale based on Conductor/Superset/Netflix Conductor research: the Orchestrator remains LLM-free; intelligence lives in the Planner Agent. |

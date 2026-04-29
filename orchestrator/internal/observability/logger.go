@@ -23,46 +23,60 @@ func init() {
 // InitLogger sets up the global structured logger.
 // Must be called once from main.go before any log output.
 //
-//   - level:  "debug" | "info" | "warn" | "error"  (default: "info")
-//   - format: "json" (production) | "text" (local dev)
+//   - level:  "debug" | "info" | "warn" | "warning" | "error" | "fatal" | "critical" (default: "info")
+//   - format: accepted for backward compatibility; logs are always JSON
 //   - node:   NODE_ID value for the node_id field
 func InitLogger(level, format, node string) {
+	_ = format
 	nodeID = node
 
 	var lvl slog.Level
 	switch strings.ToLower(level) {
 	case "debug":
 		lvl = slog.LevelDebug
-	case "warn":
+	case "warn", "warning":
 		lvl = slog.LevelWarn
-	case "error":
+	case "error", "fatal", "critical":
 		lvl = slog.LevelError
 	default:
 		lvl = slog.LevelInfo
 	}
 
 	opts := &slog.HandlerOptions{Level: lvl}
+	defaultLogger = slog.New(slog.NewJSONHandler(os.Stdout, opts))
+}
 
-	var handler slog.Handler
-	if strings.ToLower(format) == "text" {
-		handler = slog.NewTextHandler(os.Stdout, opts)
-	} else {
-		handler = slog.NewJSONHandler(os.Stdout, opts)
+// LoggerWithModule returns the default orchestrator logger with the canonical
+// component=orchestrator attribute and the supplied module name. Prefer
+// LogFromContext when context IDs are available.
+func LoggerWithModule(module string) *slog.Logger {
+	attrs := []any{"component", "orchestrator", "module", module}
+	if nodeID != "" {
+		attrs = append(attrs, "node_id", nodeID)
 	}
+	return defaultLogger.With(attrs...)
+}
 
-	defaultLogger = slog.New(handler)
+// LoggerWithComponent is a deprecated alias for LoggerWithModule kept so older
+// call sites compile. Its argument is the module name within the orchestrator
+// component, despite the legacy name.
+//
+// Deprecated: use LoggerWithModule.
+func LoggerWithComponent(module string) *slog.Logger {
+	return LoggerWithModule(module)
 }
 
 // LogFromContext returns a *slog.Logger pre-populated with all IDs present in ctx.
 //
 // Required fields on every line (EDD §15.1):
-//   - component = "orchestrator"
-//   - node_id   (from InitLogger)
-//   - trace_id  (from context, if set)
-//   - task_id   (from context, if set)
-//   - plan_id   (from context, if set)
-//   - subtask_id (from context, if set)
-//   - module    (from context, if set)
+//   - component       = "orchestrator"
+//   - node_id         (from InitLogger)
+//   - trace_id        (from context, if set)
+//   - task_id         (from context, if set)
+//   - conversation_id (from context, if set)
+//   - plan_id         (from context, if set)
+//   - subtask_id      (from context, if set)
+//   - module          (from context, if set)
 //
 // FORBIDDEN log content (EDD §15.1):
 //   - raw user input (payload.raw_input)
@@ -70,18 +84,15 @@ func InitLogger(level, format, node string) {
 //   - task result payloads
 //   - planner output
 func LogFromContext(ctx context.Context) *slog.Logger {
-	attrs := []any{
-		"service", "orchestrator",
-		"component", "orchestrator",
-	}
-	if nodeID != "" {
-		attrs = append(attrs, "node_id", nodeID)
-	}
+	attrs := []any{}
 	if v := TraceIDFrom(ctx); v != "" {
 		attrs = append(attrs, "trace_id", v)
 	}
 	if v := TaskIDFrom(ctx); v != "" {
 		attrs = append(attrs, "task_id", v)
+	}
+	if v := ConversationIDFrom(ctx); v != "" {
+		attrs = append(attrs, "conversation_id", v)
 	}
 	if v := PlanIDFrom(ctx); v != "" {
 		attrs = append(attrs, "plan_id", v)
@@ -92,5 +103,12 @@ func LogFromContext(ctx context.Context) *slog.Logger {
 	if v := ModuleFrom(ctx); v != "" {
 		attrs = append(attrs, "module", v)
 	}
-	return defaultLogger.With(attrs...)
+	// Note: when the context carries no module, we still emit component=orchestrator
+	// so every line has the canonical component label even if the caller has not
+	// chosen a module yet.
+	base := []any{"component", "orchestrator"}
+	if nodeID != "" {
+		base = append(base, "node_id", nodeID)
+	}
+	return defaultLogger.With(base...).With(attrs...)
 }

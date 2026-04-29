@@ -32,13 +32,13 @@ func (h *VaultHandler) validateUserExists(ctx context.Context, userUUID uuid.UUI
 }
 
 func (h *VaultHandler) logAccessEvent(ctx context.Context, userID, status, path string) {
-	traceIDStr, ok := ctx.Value(TraceIDKey{}).(string)
-	if !ok || traceIDStr == "" {
-		return // No trace ID, cannot log properly
+	traceID, ok := traceIDFromContext(ctx)
+	if !ok {
+		// Non-HTTP/background callers may not carry context trace; initialize one.
+		traceID = uuid.New()
 	}
 
 	eventID, _ := uuid.NewRandom()
-	traceUUID, _ := uuid.Parse(traceIDStr)
 
 	now := pgtype.Timestamptz{}
 	now.Valid = true
@@ -52,7 +52,7 @@ func (h *VaultHandler) logAccessEvent(ctx context.Context, userID, status, path 
 
 	_, err := h.logRepo.CreateSystemEvent(ctx, storage.CreateSystemEventParams{
 		ID:          pgtype.UUID{Bytes: eventID, Valid: true},
-		TraceID:     pgtype.UUID{Bytes: traceUUID, Valid: true},
+		TraceID:     pgtype.UUID{Bytes: traceID, Valid: true},
 		ServiceName: pgtype.Text{String: "VaultService", Valid: true},
 		Severity:    pgtype.Text{String: "INFO", Valid: true},
 		Message:     "VAULT_ACCESS",
@@ -61,7 +61,7 @@ func (h *VaultHandler) logAccessEvent(ctx context.Context, userID, status, path 
 	})
 
 	if err != nil {
-		slog.Error("failed to log vault access event", "error", err, "traceID", traceIDStr)
+		slog.Error("failed to log vault access event", "error", err, "traceID", traceID.String())
 	}
 }
 

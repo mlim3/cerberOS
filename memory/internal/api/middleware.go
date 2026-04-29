@@ -37,6 +37,11 @@ var (
 
 type TraceIDKey struct{}
 
+const (
+	traceIDHeader     = "X-Trace-ID"
+	traceparentHeader = "traceparent"
+)
+
 // MetricsMiddleware records HTTP request metrics
 func MetricsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -67,12 +72,10 @@ func MetricsMiddleware(next http.Handler) http.Handler {
 // request is for the Vault.
 func TraceIDMiddleware(logger *slog.Logger, logRepo *storage.LogRepository, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		traceID := extractTraceparentID(r.Header.Get("traceparent"))
-		if traceID == "" {
-			traceID = uuid.New().String()
-		}
-		ctx := context.WithValue(r.Context(), TraceIDKey{}, traceID)
+		traceID := resolveRequestTraceID(r)
+		ctx := context.WithValue(r.Context(), TraceIDKey{}, traceID.String())
 		r = r.WithContext(ctx)
+		w.Header().Set(traceIDHeader, traceID.String())
 
 		// Create a custom response writer to capture status code
 		rw := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
@@ -80,26 +83,66 @@ func TraceIDMiddleware(logger *slog.Logger, logRepo *storage.LogRepository, next
 	})
 }
 
-// extractTraceparentID returns the 32-char trace_id segment of a W3C
-// `traceparent` header (`00-<trace_id>-<span_id>-<flags>`) when it is
-// well-formed and non-zero. Returns "" when the header is absent, malformed,
-// or carries the all-zero trace_id which MUST be rejected per the spec.
-func extractTraceparentID(header string) string {
-	if header == "" {
-		return ""
+func resolveRequestTraceID(r *http.Request) uuid.UUID {
+	if fromTraceID, ok := normalizeTraceID(r.Header.Get(traceIDHeader)); ok {
+		return fromTraceID
 	}
-	parts := strings.Split(header, "-")
+	if fromTraceparent, ok := traceIDFromTraceparent(r.Header.Get(traceparentHeader)); ok {
+		return fromTraceparent
+	}
+	return uuid.New()
+}
+
+func traceIDFromContext(ctx context.Context) (uuid.UUID, bool) {
+	traceIDStr, ok := ctx.Value(TraceIDKey{}).(string)
+	if !ok {
+		return uuid.UUID{}, false
+	}
+	return normalizeTraceID(traceIDStr)
+}
+
+func normalizeTraceID(raw string) (uuid.UUID, bool) {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return uuid.UUID{}, false
+	}
+	id, err := uuid.Parse(v)
+	if err != nil {
+		return uuid.UUID{}, false
+	}
+	return id, true
+}
+
+// extractTraceparentID returns the raw 32-char hex trace_id from a W3C
+// traceparent header, or "" if the header is absent or malformed.
+func extractTraceparentID(header string) string {
+	parts := strings.Split(strings.TrimSpace(header), "-")
 	if len(parts) != 4 {
 		return ""
 	}
 	if len(parts[0]) != 2 || len(parts[1]) != 32 || len(parts[2]) != 16 || len(parts[3]) != 2 {
 		return ""
 	}
-	tid := parts[1]
-	if tid == "00000000000000000000000000000000" {
+	if parts[1] == "00000000000000000000000000000000" {
 		return ""
 	}
-	return tid
+	return parts[1]
+}
+
+// traceparent format: version-traceid-parentid-flags (W3C); rejects malformed
+// and all-zero trace_id per spec.
+func traceIDFromTraceparent(header string) (uuid.UUID, bool) {
+	parts := strings.Split(strings.TrimSpace(header), "-")
+	if len(parts) != 4 {
+		return uuid.UUID{}, false
+	}
+	if len(parts[0]) != 2 || len(parts[1]) != 32 || len(parts[2]) != 16 || len(parts[3]) != 2 {
+		return uuid.UUID{}, false
+	}
+	if parts[1] == "00000000000000000000000000000000" {
+		return uuid.UUID{}, false
+	}
+	return normalizeTraceID(parts[1])
 }
 
 // RequireVaultKey is a middleware that checks for the X-Internal-API-Key

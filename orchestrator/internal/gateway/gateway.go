@@ -56,12 +56,14 @@ const (
 	TopicPlanDecision            = "aegis.orchestrator.plan.decision"
 	TopicAgentStateWrite         = "aegis.orchestrator.state.write"
 	TopicAgentStateReadRequest   = "aegis.orchestrator.state.read.request"
+	TopicVaultExecuteRequest     = "aegis.orchestrator.vault.execute.request"
 	TopicAgentTasksInbound       = "aegis.agents.task.inbound"
 	TopicCapabilityQuery         = "aegis.agents.capability.query"
 	TopicAgentTerminate          = "aegis.agents.lifecycle.terminate"
 	TopicTaskCancel              = "aegis.agents.tasks.cancel"
 	TopicAgentStateWriteAck      = "aegis.agents.state.write.ack"
 	TopicAgentStateReadResponse  = "aegis.agents.state.read.response"
+	TopicVaultExecuteResult      = "aegis.agents.vault.execute.result"
 	TopicOrchestratorErrors      = "aegis.orchestrator.errors"
 	TopicAuditEvents             = "aegis.orchestrator.audit.events"
 	TopicMetrics                 = "aegis.orchestrator.metrics"
@@ -95,11 +97,16 @@ type TaskResultHandler func(ctx context.Context, result types.TaskResult) error
 // CredentialRequestHandler is called when an agent publishes a credential.request
 // that requires user input (operation: "user_input"). Registered by main.go to
 // forward the request to the IO Component.
-type CredentialRequestHandler func(agentID, taskID, requestID, keyName, label string) error
+type CredentialRequestHandler func(agentID, taskID, requestID, keyName, label, traceID string) error
 
 // PlanDecisionHandler is called when User I/O forwards the user's approve/reject
 // decision for a proposed execution plan. Registered by main.go → Dispatcher.
 type PlanDecisionHandler func(ctx context.Context, decision types.PlanDecision) error
+
+// VaultExecuteHandler is called when an agent publishes a vault.execute.request.
+// The handler resolves user_id from task state and forwards to the vault engine.
+// Returns the VaultExecuteResult to publish back to the agent.
+type VaultExecuteHandler func(ctx context.Context, req types.VaultExecuteRequest) (types.VaultExecuteResult, error)
 
 // ── Gateway ───────────────────────────────────────────────────────────────────
 
@@ -113,6 +120,7 @@ type Gateway struct {
 	taskResultHandler        TaskResultHandler
 	credentialRequestHandler CredentialRequestHandler
 	planDecisionHandler      PlanDecisionHandler
+	vaultExecuteHandler      VaultExecuteHandler
 
 	// pendingCapabilityQueries tracks in-flight capability query requests.
 	// key: query_id, value: chan *types.CapabilityResponse
@@ -168,6 +176,11 @@ func (g *Gateway) RegisterPlanDecisionHandler(h PlanDecisionHandler) {
 	g.planDecisionHandler = h
 }
 
+// RegisterVaultExecuteHandler registers the callback for vault.execute.request messages.
+func (g *Gateway) RegisterVaultExecuteHandler(h VaultExecuteHandler) {
+	g.vaultExecuteHandler = h
+}
+
 // Start subscribes to all inbound NATS topics and begins message processing.
 // Must be called after all handlers are registered.
 func (g *Gateway) Start() error {
@@ -201,6 +214,9 @@ func (g *Gateway) Start() error {
 	if err := g.nats.Subscribe(TopicAgentStateReadRequest, g.handleRawStateReadRequest); err != nil {
 		return fmt.Errorf("subscribe %s: %w", TopicAgentStateReadRequest, err)
 	}
+	if err := g.nats.Subscribe(TopicVaultExecuteRequest, g.handleRawVaultExecuteRequest); err != nil {
+		return fmt.Errorf("subscribe %s: %w", TopicVaultExecuteRequest, err)
+	}
 	observability.LogFromContext(observability.WithModule(context.Background(), "comms_gateway")).
 		Info("gateway started — subscribed to inbound topics", "node_id", g.nodeID)
 	return nil
@@ -233,9 +249,13 @@ func (g *Gateway) handleRawInboundTask(subject string, data []byte) error {
 		_ = g.publishDeadLetter(data, fmt.Sprintf("payload deserialize error: %v", err))
 		return fmt.Errorf("deserialize user_task: %w", err)
 	}
+	if task.TraceID == "" && strings.TrimSpace(envelope.TraceID) != "" {
+		task.TraceID = strings.TrimSpace(envelope.TraceID)
+	}
 
 	ctx := extractOrCreateCtx(envelope, "comms_gateway")
 	ctx = observability.WithTaskID(ctx, task.TaskID)
+	ctx = observability.WithConversationID(ctx, task.ConversationID)
 
 	ctx, span := observability.StartSpan(ctx, "task_received")
 	defer span.End()
@@ -352,12 +372,11 @@ func (g *Gateway) handleRawTaskResult(subject string, data []byte) error {
 		return err
 	}
 
-	ctx := extractOrCreateCtx(envelope, "comms_gateway")
-
 	var payload struct {
 		TaskID      string          `json:"task_id"`
 		AgentID     string          `json:"agent_id"`
 		Success     bool            `json:"success"`
+		TraceID     string          `json:"trace_id"`
 		Result      json.RawMessage `json:"result"`
 		Output      json.RawMessage `json:"output"`
 		ErrorCode   string          `json:"error_code"`
@@ -367,6 +386,9 @@ func (g *Gateway) handleRawTaskResult(subject string, data []byte) error {
 	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
 		return fmt.Errorf("deserialize task.result: %w", err)
 	}
+
+	// Agents-component omits envelope.trace_id; trace_id lives on the payload only.
+	ctx := inboundObservabilityCtx(envelope, "comms_gateway", payload.TraceID)
 
 	if payload.TaskID != "" {
 		ctx = observability.WithTaskID(ctx, payload.TaskID)
@@ -401,17 +423,18 @@ func (g *Gateway) handleRawTaskFailed(subject string, data []byte) error {
 		return err
 	}
 
-	ctx := extractOrCreateCtx(envelope, "comms_gateway")
-
 	var payload struct {
 		TaskID       string `json:"task_id"`
 		AgentID      string `json:"agent_id"`
 		ErrorCode    string `json:"error_code"`
 		ErrorMessage string `json:"error_message"`
+		TraceID      string `json:"trace_id"`
 	}
 	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
 		return fmt.Errorf("deserialize task.failed: %w", err)
 	}
+
+	ctx := inboundObservabilityCtx(envelope, "comms_gateway", payload.TraceID)
 	if payload.TaskID != "" {
 		ctx = observability.WithTaskID(ctx, payload.TaskID)
 	}
@@ -470,6 +493,7 @@ func (g *Gateway) handleRawCredentialRequest(subject string, data []byte) error 
 	}
 	return g.credentialRequestHandler(
 		payload.AgentID, payload.TaskID, payload.RequestID, payload.KeyName, payload.Label,
+		envelope.TraceID,
 	)
 }
 
@@ -763,6 +787,44 @@ func (g *Gateway) PublishAuditEvent(ctx context.Context, event types.AuditEvent)
 	return g.publishEnvelope(ctx, TopicAuditEvents, "audit_event", event.OrchestratorTaskRef, event)
 }
 
+// ── Vault Execute ─────────────────────────────────────────────────────────────
+
+// handleRawVaultExecuteRequest handles aegis.orchestrator.vault.execute.request.
+func (g *Gateway) handleRawVaultExecuteRequest(subject string, data []byte) error {
+	envelope, err := validateEnvelope(data)
+	if err != nil {
+		observability.LogFromContext(context.Background()).
+			Warn("rejected malformed vault.execute.request envelope", "error", err)
+		return nil
+	}
+
+	ctx := extractOrCreateCtx(envelope, "comms_gateway")
+
+	var req types.VaultExecuteRequest
+	if err := json.Unmarshal(envelope.Payload, &req); err != nil {
+		observability.LogFromContext(ctx).Warn("failed to deserialize vault.execute.request", "error", err)
+		return nil
+	}
+
+	if g.vaultExecuteHandler == nil {
+		observability.LogFromContext(ctx).Warn("vault.execute.request received but no handler registered")
+		return nil
+	}
+
+	result, err := g.vaultExecuteHandler(ctx, req)
+	if err != nil {
+		result = types.VaultExecuteResult{
+			RequestID:    req.RequestID,
+			AgentID:      req.AgentID,
+			Status:       types.VaultExecStatusExecutionError,
+			ErrorCode:    "EXECUTION_ERROR",
+			ErrorMessage: err.Error(),
+		}
+	}
+
+	return g.publishEnvelope(ctx, TopicVaultExecuteResult, "vault.execute.result", req.RequestID, result)
+}
+
 // ── Envelope Helpers ──────────────────────────────────────────────────────────
 
 // publishEnvelope wraps any payload in a signed MessageEnvelope and publishes it (§13.5).
@@ -838,9 +900,18 @@ func validateEnvelope(data []byte) (*types.MessageEnvelope, error) {
 // extractOrCreateCtx builds a context from the envelope's trace_id (or creates a new one)
 // and attaches the given module name. Used by inbound NATS message handlers.
 func extractOrCreateCtx(envelope *types.MessageEnvelope, module string) context.Context {
-	traceID := envelope.TraceID
+	return inboundObservabilityCtx(envelope, module)
+}
+
+// inboundObservabilityCtx prefers envelope.TraceID, then optional fallbacks (e.g. payload
+// trace_id when the agents-component envelope has no top-level trace_id field).
+func inboundObservabilityCtx(envelope *types.MessageEnvelope, module string, payloadTraceFallbacks ...string) context.Context {
+	traceID := strings.TrimSpace(envelope.TraceID)
 	if traceID == "" {
-		traceID = newUUID()
+		traceID = firstNonEmpty(payloadTraceFallbacks...)
+	}
+	if traceID == "" {
+		traceID = observability.NewRandomTraceID()
 	}
 	ctx := context.Background()
 	ctx = observability.WithTraceID(ctx, traceID)

@@ -3,7 +3,7 @@
 package main
 
 import (
-	"log"
+	"log/slog"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -17,6 +17,9 @@ const (
 )
 
 func main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).
+		With("component", "databus", "module", "orchestrator-stub")
+
 	memoryURL := os.Getenv("AEGIS_MEMORY_URL")
 	if memoryURL == "" {
 		memoryURL = defaultMemoryURL
@@ -54,8 +57,9 @@ func main() {
 	if addr == "" {
 		addr = defaultAddr
 	}
-	log.Printf("orchestrator-stub listening on %s, forwarding to %s", addr, memoryURL)
+	logger.Info("orchestrator stub listening", "addr", addr, "memory_url", memoryURL)
 	if err := http.ListenAndServe(addr, mux); err != nil {
-		log.Fatal(err)
+		logger.Error("orchestrator stub failed", "error", err, "exit_code", 1)
+		os.Exit(1)
 	}
 }
