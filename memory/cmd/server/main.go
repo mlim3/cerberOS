@@ -193,6 +193,7 @@ func main() {
 	mux.HandleFunc("GET /api/v1/tasks/{taskId}", chatHandler.HandleGetTask)
 	mux.HandleFunc("POST /api/v1/chat/{conversationId}/messages", chatHandler.HandleCreateMessage)
 	mux.HandleFunc("GET /api/v1/chat/{conversationId}/messages", chatHandler.HandleListMessages)
+	mux.HandleFunc("GET /api/v1/chat/{conversationId}/history", chatHandler.HandleGetSessionHistory)
 
 	// Orchestrator persistence endpoints (Internal Only)
 	orchestratorMux := http.NewServeMux()
