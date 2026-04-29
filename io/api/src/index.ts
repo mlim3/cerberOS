@@ -16,6 +16,8 @@ import {
   getTask,
   getConversationLogs,
   listConversations,
+  deleteConversation,
+  renameConversation,
   type MemoryLogEntry,
 } from '@cerberos/io-core/memory-client'
 import { transcribe, warmupTranscription } from './transcription/runner'
@@ -589,8 +591,9 @@ app.post('/api/orchestrator/plan-decision', async (c) => {
 // Send a message (returns streaming response)
 app.post('/api/chat', async (c) => {
   const body = (await c.req.json()) as SendMessageRequest;
-  const { taskId, userId, content, conversationHistory, conversationId } = body as SendMessageRequest & { userId?: string };
+  const { taskId, userId, content, conversationHistory, conversationId, required_skill_domains } = body as SendMessageRequest & { userId?: string; required_skill_domains?: string[] };
   const effectiveUserId = userId || requestUserId(c)
+  const traceId = c.get('traceId') as string | undefined;
   if (taskId) c.set('taskId', taskId)
   if (conversationId) c.set('conversationId', conversationId)
   logFromContext(c, 'info', 'http', 'POST /api/chat', {
@@ -609,6 +612,7 @@ app.post('/api/chat', async (c) => {
     role: 'user',
     content,
     taskId,
+    traceId,
   }).catch(() => { /* best-effort */ })
 
   const workingStatus: StatusUpdate = {
@@ -646,8 +650,9 @@ app.post('/api/chat', async (c) => {
         content,
         payload: { raw_input: rawInput },
         callback_topic: callbackTopicForTask(taskId),
-        trace_id: c.get('traceId'),
+        trace_id: traceId,
         conversation_id: conversationId,
+        required_skill_domains,
       })
       awaitingOrchestratorChat = true
       logFromContext(c, 'info', 'nats', 'published user_task', {
@@ -672,7 +677,7 @@ app.post('/api/chat', async (c) => {
         controller.enqueue(encoder.encode(`data: ${JSON.stringify({ chunk: fallbackMsg })}\n\n`));
         controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true })}\n\n`));
         controller.close();
-        appendLogEntry({ conversationId, userId: effectiveUserId, role: 'assistant', content: fallbackMsg, taskId })
+        appendLogEntry({ conversationId, userId: effectiveUserId, role: 'assistant', content: fallbackMsg, taskId, traceId })
         return;
       }
 
@@ -683,7 +688,7 @@ app.post('/api/chat', async (c) => {
         controller.enqueue(encoder.encode(`data: ${JSON.stringify({ chunk: errMsg })}\n\n`))
         controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true })}\n\n`))
         controller.close()
-        appendLogEntry({ conversationId, userId: effectiveUserId, role: 'assistant', content: errMsg, taskId })
+        appendLogEntry({ conversationId, userId: effectiveUserId, role: 'assistant', content: errMsg, taskId, traceId })
         return
       }
 
@@ -734,7 +739,7 @@ app.post('/api/chat', async (c) => {
           }
           safeEnqueue(`data: ${JSON.stringify({ done: true })}\n\n`)
           safeClose()
-          appendLogEntry({ conversationId, userId: effectiveUserId, role: 'assistant', content: msg, taskId })
+          appendLogEntry({ conversationId, userId: effectiveUserId, role: 'assistant', content: msg, taskId, traceId })
         }, TIMEOUT_MS)
 
         cleanupChatStream = () => {
@@ -756,7 +761,7 @@ app.post('/api/chat', async (c) => {
             if (streamDone) return
             safeEnqueue(`data: ${JSON.stringify({ done: true })}\n\n`)
             safeClose()
-            appendLogEntry({ conversationId, userId: effectiveUserId, role: 'assistant', content: accumulated, taskId })
+            appendLogEntry({ conversationId, userId: effectiveUserId, role: 'assistant', content: accumulated, taskId, traceId })
             const doneStatus: StatusUpdate = {
               taskId,
               status: 'awaiting_feedback',
@@ -774,7 +779,7 @@ app.post('/api/chat', async (c) => {
             safeEnqueue(`data: ${JSON.stringify({ chunk: errContent })}\n\n`)
             safeEnqueue(`data: ${JSON.stringify({ done: true })}\n\n`)
             safeClose()
-            appendLogEntry({ conversationId, userId: effectiveUserId, role: 'assistant', content: errContent, taskId })
+            appendLogEntry({ conversationId, userId: effectiveUserId, role: 'assistant', content: errContent, taskId, traceId })
           },
         })
         // Flush the local ack immediately so the user sees feedback before the orchestrator round-trip.
@@ -804,7 +809,7 @@ app.post('/api/chat', async (c) => {
         }
         controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true })}\n\n`));
         controller.close();
-        await appendLogEntry({ conversationId, userId: effectiveUserId, role: 'assistant', content: accumulated, taskId })
+        await appendLogEntry({ conversationId, userId: effectiveUserId, role: 'assistant', content: accumulated, taskId, traceId })
         const doneStatus: StatusUpdate = {
           taskId, status: 'awaiting_feedback', lastUpdate: 'Response complete',
           expectedNextInputMinutes: 0, timestamp: Date.now(),
@@ -834,15 +839,16 @@ app.post('/api/chat', async (c) => {
 // Get logs for a task
 app.get('/api/logs/:taskId', async (c) => {
   const taskId = c.req.param('taskId');
+  const traceId = c.get('traceId') as string | undefined;
   const userId = requestUserId(c)
   c.set('taskId', taskId)
-  logFromContext(c, 'info', 'http', 'GET /api/logs/:taskId')
+  logFromContext(c, 'info', 'http', 'GET /api/logs/:taskId', { task_id: taskId })
   const task = await getTask(taskId, userId)
   if (!task) {
     return c.json({ logs: [] })
   }
   c.set('conversationId', task.conversationId)
-  const memoryLogs = await getConversationLogs(task.conversationId, { userId })
+  const memoryLogs = await getConversationLogs(task.conversationId, { userId, traceId })
   const logs = memoryLogs.map(memoryToLogEntry)
   return c.json({ logs });
 });
@@ -852,6 +858,25 @@ app.get('/api/conversations', async (c) => {
   logFromContext(c, 'info', 'http', 'GET /api/conversations', { user_id: userId })
   const conversations = await listConversations(userId)
   return c.json({ conversations })
+})
+
+app.delete('/api/conversations/:conversationId', async (c) => {
+  const conversationId = c.req.param('conversationId')
+  const userId = requestUserId(c)
+  logFromContext(c, 'info', 'http', 'DELETE /api/conversations/:conversationId', { user_id: userId })
+  await deleteConversation(conversationId, userId)
+  return c.json({ ok: true })
+})
+
+app.patch('/api/conversations/:conversationId', async (c) => {
+  const conversationId = c.req.param('conversationId')
+  const userId = requestUserId(c)
+  const body = await c.req.json() as { title?: string }
+  logFromContext(c, 'info', 'http', 'PATCH /api/conversations/:conversationId', { user_id: userId })
+  if (body.title) {
+    await renameConversation(conversationId, userId, body.title)
+  }
+  return c.json({ ok: true })
 })
 
 app.get('/api/conversations/:conversationId/logs', async (c) => {

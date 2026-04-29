@@ -3,8 +3,10 @@ package telemetry
 
 import (
 	"context"
+	"crypto/rand"
 	"net/http"
 	"os"
+	"strings"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
@@ -46,6 +48,33 @@ func Init(ctx context.Context) (shutdown func(context.Context) error, err error)
 		propagation.Baggage{},
 	))
 	return tp.Shutdown, nil
+}
+
+// ContextFromTraceID returns a context whose OTel span context is rooted at the
+// given trace ID, so any spans started from it appear as children in the same
+// trace. traceID must be a 32-char lowercase hex string or a UUID (dashes
+// stripped). If the ID is invalid or empty the original ctx is returned
+// unchanged — callers do not need to guard against bad input.
+func ContextFromTraceID(ctx context.Context, traceID string) context.Context {
+	hex := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(traceID), "-", ""))
+	if len(hex) != 32 {
+		return ctx
+	}
+	tid, err := trace.TraceIDFromHex(hex)
+	if err != nil {
+		return ctx
+	}
+	var sid trace.SpanID
+	if _, err := rand.Read(sid[:]); err != nil {
+		return ctx
+	}
+	sc := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    tid,
+		SpanID:     sid,
+		TraceFlags: trace.FlagsSampled,
+		Remote:     true,
+	})
+	return trace.ContextWithRemoteSpanContext(ctx, sc)
 }
 
 // HTTPRoundTripper wraps the transport with otelhttp when telemetry is enabled.

@@ -82,7 +82,7 @@
 }
 
 .log-entry:hover {
-  background-color: rgba(255, 255, 255, 0.02);
+  background-color: var(--surface-hover);
 }
 
 .log-entry.heartbeat { color: var(--text-muted); }

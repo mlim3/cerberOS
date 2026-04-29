@@ -72,14 +72,16 @@ func (r *OutboxRelay) Start(ctx context.Context) {
 				return
 			}
 
-			_, span := telemetry.Tracer().Start(ctx, "outbox.relay.publish",
+			// Continue the upstream trace carried in the CloudEvents envelope.
+			spanCtx := ctx
+			if _, _, tid := envelope.ParseMetadata(entry.Payload); tid != "" {
+				spanCtx = telemetry.ContextFromTraceID(ctx, tid)
+			}
+			_, span := telemetry.Tracer().Start(spanCtx, "outbox.relay.publish",
 				trace.WithAttributes(
 					attribute.String("messaging.destination", entry.Subject),
 					attribute.String("outbox.id", entry.ID),
 				))
-			if _, _, tid := envelope.ParseMetadata(entry.Payload); tid != "" {
-				span.SetAttributes(attribute.String("ce.traceid", tid))
-			}
 			ack, err := bus.PublishValidated(r.JS, entry.Subject, entry.Payload)
 			if err != nil {
 				span.RecordError(err)

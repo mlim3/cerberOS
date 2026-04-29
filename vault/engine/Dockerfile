@@ -3,10 +3,10 @@ FROM golang:1.25.5-alpine AS build
 
 WORKDIR /app
 
-COPY go.mod ./
+COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod \
   --mount=type=cache,target=/root/.cache/go-build \
-  go mod download
+  GOPROXY=https://proxy.golang.org,direct go mod download
 
 RUN adduser -D -u 1001 altuser
 

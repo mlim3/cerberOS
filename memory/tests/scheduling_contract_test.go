@@ -10,7 +10,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func TestScheduledJobsContract_FutureBlackBox(t *testing.T) {
+func TestScheduledJobsContract_BlackBox(t *testing.T) {
 	baseURL := strings.TrimRight(blackboxBaseURL(), "/")
 	jobName := "fact-decay-scan"
 	nextRunAt := time.Now().Add(-1 * time.Minute).UTC().Format(time.RFC3339)

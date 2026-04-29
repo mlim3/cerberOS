@@ -8,8 +8,8 @@ replicaCount: 1
 service:
   port: 9091
 
-natsUrl: "nats://nats-1:4222"
-natsHttpUrl: "http://nats-1:8222"
+natsUrl: "nats://nats:4222"
+natsHttpUrl: "http://nats:8222"
 natsReplicas: "1"
 orchestratorUrl: "http://orchestrator:8080"
 memoryUrl: "http://memory-api:8081/v1/memory"

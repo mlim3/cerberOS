@@ -139,6 +139,8 @@ type MemoryWrite struct {
 	Tags       map[string]string `json:"tags"`
 	RequestID  string            `json:"request_id,omitempty"`
 	RequireAck bool              `json:"require_ack,omitempty"`
+	// WireTraceID is copied to the NATS message envelope only (not serialized in state.write JSON).
+	WireTraceID string `json:"-"`
 }
 
 // StateWriteAck is the confirmation sent by the Orchestrator on

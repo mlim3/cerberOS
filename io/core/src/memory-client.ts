@@ -92,6 +92,8 @@ export interface AppendLogParams {
   content: string
   taskId?: string
   idempotencyKey?: string
+  /** W3C trace_id (32 hex) — same as HTTP / NATS user_task; keeps Memory rows aligned with IO + orchestrator */
+  traceId?: string
 }
 
 const demoLogs: DemoLogEntry[] = []
@@ -274,9 +276,16 @@ export async function appendLogEntry(params: AppendLogParams): Promise<MemoryLog
   if (params.idempotencyKey) body['idempotencyKey'] = params.idempotencyKey
 
   try {
+    const headers: Record<string, string> = {
+      ...authHeaders() as Record<string, string>,
+    }
+    if (params.traceId) {
+      headers['X-Trace-ID'] = params.traceId
+    }
+
     const res = await fetch(`${MEMORY_API_BASE}/api/v1/chat/${params.conversationId}/messages`, {
       method: 'POST',
-      headers: authHeaders(),
+      headers,
       body: JSON.stringify(body),
     })
 
@@ -300,7 +309,7 @@ export async function appendLogEntry(params: AppendLogParams): Promise<MemoryLog
 
 export async function getConversationLogs(
   conversationId: string,
-  options?: { userId?: string; taskId?: string; limit?: number }
+  options?: { userId?: string; taskId?: string; limit?: number; traceId?: string }
 ): Promise<MemoryLogEntry[]> {
   if (DEMO_MODE) {
     let entries = demoLogs.filter(m => m.conversationId === conversationId)
@@ -321,10 +330,15 @@ export async function getConversationLogs(
     if (options?.userId) url.searchParams.set('userId', options.userId)
     if (options?.limit) url.searchParams.set('limit', String(options.limit))
 
+    const headers: Record<string, string> = {
+      'X-Internal-API-Key': MEMORY_API_KEY,
+    }
+    if (options?.traceId) {
+      headers['X-Trace-ID'] = options.traceId
+    }
+
     const res = await fetch(url.toString(), {
-      headers: {
-        'X-Internal-API-Key': MEMORY_API_KEY,
-      },
+      headers,
     })
 
     if (!res.ok) {
@@ -342,6 +356,45 @@ export async function getConversationLogs(
   } catch (err) {
     memoryClientLog('error', 'fetch logs network error', { task_id: options?.taskId, error: String(err) })
     return []
+  }
+}
+
+export async function deleteConversation(conversationId: string, userId: string): Promise<boolean> {
+  if (DEMO_MODE) {
+    demoConversations.delete(conversationId)
+    return true
+  }
+
+  try {
+    const url = new URL(`${MEMORY_API_BASE}/api/v1/conversations/${conversationId}`)
+    url.searchParams.set('userId', userId)
+    const res = await fetch(url.toString(), {
+      method: 'DELETE',
+      headers: { 'X-Internal-API-Key': MEMORY_API_KEY },
+    })
+    return res.ok
+  } catch (err) {
+    memoryClientLog('error', 'delete conversation network error', { conversation_id: conversationId, error: String(err) })
+    return false
+  }
+}
+
+export async function renameConversation(conversationId: string, userId: string, title: string): Promise<boolean> {
+  if (DEMO_MODE) {
+    touchDemoConversation(conversationId, { title })
+    return true
+  }
+
+  try {
+    const res = await fetch(`${MEMORY_API_BASE}/api/v1/conversations/${conversationId}`, {
+      method: 'PATCH',
+      headers: authHeaders(),
+      body: JSON.stringify({ userId, title }),
+    })
+    return res.ok
+  } catch (err) {
+    memoryClientLog('error', 'rename conversation network error', { conversation_id: conversationId, error: String(err) })
+    return false
   }
 }
 

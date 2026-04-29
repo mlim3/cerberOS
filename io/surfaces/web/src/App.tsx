@@ -383,6 +383,7 @@ function App() {
   }, [DEMO_MODE, selectedTaskId])
 
   // Orchestrator → IO push stream (SSE) for status + credential_request
+  const activeOrchestratorTaskId = tasks.find(t => t.id === selectedTaskId)?.currentTaskId
   useEffect(() => {
     if (!orchestratorSseEnabled()) return
 
@@ -428,9 +429,8 @@ function App() {
       }
     }
 
-    const activeTaskId = tasks.find(t => t.id === selectedTaskId)?.currentTaskId
-    if (!activeTaskId) return
-    const unsub = subscribeOrchestratorTaskStream(activeTaskId, {
+    if (!activeOrchestratorTaskId) return
+    const unsub = subscribeOrchestratorTaskStream(activeOrchestratorTaskId, {
       onOpen: () => {
         if (!cancelled) setUseMockHeartbeat(false)
       },
@@ -444,7 +444,7 @@ function App() {
       cancelled = true
       unsub()
     }
-  }, [selectedTaskId])
+  }, [selectedTaskId, activeOrchestratorTaskId])
 
   // Offline / API-down: still show credential demo for task 13 (matches IO API demo push)
   useEffect(() => {
@@ -666,6 +666,30 @@ function App() {
       }
     }
   }, [uiSettings.showActivityLog, tasks, addLogEntry, useMockHeartbeat])
+
+  const handleDeleteTask = useCallback((id: string) => {
+    setTasks(prev => prev.filter(t => t.id !== id))
+    if (selectedTaskId === id) {
+      setSelectedTaskId(null)
+    }
+    if (!DEMO_MODE) {
+      fetch(buildApiUrl(`/api/conversations/${encodeURIComponent(id)}`), {
+        method: 'DELETE',
+        headers: { 'X-User-Id': UI_USER_ID },
+      }).catch(() => {/* best-effort */})
+    }
+  }, [selectedTaskId, DEMO_MODE])
+
+  const handleRenameTask = useCallback((id: string, title: string) => {
+    setTasks(prev => prev.map(t => t.id === id ? { ...t, title } : t))
+    if (!DEMO_MODE) {
+      fetch(buildApiUrl(`/api/conversations/${encodeURIComponent(id)}`), {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', 'X-User-Id': UI_USER_ID },
+        body: JSON.stringify({ title }),
+      }).catch(() => {/* best-effort */})
+    }
+  }, [DEMO_MODE])
 
   const handleCreateTask = async () => {
     let newConversationId: string
@@ -989,6 +1013,8 @@ function App() {
         settings={uiSettings}
         taskHeartbeats={taskHeartbeats}
         onCreateTask={handleCreateTask}
+        onDeleteTask={handleDeleteTask}
+        onRenameTask={handleRenameTask}
       />
       <main className="main-content">
         <header className="header">

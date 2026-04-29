@@ -1,7 +1,7 @@
 .settings-panel-overlay {
   position: fixed;
   inset: 0;
-  background-color: rgba(0, 0, 0, 0.5);
+  background: var(--overlay-scrim);
   display: flex;
   justify-content: flex-end;
   z-index: 1000;
@@ -131,7 +131,7 @@
   position: relative;
   width: 36px;
   height: 20px;
-  background-color: rgba(255, 255, 255, 0.06);
+  background-color: var(--toggle-track-off);
   border-radius: 10px;
   flex-shrink: 0;
   transition: background-color 0.2s ease;
@@ -146,11 +146,13 @@
   height: 14px;
   background-color: var(--text-muted);
   border-radius: 50%;
-  transition: all 0.2s ease;
+  transition:
+    left 0.2s ease,
+    background-color 0.2s ease;
 }
 
 .settings-toggle input[type="checkbox"]:checked + .toggle-switch {
-  background-color: rgba(100, 149, 237, 0.3);
+  background-color: var(--accent-toggle-on);
 }
 
 .settings-toggle input[type="checkbox"]:checked + .toggle-switch::after {
@@ -184,7 +186,11 @@
 
 .settings-select:focus {
   outline: none;
-  border-color: rgba(100, 149, 237, 0.3);
+}
+
+.settings-select:focus-visible {
+  border-color: var(--accent-border);
+  box-shadow: var(--focus-ring);
 }
 
 .settings-footer {

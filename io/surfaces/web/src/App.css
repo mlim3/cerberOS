@@ -123,14 +123,14 @@
   background-color: var(--bg-card);
   border-left: var(--border);
   border-bottom: var(--border);
-  padding: 20px;
-  box-shadow: -4px 4px 12px rgba(0, 0, 0, 0.3);
+  padding: var(--sp-5);
+  box-shadow: var(--shadow-elevated);
   z-index: 100;
 }
 
 .settings-panel h2 {
   font-size: 14px;
-  margin-bottom: 20px;
+  margin-bottom: var(--sp-5);
   color: var(--text-primary);
 }
 

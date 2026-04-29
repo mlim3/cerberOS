@@ -27,6 +27,7 @@ import (
 
 	"github.com/mlim3/cerberOS/orchestrator/internal/api"
 	"github.com/mlim3/cerberOS/orchestrator/internal/config"
+	"github.com/mlim3/cerberOS/orchestrator/internal/cronwake"
 	"github.com/mlim3/cerberOS/orchestrator/internal/databusproxy"
 	"github.com/mlim3/cerberOS/orchestrator/internal/dispatcher"
 	"github.com/mlim3/cerberOS/orchestrator/internal/executor"
@@ -44,6 +45,7 @@ import (
 	"github.com/mlim3/cerberOS/orchestrator/internal/policy"
 	"github.com/mlim3/cerberOS/orchestrator/internal/recovery"
 	"github.com/mlim3/cerberOS/orchestrator/internal/types"
+	"github.com/mlim3/cerberOS/orchestrator/internal/vaultclient"
 )
 
 func main() {
@@ -123,7 +125,7 @@ func main() {
 
 type runtime struct {
 	memory     *memoryiface.Interface
-	vault      *mocks.VaultMock
+	vault      interfaces.VaultClient
 	nats       interfaces.NATSClient
 	mockNATS   *mocks.NATSMock
 	mockMemory *mocks.MemoryMock
@@ -145,7 +147,14 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 		return nil, err
 	}
 
-	vaultClient := &mocks.VaultMock{}
+	var vaultClient interfaces.VaultClient
+	if cfg.VaultEngineURL != "" {
+		observability.LogFromContext(context.Background()).Info("using real vault engine", "url", cfg.VaultEngineURL)
+		vaultClient = vaultclient.New(cfg.VaultEngineURL)
+	} else {
+		observability.LogFromContext(context.Background()).Info("vault engine URL not set — using mock vault")
+		vaultClient = &mocks.VaultMock{}
+	}
 	policyEnforcer := policy.New(cfg, vaultClient, memClient)
 
 	natsClient, mockNATS, err := buildNATSClient(cfg)
@@ -205,15 +214,16 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 	gw.RegisterAgentStatusHandler(taskMonitor.HandleAgentStatusUpdate)
 	gw.RegisterTaskResultHandler(taskDispatcher.HandleTaskResult)
 	gw.RegisterPlanDecisionHandler(taskDispatcher.HandlePlanDecision)
+	gw.RegisterVaultExecuteHandler(taskDispatcher.HandleVaultExecuteRequest)
 
 	// Forward agent user_input credential requests to the IO Component.
-	gw.RegisterCredentialRequestHandler(func(agentID, taskID, requestID, keyName, label string) error {
+	gw.RegisterCredentialRequestHandler(func(_, taskID, requestID, keyName, label, traceID string) error {
 		return ioClient.PushCredentialRequest(ioclient.CredentialRequestPayload{
 			TaskID:    taskID,
 			RequestID: requestID,
 			KeyName:   keyName,
 			Label:     label,
-		})
+		}, traceID)
 	})
 
 	healthHandler := health.New(vaultClient, memClient, natsClient, taskMonitor, cfg.NodeID)
@@ -229,6 +239,11 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 	mux.Handle("GET /heartbeats", &heartbeat.HTTPHandler{Sweeper: hbSweeper})
 	mux.HandleFunc("GET /debug/trace/{trace_id}", debugHandler.GetTrace)
 	mux.Handle("GET /metrics", metricsHandler)
+
+	if strings.TrimSpace(cfg.CronWakeSecret) != "" {
+		mux.Handle("POST /v1/cron/wake", cronwake.NewHandler(cfg, taskDispatcher))
+		observability.LogFromContext(context.Background()).Info("cron wake endpoint enabled", "path", "/v1/cron/wake")
+	}
 
 	// Databus proxy: forward /v1/databus/* to Memory API if endpoint is HTTP-based.
 	if isHTTPMemoryEndpoint(cfg.MemoryEndpoint) {
@@ -293,6 +308,39 @@ func applyEnvOverrides(cfg *config.OrchestratorConfig) {
 		if parsed, err := strconv.Atoi(v); err == nil {
 			cfg.DecompositionTimeoutSeconds = parsed
 		}
+	}
+	if v := os.Getenv("CRON_WAKE_SECRET"); v != "" {
+		cfg.CronWakeSecret = v
+	}
+	if v := os.Getenv("CRON_WAKE_SYSTEM_PROMPT"); v != "" {
+		cfg.CronWakeSystemPrompt = v
+	}
+	if v := os.Getenv("CRON_WAKE_RAW_INPUT"); v != "" {
+		cfg.CronWakeRawInput = v
+	}
+	if v := os.Getenv("CRON_WAKE_USER_ID"); v != "" {
+		cfg.CronWakeUserID = v
+	}
+	if v := os.Getenv("CRON_WAKE_CALLBACK_TOPIC"); v != "" {
+		cfg.CronWakeCallbackTopic = v
+	}
+	if v := os.Getenv("CRON_WAKE_TIMEOUT_SECONDS"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			cfg.CronWakeTimeoutSeconds = parsed
+		}
+	}
+	// Observability (esp. when falling back to demoConfig — full Load() already sets these).
+	if v := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")); v != "" {
+		cfg.OTELEndpoint = observability.NormalizeOTLPGRPCEndpoint(v)
+	}
+	if v := os.Getenv("LOG_LEVEL"); v != "" {
+		cfg.LogLevel = v
+	}
+	if v := os.Getenv("LOG_FORMAT"); v != "" {
+		cfg.LogFormat = v
+	}
+	if v := os.Getenv("LOKI_URL"); v != "" {
+		cfg.LokiURL = v
 	}
 }
 
@@ -377,5 +425,7 @@ func demoConfig() *config.OrchestratorConfig {
 		QueueHighWaterMark:          500,
 		MemoryWriteBufferSeconds:    30,
 		NodeID:                      "demo-node",
+		LogLevel:                    "info",
+		LogFormat:                   "json",
 	}
 }

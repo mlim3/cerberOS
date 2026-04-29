@@ -1,6 +1,10 @@
 package bus
 
 import (
+	"log/slog"
+	"strings"
+	"time"
+
 	"aegis-databus/pkg/security"
 	"aegis-databus/pkg/validation"
 	"github.com/nats-io/nats.go"
@@ -26,7 +30,9 @@ func subscribeWithACLImpl(js nats.JetStreamContext, component, subject string, c
 	if err := security.CheckSubscribePlainForbidden(subject); err != nil {
 		return nil, err
 	}
-	return js.Subscribe(subject, cb, opts...)
+	return retrySubscribe(func() (*nats.Subscription, error) {
+		return js.Subscribe(subject, cb, opts...)
+	}, subject)
 }
 
 // QueueSubscribeWithACL is QueueSubscribe with ACL check (SR-DB-006). Uses validation.Strict.
@@ -38,7 +44,9 @@ func QueueSubscribeWithACL(js nats.JetStreamContext, component, subject, queue s
 	if err := security.CheckQueueSubscribe(component, subject, queue); err != nil {
 		return nil, err
 	}
-	return js.QueueSubscribe(subject, queue, cb, opts...)
+	return retrySubscribe(func() (*nats.Subscription, error) {
+		return js.QueueSubscribe(subject, queue, cb, opts...)
+	}, subject)
 }
 
 // QueueSubscribeWithACLValidator is QueueSubscribeWithACL with explicit validator.
@@ -49,5 +57,33 @@ func QueueSubscribeWithACLValidator(js nats.JetStreamContext, component, subject
 	if err := security.CheckQueueSubscribe(component, subject, queue); err != nil {
 		return nil, err
 	}
-	return js.QueueSubscribe(subject, queue, cb, opts...)
+	return retrySubscribe(func() (*nats.Subscription, error) {
+		return js.QueueSubscribe(subject, queue, cb, opts...)
+	}, subject)
+}
+
+// retrySubscribe retries fn with exponential backoff when a durable push consumer
+// is already bound to another subscriber (rolling update scenario). The old pod
+// releases the binding when its NATS connection closes, typically within seconds.
+func retrySubscribe(fn func() (*nats.Subscription, error), subject string) (*nats.Subscription, error) {
+	const maxAttempts = 20
+	backoff := 2 * time.Second
+	var sub *nats.Subscription
+	var err error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		sub, err = fn()
+		if err == nil {
+			return sub, nil
+		}
+		if attempt == maxAttempts || !strings.Contains(err.Error(), "already bound") {
+			return nil, err
+		}
+		slog.Warn("bus: durable consumer already bound, retrying",
+			"subject", subject, "attempt", attempt, "backoff", backoff)
+		time.Sleep(backoff)
+		if backoff < 30*time.Second {
+			backoff *= 2
+		}
+	}
+	return nil, err
 }
