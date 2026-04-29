@@ -14,6 +14,26 @@ for arg in "$@"; do
   case $arg in
     --skip-build) SKIP_BUILD=true ;;
     --skip-install) SKIP_INSTALL=true ;;
+    -h|--help)
+      echo "Usage: ./deploy/scripts/kind-up.sh [OPTIONS]"
+      echo ""
+      echo "Create the kind cluster, build & load images, and install the cerberOS Helm chart."
+      echo ""
+      echo "Options:"
+      echo "  --skip-build    Skip Docker image builds (use already-loaded images)"
+      echo "  --skip-install  Skip Helm chart install/upgrade"
+      echo "  -h, --help      Show this help message"
+      echo ""
+      echo "Environment variables (auto-injected into aegis-agents if set):"
+      echo "  ANTHROPIC_API_KEY   Anthropic API key"
+      echo "  ANTHROPIC_BASE_URL  Anthropic API base URL (defaults to Anthropic's standard endpoint)"
+      echo ""
+      echo "Examples:"
+      echo "  ./deploy/scripts/kind-up.sh                   # full setup"
+      echo "  ./deploy/scripts/kind-up.sh --skip-build      # reinstall chart without rebuilding images"
+      echo "  ./deploy/scripts/kind-up.sh --skip-install    # rebuild & reload images only"
+      exit 0
+      ;;
   esac
 done
 
@@ -58,9 +78,18 @@ if [ "$SKIP_INSTALL" = false ]; then
     fi
   done
   helm dependency update "${REPO_ROOT}/deploy/helm/cerberos" >/dev/null
+  HELM_SET_ARGS=()
+  if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+    HELM_SET_ARGS+=(--set "aegis-agents.anthropicApiKey=${ANTHROPIC_API_KEY}")
+  fi
+  if [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
+    HELM_SET_ARGS+=(--set "aegis-agents.anthropicBaseUrl=${ANTHROPIC_BASE_URL}")
+  fi
+
   helm upgrade --install cerberos "${REPO_ROOT}/deploy/helm/cerberos" \
     --namespace "${NAMESPACE}" \
-    --values "${REPO_ROOT}/deploy/helm/cerberos/values-dev.yaml"
+    --values "${REPO_ROOT}/deploy/helm/cerberos/values-dev.yaml" \
+    "${HELM_SET_ARGS[@]}"
 
   echo ""
   echo "    Waiting for core workloads to be ready (up to 5 min) ..."
@@ -95,4 +124,22 @@ echo "                  root token: root"
 echo ""
 echo "  All pods:       kubectl get pods -n ${NAMESPACE} -o wide"
 echo "  Tear down:      ./deploy/scripts/kind-down.sh"
+echo ""
+echo "  Anthropic (aegis-agents):"
+if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+  echo "    ANTHROPIC_API_KEY  ✓ injected"
+else
+  echo "    ANTHROPIC_API_KEY  ✗ not set"
+  echo "      How to inject:"
+  echo "        Live cluster:  kubectl set env deployment/aegis-agents ANTHROPIC_API_KEY=<key> -n ${NAMESPACE}"
+  echo "        Fresh start:   export ANTHROPIC_API_KEY=<key> && ./deploy/scripts/kind-up.sh --skip-build"
+fi
+if [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
+  echo "    ANTHROPIC_BASE_URL ✓ injected: ${ANTHROPIC_BASE_URL}"
+else
+  echo "    ANTHROPIC_BASE_URL ✗ not set (using Anthropic default endpoint)"
+  echo "      How to inject:"
+  echo "        Live cluster:  kubectl set env deployment/aegis-agents ANTHROPIC_BASE_URL=<url> -n ${NAMESPACE}"
+  echo "        Fresh start:   export ANTHROPIC_BASE_URL=<url> && ./deploy/scripts/kind-up.sh --skip-build"
+fi
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

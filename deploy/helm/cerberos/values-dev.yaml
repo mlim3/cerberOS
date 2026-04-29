@@ -2,12 +2,10 @@
 # values-dev.yaml — kind local cluster overrides
 # =============================================================================
 # Usage:
-#   helm upgrade --install cerberos deploy/helm/cerberos \
-#     --namespace cerberos \
-#     -f deploy/helm/cerberos/values-dev.yaml \
-#     --set aegis-agents.anthropicApiKey=$ANTHROPIC_API_KEY \
-#     --set memory-api.vaultMasterKey=$VAULT_MASTER_KEY \
-#     --set memory-api.internalVaultApiKey=$INTERNAL_VAULT_API_KEY
+#   ./deploy/scripts/kind-up.sh
+#
+#   ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL are read automatically from the
+#   environment by kind-up.sh — no --set flags needed.
 # =============================================================================
 
 # Use locally-built images (loaded via kind load docker-image)
