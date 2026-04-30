@@ -287,6 +287,9 @@ CREATE TABLE IF NOT EXISTS scheduling_schema.scheduled_jobs (
     interval_seconds INT,
     name VARCHAR(255) NOT NULL,
     payload JSONB,
+    user_id VARCHAR(64) NOT NULL DEFAULT '',
+    time_zone VARCHAR(64) NOT NULL DEFAULT 'UTC',
+    cron_expression TEXT NOT NULL DEFAULT '',
     next_run_at TIMESTAMPTZ NOT NULL,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()

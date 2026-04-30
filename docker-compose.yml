@@ -106,6 +106,8 @@ services:
       LOG_LEVEL: debug
       STT_PROVIDER: disabled
       MEMORY_API_BASE: http://memory-api:8081
+      INTERNAL_VAULT_API_KEY: ${INTERNAL_VAULT_API_KEY:?Set INTERNAL_VAULT_API_KEY in .env}
+      MEMORY_API_KEY: ${INTERNAL_VAULT_API_KEY:?Set INTERNAL_VAULT_API_KEY in .env}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
       OTEL_SERVICE_NAME: io
     restart: unless-stopped

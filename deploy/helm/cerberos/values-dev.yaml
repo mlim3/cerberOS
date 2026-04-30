@@ -69,6 +69,8 @@ io:
     repository: cerberos-io
     tag: local
     pullPolicy: Never
+  # Must match memory-api.internalVaultApiKey above (IO → Memory X-Internal-API-Key)
+  internalVaultApiKey: "dev-internal-key"
 
 aegis-databus:
   image:
