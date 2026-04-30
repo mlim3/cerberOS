@@ -295,6 +295,9 @@ function App() {
 
   const selectedTask = tasks.find(t => t.id === selectedTaskId)
 
+  const selectedConversationSidebarPreview =
+    DEMO_MODE || !selectedTaskId ? '' : tasks.find(t => t.id === selectedTaskId)?.lastUpdate ?? ''
+
   const addLogEntry = useCallback((entry: Omit<LogEntry, 'id' | 'timestamp'>) => {
     const newEntry: LogEntry = {
       ...entry,
@@ -313,45 +316,68 @@ function App() {
     document.documentElement.setAttribute('data-high-contrast', uiSettings.highContrast ? 'true' : 'false')
   }, [uiSettings.fontSizeScale, uiSettings.highContrast])
 
-  useEffect(() => {
+  const refetchConversations = useCallback(async () => {
     if (DEMO_MODE) return
-    let cancelled = false
-
-    ;(async () => {
-      try {
-        const res = await fetch(buildApiUrl(`/api/conversations?userId=${encodeURIComponent(UI_USER_ID)}`), {
-          headers: { 'X-User-Id': UI_USER_ID },
-        })
-        if (!res.ok) return
-        const json = await res.json() as { conversations?: ConversationSummary[] }
-        const conversations = json.conversations ?? []
-        if (cancelled) return
-        const loadedTasks = conversations.map(taskFromConversation)
-        setTasks(prev => {
-          const existing = new Map(prev.map(task => [task.id, task]))
-          for (const task of loadedTasks) {
-            if (!existing.has(task.id)) {
-              existing.set(task.id, task)
-            }
+    try {
+      const res = await fetch(buildApiUrl(`/api/conversations?userId=${encodeURIComponent(UI_USER_ID)}`), {
+        headers: { 'X-User-Id': UI_USER_ID },
+      })
+      if (!res.ok) return
+      const json = await res.json() as { conversations?: ConversationSummary[] }
+      const conversations = json.conversations ?? []
+      const loadedTasks = conversations.map(taskFromConversation)
+      setTasks(prev => {
+        const existing = new Map(prev.map(task => [task.id, task]))
+        for (const task of loadedTasks) {
+          const prior = existing.get(task.id)
+          if (!prior) {
+            existing.set(task.id, task)
+            continue
           }
-          return Array.from(existing.values()).sort((a, b) => a.id.localeCompare(b.id)).reverse()
-        })
-      } catch {
-        // ignore bootstrap failures; the app can still create new tasks
-      }
-    })()
-
-    return () => {
-      cancelled = true
+          existing.set(task.id, {
+            ...prior,
+            title: task.title || prior.title,
+            status: task.status,
+            lastUpdate: task.lastUpdate,
+            expectedNextInput: task.expectedNextInput,
+            currentTaskId: task.currentTaskId ?? prior.currentTaskId,
+          })
+        }
+        return Array.from(existing.values()).sort((a, b) => a.id.localeCompare(b.id)).reverse()
+      })
+    } catch {
+      // ignore bootstrap failures; the app can still create new tasks
     }
   }, [DEMO_MODE])
 
   useEffect(() => {
     if (DEMO_MODE) return
+    void refetchConversations()
+  }, [DEMO_MODE, refetchConversations])
+
+  useEffect(() => {
+    if (DEMO_MODE) return
+    const id = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        void refetchConversations()
+      }
+    }, 20_000)
+    const onVis = () => {
+      if (document.visibilityState === 'visible') void refetchConversations()
+    }
+    document.addEventListener('visibilitychange', onVis)
+    return () => {
+      clearInterval(id)
+      document.removeEventListener('visibilitychange', onVis)
+    }
+  }, [DEMO_MODE, refetchConversations])
+
+  useEffect(() => {
+    if (DEMO_MODE) return
     if (!selectedTaskId) return
     const task = tasks.find(t => t.id === selectedTaskId)
-    if (!task || task.messages.length > 0) return
-    if (!task.id) return
+    if (!task?.id) return
+    if (streamingForTaskId === selectedTaskId) return
 
     let cancelled = false
     ;(async () => {
@@ -380,7 +406,7 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [DEMO_MODE, selectedTaskId])
+  }, [DEMO_MODE, selectedTaskId, selectedConversationSidebarPreview, streamingForTaskId])
 
   // Orchestrator → IO push stream (SSE) for status + credential_request
   const activeOrchestratorTaskId = tasks.find(t => t.id === selectedTaskId)?.currentTaskId
@@ -1078,6 +1104,7 @@ function App() {
             settings={uiSettings}
             onSettingsChange={setUISettings}
             onClose={() => setShowSettings(false)}
+            userId={UI_USER_ID}
           />
         )}
       </main>
