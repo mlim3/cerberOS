@@ -45,6 +45,12 @@ spec:
               value: {{ .Values.sttProvider | quote }}
             - name: MEMORY_API_BASE
               value: {{ .Values.memoryApiBase | quote }}
+            {{- if .Values.internalVaultApiKey }}
+            - name: INTERNAL_VAULT_API_KEY
+              value: {{ .Values.internalVaultApiKey | quote }}
+            - name: MEMORY_API_KEY
+              value: {{ .Values.internalVaultApiKey | quote }}
+            {{- end }}
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: {{ .Values.observability.otlpEndpoint | quote }}
             - name: OTEL_SERVICE_NAME

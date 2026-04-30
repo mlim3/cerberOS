@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -24,10 +25,16 @@ type ScheduledJob struct {
 	IntervalSeconds pgtype.Int4
 	Name            string
 	Payload         []byte
+	UserID          string
+	TimeZone        string
+	CronExpression  string
 	NextRunAt       time.Time
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
 }
+
+// UserCronDispatch publishes a due user_cron job to NATS when configured.
+type UserCronDispatch func(ctx context.Context, job ScheduledJob) error
 
 // ScheduledJobRun is one execution attempt of a scheduled job.
 type ScheduledJobRun struct {
@@ -53,6 +60,9 @@ type CreateScheduledJobParams struct {
 	IntervalSeconds pgtype.Int4
 	Name            string
 	Payload         []byte
+	UserID          string
+	TimeZone        string
+	CronExpression  string
 	NextRunAt       time.Time
 }
 
@@ -71,10 +81,15 @@ func (r *ScheduledJobsRepository) CreateJob(ctx context.Context, p CreateSchedul
 	const q = `
 INSERT INTO scheduling_schema.scheduled_jobs (
   id, job_type, target_kind, target_service, status, schedule_kind,
-  interval_seconds, name, payload, next_run_at
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+  interval_seconds, name, payload, user_id, time_zone, cron_expression, next_run_at
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 RETURNING id, job_type, target_kind, target_service, status, schedule_kind,
-  interval_seconds, name, payload, next_run_at, created_at, updated_at`
+  interval_seconds, name, payload, user_id, time_zone, cron_expression, next_run_at, created_at, updated_at`
+
+	tz := strings.TrimSpace(p.TimeZone)
+	if tz == "" {
+		tz = "UTC"
+	}
 
 	var row ScheduledJob
 	err := r.pool.QueryRow(ctx, q,
@@ -87,6 +102,9 @@ RETURNING id, job_type, target_kind, target_service, status, schedule_kind,
 		p.IntervalSeconds,
 		p.Name,
 		p.Payload,
+		strings.TrimSpace(p.UserID),
+		tz,
+		strings.TrimSpace(p.CronExpression),
 		p.NextRunAt,
 	).Scan(
 		&row.ID,
@@ -98,6 +116,9 @@ RETURNING id, job_type, target_kind, target_service, status, schedule_kind,
 		&row.IntervalSeconds,
 		&row.Name,
 		&row.Payload,
+		&row.UserID,
+		&row.TimeZone,
+		&row.CronExpression,
 		&row.NextRunAt,
 		&row.CreatedAt,
 		&row.UpdatedAt,
@@ -112,7 +133,7 @@ RETURNING id, job_type, target_kind, target_service, status, schedule_kind,
 func (r *ScheduledJobsRepository) GetJob(ctx context.Context, id uuid.UUID) (ScheduledJob, error) {
 	const q = `
 SELECT id, job_type, target_kind, target_service, status, schedule_kind,
-  interval_seconds, name, payload, next_run_at, created_at, updated_at
+  interval_seconds, name, payload, user_id, time_zone, cron_expression, next_run_at, created_at, updated_at
 FROM scheduling_schema.scheduled_jobs WHERE id = $1`
 
 	var row ScheduledJob
@@ -126,6 +147,9 @@ FROM scheduling_schema.scheduled_jobs WHERE id = $1`
 		&row.IntervalSeconds,
 		&row.Name,
 		&row.Payload,
+		&row.UserID,
+		&row.TimeZone,
+		&row.CronExpression,
 		&row.NextRunAt,
 		&row.CreatedAt,
 		&row.UpdatedAt,
@@ -143,7 +167,7 @@ FROM scheduling_schema.scheduled_jobs WHERE id = $1`
 func (r *ScheduledJobsRepository) ListDueJobs(ctx context.Context, before time.Time) ([]ScheduledJob, error) {
 	const q = `
 SELECT id, job_type, target_kind, target_service, status, schedule_kind,
-  interval_seconds, name, payload, next_run_at, created_at, updated_at
+  interval_seconds, name, payload, user_id, time_zone, cron_expression, next_run_at, created_at, updated_at
 FROM scheduling_schema.scheduled_jobs
 WHERE status = 'active' AND next_run_at <= $1
 ORDER BY next_run_at ASC`
@@ -167,6 +191,9 @@ ORDER BY next_run_at ASC`
 			&row.IntervalSeconds,
 			&row.Name,
 			&row.Payload,
+			&row.UserID,
+			&row.TimeZone,
+			&row.CronExpression,
 			&row.NextRunAt,
 			&row.CreatedAt,
 			&row.UpdatedAt,
@@ -249,6 +276,57 @@ ORDER BY started_at DESC`
 		out = append(out, row)
 	}
 	return out, rows.Err()
+}
+
+// ListUserCrons returns active jobs of type user_cron for a user namespace.
+func (r *ScheduledJobsRepository) ListUserCrons(ctx context.Context, userID string) ([]ScheduledJob, error) {
+	const q = `
+SELECT id, job_type, target_kind, target_service, status, schedule_kind,
+  interval_seconds, name, payload, user_id, time_zone, cron_expression, next_run_at, created_at, updated_at
+FROM scheduling_schema.scheduled_jobs
+WHERE job_type = 'user_cron' AND user_id = $1 AND status = 'active'
+ORDER BY name ASC`
+	rows, err := r.pool.Query(ctx, q, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list user crons: %w", err)
+	}
+	defer rows.Close()
+
+	var out []ScheduledJob
+	for rows.Next() {
+		var row ScheduledJob
+		if err := rows.Scan(
+			&row.ID,
+			&row.JobType,
+			&row.TargetKind,
+			&row.TargetService,
+			&row.Status,
+			&row.ScheduleKind,
+			&row.IntervalSeconds,
+			&row.Name,
+			&row.Payload,
+			&row.UserID,
+			&row.TimeZone,
+			&row.CronExpression,
+			&row.NextRunAt,
+			&row.CreatedAt,
+			&row.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+// DeleteUserCron deletes a job if it is owned by userID and typed user_cron.
+func (r *ScheduledJobsRepository) DeleteUserCron(ctx context.Context, jobID uuid.UUID, userID string) (bool, error) {
+	const q = `DELETE FROM scheduling_schema.scheduled_jobs WHERE id = $1 AND user_id = $2 AND job_type = 'user_cron'`
+	ct, err := r.pool.Exec(ctx, q, jobID, userID)
+	if err != nil {
+		return false, err
+	}
+	return ct.RowsAffected() > 0, nil
 }
 
 // FactCountForDecayScan returns how many user_facts rows exist (lightweight internal job signal).

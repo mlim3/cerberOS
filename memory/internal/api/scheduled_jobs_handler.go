@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/mlim3/cerberOS/memory/internal/scheduleutil"
 	"github.com/mlim3/cerberOS/memory/internal/storage"
 )
 
@@ -22,24 +23,42 @@ var orchestratorHookHTTPClient = &http.Client{Timeout: 15 * time.Second}
 
 // ScheduledJobsHandler implements /api/v1/scheduled_jobs* endpoints.
 type ScheduledJobsHandler struct {
-	repo *storage.ScheduledJobsRepository
+	repo     *storage.ScheduledJobsRepository
+	userCron storage.UserCronDispatch
 }
 
-// NewScheduledJobsHandler constructs the handler.
-func NewScheduledJobsHandler(repo *storage.ScheduledJobsRepository) *ScheduledJobsHandler {
-	return &ScheduledJobsHandler{repo: repo}
+// NewScheduledJobsHandler constructs the handler. Pass userCron=nil in tests or when NATS is disabled.
+func NewScheduledJobsHandler(repo *storage.ScheduledJobsRepository, userCron storage.UserCronDispatch) *ScheduledJobsHandler {
+	return &ScheduledJobsHandler{repo: repo, userCron: userCron}
 }
 
 type createScheduledJobRequest struct {
-	JobType         string         `json:"jobType"`
-	TargetKind      string         `json:"targetKind"`
-	TargetService   string         `json:"targetService"`
-	Status          string         `json:"status"`
-	ScheduleKind    string         `json:"scheduleKind"`
-	IntervalSeconds *float64       `json:"intervalSeconds,omitempty"`
-	Name            string         `json:"name"`
-	Payload         map[string]any `json:"payload"`
-	NextRunAt       string         `json:"nextRunAt"`
+	JobType          string         `json:"jobType"`
+	TargetKind       string         `json:"targetKind"`
+	TargetService    string         `json:"targetService"`
+	Status           string         `json:"status"`
+	ScheduleKind     string         `json:"scheduleKind"`
+	IntervalSeconds  *float64       `json:"intervalSeconds,omitempty"`
+	Name             string         `json:"name"`
+	Payload          map[string]any `json:"payload"`
+	NextRunAt        string         `json:"nextRunAt"`
+	UserID           string         `json:"userId"`
+	TimeZone         string         `json:"timeZone"`
+	CronExpression   string         `json:"cronExpression"`
+}
+
+// RunDue executes the same processing as POST /api/v1/scheduled_jobs/run_due (used by memory-server ticker).
+func (h *ScheduledJobsHandler) RunDue(ctx context.Context) error {
+	jobs, err := h.repo.ListDueJobs(ctx, time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	for _, job := range jobs {
+		if _, err := h.executeJob(ctx, job); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // HandleCreateScheduledJob POST /api/v1/scheduled_jobs
@@ -63,6 +82,16 @@ func (h *ScheduledJobsHandler) HandleCreateScheduledJob(w http.ResponseWriter, r
 	req.Status = strings.TrimSpace(req.Status)
 	req.ScheduleKind = strings.TrimSpace(req.ScheduleKind)
 	req.Name = strings.TrimSpace(req.Name)
+	req.UserID = strings.TrimSpace(req.UserID)
+
+	if req.JobType == "user_cron" {
+		if req.TargetKind == "" {
+			req.TargetKind = "user"
+		}
+		if req.TargetService == "" {
+			req.TargetService = "orchestrator"
+		}
+	}
 
 	if req.JobType == "" || req.TargetKind == "" || req.TargetService == "" || req.Name == "" {
 		w.Header().Set("Content-Type", "application/json")
@@ -78,6 +107,30 @@ func (h *ScheduledJobsHandler) HandleCreateScheduledJob(w http.ResponseWriter, r
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "scheduleKind is required", nil))
 		return
+	}
+
+	if req.JobType == "user_cron" {
+		if req.UserID == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "userId is required for user_cron", nil))
+			return
+		}
+		if req.ScheduleKind == "cron" {
+			if err := scheduleutil.ValidateCron(strings.TrimSpace(req.CronExpression)); err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", err.Error(), nil))
+				return
+			}
+		} else if req.ScheduleKind == "interval" {
+			if req.IntervalSeconds == nil || *req.IntervalSeconds <= 0 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "intervalSeconds must be positive for interval schedules", nil))
+				return
+			}
+		}
 	}
 
 	var interval pgtype.Int4
@@ -97,6 +150,15 @@ func (h *ScheduledJobsHandler) HandleCreateScheduledJob(w http.ResponseWriter, r
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "nextRunAt must be RFC3339", nil))
 		return
+	}
+
+	if req.Payload == nil {
+		req.Payload = map[string]any{}
+	}
+	if req.JobType == "user_cron" {
+		if _, ok := req.Payload["userId"]; !ok || strings.TrimSpace(asPayloadString(req.Payload["userId"])) == "" {
+			req.Payload["userId"] = req.UserID
+		}
 	}
 
 	payloadBytes, err := storage.MarshalPayloadMap(req.Payload)
@@ -122,6 +184,9 @@ func (h *ScheduledJobsHandler) HandleCreateScheduledJob(w http.ResponseWriter, r
 		IntervalSeconds: interval,
 		Name:            req.Name,
 		Payload:         payloadBytes,
+		UserID:          req.UserID,
+		TimeZone:        strings.TrimSpace(req.TimeZone),
+		CronExpression:  strings.TrimSpace(req.CronExpression),
 		NextRunAt:       nextRun.UTC(),
 	})
 	if err != nil {
@@ -134,6 +199,16 @@ func (h *ScheduledJobsHandler) HandleCreateScheduledJob(w http.ResponseWriter, r
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(SuccessResponse(scheduledJobToMap(row)))
+}
+
+func asPayloadString(v any) string {
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
 }
 
 // HandleRunDueJobs POST /api/v1/scheduled_jobs/run_due
@@ -179,7 +254,7 @@ func (h *ScheduledJobsHandler) executeJob(ctx context.Context, job storage.Sched
 
 	var trace pgtype.UUID
 	if tid, ok := traceIDFromContext(ctx); ok {
-		trace = pgtype.UUID{Bytes: tid, Valid: true}
+		trace = pgtype.UUID{Bytes: [16]byte(tid), Valid: true}
 	}
 
 	detail, status := h.runJobBody(ctx, job)
@@ -205,9 +280,7 @@ func (h *ScheduledJobsHandler) executeJob(ctx context.Context, job storage.Sched
 		return nil, err
 	}
 
-	// Advance next_run_at for interval schedules on success paths.
-	if job.ScheduleKind == "interval" && job.IntervalSeconds.Valid && job.IntervalSeconds.Int32 > 0 {
-		next := finished.Add(time.Duration(job.IntervalSeconds.Int32) * time.Second)
+	if next := h.computeNextRunAt(job, finished); !next.IsZero() {
 		if err := h.repo.UpdateJobNextRun(ctx, job.ID, next); err != nil {
 			return nil, err
 		}
@@ -216,7 +289,36 @@ func (h *ScheduledJobsHandler) executeJob(ctx context.Context, job storage.Sched
 	return scheduledRunToMap(run), nil
 }
 
+func (h *ScheduledJobsHandler) computeNextRunAt(job storage.ScheduledJob, finished time.Time) time.Time {
+	switch job.ScheduleKind {
+	case "cron":
+		if strings.TrimSpace(job.CronExpression) == "" {
+			return time.Time{}
+		}
+		interval := int32(0)
+		if job.IntervalSeconds.Valid {
+			interval = job.IntervalSeconds.Int32
+		}
+		n := scheduleutil.NextRunTime("cron", job.CronExpression, job.TimeZone, interval, finished)
+		if !n.After(finished) {
+			n = finished.Add(time.Minute)
+		}
+		return n.UTC()
+	case "interval":
+		if job.IntervalSeconds.Valid && job.IntervalSeconds.Int32 > 0 {
+			return finished.Add(time.Duration(job.IntervalSeconds.Int32) * time.Second).UTC()
+		}
+	default:
+		break
+	}
+	return time.Time{}
+}
+
 func (h *ScheduledJobsHandler) runJobBody(ctx context.Context, job storage.ScheduledJob) (map[string]any, string) {
+	if job.JobType == "user_cron" {
+		return h.runUserCron(ctx, job)
+	}
+
 	switch job.TargetKind {
 	case "internal":
 		return h.runInternalJob(ctx, job)
@@ -225,6 +327,20 @@ func (h *ScheduledJobsHandler) runJobBody(ctx context.Context, job storage.Sched
 	default:
 		return map[string]any{"error": "unknown targetKind"}, "failed"
 	}
+}
+
+func (h *ScheduledJobsHandler) runUserCron(ctx context.Context, job storage.ScheduledJob) (map[string]any, string) {
+	detail := map[string]any{"jobType": job.JobType, "targetKind": job.TargetKind, "scheduledJobId": job.ID.String()}
+	if h.userCron == nil {
+		detail["note"] = "user_cron NATS dispatch not configured"
+		return detail, "completed"
+	}
+	if err := h.userCron(ctx, job); err != nil {
+		detail["error"] = err.Error()
+		return detail, "failed"
+	}
+	detail["dispatched"] = true
+	return detail, "completed"
 }
 
 func (h *ScheduledJobsHandler) runInternalJob(ctx context.Context, job storage.ScheduledJob) (map[string]any, string) {
@@ -287,6 +403,79 @@ func (h *ScheduledJobsHandler) runExternalJob(ctx context.Context, job storage.S
 	return out, "failed"
 }
 
+// HandleListUserCrons GET /api/v1/user_crons
+func (h *ScheduledJobsHandler) HandleListUserCrons(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	userID := strings.TrimSpace(r.URL.Query().Get("userId"))
+	if userID == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "userId is required", nil))
+		return
+	}
+
+	jobs, err := h.repo.ListUserCrons(r.Context(), userID)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(ErrorResponse("internal", "failed to list user crons", err.Error()))
+		return
+	}
+
+	out := make([]map[string]any, 0, len(jobs))
+	for _, j := range jobs {
+		sm := scheduledJobToMap(j)
+		out = append(out, sm)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(SuccessResponse(map[string]any{"jobs": out}))
+}
+
+// HandleDeleteUserCron DELETE /api/v1/scheduled_jobs/{jobId}
+func (h *ScheduledJobsHandler) HandleDeleteUserCron(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	jobID, err := uuid.Parse(strings.TrimSpace(r.PathValue("jobId")))
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "invalid job id", nil))
+		return
+	}
+	userID := strings.TrimSpace(r.URL.Query().Get("userId"))
+	if userID == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "userId is required", nil))
+		return
+	}
+
+	ok, err := h.repo.DeleteUserCron(r.Context(), jobID, userID)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(ErrorResponse("internal", "failed to delete job", err.Error()))
+		return
+	}
+	if !ok {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(ErrorResponse("not_found", "job not found or not owned by user", nil))
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(SuccessResponse(map[string]any{"deleted": true}))
+}
+
 // HandleListScheduledJobRuns GET /api/v1/scheduled_jobs/{jobId}/runs
 func (h *ScheduledJobsHandler) HandleListScheduledJobRuns(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -336,14 +525,17 @@ func (h *ScheduledJobsHandler) HandleListScheduledJobRuns(w http.ResponseWriter,
 
 func scheduledJobToMap(j storage.ScheduledJob) map[string]any {
 	m := map[string]any{
-		"id":            j.ID.String(),
-		"jobType":       j.JobType,
-		"targetKind":    j.TargetKind,
-		"targetService": j.TargetService,
-		"status":        j.Status,
-		"scheduleKind":  j.ScheduleKind,
-		"name":          j.Name,
-		"nextRunAt":     j.NextRunAt.UTC().Format(time.RFC3339Nano),
+		"id":             j.ID.String(),
+		"jobType":        j.JobType,
+		"targetKind":     j.TargetKind,
+		"targetService":  j.TargetService,
+		"status":         j.Status,
+		"scheduleKind":   j.ScheduleKind,
+		"name":           j.Name,
+		"nextRunAt":      j.NextRunAt.UTC().Format(time.RFC3339Nano),
+		"userId":         j.UserID,
+		"timeZone":       j.TimeZone,
+		"cronExpression": j.CronExpression,
 	}
 	if j.IntervalSeconds.Valid {
 		m["intervalSeconds"] = j.IntervalSeconds.Int32

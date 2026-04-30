@@ -86,10 +86,14 @@ if [ "$SKIP_INSTALL" = false ]; then
     HELM_SET_ARGS+=(--set "aegis-agents.anthropicBaseUrl=${ANTHROPIC_BASE_URL}")
   fi
 
+  # Bash with `set -u` treats "${HELM_SET_ARGS[@]}" as an error when the array is empty
+  # on some versions; temporarily allow unset for this invocation.
+  set +u
   helm upgrade --install cerberos "${REPO_ROOT}/deploy/helm/cerberos" \
     --namespace "${NAMESPACE}" \
     --values "${REPO_ROOT}/deploy/helm/cerberos/values-dev.yaml" \
     "${HELM_SET_ARGS[@]}"
+  set -u
 
   echo ""
   echo "    Waiting for core workloads to be ready (up to 5 min) ..."

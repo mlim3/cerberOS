@@ -1,4 +1,5 @@
 import './SettingsPanel.css'
+import UserCronSection from './UserCronSection'
 
 export interface UISettings {
   demoMode: boolean
@@ -24,9 +25,10 @@ interface SettingsPanelProps {
   settings: UISettings
   onSettingsChange: (settings: UISettings) => void
   onClose: () => void
+  userId: string
 }
 
-function SettingsPanel({ settings, onSettingsChange, onClose }: SettingsPanelProps) {
+function SettingsPanel({ settings, onSettingsChange, onClose, userId }: SettingsPanelProps) {
   const updateSetting = <K extends keyof UISettings>(key: K, value: UISettings[K]) => {
     onSettingsChange({ ...settings, [key]: value })
   }
@@ -149,6 +151,8 @@ function SettingsPanel({ settings, onSettingsChange, onClose }: SettingsPanelPro
               </label>
             </div>
           </section>
+
+          <UserCronSection userId={userId} />
         </div>
 
         <div className="settings-footer">

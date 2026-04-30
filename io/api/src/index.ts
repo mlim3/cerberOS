@@ -1,3 +1,4 @@
+import './load-env'
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { serveStatic } from 'hono/bun';
@@ -30,6 +31,7 @@ import {
 import { traceMiddleware } from './trace-context'
 import { ioLog, logFromContext } from './logger'
 import { startHeartbeatEmitter } from './heartbeat'
+import { mirrorMemoryConfigured, persistOrchestratorOutcomeToMemory } from './scheduled-run-mirror'
 
 // =============================================================================
 // Planner input enrichment
@@ -223,6 +225,8 @@ if (natsClient) {
     if (!raw) return
     const envelope = (raw.envelope ?? raw) as Record<string, unknown>
     const subject = typeof raw.subject === 'string' ? raw.subject : ''
+    const envelopeTrace =
+      envelope && typeof envelope.trace_id === 'string' ? envelope.trace_id.trim() : undefined
     const payload = parseEnvelopePayload(envelope)
     const msgType = envelope.message_type as string | undefined
     const taskId = clientTaskIdFromIOResults(subject, payload)
@@ -236,8 +240,29 @@ if (natsClient) {
       const result = payload.result as unknown
       const content = extractHumanResult(result)
       if (taskId) {
-        deliverChatResponse(taskId, content, true)
+        const streamed = deliverChatResponse(taskId, content, true)
         ioLog('info', 'nats', 'task_result', { task_id: taskId })
+        if (!streamed && !DEMO_MODE && mirrorMemoryConfigured()) {
+          const uid =
+            typeof payload.user_id === 'string' && payload.user_id.trim()
+              ? payload.user_id.trim()
+              : DEFAULT_UI_USER_ID
+          const cid =
+            typeof payload.conversation_id === 'string' && payload.conversation_id.trim()
+              ? payload.conversation_id.trim()
+              : undefined
+          const headline =
+            payload.success === false
+              ? `Task finished with errors: \`${taskId}\``
+              : `Task completed: \`${taskId}\``
+          void persistOrchestratorOutcomeToMemory({
+            userId: uid,
+            taskId,
+            payloadConversationId: cid,
+            traceId: envelopeTrace,
+            contentLines: [headline, '', content],
+          })
+        }
       }
     } else if (msgType === 'error_response') {
       const userMsg = (payload.user_message ?? 'An error occurred.') as string
@@ -255,6 +280,23 @@ if (natsClient) {
             detail: userMsg,
             hint: 'client disconnected before callback or task id key mismatch',
           })
+          if (!DEMO_MODE && mirrorMemoryConfigured()) {
+            const uid =
+              typeof payload.user_id === 'string' && payload.user_id.trim()
+                ? payload.user_id.trim()
+                : DEFAULT_UI_USER_ID
+            const cid =
+              typeof payload.conversation_id === 'string' && payload.conversation_id.trim()
+                ? payload.conversation_id.trim()
+                : undefined
+            void persistOrchestratorOutcomeToMemory({
+              userId: uid,
+              taskId: errKey,
+              payloadConversationId: cid,
+              traceId: envelopeTrace,
+              contentLines: [`Task failed: \`${errKey}\``, '', userMsg],
+            })
+          }
         }
       }
     }
@@ -398,7 +440,7 @@ app.get('/api/status', (c) => {
     io_api: 'ok',
     demo_mode: DEMO_MODE,
     orchestrator: natsClient?.connected ? 'connected' : 'disconnected',
-    memory: process.env.MEMORY_API_BASE ? 'configured' : 'disconnected',
+    memory: (process.env.MEMORY_API_BASE ?? '').trim() ? 'configured' : 'disconnected',
     nats: natsClient ? 'configured' : 'disconnected',
     web_dashboard: process.env.NODE_ENV === 'production' ? 'serving' : 'dev',
     voice_enabled: stt !== 'disabled' && stt !== 'off' && stt !== 'none',
@@ -888,6 +930,124 @@ app.get('/api/conversations/:conversationId/logs', async (c) => {
   })
   const memoryLogs = await getConversationLogs(conversationId, { userId })
   return c.json({ logs: memoryLogs.map(memoryToLogEntry) })
+})
+
+// User-scheduled crons (proxy to memory-api; server holds MEMORY_API_KEY)
+const memoryBffBase = () => (process.env.MEMORY_API_BASE ?? '').trim().replace(/\/$/, '')
+const memoryBffKey = () =>
+  (process.env.MEMORY_API_KEY ?? process.env.INTERNAL_VAULT_API_KEY ?? '').trim()
+
+function jsonFromMemoryProxy(text: string, status: number) {
+  try {
+    return { data: JSON.parse(text) as unknown, err: null as null }
+  } catch {
+    return { data: null, err: text as string }
+  }
+}
+
+app.post('/api/user-crons', async (c) => {
+  const base = memoryBffBase()
+  const key = memoryBffKey()
+  if (!base || !key) {
+    return c.json(
+      {
+        error:
+          'User crons need MEMORY_API_BASE and either MEMORY_API_KEY or INTERNAL_VAULT_API_KEY on the IO server',
+      },
+      503,
+    )
+  }
+  const body = (await c.req.json()) as {
+    name?: string
+    userId?: string
+    rawInput?: string
+    scheduleKind?: 'interval' | 'cron'
+    intervalSeconds?: number
+    cronExpression?: string
+    timeZone?: string
+    nextRunAt?: string
+    conversationId?: string
+  }
+  const userId = typeof body.userId === 'string' && body.userId ? body.userId : requestUserId(c)
+  if (!body.name?.trim() || !body.rawInput?.trim() || !body.nextRunAt || !body.scheduleKind) {
+    return c.json({ error: 'name, rawInput, nextRunAt, and scheduleKind are required' }, 400)
+  }
+  logFromContext(c, 'info', 'http', 'POST /api/user-crons', { user_id: userId, name: body.name })
+  const res = await fetch(`${base}/api/v1/scheduled_jobs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Internal-API-Key': key },
+    body: JSON.stringify({
+      jobType: 'user_cron',
+      targetKind: 'user',
+      targetService: 'orchestrator',
+      status: 'active',
+      name: body.name.trim(),
+      scheduleKind: body.scheduleKind,
+      intervalSeconds: body.intervalSeconds ?? 0,
+      cronExpression: body.cronExpression ?? '',
+      timeZone: body.timeZone?.trim() || 'UTC',
+      nextRunAt: body.nextRunAt,
+      userId,
+      payload: { userId, rawInput: body.rawInput.trim(), conversationId: body.conversationId },
+    }),
+  })
+  const text = await res.text()
+  const { data, err } = jsonFromMemoryProxy(text, res.status)
+  if (err !== null) {
+    return c.text(err, res.status)
+  }
+  return c.json(data, res.status)
+})
+
+app.get('/api/user-crons', async (c) => {
+  const base = memoryBffBase()
+  const key = memoryBffKey()
+  if (!base || !key) {
+    return c.json(
+      {
+        error:
+          'User crons need MEMORY_API_BASE and either MEMORY_API_KEY or INTERNAL_VAULT_API_KEY on the IO server',
+      },
+      503,
+    )
+  }
+  const userId = c.req.query('userId') || requestUserId(c)
+  const res = await fetch(
+    `${base}/api/v1/user_crons?userId=${encodeURIComponent(userId)}`,
+    { headers: { 'X-Internal-API-Key': key } },
+  )
+  const text = await res.text()
+  const { data, err } = jsonFromMemoryProxy(text, res.status)
+  if (err !== null) {
+    return c.text(err, res.status)
+  }
+  return c.json(data, res.status)
+})
+
+app.delete('/api/user-crons/:jobId', async (c) => {
+  const base = memoryBffBase()
+  const key = memoryBffKey()
+  if (!base || !key) {
+    return c.json(
+      {
+        error:
+          'User crons need MEMORY_API_BASE and either MEMORY_API_KEY or INTERNAL_VAULT_API_KEY on the IO server',
+      },
+      503,
+    )
+  }
+  const jobId = c.req.param('jobId')
+  const userId = c.req.query('userId') || requestUserId(c)
+  const res = await fetch(
+    `${base}/api/v1/scheduled_jobs/${encodeURIComponent(jobId)}?userId=${encodeURIComponent(userId)}`,
+    { method: 'DELETE', headers: { 'X-Internal-API-Key': key } },
+  )
+  const text = await res.text()
+  const { data, err } = jsonFromMemoryProxy(text, res.status)
+  if (err !== null) {
+    return c.text(err, res.status)
+  }
+  return c.json(data, res.status)
 })
 
 // Get all logs — session-scoped queries via /api/logs/:taskId are the intended API

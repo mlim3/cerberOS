@@ -348,9 +348,11 @@ func (m *Manager) terminateTask(ctx context.Context, ts *types.TaskState, errorC
 	// ── Step 4: Notify User I/O via Gateway ───────────────────────────────
 	userMessage := userMessageForErrorCode(errorCode)
 	if err := m.gateway.PublishError(ctx, ts.CallbackTopic, types.ErrorResponse{
-		TaskID:      ts.TaskID,
-		ErrorCode:   errorCode,
-		UserMessage: userMessage,
+		TaskID:         ts.TaskID,
+		UserID:         ts.UserID,
+		ConversationID: ts.ConversationID,
+		ErrorCode:      errorCode,
+		UserMessage:    userMessage,
 	}); err != nil {
 		logger.Warn("failed to publish error to User I/O",
 			"task_id", ts.TaskID,

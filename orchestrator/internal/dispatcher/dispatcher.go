@@ -190,9 +190,11 @@ func (d *Dispatcher) HandleInboundTask(ctx context.Context, task types.UserTask)
 	if err := validateSchema(task); err != nil {
 		log.Warn("schema validation failed", "error", err)
 		_ = d.gateway.PublishError(ctx, task.CallbackTopic, types.ErrorResponse{
-			TaskID:      task.TaskID,
-			ErrorCode:   types.ErrCodeInvalidTaskSpec,
-			UserMessage: err.Error(),
+			TaskID:         task.TaskID,
+			UserID:         task.UserID,
+			ConversationID: task.ConversationID,
+			ErrorCode:      types.ErrCodeInvalidTaskSpec,
+			UserMessage:    err.Error(),
 		})
 		return err
 	}
@@ -217,9 +219,11 @@ func (d *Dispatcher) HandleInboundTask(ctx context.Context, task types.UserTask)
 		if existing != nil && !types.IsTerminalState(existing.State) {
 			log.Info("duplicate task rejected", "current_state", existing.State)
 			_ = d.gateway.PublishError(ctx, task.CallbackTopic, types.ErrorResponse{
-				TaskID:      task.TaskID,
-				ErrorCode:   types.ErrCodeDuplicateTask,
-				UserMessage: fmt.Sprintf("task already submitted — current state: %s", existing.State),
+				TaskID:         task.TaskID,
+				UserID:         task.UserID,
+				ConversationID: task.ConversationID,
+				ErrorCode:      types.ErrCodeDuplicateTask,
+				UserMessage:    fmt.Sprintf("task already submitted — current state: %s", existing.State),
 			})
 			return nil
 		}
@@ -249,9 +253,11 @@ func (d *Dispatcher) HandleInboundTask(ctx context.Context, task types.UserTask)
 			atomic.AddInt64(&d.policyViolations, 1)
 			log.Warn("policy validation denied", "orchestrator_task_ref", orchRef)
 			_ = d.gateway.PublishError(ctx, task.CallbackTopic, types.ErrorResponse{
-				TaskID:      task.TaskID,
-				ErrorCode:   types.ErrCodePolicyViolation,
-				UserMessage: "Task requires resources outside your configured permissions.",
+				TaskID:         task.TaskID,
+				UserID:         task.UserID,
+				ConversationID: task.ConversationID,
+				ErrorCode:      types.ErrCodePolicyViolation,
+				UserMessage:    "Task requires resources outside your configured permissions.",
 			})
 			return fmt.Errorf("policy validation denied: %w", err)
 		}
@@ -285,9 +291,11 @@ func (d *Dispatcher) HandleInboundTask(ctx context.Context, task types.UserTask)
 	if err := d.persistTaskState(ts, now); err != nil {
 		log.Error("memory write failed before decomposition", "error", err)
 		_ = d.gateway.PublishError(ctx, task.CallbackTopic, types.ErrorResponse{
-			TaskID:      task.TaskID,
-			ErrorCode:   types.ErrCodeStorageUnavailable,
-			UserMessage: "Unable to persist task state. Task not dispatched.",
+			TaskID:         task.TaskID,
+			UserID:         task.UserID,
+			ConversationID: task.ConversationID,
+			ErrorCode:      types.ErrCodeStorageUnavailable,
+			UserMessage:    "Unable to persist task state. Task not dispatched.",
 		})
 		return fmt.Errorf("persist decomposing state: %w", err)
 	}
@@ -719,6 +727,9 @@ func (d *Dispatcher) HandlePlanComplete(ts *types.TaskState, aggregatedResults [
 	resultsJSON, _ := json.Marshal(aggregatedResults)
 	result := types.TaskResult{
 		OrchestratorTaskRef: ts.OrchestratorTaskRef,
+		TaskID:              ts.TaskID,
+		UserID:              ts.UserID,
+		ConversationID:      ts.ConversationID,
 		Success:             true,
 		Result:              resultsJSON,
 		CompletedAt:         now,
@@ -783,6 +794,9 @@ func (d *Dispatcher) HandlePlanFailed(ts *types.TaskState, errorCode string, par
 		resultsJSON, _ := json.Marshal(partialResults)
 		result := types.TaskResult{
 			OrchestratorTaskRef: ts.OrchestratorTaskRef,
+			TaskID:              ts.TaskID,
+			UserID:              ts.UserID,
+			ConversationID:      ts.ConversationID,
 			Success:             false,
 			Result:              resultsJSON,
 			ErrorCode:           errorCode,
@@ -791,9 +805,11 @@ func (d *Dispatcher) HandlePlanFailed(ts *types.TaskState, errorCode string, par
 		_ = d.gateway.PublishTaskResult(ctx, ts.CallbackTopic, result)
 	} else {
 		_ = d.gateway.PublishError(ctx, ts.CallbackTopic, types.ErrorResponse{
-			TaskID:      ts.TaskID,
-			ErrorCode:   errorCode,
-			UserMessage: humanReadableError(errorCode),
+			TaskID:         ts.TaskID,
+			UserID:         ts.UserID,
+			ConversationID: ts.ConversationID,
+			ErrorCode:      errorCode,
+			UserMessage:    humanReadableError(errorCode),
 		})
 	}
 
@@ -912,9 +928,11 @@ func (d *Dispatcher) failTaskWithState(ctx context.Context, ts *types.TaskState,
 	}
 
 	_ = d.gateway.PublishError(ctx, ts.CallbackTopic, types.ErrorResponse{
-		TaskID:      ts.TaskID,
-		ErrorCode:   errorCode,
-		UserMessage: userMessage,
+		TaskID:         ts.TaskID,
+		UserID:         ts.UserID,
+		ConversationID: ts.ConversationID,
+		ErrorCode:      errorCode,
+		UserMessage:    userMessage,
 	})
 
 	// Notify IO: task failed during decomposition.
