@@ -66,6 +66,19 @@ func isVaultDelegated(tools []SkillTool, name string) bool {
 	return false
 }
 
+// isSynthesized returns true when the named tool was dynamically synthesized in
+// a prior session (SkillTool.Synthesized). Used to populate the synthesized
+// field in skill_invocation audit events so the orchestrator can surface a
+// "learned skill used" toast in the UI.
+func isSynthesized(tools []SkillTool, name string) bool {
+	for _, t := range tools {
+		if t.Definition.Name == name {
+			return t.Synthesized
+		}
+	}
+	return false
+}
+
 // drillDownDepth returns the drill-down depth for a tool invocation.
 //
 // Pinned tools (task_complete, spawn_agent) are at "command" depth because

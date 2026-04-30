@@ -121,8 +121,26 @@ type SkillNode struct {
 	Origin        string     `json:"origin,omitempty"`         // "static" | "synthesized"
 	SynthesizedAt *time.Time `json:"synthesized_at,omitempty"` // non-nil when Origin == "synthesized"
 
+	// Recipe is set only on synthesized command nodes. It is a step-by-step
+	// procedure extracted from the session history, with {{param_name}}
+	// placeholders for the parameters defined in Spec. The agent-process uses
+	// this at invocation time to drive an inline LLM call that executes the
+	// procedure with the caller's concrete parameter values substituted in.
+	Recipe string `json:"recipe,omitempty"`
+
 	Children map[string]*SkillNode `json:"children,omitempty"`
 	Spec     *SkillSpec            `json:"spec,omitempty"` // only at leaf level
+}
+
+// SynthesizedSkillRecord is a compact representation of a synthesized skill
+// passed at agent spawn time via SpawnContext. It carries only what is needed
+// to build a dynamic SkillTool at runtime — name, LLM-facing description,
+// execution recipe, and parameter spec.
+type SynthesizedSkillRecord struct {
+	Name        string     `json:"name"`
+	Description string     `json:"description"`
+	Recipe      string     `json:"recipe"`
+	Spec        *SkillSpec `json:"spec,omitempty"`
 }
 
 // MemoryWrite is the tagged payload sent to the Memory Component.
@@ -414,6 +432,7 @@ const (
 	AuditEventAgentSpawnRequest    = "agent_spawn_request"  // parent agent requested a child agent (issue #67)
 	AuditEventAgentSpawnResponse   = "agent_spawn_response" // child agent result returned to parent (issue #67)
 	AuditEventSkillInvocation      = "skill_invocation"     // skill tool dispatched by the ReAct loop
+	AuditEventSkillSynthesized     = "skill_synthesized"    // new skill dynamically created by post-task synthesis
 )
 
 // AuditEvent is published to aegis.orchestrator.audit.event (EDD §8.8).
