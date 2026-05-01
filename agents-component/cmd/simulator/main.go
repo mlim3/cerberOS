@@ -291,10 +291,17 @@ func (s *simulator) handleStateReadRequest(msg *nats.Msg) {
 		_ = msg.Nak()
 		return
 	}
-	// system_log reads are served by the orchestrator's Loki bridge.
-	// Responding here with empty records would race and beat the real answer.
-	if req.DataType == "system_log" {
+	// Some data types are answered by the orchestrator — skip these to avoid
+	// racing with the real response and beating it with empty records.
+	switch req.DataType {
+	case "system_log":
+		// Served by the orchestrator's Loki bridge.
 		s.log.Info("simulator: skipping system_log read (routed to Loki via orchestrator)", "agent_id", req.AgentID)
+		_ = msg.Ack()
+		return
+	case "skill_cache":
+		// Served by the orchestrator's in-process agentStore.
+		s.log.Info("simulator: skipping skill_cache read (answered by orchestrator agentStore)", "agent_id", req.AgentID)
 		_ = msg.Ack()
 		return
 	}

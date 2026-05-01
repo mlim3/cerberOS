@@ -122,8 +122,11 @@ type AgentSpawnHandler func(ctx context.Context, req types.AgentSpawnRequest) er
 // Implementations must be non-blocking (called on the NATS subscription goroutine).
 //
 // Notable criteria: web domain, vault-delegated, synthesized, elapsed_ms > 5000,
-// or command == "logs_search".
-type SkillActivityHandler func(agentID, taskID, domain, command, outcome string, elapsedMS int64, vaultDelegated bool)
+// or command == "logs_search". skill_synthesized events always bypass the filter.
+//
+// synthesized is true when the command was dynamically created by post-task synthesis,
+// or when the event itself is a skill_synthesized creation event (outcome == "synthesized").
+type SkillActivityHandler func(agentID, taskID, domain, command, outcome string, elapsedMS int64, vaultDelegated, synthesized bool)
 
 // VaultExecuteHandler is called when an agent publishes a vault.execute.request.
 // The handler resolves user_id from task state and forwards to the vault engine.
@@ -285,7 +288,10 @@ func (g *Gateway) Start() error {
 	if err := g.nats.Subscribe(TopicPlanDecision, g.handleRawPlanDecision); err != nil {
 		return fmt.Errorf("subscribe %s: %w", TopicPlanDecision, err)
 	}
-	if err := g.nats.Subscribe(TopicAgentStateWrite, g.handleRawStateWrite); err != nil {
+	// Use SubscribeDurable for state.write so the agentStore is rebuilt from the
+	// full JetStream history on every restart (skill_cache, session state, etc.).
+	// Falls back to core NATS subscribe when JetStream is unavailable.
+	if err := g.nats.SubscribeDurable(TopicAgentStateWrite, "orchestrator-state-write", g.handleRawStateWrite); err != nil {
 		return fmt.Errorf("subscribe %s: %w", TopicAgentStateWrite, err)
 	}
 	if err := g.nats.Subscribe(TopicAgentStateReadRequest, g.handleRawStateReadRequest); err != nil {
@@ -777,7 +783,15 @@ func (g *Gateway) handleRawStateReadRequest(subject string, data []byte) error {
 
 	// Default: answer from the in-process agentStore.
 	g.agentStoreMu.RLock()
-	all := g.agentStore[req.AgentID]
+	var all []json.RawMessage
+	if req.AgentID == "" {
+		// No AgentID constraint — scan all entries (used by ReadAllByType at startup).
+		for _, records := range g.agentStore {
+			all = append(all, records...)
+		}
+	} else {
+		all = g.agentStore[req.AgentID]
+	}
 	g.agentStoreMu.RUnlock()
 
 	// Filter by contextTag (tags["context"]) and DataType if specified.
@@ -1226,9 +1240,9 @@ type agentAuditPayload struct {
 	Details   map[string]string `json:"details,omitempty"`
 }
 
-// handleRawAgentAuditEvent receives skill_invocation audit events published by
-// agent processes. It applies the notability filter and forwards notable events
-// to the registered SkillActivityHandler (typically the IO client).
+// handleRawAgentAuditEvent receives skill_invocation and skill_synthesized audit
+// events published by agent processes. For skill_invocation it applies the
+// notability filter before forwarding; skill_synthesized events are always routed.
 func (g *Gateway) handleRawAgentAuditEvent(subject string, data []byte) error {
 	ctx := observability.WithModule(context.Background(), "comms_gateway")
 
@@ -1247,33 +1261,44 @@ func (g *Gateway) handleRawAgentAuditEvent(subject string, data []byte) error {
 		return nil
 	}
 
-	if event.EventType != "skill_invocation" {
-		return nil // only route skill_invocation events to IO
-	}
-
-	if !isNotableSkillInvocation(event.Details) {
-		return nil // below the notability threshold — skip
-	}
-
 	h := g.skillActivityHandler
-	if h == nil {
-		return nil
-	}
 
-	elapsedMS := parseDetailsInt64(event.Details, "elapsed_ms")
-	vaultDelegated := event.Details["vault_delegated"] == "true"
-	domain := event.Details["domain"]
-	command := event.Details["command"]
-	outcome := event.Details["outcome"]
-	if domain == "" {
-		// Derive domain from command name prefix (e.g. "web.search" → "web")
-		if idx := strings.Index(command, "."); idx >= 0 {
-			domain = command[:idx]
+	switch event.EventType {
+	case "skill_synthesized":
+		// A new skill was just created. Always route — no notability filter.
+		if h == nil {
+			return nil
 		}
-	}
+		domain := event.Details["domain"]
+		skillName := event.Details["skill_name"]
+		h(event.AgentID, event.TaskID, domain, skillName, "synthesized", 0, false, true)
+		return nil
 
-	h(event.AgentID, event.TaskID, domain, command, outcome, elapsedMS, vaultDelegated)
-	return nil
+	case "skill_invocation":
+		if !isNotableSkillInvocation(event.Details) {
+			return nil // below the notability threshold — skip
+		}
+		if h == nil {
+			return nil
+		}
+		elapsedMS := parseDetailsInt64(event.Details, "elapsed_ms")
+		vaultDelegated := event.Details["vault_delegated"] == "true"
+		synthesized := event.Details["synthesized"] == "true"
+		domain := event.Details["domain"]
+		command := event.Details["command"]
+		outcome := event.Details["outcome"]
+		if domain == "" {
+			// Derive domain from command name prefix (e.g. "web.search" → "web")
+			if idx := strings.Index(command, "."); idx >= 0 {
+				domain = command[:idx]
+			}
+		}
+		h(event.AgentID, event.TaskID, domain, command, outcome, elapsedMS, vaultDelegated, synthesized)
+		return nil
+
+	default:
+		return nil // only route skill events to IO
+	}
 }
 
 // isNotableSkillInvocation returns true when a skill_invocation event satisfies

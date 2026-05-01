@@ -238,7 +238,7 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 
 	// Forward notable skill_invocation audit events to the IO Component so
 	// the web dashboard can display skill-activity toasts.
-	gw.RegisterSkillActivityHandler(func(agentID, taskID, domain, command, outcome string, elapsedMS int64, vaultDelegated bool) {
+	gw.RegisterSkillActivityHandler(func(agentID, taskID, domain, command, outcome string, elapsedMS int64, vaultDelegated, synthesized bool) {
 		// taskID here is the subtask's orchRef (internal UUID). Resolve it to the
 		// frontend-visible parent task ID so broadcastStreamEvent in IO can match
 		// the SSE client registered at /api/events/{parentTaskID}.
@@ -253,6 +253,7 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 			Command:        command,
 			ElapsedMS:      elapsedMS,
 			VaultDelegated: vaultDelegated,
+			Synthesized:    synthesized,
 			Outcome:        outcome,
 			Timestamp:      time.Now().UnixMilli(),
 		}); err != nil {

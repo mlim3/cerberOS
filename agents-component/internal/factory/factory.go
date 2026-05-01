@@ -210,9 +210,34 @@ const (
 // requires its parent domain to be registered first. Individual registration failures
 // are logged and skipped; they do not abort the startup sequence.
 func (f *Factory) LoadSynthesizedSkills(ctx context.Context) error {
-	records, err := f.memory.ReadAllByType("skill_cache")
-	if err != nil {
-		return fmt.Errorf("factory: load synthesized skills: read: %w", err)
+	// Retry up to 3 times with a 2-second delay between attempts.
+	// The orchestrator rebuilds its agentStore from a JetStream DeliverAll replay
+	// on every restart; aegis-agents may query before that replay completes,
+	// returning an empty list even though skill_cache records exist in the stream.
+	const (
+		maxAttempts = 3
+		retryDelay  = 2 * time.Second
+	)
+
+	var records []types.MemoryWrite
+	var err error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		records, err = f.memory.ReadAllByType("skill_cache")
+		if err != nil {
+			return fmt.Errorf("factory: load synthesized skills: read: %w", err)
+		}
+		if len(records) > 0 {
+			break
+		}
+		if attempt < maxAttempts {
+			f.log.Info("factory: no synthesized skills yet, retrying after delay",
+				"attempt", attempt, "retry_in", retryDelay)
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(retryDelay):
+			}
+		}
 	}
 	if len(records) == 0 {
 		f.log.Info("factory: no synthesized skills found in memory")
@@ -463,20 +488,21 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 
 	// Step 6: Spawn agent process.
 	vmCfg := lifecycle.VMConfig{
-		AgentID:         agentID,
-		VMID:            vmID,
-		TaskID:          spec.TaskID,
-		SkillDomain:     entryDomain,
-		CredentialPtr:   token,
-		Instructions:    spec.Instructions,
-		CommandManifest: manifest,
-		AgentMemory:     agentMemory,
-		UserProfile:     userProfile,
-		TraceID:         spec.TraceID,
-		UserContextID:   spec.UserContextID,
-		ConversationID:  spec.ConversationID,
-		PriorTurns:      priorTurns,
-		OnComplete:      f.processCompletionHandler(agentID),
+		AgentID:           agentID,
+		VMID:              vmID,
+		TaskID:            spec.TaskID,
+		SkillDomain:       entryDomain,
+		CredentialPtr:     token,
+		Instructions:      spec.Instructions,
+		CommandManifest:   manifest,
+		AgentMemory:       agentMemory,
+		UserProfile:       userProfile,
+		TraceID:           spec.TraceID,
+		UserContextID:     spec.UserContextID,
+		ConversationID:    spec.ConversationID,
+		PriorTurns:        priorTurns,
+		SynthesizedSkills: f.synthesizedSkillsForDomain(entryDomain),
+		OnComplete:        f.processCompletionHandler(agentID),
 	}
 	if err := f.lifecycle.Spawn(vmCfg); err != nil {
 		return fmt.Errorf("factory: lifecycle.Spawn: %w", err)
@@ -579,19 +605,20 @@ func (f *Factory) assignTask(agentID string, spec *types.TaskSpec) error {
 	priorTurns, _ := f.fetchPriorTurns(spec.ConversationID, spec.TraceID)
 
 	vmCfg := lifecycle.VMConfig{
-		AgentID:         agentID,
-		TaskID:          spec.TaskID,
-		SkillDomain:     entryDomain,
-		CredentialPtr:   token,
-		Instructions:    spec.Instructions,
-		CommandManifest: manifest,
-		AgentMemory:     agentMemory,
-		UserProfile:     userProfile,
-		TraceID:         spec.TraceID,
-		UserContextID:   spec.UserContextID,
-		ConversationID:  spec.ConversationID,
-		PriorTurns:      priorTurns,
-		OnComplete:      f.processCompletionHandler(agentID),
+		AgentID:           agentID,
+		TaskID:            spec.TaskID,
+		SkillDomain:       entryDomain,
+		CredentialPtr:     token,
+		Instructions:      spec.Instructions,
+		CommandManifest:   manifest,
+		AgentMemory:       agentMemory,
+		UserProfile:       userProfile,
+		TraceID:           spec.TraceID,
+		UserContextID:     spec.UserContextID,
+		ConversationID:    spec.ConversationID,
+		PriorTurns:        priorTurns,
+		SynthesizedSkills: f.synthesizedSkillsForDomain(entryDomain),
+		OnComplete:        f.processCompletionHandler(agentID),
 	}
 
 	if err := f.lifecycle.Deliver(agentID, vmCfg); err != nil {
@@ -1259,6 +1286,22 @@ func buildManifestText(commands []*types.SkillNode) string {
 	return b.String()
 }
 
+// synthesizedSkillsForDomain returns the SynthesizedSkillRecord slice for all
+// synthesized commands in the given domain. Errors are logged and treated as an
+// empty list — a missing synthesized skill does not block agent spawn.
+func (f *Factory) synthesizedSkillsForDomain(domain string) []types.SynthesizedSkillRecord {
+	if domain == "" {
+		return nil
+	}
+	records, err := f.skills.GetSynthesizedSkills(domain)
+	if err != nil {
+		f.log.Warn("factory: GetSynthesizedSkills failed; spawning without synthesized tools",
+			"domain", domain, "error", err)
+		return nil
+	}
+	return records
+}
+
 // spawnSystemPrompt returns the domain-scoped system prompt (including command
 // manifest) that will be used at spawn time for token-budget enforcement.
 // Must stay in sync with buildSystemPrompt in cmd/agent-process/loop.go.
@@ -1671,20 +1714,21 @@ func (f *Factory) wakeAgent(agentID string, spec *types.TaskSpec) error {
 	userProfile := f.fetchUserProfile(spec.UserContextID, spec.TraceID)
 	priorTurns, _ := f.fetchPriorTurns(spec.ConversationID, spec.TraceID)
 	vmCfg := lifecycle.VMConfig{
-		AgentID:         agentID,
-		VMID:            newVMID,
-		TaskID:          spec.TaskID,
-		SkillDomain:     entryDomain,
-		CredentialPtr:   token,
-		Instructions:    spec.Instructions,
-		CommandManifest: manifest,
-		AgentMemory:     agentMemory,
-		UserProfile:     userProfile,
-		TraceID:         spec.TraceID,
-		UserContextID:   spec.UserContextID,
-		ConversationID:  spec.ConversationID,
-		PriorTurns:      priorTurns,
-		OnComplete:      f.processCompletionHandler(agentID),
+		AgentID:           agentID,
+		VMID:              newVMID,
+		TaskID:            spec.TaskID,
+		SkillDomain:       entryDomain,
+		CredentialPtr:     token,
+		Instructions:      spec.Instructions,
+		CommandManifest:   manifest,
+		AgentMemory:       agentMemory,
+		UserProfile:       userProfile,
+		TraceID:           spec.TraceID,
+		UserContextID:     spec.UserContextID,
+		ConversationID:    spec.ConversationID,
+		PriorTurns:        priorTurns,
+		SynthesizedSkills: f.synthesizedSkillsForDomain(entryDomain),
+		OnComplete:        f.processCompletionHandler(agentID),
 	}
 	if err := f.lifecycle.Spawn(vmCfg); err != nil {
 		return fmt.Errorf("factory: wakeAgent: lifecycle.Spawn: %w", err)

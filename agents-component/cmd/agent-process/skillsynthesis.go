@@ -25,21 +25,27 @@ import (
 
 const (
 	// skillSynthesisThreshold is the minimum number of tool calls dispatched
-	// during a task for synthesis to be attempted. Tasks under this threshold
-	// are too simple to warrant a reusable skill definition.
-	skillSynthesisThreshold = 5
+	// during a task for synthesis to be attempted. Plan Executor subtasks
+	// return via end_turn (no task_complete call), so threshold=1 means
+	// "at least 1 domain tool call". Tasks in the "general" domain are still
+	// excluded by shouldSynthesize regardless of count.
+	skillSynthesisThreshold = 1
 
 	// skillSynthesisMaxTokens caps the LLM output for the synthesis call.
-	// Skill definitions are compact; 512 tokens is sufficient.
-	skillSynthesisMaxTokens = 512
+	// 768 tokens accommodates the extra recipe field (step-by-step procedure
+	// with parameter placeholders) on top of the core metadata fields.
+	skillSynthesisMaxTokens = 768
 )
 
 // synthesizedSkillJSON is the JSON shape requested from the synthesis LLM call.
 // Fields map directly to command-level SkillNode properties (EDD §13.2).
+// Recipe is a step-by-step execution procedure with {{param_name}} placeholders;
+// it is used at invocation time to drive an inline LLM execution call.
 type synthesizedSkillJSON struct {
 	Name        string           `json:"name"`
 	Label       string           `json:"label"`
 	Description string           `json:"description"`
+	Recipe      string           `json:"recipe"`
 	Spec        *types.SkillSpec `json:"spec,omitempty"`
 }
 
@@ -106,12 +112,23 @@ func synthesizeSkill(
 		return nil, nil
 	}
 
+	// Clamp LLM-generated fields to Tool Contract limits before validation.
+	// Synthesis output is untrusted — the model occasionally generates a few
+	// extra characters despite the prompt constraint.
+	if len(sj.Name) > 64 {
+		sj.Name = sj.Name[:64]
+	}
+	if len(sj.Description) > 300 {
+		sj.Description = sj.Description[:300]
+	}
+
 	now := time.Now().UTC()
 	node := &types.SkillNode{
 		Name:          sj.Name,
 		Level:         "command",
 		Label:         sj.Label,
 		Description:   sj.Description,
+		Recipe:        sj.Recipe,
 		Spec:          sj.Spec,
 		Origin:        "synthesized",
 		SynthesizedAt: &now,
@@ -137,6 +154,7 @@ Output ONLY a single JSON object with this exact schema:
   "name": "<snake_case identifier, max 64 chars — describe the general procedure, not the specific task data>",
   "label": "<human-readable display name>",
   "description": "<max 300 chars — what the skill does AND at least one explicit 'Do NOT use when...' clause>",
+  "recipe": "<numbered step-by-step execution procedure, max 500 chars — use {{param_name}} placeholders for every parameter defined in spec.parameters. Each step must be a concrete action. Example: '1. Fetch {{url}} using {{method}}. 2. Extract the JSON field {{field_name}} from the response. 3. Return the extracted value.'",
   "spec": {
     "parameters": {
       "<param_name>": {
@@ -152,13 +170,15 @@ Rules:
 - name must be snake_case, max 64 characters, unique within the domain.
 - description must contain negative guidance: at least one 'Do NOT use when' clause.
 - Every parameter in spec.parameters must have a non-empty description.
+- recipe must reference every parameter defined in spec.parameters using {{param_name}} syntax.
 - Generalise the procedure: replace task-specific values with named parameters.
 - If the task used no novel procedure worth reusing (e.g. a trivial single-step lookup),
-  output exactly: {"name":"","label":"","description":""}`, domain)
+  output exactly: {"name":"","label":"","description":"","recipe":""}`, domain)
 }
 
 // attemptSkillSynthesis is the top-level driver called at task completion.
-// It checks the threshold, calls synthesizeSkill, and persists via sl.
+// It checks the threshold, calls synthesizeSkill, persists the result, and
+// emits a skill_synthesized audit event so the UI can toast the user.
 // All errors are logged and discarded — synthesis is never allowed to fail the task.
 func attemptSkillSynthesis(
 	ctx context.Context,
@@ -166,6 +186,7 @@ func attemptSkillSynthesis(
 	log *slog.Logger,
 	spawnCtx *SpawnContext,
 	sl *SessionLog,
+	ve *VaultExecutor,
 	history []anthropic.MessageParam,
 	toolCallCount int,
 ) {
@@ -198,4 +219,7 @@ func attemptSkillSynthesis(
 	}
 	log.Info("skill synthesis: complete",
 		"skill_name", node.Name, "domain", spawnCtx.SkillDomain)
+
+	// Notify the orchestrator (and via it, the UI) that a new skill was created.
+	ve.EmitSkillSynthesized(spawnCtx.SkillDomain, node.Name)
 }

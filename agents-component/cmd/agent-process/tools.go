@@ -56,6 +56,7 @@ type SkillTool struct {
 	Label                   string   // human-readable display name — monitoring/audit only, never shown to the LLM
 	RequiredCredentialTypes []string // empty = local execution; non-empty = vault execution required (M3)
 	TimeoutSeconds          int      // 0 = default (30s); hard max 300s; enforced by dispatchTool
+	Synthesized             bool     // true when this tool was dynamically synthesized in a prior session
 
 	// Anthropic API definition: name (≤64 chars), description (≤300 chars), input schema.
 	Definition anthropic.ToolParam

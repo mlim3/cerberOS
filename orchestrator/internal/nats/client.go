@@ -2,6 +2,7 @@ package natsclient
 
 import (
 	"fmt"
+	"log/slog"
 	"sync"
 
 	nats "github.com/nats-io/nats.go"
@@ -63,6 +64,80 @@ func (c *Client) Subscribe(subject string, handler interfaces.MessageHandler) er
 	})
 	if err != nil {
 		return err
+	}
+	c.subs = append(c.subs, sub)
+	return c.nc.Flush()
+}
+
+// SubscribeDurable subscribes to subject using a JetStream ephemeral push consumer
+// with DeliverAll policy. On every startup this replays ALL messages from the stream
+// before delivering new ones, rebuilding in-process state (e.g. agentStore) from
+// the full write history. Falls back to core NATS when JetStream is unavailable.
+//
+// The consumer parameter is accepted for interface compatibility but not used —
+// the consumer is ephemeral (no durable name) so it starts fresh every restart.
+func (c *Client) SubscribeDurable(subject, consumer string, handler interfaces.MessageHandler) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.nc == nil || !c.nc.IsConnected() {
+		return fmt.Errorf("nats: not connected")
+	}
+
+	js, err := c.nc.JetStream()
+	if err != nil {
+		slog.Warn("nats: JetStream unavailable, subscribing without historical replay",
+			"subject", subject, "error", err)
+		return c.subscribeCoreUnlocked(subject, handler)
+	}
+
+	// Ensure the stream covering aegis.orchestrator.> exists. It is normally
+	// created by aegis-agents (EnsureStreams), but the orchestrator may start
+	// first. AddStream is idempotent — if the stream already exists, it's a no-op.
+	if _, err := js.StreamInfo("AEGIS_ORCHESTRATOR"); err != nil {
+		if _, err := js.AddStream(&nats.StreamConfig{
+			Name:      "AEGIS_ORCHESTRATOR",
+			Subjects:  []string{"aegis.orchestrator.>"},
+			Storage:   nats.FileStorage,
+			Retention: nats.LimitsPolicy,
+		}); err != nil {
+			slog.Warn("nats: could not ensure AEGIS_ORCHESTRATOR stream, subscribing without replay",
+				"subject", subject, "error", err)
+			return c.subscribeCoreUnlocked(subject, handler)
+		}
+	}
+
+	// Ephemeral push consumer with DeliverAll: replays the entire stream on every
+	// startup, then continues with new messages. No durable name means a fresh
+	// consumer is created on every restart — giving a full agentStore rebuild each time.
+	sub, err := js.Subscribe(subject,
+		func(msg *nats.Msg) {
+			if err := handler(msg.Subject, msg.Data); err != nil {
+				_ = msg.Nak()
+			} else {
+				_ = msg.Ack()
+			}
+		},
+		nats.DeliverAll(),
+		nats.AckExplicit(),
+	)
+	if err != nil {
+		slog.Warn("nats: JetStream subscribe failed, falling back to core NATS",
+			"subject", subject, "error", err)
+		return c.subscribeCoreUnlocked(subject, handler)
+	}
+
+	c.subs = append(c.subs, sub)
+	return c.nc.Flush()
+}
+
+// subscribeCoreUnlocked subscribes via core NATS. Must be called with c.mu held.
+func (c *Client) subscribeCoreUnlocked(subject string, handler interfaces.MessageHandler) error {
+	sub, err := c.nc.Subscribe(subject, func(msg *nats.Msg) {
+		_ = handler(msg.Subject, msg.Data)
+	})
+	if err != nil {
+		return fmt.Errorf("nats: subscribe %q: %w", subject, err)
 	}
 	c.subs = append(c.subs, sub)
 	return c.nc.Flush()

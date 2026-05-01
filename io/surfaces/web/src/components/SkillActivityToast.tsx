@@ -85,6 +85,16 @@ function SkillActivityToast({ toasts, onDismiss }: SkillActivityToastProps) {
           </span>
           <div className="skill-toast-body">
             <span className="skill-toast-label">{commandLabel(activity.command)}</span>
+            {activity.synthesized && activity.outcome === 'synthesized' && (
+              <span className="skill-toast-badge skill-toast-badge--new" title="New skill synthesized from this session">
+                new skill
+              </span>
+            )}
+            {activity.synthesized && activity.outcome !== 'synthesized' && (
+              <span className="skill-toast-badge skill-toast-badge--learned" title="Learned skill from a prior session">
+                learned
+              </span>
+            )}
             {activity.vaultDelegated && (
               <span className="skill-toast-badge skill-toast-badge--vault" title="Credentialed operation">
                 secured

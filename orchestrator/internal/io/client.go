@@ -171,6 +171,7 @@ type SkillActivityPayload struct {
 	Command        string `json:"command"`
 	ElapsedMS      int64  `json:"elapsedMs"`
 	VaultDelegated bool   `json:"vaultDelegated"`
+	Synthesized    bool   `json:"synthesized"`
 	Outcome        string `json:"outcome"`
 	Timestamp      int64  `json:"timestamp"` // Unix ms
 }

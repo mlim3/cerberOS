@@ -151,6 +151,7 @@ export interface SkillActivity {
   command: string;
   elapsedMs: number;
   vaultDelegated: boolean;
+  synthesized?: boolean; // true when the command was dynamically synthesized, or outcome === 'synthesized'
   outcome: string;
   timestamp: number; // Unix ms
 }
@@ -264,6 +265,7 @@ export function parseOrchestratorStreamEvent(raw: unknown): OrchestratorStreamEv
           command: p.command as string,
           elapsedMs: typeof p.elapsedMs === 'number' ? p.elapsedMs : 0,
           vaultDelegated: p.vaultDelegated === true,
+          synthesized: p.synthesized === true,
           outcome: typeof p.outcome === 'string' ? p.outcome : '',
           timestamp: typeof p.timestamp === 'number' ? p.timestamp : Date.now(),
         },

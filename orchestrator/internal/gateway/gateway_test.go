@@ -992,7 +992,7 @@ func TestSkillActivity_WebDomain_IsForwardedToHandler(t *testing.T) {
 	gw, nats := newGateway(t)
 
 	var received []string
-	gw.RegisterSkillActivityHandler(func(agentID, taskID, domain, command, outcome string, elapsedMS int64, vaultDelegated bool) {
+	gw.RegisterSkillActivityHandler(func(agentID, taskID, domain, command, outcome string, elapsedMS int64, vaultDelegated, synthesized bool) {
 		received = append(received, command)
 	})
 
@@ -1017,7 +1017,7 @@ func TestSkillActivity_LogsSearch_IsForwardedToHandler(t *testing.T) {
 	gw, nats := newGateway(t)
 
 	var received []string
-	gw.RegisterSkillActivityHandler(func(agentID, taskID, domain, command, outcome string, elapsedMS int64, vaultDelegated bool) {
+	gw.RegisterSkillActivityHandler(func(agentID, taskID, domain, command, outcome string, elapsedMS int64, vaultDelegated, synthesized bool) {
 		received = append(received, command)
 	})
 
@@ -1040,7 +1040,7 @@ func TestSkillActivity_SlowTool_IsForwardedToHandler(t *testing.T) {
 	gw, nats := newGateway(t)
 
 	var receivedElapsed []int64
-	gw.RegisterSkillActivityHandler(func(agentID, taskID, domain, command, outcome string, elapsedMS int64, vaultDelegated bool) {
+	gw.RegisterSkillActivityHandler(func(agentID, taskID, domain, command, outcome string, elapsedMS int64, vaultDelegated, synthesized bool) {
 		receivedElapsed = append(receivedElapsed, elapsedMS)
 	})
 
@@ -1063,7 +1063,7 @@ func TestSkillActivity_FastNonWebTool_IsNotForwarded(t *testing.T) {
 	gw, nats := newGateway(t)
 
 	var callCount int
-	gw.RegisterSkillActivityHandler(func(agentID, taskID, domain, command, outcome string, elapsedMS int64, vaultDelegated bool) {
+	gw.RegisterSkillActivityHandler(func(agentID, taskID, domain, command, outcome string, elapsedMS int64, vaultDelegated, synthesized bool) {
 		callCount++
 	})
 
@@ -1087,7 +1087,7 @@ func TestSkillActivity_VaultDelegated_IsForwardedToHandler(t *testing.T) {
 	gw, nats := newGateway(t)
 
 	var vaultDelegatedReceived []bool
-	gw.RegisterSkillActivityHandler(func(agentID, taskID, domain, command, outcome string, elapsedMS int64, vaultDelegated bool) {
+	gw.RegisterSkillActivityHandler(func(agentID, taskID, domain, command, outcome string, elapsedMS int64, vaultDelegated, synthesized bool) {
 		vaultDelegatedReceived = append(vaultDelegatedReceived, vaultDelegated)
 	})
 
@@ -1111,7 +1111,7 @@ func TestSkillActivity_SynthesizedSkill_IsForwardedToHandler(t *testing.T) {
 	gw, nats := newGateway(t)
 
 	var received []string
-	gw.RegisterSkillActivityHandler(func(agentID, taskID, domain, command, outcome string, elapsedMS int64, vaultDelegated bool) {
+	gw.RegisterSkillActivityHandler(func(agentID, taskID, domain, command, outcome string, elapsedMS int64, vaultDelegated, synthesized bool) {
 		received = append(received, command)
 	})
 
@@ -1135,7 +1135,7 @@ func TestSkillActivity_NonSkillAuditEvent_IsIgnored(t *testing.T) {
 	gw, nats := newGateway(t)
 
 	callCount := 0
-	gw.RegisterSkillActivityHandler(func(agentID, taskID, domain, command, outcome string, elapsedMS int64, vaultDelegated bool) {
+	gw.RegisterSkillActivityHandler(func(agentID, taskID, domain, command, outcome string, elapsedMS int64, vaultDelegated, synthesized bool) {
 		callCount++
 	})
 

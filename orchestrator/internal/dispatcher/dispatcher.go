@@ -1429,7 +1429,8 @@ func buildDecompositionInstructionsWithFacts(taskID, rawInput string, scope type
 			"- Use an empty array for depends_on when a subtask has no dependencies\n"+
 			"- Keep the plan concise and executable\n"+
 			"Skill domain guide: use \"web\" for search/fetch/web_search, \"data\" for transforms/reads/writes, \"comms\" for messaging, \"storage\" for file operations, \"logs\" for log queries, \"google_search\" for Google search via Serper, \"general\" for reasoning/summarization with no external tools.\n"+
-			"- Only assign a credentialed domain (google_search, github, web, data, comms, storage) to a subtask if the corresponding credential type appears in the available credential types list above\n"+
+			"- Only assign a credentialed domain (google_search, github, data, comms, storage) to a subtask if the corresponding credential type appears in the available credential types list above\n"+
+			"- The \"web\" domain (web.fetch, web.parse, web.extract) does NOT require credentials — use it freely for any URL fetch or content extraction task\n"+
 			"Ambiguity handling (CRITICAL):\n"+
 			"- You MUST return a valid execution plan JSON object. NEVER reply with a clarifying question, free-form text, an apology, or anything that is not JSON matching the schema above.\n"+
 			"- If the user's message is ambiguous, conversational, a greeting, or a follow-up that depends on prior context, produce a SINGLE-subtask plan where one general-domain agent composes a direct natural-language answer using the conversation context provided.\n"+

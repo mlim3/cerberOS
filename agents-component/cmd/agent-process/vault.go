@@ -281,15 +281,20 @@ func (ve *VaultExecutor) routeResult(data []byte) {
 // no-op so telemetry never affects the ReAct loop.
 //
 // vaultDelegated is true when the tool required vault execution (non-empty
-// RequiredCredentialTypes). The orchestrator uses this flag to apply the
-// notability filter for UI skill-activity toasts.
-func (ve *VaultExecutor) EmitSkillInvocation(domain, command, depth string, elapsedMS int64, outcome string, vaultDelegated bool) {
+// RequiredCredentialTypes). synthesized is true when the tool was dynamically
+// created by post-task synthesis in a prior session. The orchestrator uses
+// these flags to apply the notability filter for UI skill-activity toasts.
+func (ve *VaultExecutor) EmitSkillInvocation(domain, command, depth string, elapsedMS int64, outcome string, vaultDelegated, synthesized bool) {
 	if ve == nil {
 		return
 	}
 	vaultDelegatedStr := "false"
 	if vaultDelegated {
 		vaultDelegatedStr = "true"
+	}
+	synthesizedStr := "false"
+	if synthesized {
+		synthesizedStr = "true"
 	}
 	ve.emitAudit(types.AuditEventSkillInvocation, map[string]string{
 		"domain":           domain,
@@ -298,6 +303,23 @@ func (ve *VaultExecutor) EmitSkillInvocation(domain, command, depth string, elap
 		"elapsed_ms":       fmt.Sprintf("%d", elapsedMS),
 		"outcome":          outcome,
 		"vault_delegated":  vaultDelegatedStr,
+		"synthesized":      synthesizedStr,
+	})
+}
+
+// EmitSkillSynthesized publishes a skill_synthesized audit event when a new
+// skill has been successfully created by post-task synthesis and persisted to
+// the Memory Component. The orchestrator routes this to the IO Component so
+// the UI can surface a "new skill created" toast.
+//
+// EmitSkillSynthesized is nil-safe — a no-op when ve is nil (NATS absent).
+func (ve *VaultExecutor) EmitSkillSynthesized(domain, skillName string) {
+	if ve == nil {
+		return
+	}
+	ve.emitAudit(types.AuditEventSkillSynthesized, map[string]string{
+		"domain":     domain,
+		"skill_name": skillName,
 	})
 }
 
@@ -338,6 +360,8 @@ func (ve *VaultExecutor) emitAudit(eventType string, details map[string]string) 
 		}
 		if _, err := ve.js.Publish(comms.SubjectAuditEvent, data); err != nil {
 			ve.log.Error("audit.event publish failed", "event_type", eventType, "error", err)
+		} else {
+			ve.log.Info("audit.event publish ok", "event_type", eventType, "subject", comms.SubjectAuditEvent)
 		}
 	}()
 }

@@ -72,6 +72,23 @@
   border: 1px solid rgba(96, 165, 250, 0.3);
 }
 
+/* "new skill" badge — shown when a skill_synthesized event fires */
+.skill-toast-badge--new {
+  background: rgba(52, 211, 153, 0.18);
+  color: #6ee7b7;
+  border: 1px solid rgba(52, 211, 153, 0.3);
+}
+
+/* "learned" badge — shown when a previously-synthesized skill is used */
+.skill-toast-badge--learned {
+  background: rgba(167, 139, 250, 0.18);
+  color: #c4b5fd;
+  border: 1px solid rgba(167, 139, 250, 0.3);
+}
+
+/* Domain accent for synthesized-skill creation toasts (no domain prefix) */
+.skill-toast--synthesized { border-left: 3px solid #34d399; }
+
 .skill-toast-elapsed {
   font-size: 0.6875rem;
   color: #9ca3af;
