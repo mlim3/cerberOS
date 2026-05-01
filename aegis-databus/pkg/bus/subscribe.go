@@ -78,8 +78,13 @@ func retrySubscribe(fn func() (*nats.Subscription, error), subject string) (*nat
 		if attempt == maxAttempts || !strings.Contains(err.Error(), "already bound") {
 			return nil, err
 		}
-		slog.Warn("bus: durable consumer already bound, retrying",
-			"subject", subject, "attempt", attempt, "backoff", backoff)
+		slog.Default().With("module", "subscribe-retry").Warn(
+			"durable consumer is already bound to another subscriber; retrying with backoff (rolling restart in progress)",
+			"subject", subject,
+			"attempt", attempt,
+			"max_attempts", maxAttempts,
+			"backoff", backoff,
+		)
 		time.Sleep(backoff)
 		if backoff < 30*time.Second {
 			backoff *= 2

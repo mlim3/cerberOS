@@ -293,11 +293,11 @@ func main() {
 	defer shutdownCancel()
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		logger.Error("server shutdown failed", "error", err)
+		logger.Error("memory server shutdown failed; some in-flight requests may have been dropped", "error", err)
 		os.Exit(1)
 	}
 
-	logger.Info("server stopped")
+	logger.Info("memory server stopped cleanly")
 }
 
 func getEnvOrDefault(key, defaultValue string) string {
@@ -307,8 +307,12 @@ func getEnvOrDefault(key, defaultValue string) string {
 	return defaultValue
 }
 
-// loggingMiddleware adds basic request logging
+// loggingMiddleware adds basic request logging. Each request line carries
+// component=memory module=http and a human-readable msg describing the
+// request outcome at INFO; 5xx errors are logged at WARN to make them stand
+// out in dashboards.
 func loggingMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
+	httpLogger := logger.With("module", "http")
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 
@@ -318,11 +322,18 @@ func loggingMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 		next.ServeHTTP(rw, r)
 
 		duration := time.Since(start)
-		logger.Info("http request",
-			"method", r.Method,
-			"path", r.URL.Path,
-			"status", rw.statusCode,
-			"duration", duration,
+		level := slog.LevelInfo
+		if rw.statusCode >= 500 {
+			level = slog.LevelWarn
+		} else if rw.statusCode >= 400 {
+			level = slog.LevelInfo
+		}
+		httpLogger.LogAttrs(r.Context(), level,
+			"memory http request handled",
+			slog.String("method", r.Method),
+			slog.String("path", r.URL.Path),
+			slog.Int("status", rw.statusCode),
+			slog.Duration("duration", duration),
 		)
 	})
 }

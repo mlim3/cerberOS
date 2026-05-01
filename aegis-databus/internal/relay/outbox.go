@@ -58,7 +58,9 @@ func (r *OutboxRelay) Start(ctx context.Context) {
 	doFetch := func() {
 		entries, err := r.MemoryClient.FetchPendingOutbox(ctx, r.MaxBatch)
 		if err != nil {
-			logger.Error("outbox fetch failed", "error", err)
+			logger.Error("could not fetch pending outbox entries from storage; will retry after backoff",
+				"error", err,
+				"backoff", backoff)
 			if !sleepWithContext(ctx, backoff) {
 				return
 			}
@@ -66,6 +68,10 @@ func (r *OutboxRelay) Start(ctx context.Context) {
 			return
 		}
 		backoff = initialBackoff
+		if len(entries) > 0 {
+			logger.Debug("fetched batch of pending outbox entries; relaying to jetstream",
+				"batch_size", len(entries))
+		}
 
 		for _, entry := range entries {
 			if ctx.Err() != nil {
@@ -82,30 +88,41 @@ func (r *OutboxRelay) Start(ctx context.Context) {
 					attribute.String("messaging.destination", entry.Subject),
 					attribute.String("outbox.id", entry.ID),
 				))
+			source, corrID, traceID := envelope.ParseMetadata(entry.Payload)
+			entryLog := logger.With(
+				"outbox_id", entry.ID,
+				"subject", entry.Subject,
+				"source_component", source,
+				"correlation_id", corrID,
+				"trace_id", traceID,
+				"size_bytes", len(entry.Payload),
+			)
 			ack, err := bus.PublishValidated(r.JS, entry.Subject, entry.Payload)
 			if err != nil {
 				span.RecordError(err)
 			}
 			span.End()
 			if err != nil {
-				logger.Error("outbox publish failed",
-					"subject", entry.Subject,
-					"size_bytes", len(entry.Payload),
+				entryLog.Error("could not publish outbox entry to jetstream; will retry after backoff",
 					"attempt", entry.AttemptCount+1,
 					"error", err,
 				)
 				if updateErr := r.applyPublishFailure(ctx, entry); updateErr != nil {
-					logger.Error("outbox update failed", "entry_id", entry.ID, "error", updateErr)
+					entryLog.Error("could not record outbox publish failure in storage; entry may be retried out of sequence",
+						"error", updateErr)
 				}
 				continue
 			}
 
 			if err := r.MemoryClient.MarkOutboxSent(ctx, entry.ID, ack.Sequence); err != nil {
-				logger.Error("outbox mark sent failed", "entry_id", entry.ID, "error", err)
+				entryLog.Error("published outbox entry to jetstream but could not mark it sent in storage; risk of duplicate publish on next tick",
+					"jetstream_sequence", ack.Sequence,
+					"error", err)
 			} else {
 				metrics.OutboxRelayProcessed.Inc()
+				entryLog.Info("relayed outbox entry from storage to jetstream; marked sent and appended audit metadata",
+					"jetstream_sequence", ack.Sequence)
 				// Audit log: metadata only, no payload (SR-DB-005); traceid for Design Principle 4
-				source, corrID, traceID := envelope.ParseMetadata(entry.Payload)
 				_ = r.MemoryClient.AppendAuditLog(ctx, memory.AuditLogEntry{
 					ID:            entry.ID,
 					Subject:       entry.Subject,

@@ -28,7 +28,7 @@ import {
   SUBJECT_IO_RESULTS,
 } from './nats/client'
 import { traceMiddleware } from './trace-context'
-import { ioLog, logFromContext } from './logger'
+import { ioLog, logFromContext, previewHeadTail, previewWords } from './logger'
 import { startHeartbeatEmitter } from './heartbeat'
 
 // =============================================================================
@@ -105,8 +105,10 @@ const natsClient = createNatsClient({
 })
 ioLog(
   'info',
-  'transport',
-  natsClient ? 'using NATS' : 'using HTTP bridge (POST /api/orchestrator/stream-events)',
+  'startup',
+  natsClient
+    ? 'orchestrator transport: connected nats client (chat will reach orchestrator over jetstream)'
+    : 'orchestrator transport: no nats; falling back to http bridge (POST /api/orchestrator/stream-events)',
 )
 
 startHeartbeatEmitter(natsClient)
@@ -230,14 +232,17 @@ if (natsClient) {
     if (msgType === 'task_accepted') {
       if (taskId) {
         deliverChatResponse(taskId, 'Task accepted — the orchestrator is working on it.\n', false)
-        ioLog('info', 'nats', 'task_accepted', { task_id: taskId })
+        ioLog('info', 'nats', 'orchestrator accepted task; relaying acknowledgment to chat stream', { task_id: taskId })
       }
     } else if (msgType === 'task_result') {
       const result = payload.result as unknown
       const content = extractHumanResult(result)
       if (taskId) {
         deliverChatResponse(taskId, content, true)
-        ioLog('info', 'nats', 'task_result', { task_id: taskId })
+        ioLog('info', 'nats', 'orchestrator returned final task result; closing chat stream', {
+          task_id: taskId,
+          result_preview: previewHeadTail(content),
+        })
       }
     } else if (msgType === 'error_response') {
       const userMsg = (payload.user_message ?? 'An error occurred.') as string
@@ -247,13 +252,15 @@ if (natsClient) {
         if (cb) {
           cb.error(userMsg)
           pendingChatResponses.delete(errKey)
-          ioLog('warn', 'nats', 'error_response', { task_id: errKey, detail: userMsg })
+          ioLog('warn', 'nats', 'orchestrator returned error_response; failing waiting chat stream', {
+            task_id: errKey,
+            detail_preview: previewHeadTail(userMsg),
+          })
         } else {
-          ioLog('warn', 'nats', 'error_response_no_pending_chat', {
+          ioLog('warn', 'nats', 'orchestrator returned error_response but no chat stream is waiting (client disconnected or task_id mismatch)', {
             task_id: errKey,
             subject,
-            detail: userMsg,
-            hint: 'client disconnected before callback or task id key mismatch',
+            detail_preview: previewHeadTail(userMsg),
           })
         }
       }
@@ -378,12 +385,12 @@ app.use('/*', traceMiddleware);
 // =============================================================================
 
 app.get('/health', (c) => {
-  logFromContext(c, 'info', 'http', 'GET /health')
+  logFromContext(c, 'debug', 'http', 'liveness probe')
   return c.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
 app.get('/api/health', (c) => {
-  logFromContext(c, 'info', 'http', 'GET /api/health')
+  logFromContext(c, 'debug', 'http', 'liveness probe')
   return c.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
@@ -392,7 +399,7 @@ app.get('/api/health', (c) => {
 // =============================================================================
 
 app.get('/api/status', (c) => {
-  logFromContext(c, 'info', 'http', 'GET /api/status')
+  logFromContext(c, 'debug', 'http', 'status probe')
   const stt = (process.env.STT_PROVIDER ?? 'local').toLowerCase()
   return c.json({
     io_api: 'ok',
@@ -411,7 +418,7 @@ app.get('/api/status', (c) => {
 
 // Get all tasks
 app.get('/api/tasks', (c) => {
-  logFromContext(c, 'info', 'http', 'GET /api/tasks')
+  logFromContext(c, 'debug', 'http', 'listed in-memory task statuses for ui')
   const taskList = Array.from(tasks.values());
   return c.json({ tasks: taskList });
 });
@@ -420,11 +427,12 @@ app.get('/api/tasks', (c) => {
 app.get('/api/tasks/:taskId', (c) => {
   const taskId = c.req.param('taskId');
   c.set('taskId', taskId)
-  logFromContext(c, 'info', 'http', 'GET /api/tasks/:taskId')
   const task = tasks.get(taskId);
   if (!task) {
+    logFromContext(c, 'debug', 'http', 'ui requested status for unknown task')
     return c.json({ error: 'Task not found' }, 404);
   }
+  logFromContext(c, 'debug', 'http', 'served current task status to ui', { status: task.status })
   return c.json(task);
 });
 
@@ -436,8 +444,16 @@ app.post('/api/conversations', async (c) => {
     title: typeof title === 'string' ? title : undefined,
   })
   if (!conversation) {
+    logFromContext(c, 'error', 'http', 'memory rejected conversation creation; returning 502 to ui', {
+      user_id: effectiveUserId,
+    })
     return c.json({ error: 'Failed to create conversation' }, 502)
   }
+  c.set('conversationId', conversation.conversationId)
+  logFromContext(c, 'info', 'http', 'created new conversation thread for user', {
+    user_id: effectiveUserId,
+    title_preview: previewWords(conversation.title ?? ''),
+  })
   return c.json({
     conversationId: conversation.conversationId,
     title: conversation.title,
@@ -462,6 +478,10 @@ app.post('/api/tasks', async (c) => {
     status,
   })
   if (!createdTask) {
+    logFromContext(c, 'error', 'http', 'memory rejected task creation; returning 502 to ui', {
+      user_id: userId,
+      conversation_id: conversationId,
+    })
     return c.json({ error: 'Failed to create task' }, 502)
   }
 
@@ -469,8 +489,10 @@ app.post('/api/tasks', async (c) => {
   c.set('taskId', taskId)
   c.set('conversationId', createdTask.conversationId)
 
-  logFromContext(c, 'info', 'http', 'POST /api/tasks', {
+  logFromContext(c, 'info', 'http', 'created new task in conversation; awaiting orchestrator pickup', {
     user_id: userId,
+    title_preview: previewWords(title ?? ''),
+    initial_status: status,
   })
 
   const statusUpdate: StatusUpdate = {
@@ -507,9 +529,18 @@ app.post('/api/orchestrator/stream-events', async (c) => {
   }
   const taskId = event.payload.taskId;
   if (taskId) c.set('taskId', taskId)
-  logFromContext(c, 'info', 'orchestrator-proxy', 'POST /api/orchestrator/stream-events', {
-    event_type: event.type,
-  })
+  const eventLogFields: Record<string, unknown> = { event_type: event.type }
+  if (event.type === 'credential_request') {
+    const cr = event.payload as { label?: string; description?: string; keyName?: string }
+    if (cr.keyName) eventLogFields.key_name = cr.keyName
+    if (cr.label) eventLogFields.label_preview = previewWords(cr.label)
+    if (cr.description) eventLogFields.description_preview = previewWords(cr.description)
+  } else if (event.type === 'chat_response') {
+    const cr = event.payload as { content?: string; done?: boolean }
+    if (cr.content) eventLogFields.content_preview = previewHeadTail(cr.content)
+    if (typeof cr.done === 'boolean') eventLogFields.done = cr.done
+  }
+  logFromContext(c, 'info', 'orchestrator-proxy', `received ${event.type} push from orchestrator; broadcasting to ui sse listeners`, eventLogFields)
   if (event.type === 'status') {
     tasks.set(taskId, event.payload);
   } else if (event.type === 'chat_response') {
@@ -554,12 +585,17 @@ app.post('/api/orchestrator/plan-decision', async (c) => {
   }
 
   c.set('taskId', taskId)
-  logFromContext(c, 'info', 'orchestrator-proxy', 'POST /api/orchestrator/plan-decision', {
+  logFromContext(c, 'info', 'orchestrator-proxy', `user ${approved ? 'approved' : 'rejected'} the proposed plan; forwarding decision to orchestrator`, {
     orchestrator_task_ref: orchestratorTaskRef,
     approved,
+    reason_preview: reason ? previewWords(reason) : undefined,
   })
 
   if (!natsClient?.connected) {
+    logFromContext(c, 'error', 'orchestrator-proxy', 'cannot deliver plan decision: orchestrator nats connection is down', {
+      orchestrator_task_ref: orchestratorTaskRef,
+      approved,
+    })
     return c.json(
       { error: 'orchestrator not connected — cannot deliver decision' },
       503,
@@ -575,7 +611,7 @@ app.post('/api/orchestrator/plan-decision', async (c) => {
       trace_id: c.get('traceId'),
     })
   } catch (err) {
-    logFromContext(c, 'error', 'nats', 'failed to publish plan_decision', {
+    logFromContext(c, 'error', 'nats', 'failed to publish plan_decision to orchestrator on nats', {
       err: String(err),
     })
     return c.json({ error: 'failed to publish decision' }, 502)
@@ -596,13 +632,17 @@ app.post('/api/chat', async (c) => {
   const traceId = c.get('traceId') as string | undefined;
   if (taskId) c.set('taskId', taskId)
   if (conversationId) c.set('conversationId', conversationId)
-  logFromContext(c, 'info', 'http', 'POST /api/chat', {
+  logFromContext(c, 'info', 'http', 'received chat message from user; queuing for orchestrator', {
     user_id: effectiveUserId,
+    content_preview: previewHeadTail(content),
     content_len: content.length,
-    history_len: conversationHistory?.length,
+    history_turns: conversationHistory?.length ?? 0,
   })
 
   if (!conversationId) {
+    logFromContext(c, 'warn', 'http', 'rejected chat message: request omitted required conversationId', {
+      user_id: effectiveUserId,
+    })
     return c.json({ error: 'conversationId is required' }, 400)
   }
   // Log user message via memory client — fire-and-forget so the SSE stream opens immediately.
@@ -655,14 +695,18 @@ app.post('/api/chat', async (c) => {
         required_skill_domains,
       })
       awaitingOrchestratorChat = true
-      logFromContext(c, 'info', 'nats', 'published user_task', {
+      logFromContext(c, 'info', 'nats', 'forwarded chat message to orchestrator on user_task subject', {
         is_follow_up: isFollowUp,
         history_turns: conversationHistory?.length ?? 0,
         raw_input_len: rawInput.length,
+        content_preview: previewHeadTail(content),
       })
     } catch (err) {
       userTaskPublishError = String(err)
-      logFromContext(c, 'error', 'nats', 'failed to publish user_task', { err: userTaskPublishError })
+      logFromContext(c, 'error', 'nats', 'failed to publish user_task to orchestrator on nats; will return fallback to chat stream', {
+        err: userTaskPublishError,
+        content_preview: previewHeadTail(content),
+      })
     }
   }
 
@@ -674,6 +718,7 @@ app.post('/api/chat', async (c) => {
       if (!DEMO_MODE && !natsClient?.connected) {
         const fallbackMsg = '[IO] Orchestrator is not connected. The message was logged but cannot be processed.\n\n' +
              'To connect the orchestrator, configure NATS_URL or start the orchestrator service.\n'
+        logFromContext(c, 'warn', 'http', 'orchestrator nats connection is down; replying to chat stream with fallback message')
         controller.enqueue(encoder.encode(`data: ${JSON.stringify({ chunk: fallbackMsg })}\n\n`));
         controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true })}\n\n`));
         controller.close();
@@ -784,7 +829,7 @@ app.post('/api/chat', async (c) => {
         })
         // Flush the local ack immediately so the user sees feedback before the orchestrator round-trip.
         safeEnqueue(`data: ${JSON.stringify({ chunk: accumulated })}\n\n`)
-        ioLog('info', 'http', 'task_received_local_ack', { task_id: taskId })
+        ioLog('info', 'http', 'sent local ack to chat stream while awaiting orchestrator', { task_id: taskId })
         // SSE comment line primes buffered proxies/bun runtime so the next real chunk isn't held back.
         safeEnqueue(': io-waiting\n\n')
         // Idle long-poll streams can be closed by proxies or stacks with no bytes for ~30s; keep TCP/SSE alive until orchestrator responds.
@@ -796,7 +841,10 @@ app.post('/api/chat', async (c) => {
           }
           safeEnqueue(': keepalive\n\n')
         }, 8_000)
-        ioLog('info', 'http', 'chat_stream_pending', { task_id: taskId, pending_key: pendingKey })
+        ioLog('info', 'http', 'registered chat stream as pending; awaiting orchestrator response (timeout 120s)', {
+          task_id: taskId,
+          pending_key: pendingKey,
+        })
         return
       }
 
@@ -842,28 +890,30 @@ app.get('/api/logs/:taskId', async (c) => {
   const traceId = c.get('traceId') as string | undefined;
   const userId = requestUserId(c)
   c.set('taskId', taskId)
-  logFromContext(c, 'info', 'http', 'GET /api/logs/:taskId', { task_id: taskId })
   const task = await getTask(taskId, userId)
   if (!task) {
+    logFromContext(c, 'debug', 'http', 'ui requested chat history for unknown task', { user_id: userId })
     return c.json({ logs: [] })
   }
   c.set('conversationId', task.conversationId)
   const memoryLogs = await getConversationLogs(task.conversationId, { userId, traceId })
   const logs = memoryLogs.map(memoryToLogEntry)
+  logFromContext(c, 'debug', 'http', 'served conversation chat history to ui', { user_id: userId, log_count: logs.length })
   return c.json({ logs });
 });
 
 app.get('/api/conversations', async (c) => {
   const userId = requestUserId(c)
-  logFromContext(c, 'info', 'http', 'GET /api/conversations', { user_id: userId })
   const conversations = await listConversations(userId)
+  logFromContext(c, 'debug', 'http', 'served conversation list to ui', { user_id: userId, conversation_count: conversations.length })
   return c.json({ conversations })
 })
 
 app.delete('/api/conversations/:conversationId', async (c) => {
   const conversationId = c.req.param('conversationId')
   const userId = requestUserId(c)
-  logFromContext(c, 'info', 'http', 'DELETE /api/conversations/:conversationId', { user_id: userId })
+  c.set('conversationId', conversationId)
+  logFromContext(c, 'info', 'http', 'user deleted conversation thread', { user_id: userId })
   await deleteConversation(conversationId, userId)
   return c.json({ ok: true })
 })
@@ -872,9 +922,15 @@ app.patch('/api/conversations/:conversationId', async (c) => {
   const conversationId = c.req.param('conversationId')
   const userId = requestUserId(c)
   const body = await c.req.json() as { title?: string }
-  logFromContext(c, 'info', 'http', 'PATCH /api/conversations/:conversationId', { user_id: userId })
+  c.set('conversationId', conversationId)
   if (body.title) {
+    logFromContext(c, 'info', 'http', 'user renamed conversation thread', {
+      user_id: userId,
+      title_preview: previewWords(body.title),
+    })
     await renameConversation(conversationId, userId, body.title)
+  } else {
+    logFromContext(c, 'debug', 'http', 'patch conversation called without title; nothing to update', { user_id: userId })
   }
   return c.json({ ok: true })
 })
@@ -883,16 +939,17 @@ app.get('/api/conversations/:conversationId/logs', async (c) => {
   const conversationId = c.req.param('conversationId')
   const userId = requestUserId(c)
   c.set('conversationId', conversationId)
-  logFromContext(c, 'info', 'http', 'GET /api/conversations/:conversationId/logs', {
-    user_id: userId,
-  })
   const memoryLogs = await getConversationLogs(conversationId, { userId })
+  logFromContext(c, 'debug', 'http', 'served conversation logs to ui', {
+    user_id: userId,
+    log_count: memoryLogs.length,
+  })
   return c.json({ logs: memoryLogs.map(memoryToLogEntry) })
 })
 
 // Get all logs — session-scoped queries via /api/logs/:taskId are the intended API
 app.get('/api/logs', (c) => {
-  logFromContext(c, 'info', 'http', 'GET /api/logs')
+  logFromContext(c, 'debug', 'http', 'global log endpoint hit; returning empty list (use /api/logs/:taskId)')
   return c.json({ logs: [] });
 });
 
@@ -912,7 +969,7 @@ app.post('/api/credential', async (c) => {
   };
   const { taskId, requestId, userId, keyName } = body;
   c.set('taskId', taskId)
-  logFromContext(c, 'info', 'http', 'POST /api/credential', {
+  logFromContext(c, 'info', 'credential', 'received credential value from user; forwarding to memory vault (value not logged)', {
     request_id: requestId,
     user_id: userId,
     key_name: keyName,
@@ -938,6 +995,12 @@ app.post('/api/credential', async (c) => {
 
     if (!vaultRes.ok) {
       const errText = await vaultRes.text();
+      logFromContext(c, 'error', 'credential', 'memory vault rejected credential storage; returning 500 to ui', {
+        request_id: requestId,
+        user_id: userId,
+        key_name: keyName,
+        vault_status: vaultRes.status,
+      })
       return c.json(
         {
           taskId,
@@ -950,6 +1013,11 @@ app.post('/api/credential', async (c) => {
       );
     }
 
+    logFromContext(c, 'info', 'credential', 'credential stored in memory vault for user', {
+      request_id: requestId,
+      user_id: userId,
+      key_name: keyName,
+    })
     return c.json(
       {
         taskId,
@@ -960,7 +1028,11 @@ app.post('/api/credential', async (c) => {
       201,
     );
   } catch {
-    logFromContext(c, 'warn', 'credential', 'memory vault unavailable; simulating credential storage')
+    logFromContext(c, 'warn', 'credential', 'memory vault unreachable; simulating storage so chat flow continues (dev fallback)', {
+      request_id: requestId,
+      user_id: userId,
+      key_name: keyName,
+    })
     return c.json(
       {
         taskId,
@@ -980,7 +1052,7 @@ app.post('/api/credential', async (c) => {
 app.get('/api/events/:taskId', (c) => {
   const taskId = c.req.param('taskId');
   c.set('taskId', taskId)
-  logFromContext(c, 'info', 'http', 'GET /api/events/:taskId')
+  logFromContext(c, 'debug', 'http', 'ui opened sse connection for task event stream')
 
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
@@ -1045,21 +1117,28 @@ app.get('/api/events/:taskId', (c) => {
 
 /** POST /api/voice/transcribe — transcribe audio using faster-whisper */
 app.post('/api/voice/transcribe', async (c) => {
-  logFromContext(c, 'info', 'http', 'POST /api/voice/transcribe')
   const body = await c.req.json<{
     audioData: string
     format: string
     language?: string
   }>()
+  logFromContext(c, 'info', 'voice', 'received audio for speech-to-text transcription', {
+    format: body.format,
+    language: body.language,
+    audio_bytes: typeof body.audioData === 'string' ? body.audioData.length : 0,
+  })
 
   try {
     const result = await transcribe({
       audioData: body.audioData,
       language: body.language,
     })
+    logFromContext(c, 'info', 'voice', 'transcribed audio to text and returning preview to ui', {
+      transcript_preview: previewWords(result.text ?? ''),
+    })
     return c.json(result)
   } catch (err) {
-    logFromContext(c, 'error', 'voice', 'transcription failed', { err: String(err) })
+    logFromContext(c, 'error', 'voice', 'speech-to-text transcription failed; returning 500 to ui', { err: String(err) })
     return c.json({ error: String(err) }, 500)
   }
 })

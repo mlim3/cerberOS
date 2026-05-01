@@ -199,7 +199,9 @@ func (e *PlanExecutor) Execute(ctx context.Context, plan types.ExecutionPlan, ts
 
 	e.activePlans.Store(plan.PlanID, exec)
 
-	log.Info("plan execution initialized", "plan_id", plan.PlanID, "subtask_count", len(plan.Subtasks))
+	log.Info("plan execution initialized; dispatching subtasks with no dependencies first",
+		"plan_id", plan.PlanID,
+		"subtask_count", len(plan.Subtasks))
 
 	// Dispatch subtasks that have no dependencies.
 	e.dispatchReadySubtasks(ctx, exec)
@@ -216,7 +218,7 @@ func (e *PlanExecutor) HandleSubtaskResult(ctx context.Context, result types.Tas
 	// Resolve which plan/subtask this result belongs to.
 	planIDVal, ok := e.orchRefToPlan.Load(result.OrchestratorTaskRef)
 	if !ok {
-		log.Debug("task result for unknown orchRef — stale or already completed",
+		log.Debug("dropped subtask result: orchestrator_task_ref is not registered with any plan (stale, duplicate, or already completed)",
 			"orchestrator_task_ref", result.OrchestratorTaskRef)
 		return nil // stale result; ignore
 	}
@@ -229,7 +231,7 @@ func (e *PlanExecutor) HandleSubtaskResult(ctx context.Context, result types.Tas
 		// hit this branch it usually means the cleanup ordering allowed a
 		// late result through. Logged at INFO to make late-arriving results
 		// visible without alarming.
-		log.Info("task result arrived for already-completed plan",
+		log.Info("subtask result arrived after plan already finished; dropping",
 			"orchestrator_task_ref", result.OrchestratorTaskRef,
 			"plan_id", planID,
 		)
@@ -250,7 +252,7 @@ func (e *PlanExecutor) HandleSubtaskResult(ctx context.Context, result types.Tas
 		// hallucinated plan_id from the planner LLM caused a later plan to
 		// overwrite an earlier one in activePlans). Keep this WARN so any
 		// future regression is loud rather than silent.
-		log.Warn("task result orchRef not in plan index — silent drop prevented",
+		log.Warn("subtask result orchRef is not in plan's index; preventing silent drop (likely planner returned a duplicate plan_id)",
 			"orchestrator_task_ref", result.OrchestratorTaskRef,
 			"plan_id", planID,
 		)
@@ -266,7 +268,9 @@ func (e *PlanExecutor) HandleSubtaskResult(ctx context.Context, result types.Tas
 
 	// Revoke credentials for this subtask's agent.
 	if err := e.policy.RevokeCredentials(subCtx, result.OrchestratorTaskRef); err != nil {
-		log.Error("subtask credential revocation failed", "error", err)
+		log.Error("could not revoke credentials for subtask agent; vault tokens may linger until ttl",
+			"agent_id", result.AgentID,
+			"error", err)
 	}
 
 	now := time.Now().UTC()
@@ -276,12 +280,16 @@ func (e *PlanExecutor) HandleSubtaskResult(ctx context.Context, result types.Tas
 		sub.Result = result.Result
 		sub.AgentID = result.AgentID
 		sub.CompletedAt = &now
-		log.Info("subtask completed")
+		log.Info("subtask completed by agent; piping result to dependents and unblocking next subtasks",
+			"agent_id", result.AgentID,
+			"result_preview", observability.PreviewHeadTail(string(result.Result), 15, 10))
 	} else {
 		sub.State = types.SubtaskStateFailed
 		sub.ErrorCode = result.ErrorCode
 		sub.CompletedAt = &now
-		log.Warn("subtask failed", "error_code", result.ErrorCode)
+		log.Warn("subtask failed by agent; blocking dependent subtasks in the plan",
+			"agent_id", result.AgentID,
+			"error_code", result.ErrorCode)
 	}
 	e.persistSubtaskState(sub, exec.ts.OrchestratorTaskRef, now)
 	atomic.AddInt32(&exec.dispatchedCount, -1)
@@ -495,7 +503,10 @@ func (e *PlanExecutor) checkPlanCompletion(exec *planExecution) {
 
 	if !anyFailed && !anyBlocked {
 		// All subtasks completed successfully.
-		log.Info("plan completed", "subtask_count", len(exec.subtasks))
+		aggregatedBlob, _ := json.Marshal(completedResults)
+		log.Info("all subtasks completed successfully; handing aggregated results back to dispatcher",
+			"subtask_count", len(exec.subtasks),
+			"result_preview", observability.PreviewHeadTail(string(aggregatedBlob), 15, 10))
 		if e.onPlanComplete != nil {
 			e.onPlanComplete(exec.ts, completedResults)
 		}

@@ -67,7 +67,10 @@ func New(nc *nats.Conn, service string, log *slog.Logger) *Emitter {
 	}
 	pid := os.Getpid()
 	if log == nil {
-		log = slog.Default()
+		// Fallback path: ensure component is present even if the caller
+		// passed a bare default logger. component is required by
+		// docs/logging.md.
+		log = slog.Default().With("component", "databus")
 	}
 	return &Emitter{
 		nc:         nc,
@@ -89,7 +92,7 @@ func (e *Emitter) Start(ctx context.Context) {
 	defer ticker.Stop()
 
 	e.emit()
-	e.log.Info("heartbeat emitter started",
+	e.log.Info("service heartbeat emitter started; will publish liveness beats on the orchestrator's heartbeat subject",
 		"subject", e.subject,
 		"interval", e.interval,
 		"instance_id", e.instanceID,
@@ -98,7 +101,8 @@ func (e *Emitter) Start(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			e.log.Info("heartbeat emitter stopped")
+			e.log.Info("service heartbeat emitter stopped after shutdown signal; orchestrator will mark this instance dead at next sweep",
+				"subject", e.subject)
 			return
 		case <-ticker.C:
 			e.emit()
@@ -121,10 +125,11 @@ func (e *Emitter) emit() {
 	}
 	data, err := json.Marshal(beat)
 	if err != nil {
-		e.log.Warn("marshal beat failed", "error", err)
+		e.log.Warn("could not marshal heartbeat beat to json; skipping this tick", "error", err)
 		return
 	}
 	if err := e.nc.Publish(e.subject, data); err != nil {
-		e.log.Warn("publish beat failed", "error", err)
+		e.log.Warn("could not publish heartbeat beat to nats; orchestrator may mark this instance unhealthy",
+			"subject", e.subject, "error", err)
 	}
 }

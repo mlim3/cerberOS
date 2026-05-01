@@ -19,6 +19,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/cerberOS/agents-component/internal/logfields"
 	"github.com/cerberOS/agents-component/internal/skills"
 	"github.com/cerberOS/agents-component/pkg/types"
 )
@@ -254,8 +255,12 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 					// so the next task in this conversation includes the full exchange.
 					history = append(history, resp.ToParam())
 					if err := sl.WriteConversationSnapshot(spawnCtx.ConversationID, spawnCtx.TaskID, history, totalTokens); err != nil {
-						log.Warn("conversation snapshot write failed", "error", err)
+						log.Warn("could not persist conversation snapshot to memory; next follow-up turn will lack this exchange",
+							"error", err)
 					}
+					log.Info("model returned end_turn with text reply; finishing task",
+						"result_preview", logfields.PreviewHeadTail(block.Text, 15, 10),
+						"tool_call_count", toolCallCount)
 					return block.Text, history, nil
 				}
 			}
@@ -272,14 +277,16 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 		if resp.StopReason == anthropic.StopReasonMaxTokens {
 			for _, block := range resp.Content {
 				if block.Type == "text" && block.Text != "" {
-					log.Warn("response truncated by max_tokens",
+					log.Warn("model hit max_tokens before finishing reply; returning partial text with truncation notice",
 						"max_tokens", maxOutputTokens,
 						"output_tokens", resp.Usage.OutputTokens,
+						"result_preview", logfields.PreviewHeadTail(block.Text, 15, 10),
 					)
 					attemptSkillSynthesis(ctx, client, log, spawnCtx, sl, history, toolCallCount)
 					history = append(history, resp.ToParam())
 					if err := sl.WriteConversationSnapshot(spawnCtx.ConversationID, spawnCtx.TaskID, history, totalTokens); err != nil {
-						log.Warn("conversation snapshot write failed", "error", err)
+						log.Warn("could not persist conversation snapshot to memory after max_tokens stop; next follow-up turn will lack this exchange",
+							"error", err)
 					}
 					const truncationNotice = "\n\n_[Response truncated — output token limit reached. Send a follow-up message to continue.]_"
 					return block.Text + truncationNotice, history, nil
@@ -465,7 +472,10 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 		}
 
 		if taskDone {
-			log.Info("task_complete called", "result_len", len(finalResult))
+			log.Info("agent invoked task_complete tool with final result; closing react loop and writing conversation snapshot",
+				"result_preview", logfields.PreviewHeadTail(finalResult, 15, 10),
+				"result_len", len(finalResult),
+				"tool_call_count", toolCallCount)
 			attemptSkillSynthesis(ctx, client, log, spawnCtx, sl, history, toolCallCount)
 
 			// Close the tool_use → tool_result turn pair BEFORE snapshotting so
@@ -482,7 +492,8 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 			}
 
 			if err := sl.WriteConversationSnapshot(spawnCtx.ConversationID, spawnCtx.TaskID, history, totalTokens); err != nil {
-				log.Warn("conversation snapshot write failed", "error", err)
+				log.Warn("could not persist conversation snapshot to memory after task_complete; next follow-up turn will lack this exchange",
+					"error", err)
 			}
 			return finalResult, history, nil
 		}

@@ -4,8 +4,14 @@ import type { UISettings } from './SettingsPanel'
 import SidebarLogo from './SidebarLogo'
 import './TaskSidebar.css'
 
+// SidebarTask extends Task with the optional in-flight task id used by the
+// dashboard. Each row in the sidebar represents a *conversation* — task.id is
+// the conversation_id — and currentTaskId, when present, is the orchestrator
+// task currently running inside that conversation.
+type SidebarTask = Task & { currentTaskId?: string }
+
 interface TaskSidebarProps {
-  tasks: Task[]
+  tasks: SidebarTask[]
   selectedTaskId: string | null
   onSelectTask: (id: string) => void
   settings: UISettings
@@ -13,6 +19,21 @@ interface TaskSidebarProps {
   onCreateTask: () => void
   onDeleteTask: (id: string) => void
   onRenameTask: (id: string, title: string) => void
+}
+
+function buildTaskHoverTitle(task: SidebarTask): string {
+  const lines = [
+    `Title: ${task.title}`,
+    `Conversation ID: ${task.id}`,
+  ]
+  if (task.currentTaskId && task.currentTaskId !== task.id) {
+    lines.push(`Current task ID: ${task.currentTaskId}`)
+  }
+  lines.push(`Status: ${task.status}`)
+  if (task.lastUpdate) {
+    lines.push(`Last update: ${task.lastUpdate}`)
+  }
+  return lines.join('\n')
 }
 
 function TaskSidebar({ tasks, selectedTaskId, onSelectTask, settings, taskHeartbeats, onCreateTask, onDeleteTask, onRenameTask }: TaskSidebarProps) {
@@ -143,6 +164,7 @@ function TaskSidebar({ tasks, selectedTaskId, onSelectTask, settings, taskHeartb
                 <button
                   className="task-item-btn"
                   onClick={() => onSelectTask(task.id)}
+                  title={buildTaskHoverTitle(task)}
                 >
                   <div className="task-status">
                     {task.status === 'awaiting_feedback' && (

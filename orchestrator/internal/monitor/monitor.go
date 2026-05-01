@@ -90,8 +90,9 @@ func (m *Monitor) TrackTask(ts *types.TaskState) {
 		return
 	}
 	m.activeTasks.Store(ts.TaskID, ts)
-	observability.LogFromContext(taskCtx(ts, "task_monitor")).Info("task tracking started",
+	observability.LogFromContext(taskCtx(ts, "task_monitor")).Info("monitor started tracking task; will fail it on overall timeout",
 		"state", ts.State,
+		"timeout_at", ts.TimeoutAt,
 	)
 	go m.monitorTaskTimeout(ts)
 }
@@ -101,7 +102,11 @@ func (m *Monitor) TrackTask(ts *types.TaskState) {
 //
 // TODO Phase 5: implement
 func (m *Monitor) UntrackTask(taskID string) {
-	m.activeTasks.Delete(taskID)
+	if _, ok := m.activeTasks.LoadAndDelete(taskID); ok {
+		observability.LoggerWithModule("task_monitor").Info(
+			"monitor stopped tracking task after dispatcher signalled terminal outcome",
+			"task_id", taskID)
+	}
 }
 
 // StateTransition is the SOLE authority for task state changes.
