@@ -25,9 +25,11 @@ import (
 
 const (
 	// skillSynthesisThreshold is the minimum number of tool calls dispatched
-	// during a task for synthesis to be attempted. Tasks under this threshold
-	// are too simple to warrant a reusable skill definition.
-	skillSynthesisThreshold = 3
+	// during a task for synthesis to be attempted. Plan Executor subtasks
+	// return via end_turn (no task_complete call), so threshold=1 means
+	// "at least 1 domain tool call". Tasks in the "general" domain are still
+	// excluded by shouldSynthesize regardless of count.
+	skillSynthesisThreshold = 1
 
 	// skillSynthesisMaxTokens caps the LLM output for the synthesis call.
 	// 768 tokens accommodates the extra recipe field (step-by-step procedure
@@ -108,6 +110,16 @@ func synthesizeSkill(
 	if sj.Name == "" {
 		log.Info("skill synthesis: LLM found no reusable procedure", "domain", domain)
 		return nil, nil
+	}
+
+	// Clamp LLM-generated fields to Tool Contract limits before validation.
+	// Synthesis output is untrusted — the model occasionally generates a few
+	// extra characters despite the prompt constraint.
+	if len(sj.Name) > 64 {
+		sj.Name = sj.Name[:64]
+	}
+	if len(sj.Description) > 300 {
+		sj.Description = sj.Description[:300]
 	}
 
 	now := time.Now().UTC()

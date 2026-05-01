@@ -288,7 +288,10 @@ func (g *Gateway) Start() error {
 	if err := g.nats.Subscribe(TopicPlanDecision, g.handleRawPlanDecision); err != nil {
 		return fmt.Errorf("subscribe %s: %w", TopicPlanDecision, err)
 	}
-	if err := g.nats.Subscribe(TopicAgentStateWrite, g.handleRawStateWrite); err != nil {
+	// Use SubscribeDurable for state.write so the agentStore is rebuilt from the
+	// full JetStream history on every restart (skill_cache, session state, etc.).
+	// Falls back to core NATS subscribe when JetStream is unavailable.
+	if err := g.nats.SubscribeDurable(TopicAgentStateWrite, "orchestrator-state-write", g.handleRawStateWrite); err != nil {
 		return fmt.Errorf("subscribe %s: %w", TopicAgentStateWrite, err)
 	}
 	if err := g.nats.Subscribe(TopicAgentStateReadRequest, g.handleRawStateReadRequest); err != nil {
@@ -780,7 +783,15 @@ func (g *Gateway) handleRawStateReadRequest(subject string, data []byte) error {
 
 	// Default: answer from the in-process agentStore.
 	g.agentStoreMu.RLock()
-	all := g.agentStore[req.AgentID]
+	var all []json.RawMessage
+	if req.AgentID == "" {
+		// No AgentID constraint — scan all entries (used by ReadAllByType at startup).
+		for _, records := range g.agentStore {
+			all = append(all, records...)
+		}
+	} else {
+		all = g.agentStore[req.AgentID]
+	}
 	g.agentStoreMu.RUnlock()
 
 	// Filter by contextTag (tags["context"]) and DataType if specified.

@@ -210,9 +210,34 @@ const (
 // requires its parent domain to be registered first. Individual registration failures
 // are logged and skipped; they do not abort the startup sequence.
 func (f *Factory) LoadSynthesizedSkills(ctx context.Context) error {
-	records, err := f.memory.ReadAllByType("skill_cache")
-	if err != nil {
-		return fmt.Errorf("factory: load synthesized skills: read: %w", err)
+	// Retry up to 3 times with a 2-second delay between attempts.
+	// The orchestrator rebuilds its agentStore from a JetStream DeliverAll replay
+	// on every restart; aegis-agents may query before that replay completes,
+	// returning an empty list even though skill_cache records exist in the stream.
+	const (
+		maxAttempts = 3
+		retryDelay  = 2 * time.Second
+	)
+
+	var records []types.MemoryWrite
+	var err error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		records, err = f.memory.ReadAllByType("skill_cache")
+		if err != nil {
+			return fmt.Errorf("factory: load synthesized skills: read: %w", err)
+		}
+		if len(records) > 0 {
+			break
+		}
+		if attempt < maxAttempts {
+			f.log.Info("factory: no synthesized skills yet, retrying after delay",
+				"attempt", attempt, "retry_in", retryDelay)
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(retryDelay):
+			}
+		}
 	}
 	if len(records) == 0 {
 		f.log.Info("factory: no synthesized skills found in memory")
@@ -476,7 +501,7 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 		UserContextID:     spec.UserContextID,
 		ConversationID:    spec.ConversationID,
 		PriorTurns:        priorTurns,
-		SynthesizedSkills: synthesizedSkillRecords(commands),
+		SynthesizedSkills: f.synthesizedSkillsForDomain(entryDomain),
 		OnComplete:        f.processCompletionHandler(agentID),
 	}
 	if err := f.lifecycle.Spawn(vmCfg); err != nil {
@@ -592,7 +617,7 @@ func (f *Factory) assignTask(agentID string, spec *types.TaskSpec) error {
 		UserContextID:     spec.UserContextID,
 		ConversationID:    spec.ConversationID,
 		PriorTurns:        priorTurns,
-		SynthesizedSkills: synthesizedSkillRecords(commands),
+		SynthesizedSkills: f.synthesizedSkillsForDomain(entryDomain),
 		OnComplete:        f.processCompletionHandler(agentID),
 	}
 
@@ -1261,20 +1286,18 @@ func buildManifestText(commands []*types.SkillNode) string {
 	return b.String()
 }
 
-// synthesizedSkillRecords extracts SynthesizedSkillRecord entries for all
-// commands whose Origin is "synthesized". These are passed via VMConfig so the
-// agent process can build dynamic SkillTool entries with LLM-based execution.
-func synthesizedSkillRecords(commands []*types.SkillNode) []types.SynthesizedSkillRecord {
-	var records []types.SynthesizedSkillRecord
-	for _, c := range commands {
-		if c.Origin == "synthesized" {
-			records = append(records, types.SynthesizedSkillRecord{
-				Name:        c.Name,
-				Description: c.Description,
-				Recipe:      c.Recipe,
-				Spec:        c.Spec,
-			})
-		}
+// synthesizedSkillsForDomain returns the SynthesizedSkillRecord slice for all
+// synthesized commands in the given domain. Errors are logged and treated as an
+// empty list — a missing synthesized skill does not block agent spawn.
+func (f *Factory) synthesizedSkillsForDomain(domain string) []types.SynthesizedSkillRecord {
+	if domain == "" {
+		return nil
+	}
+	records, err := f.skills.GetSynthesizedSkills(domain)
+	if err != nil {
+		f.log.Warn("factory: GetSynthesizedSkills failed; spawning without synthesized tools",
+			"domain", domain, "error", err)
+		return nil
 	}
 	return records
 }
@@ -1704,7 +1727,7 @@ func (f *Factory) wakeAgent(agentID string, spec *types.TaskSpec) error {
 		UserContextID:     spec.UserContextID,
 		ConversationID:    spec.ConversationID,
 		PriorTurns:        priorTurns,
-		SynthesizedSkills: synthesizedSkillRecords(commands),
+		SynthesizedSkills: f.synthesizedSkillsForDomain(entryDomain),
 		OnComplete:        f.processCompletionHandler(agentID),
 	}
 	if err := f.lifecycle.Spawn(vmCfg); err != nil {

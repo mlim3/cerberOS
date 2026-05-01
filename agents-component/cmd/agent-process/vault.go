@@ -360,6 +360,8 @@ func (ve *VaultExecutor) emitAudit(eventType string, details map[string]string) 
 		}
 		if _, err := ve.js.Publish(comms.SubjectAuditEvent, data); err != nil {
 			ve.log.Error("audit.event publish failed", "event_type", eventType, "error", err)
+		} else {
+			ve.log.Info("audit.event publish ok", "event_type", eventType, "subject", comms.SubjectAuditEvent)
 		}
 	}()
 }

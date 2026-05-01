@@ -75,25 +75,37 @@ func (c *Client) ValidateAndScope(userID string, requiredSkillDomains []string, 
 		}
 	}
 
-	// Build allowed domains: always "general" + requested + any domain whose
-	// credential the user actually has in the vault.
-	domainsSet := map[string]bool{"general": true}
-	for _, d := range requiredSkillDomains {
-		domainsSet[d] = true
-	}
-	for domain, credTypes := range domainCredTypes {
-		for _, ct := range credTypes {
-			for _, avail := range available {
-				if ct == avail {
-					domainsSet[domain] = true
-					break
+	// Build allowed domains.
+	// When requiredSkillDomains is empty the caller imposes no ceiling —
+	// return empty Domains (nil) so the dispatcher's scope check
+	// (len(scopeDomains)==0 → allow any domain) passes for all subtasks.
+	// This mirrors VaultMock behaviour and the "domain policy is permissive"
+	// intent: non-credentialed skills like web.fetch must still be usable
+	// even when the user has no vault credential registered.
+	//
+	// When requiredSkillDomains is non-empty it acts as an explicit ceiling.
+	// We expand it with "general" and any domain the user has credentials for
+	// so the planner can freely use those additional domains.
+	var allowedDomains []string
+	if len(requiredSkillDomains) > 0 {
+		domainsSet := map[string]bool{"general": true}
+		for _, d := range requiredSkillDomains {
+			domainsSet[d] = true
+		}
+		for domain, credTypes := range domainCredTypes {
+			for _, ct := range credTypes {
+				for _, avail := range available {
+					if ct == avail {
+						domainsSet[domain] = true
+						break
+					}
 				}
 			}
 		}
-	}
-	allowedDomains := make([]string, 0, len(domainsSet))
-	for d := range domainsSet {
-		allowedDomains = append(allowedDomains, d)
+		allowedDomains = make([]string, 0, len(domainsSet))
+		for d := range domainsSet {
+			allowedDomains = append(allowedDomains, d)
+		}
 	}
 
 	now := time.Now()
