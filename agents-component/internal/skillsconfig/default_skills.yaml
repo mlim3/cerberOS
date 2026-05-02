@@ -222,8 +222,8 @@ domains:
         label: 'Vault Google Search'
         description: 'Search the web using Google Custom Search API via the Vault. Returns titles, URLs, and snippets for the top results. Use for current information, research, and fact-finding. Do NOT use for private or internal data — use vault_data_read for that. Do NOT include credential values in any parameter.'
         implementation: vault_google_search
-        required_credential_types: [google_search_api_key]
-        timeout_seconds: 35
+        required_credential_types: [serper_api_key]
+        timeout_seconds: 40
         parameters:
           - name: query
             type: string
