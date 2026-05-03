@@ -212,7 +212,7 @@ services:
   # ---------------------------------------------------------------------------
   aegis-databus:
     build:
-      context: ./aegis-databus
+      context: ./databus
       target: aegis-databus
     depends_on:
       nats-1:
@@ -268,8 +268,8 @@ services:
   prometheus:
     image: prom/prometheus:latest
     volumes:
-      - ./aegis-databus/config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - ./aegis-databus/config/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - ./databus/config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./databus/config/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
     ports:
       - "9090:9090"
     command:
@@ -283,7 +283,7 @@ services:
   grafana:
     image: grafana/grafana:latest
     volumes:
-      - ./aegis-databus/config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./databus/config/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./orchestrator/observability/grafana/dashboards:/etc/grafana/dashboards:ro
     ports:
       - "3000:3000"

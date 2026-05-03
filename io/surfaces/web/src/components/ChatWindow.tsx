@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo } from 'react'
+import { useState, useRef, useEffect, useMemo, type ReactNode } from 'react'
 import { marked } from 'marked'
 import type { Task, CredentialRequest, CredentialRequestStatus } from '@cerberos/io-core'
 import type { UISettings } from './SettingsPanel'
@@ -23,6 +23,13 @@ interface ChatWindowProps {
   credentialRequest?: CredentialRequest | null
   credentialStatus?: CredentialRequestStatus
   onProvideCredential?: () => void
+  /** Rendered below the transcript, above the composer (e.g. recurring schedule panel). */
+  belowMessages?: ReactNode
+  /** Lock the composer (voice + text). */
+  composerDisabled?: boolean
+  composerDisabledHint?: string
+  inputPlaceholder?: string
+  pulseMessageKey?: string
 }
 
 const SUGGESTION_CHIPS = [
@@ -42,6 +49,11 @@ function ChatWindow({
   credentialRequest,
   credentialStatus,
   onProvideCredential,
+  belowMessages,
+  composerDisabled = false,
+  composerDisabledHint,
+  inputPlaceholder,
+  pulseMessageKey,
 }: ChatWindowProps) {
   const [inputValue, setInputValue] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
@@ -57,14 +69,14 @@ function ChatWindow({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
-    if (!inputValue.trim() || isStreaming) return
+    if (!inputValue.trim() || isStreaming || composerDisabled) return
     const text = inputValue.trim()
     setInputValue('')
     onSendMessage(task.id, text)
   }
 
   const handleChipClick = (text: string) => {
-    if (isStreaming) return
+    if (isStreaming || composerDisabled) return
     setInputValue(text)
     inputRef.current?.focus()
   }
@@ -105,7 +117,12 @@ function ChatWindow({
 
       <div className="messages-container">
         {task.messages.map(message => (
-          <div key={message.id} className={`message ${message.role}${message.isRedacted ? ' redacted' : ''}`}>
+          <div
+            key={message.id}
+            className={`message ${message.role}${message.isRedacted ? ' redacted' : ''}${
+              message.scheduledRun ? ' message-scheduled-run' : ''
+            }${pulseMessageKey && pulseMessageKey === message.id ? ' message-pulse-new' : ''}`}
+          >
             <div className="message-avatar">
               {message.role === 'user' ? '👤' : <span className="avatar-glyph">C</span>}
             </div>
@@ -114,6 +131,11 @@ function ChatWindow({
                 <span className="message-sender">
                   {message.role === 'user' ? 'You' : 'cerberOS'}
                 </span>
+                {message.scheduledRun && (
+                  <span className="scheduled-turn-badge" title="Automated run from your schedule">
+                    Scheduled
+                  </span>
+                )}
                 <span className="message-time">{message.timestamp}</span>
                 {message.isRedacted && (
                   <span className="redacted-badge">Secure</span>
@@ -154,8 +176,10 @@ function ChatWindow({
         <div ref={messagesEndRef} />
       </div>
 
+      {belowMessages}
+
       <div className="chat-input-area">
-        {settings.demoMode && !isStreaming && !(task.title === 'New Task' && task.messages.length === 0) && (
+        {settings.demoMode && !isStreaming && !composerDisabled && !(task.title === 'New Task' && task.messages.length === 0) && (
           <div className="suggestion-chips">
             {SUGGESTION_CHIPS.map(chip => (
               <button
@@ -169,22 +193,32 @@ function ChatWindow({
             ))}
           </div>
         )}
+        {composerDisabledHint && composerDisabled && (
+          <p className="composer-locked-hint" role="status">
+            {composerDisabledHint}
+          </p>
+        )}
         <form className="chat-input-form" onSubmit={handleSubmit}>
           <VoiceRecorder
-            onTranscription={(text) => {
-              onSendMessage(task.id, text)
+            onTranscription={text => {
+              if (!composerDisabled && !isStreaming) onSendMessage(task.id, text)
             }}
-            disabled={isStreaming}
+            disabled={isStreaming || composerDisabled}
           />
           <input
             ref={inputRef}
             type="text"
             value={inputValue}
             onChange={e => setInputValue(e.target.value)}
-            placeholder={task.messages.length === 0 ? 'Describe the new task…' : 'Type your response...'}
+            placeholder={
+              inputPlaceholder ??
+              (task.messages.length === 0 ? 'Describe the new task…' : 'Type your response...')
+            }
             className="chat-input"
+            disabled={composerDisabled}
+            aria-disabled={composerDisabled}
           />
-          <button type="submit" className="send-button" disabled={isStreaming}>
+          <button type="submit" className="send-button" disabled={isStreaming || composerDisabled}>
             {isStreaming ? '…' : 'Send'}
           </button>
         </form>

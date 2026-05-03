@@ -14,8 +14,8 @@
 }
 
 .settings-panel-container {
-  width: 340px;
-  max-width: 90vw;
+  width: min(400px, 92vw);
+  max-width: 92vw;
   height: 100%;
   background-color: var(--bg-sidebar);
   border-left: var(--border);
@@ -201,4 +201,16 @@
 .settings-hint {
   font-size: 10px;
   color: var(--text-muted);
+}
+
+.settings-muted-paragraph {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+
+.settings-muted-paragraph strong {
+  color: var(--text-primary);
+  font-weight: 600;
 }

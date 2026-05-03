@@ -30,6 +30,8 @@ export interface ChatMessage {
   timestamp: string;
   /** When true, content was a credential and should be displayed masked */
   isRedacted?: boolean;
+  /** Emphasized row for automated scheduled-turn outcomes mirrored into the transcript */
+  scheduledRun?: boolean;
 }
 
 // ============================================

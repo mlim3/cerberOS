@@ -4,8 +4,8 @@
 # Usage:
 #   ./deploy/scripts/kind-up.sh
 #
-#   ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL are read automatically from the
-#   environment by kind-up.sh — no --set flags needed.
+#   ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL are picked up by kind-up.sh from the
+#   shell or from repo-root `.env` (shell wins if both define a key).
 # =============================================================================
 
 # Use locally-built images (loaded via kind load docker-image)

@@ -8,7 +8,7 @@ on:
       - "io/**"
       - "memory/**"
       - "vault/engine/**"
-      - "aegis-databus/**"
+      - "databus/**"
       - "agents-component/**"
       - ".github/workflows/images-build-and-push.yaml"
   workflow_dispatch:
@@ -46,7 +46,7 @@ jobs:
             image: cerberos-vault-engine
 
           - service: aegis-databus
-            context: ./aegis-databus
+            context: ./databus
             image: cerberos-aegis-databus
             build_args: ""
             target: aegis-databus

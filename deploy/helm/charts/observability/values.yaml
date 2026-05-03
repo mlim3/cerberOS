@@ -13,6 +13,10 @@ enabled: true
 prometheus:
   server:
     fullnameOverride: prometheus
+    # The upstream chart renders rollingUpdate: null for Recreate, which recent
+    # Kubernetes API validation rejects.
+    strategy:
+      type: RollingUpdate
     service:
       servicePort: 9090
     persistentVolume:
