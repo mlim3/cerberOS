@@ -92,6 +92,7 @@ type PlanExecutor interface {
 	Execute(ctx context.Context, plan types.ExecutionPlan, ts *types.TaskState) error
 	HandleSubtaskResult(ctx context.Context, result types.TaskResult) error
 	UserIDForSubtask(orchRef string) (string, bool)
+	TaskStateForSubtask(orchRef string) (*types.TaskState, bool)
 }
 
 // ── Dispatcher ────────────────────────────────────────────────────────────────
@@ -728,6 +729,36 @@ func (d *Dispatcher) HandleVaultExecuteRequest(ctx context.Context, req types.Va
 	return result, err
 }
 
+// HandleCredentialRequest is registered with the Gateway to handle credential.request
+// (operation: "user_input") messages from agents. It resolves the top-level task_id
+// and user_id from the subtask's orchRef so the IO push reaches the correct SSE stream.
+func (d *Dispatcher) HandleCredentialRequest(agentID, subtaskRef, requestID, keyName, label, traceID string) error {
+	var topTaskID, userID string
+
+	// Try direct active-task lookup first (subtaskRef == top-level task_id in some flows).
+	if tsVal, ok := d.activeTasks.Load(subtaskRef); ok {
+		ts := tsVal.(*types.TaskState)
+		topTaskID = ts.TaskID
+		userID = ts.UserID
+	} else if ts, ok := d.executor.TaskStateForSubtask(subtaskRef); ok {
+		topTaskID = ts.TaskID
+		userID = ts.UserID
+	} else {
+		observability.LogFromContext(observability.WithModule(context.Background(), "task_dispatcher")).
+			Warn("credential.request: could not resolve top-level task_id",
+				"agent_id", agentID, "subtask_ref", subtaskRef, "request_id", requestID)
+		return nil
+	}
+
+	return d.io.PushCredentialRequest(ioclient.CredentialRequestPayload{
+		TaskID:      topTaskID,
+		RequestID:   requestID,
+		UserID:      userID,
+		KeyName:     keyName,
+		Label:       label,
+	}, traceID)
+}
+
 // HandlePlanComplete is called by the Plan Executor when all subtasks complete successfully.
 // Writes COMPLETED state, delivers aggregated result to User I/O, revokes credentials.
 func (d *Dispatcher) HandlePlanComplete(ts *types.TaskState, aggregatedResults []types.PriorResult) {
@@ -1186,6 +1217,11 @@ func taskKindForPlannerSpec(maintenance bool) string {
 	return "decomposition"
 }
 
+// allSkillDomains is the full set of registered skill domains in the agents component.
+// Used as the fallback when the task's policy scope carries no domain restrictions
+// (empty Domains = "any domain permitted"). Must stay in sync with default_skills.yaml.
+var allSkillDomains = []string{"web", "data", "comms", "storage", "logs", "google_search", "github", "general"}
+
 // buildDecompositionInstructionsWithFacts renders the planner prompt with an
 // optional list of user facts (from personal_info via the Memory service).
 // When facts is empty the prompt is byte-identical to the historic output so
@@ -1195,7 +1231,9 @@ func taskKindForPlannerSpec(maintenance bool) string {
 func buildDecompositionInstructionsWithFacts(taskID, rawInput string, scope types.PolicyScope, facts []string, systemPrompt string) string {
 	allowedDomains := scope.Domains
 	if len(allowedDomains) == 0 {
-		allowedDomains = []string{"general"}
+		// Empty scope.Domains means "no restriction" — grant the planner access to
+		// all registered skill domains so it can assign the right domain per subtask.
+		allowedDomains = allSkillDomains
 	}
 
 	domains := "[]"
@@ -1242,10 +1280,13 @@ func buildDecompositionInstructionsWithFacts(taskID, rawInput string, scope type
 			"- Do not invent new skill domain names outside the allowed list\n"+
 			"- Use an empty array for depends_on when a subtask has no dependencies\n"+
 			"- Keep the plan concise and executable\n"+
-			"- Only assign a credentialed domain (google_search, github, web, data, comms, storage) to a subtask if the corresponding credential type appears in the available credential types list above\n"+
+			"Skill domain guide: use \"web\" for fetch/parse/extract of known URLs, \"data\" for transforms/reads/writes, \"comms\" for messaging, \"storage\" for file operations, \"logs\" for log queries, \"google_search\" for any Google search or web search query (PREFERRED over web for search tasks), \"github\" for GitHub API calls, \"general\" for reasoning/summarization with no external tools.\n"+
+			"- Prefer \"google_search\" over \"web\" whenever the task is a search query — the system will prompt the user for an API key if it is not yet configured.\n"+
+			"- Only avoid \"google_search\" if the user has explicitly said they do not want to use Google search.\n"+
+			"- The \"web\" domain (web.fetch, web.parse, web.extract) does NOT require credentials — use it for fetching specific known URLs, not for general search.\n"+
 			"Ambiguity handling (CRITICAL):\n"+
 			"- You MUST return a valid execution plan JSON object. NEVER reply with a clarifying question, free-form text, an apology, or anything that is not JSON matching the schema above.\n"+
-			"- If the user's message is ambiguous, conversational, a greeting, or a follow-up that depends on prior context, produce a SINGLE-subtask plan where one %s-domain agent composes a direct natural-language answer using the conversation context provided.\n"+
+			"- If the user's message is ambiguous, conversational, a greeting, or a follow-up that depends on prior context, produce a SINGLE-subtask plan where one general-domain agent composes a direct natural-language answer using the conversation context provided.\n"+
 			"- Treat \"Conversation so far:\" content in the user task as authoritative context for resolving pronouns and references in \"Current message:\".\n"+
 			"Parallelism guidance:\n"+
 			"- Independent subtasks MUST have empty depends_on so the executor can dispatch them in parallel.\n"+
@@ -1255,7 +1296,6 @@ func buildDecompositionInstructionsWithFacts(taskID, rawInput string, scope type
 		taskID,
 		taskID,
 		domains,
-		allowedDomains[0],
 		rawInput,
 	)
 }

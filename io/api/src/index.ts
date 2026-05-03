@@ -957,7 +957,7 @@ app.get('/api/logs', (c) => {
 // Credential submission
 // =============================================================================
 
-// Credential submission endpoint (proxies to Memory Vault)
+// Credential submission endpoint (proxies to Vault Engine, then notifies agent via NATS)
 // NEVER logs or exposes the credential value in responses or logs
 app.post('/api/credential', async (c) => {
   const body = (await c.req.json()) as {
@@ -975,20 +975,19 @@ app.post('/api/credential', async (c) => {
     key_name: keyName,
   })
 
-  const memoryVaultUrl = process.env.MEMORY_VAULT_URL || 'http://localhost:8080/api/v1/vault';
-  const memoryApiKey = process.env.MEMORY_VAULT_API_KEY || '';
+  const vaultEngineUrl = (process.env.VAULT_ENGINE_URL || 'http://vault:8000').replace(/\/$/, '');
 
   try {
-    const vaultRes = await fetch(`${memoryVaultUrl}/${userId}/secrets`, {
+    const vaultRes = await fetch(`${vaultEngineUrl}/credentials/put`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-Internal-API-Key': memoryApiKey,
         'traceparent': c.get('traceparent'),
         'X-Trace-ID': c.get('traceId'),
       },
       body: JSON.stringify({
-        key_name: keyName,
+        user_id: userId,
+        credential_type: keyName,
         value: body.value, // pass through without logging
       }),
     });
@@ -1007,7 +1006,7 @@ app.post('/api/credential', async (c) => {
           requestId,
           keyName,
           status: 'error',
-          error: `Vault returned ${vaultRes.status}: ${errText}`,
+          error: `Vault engine returned ${vaultRes.status}`,
         },
         500,
       );
@@ -1018,6 +1017,18 @@ app.post('/api/credential', async (c) => {
       user_id: userId,
       key_name: keyName,
     })
+    // Notify the waiting agent that the credential is now available.
+    // The agent's Execute() is blocked on aegis.agents.credential.response
+    // for this requestId — publishing here unblocks the retry.
+    if (natsClient?.connected) {
+      natsClient.publishRaw('aegis.agents.credential.response', {
+        request_id: requestId,
+        status: 'granted',
+        permission_token: `io-stored-${userId}-${keyName}`,
+        expires_at: new Date(Date.now() + 3600_000).toISOString(),
+      })
+    }
+
     return c.json(
       {
         taskId,
@@ -1027,20 +1038,22 @@ app.post('/api/credential', async (c) => {
       },
       201,
     );
-  } catch {
+  } catch (err) {
     logFromContext(c, 'warn', 'credential', 'memory vault unreachable; simulating storage so chat flow continues (dev fallback)', {
       request_id: requestId,
       user_id: userId,
       key_name: keyName,
+      error: String(err),
     })
     return c.json(
       {
         taskId,
         requestId,
         keyName,
-        status: 'stored',
+        status: 'error',
+        error: 'vault engine unavailable',
       },
-      201,
+      502,
     );
   }
 });
