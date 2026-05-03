@@ -433,7 +433,7 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 				"tool", o.call.name,
 				"tool_use_id", o.call.toolUseID,
 				"is_error", o.result.IsError,
-				"details", o.result.Details,
+				"details", logfields.BoundedDetails(o.result.Details),
 				"tool_interrupted", toolInterrupted,
 			)
 

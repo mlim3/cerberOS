@@ -114,6 +114,82 @@ func TestPreviewHeadTail(t *testing.T) {
 	})
 }
 
+func TestBoundedDetails(t *testing.T) {
+	t.Run("nil passthrough", func(t *testing.T) {
+		if got := BoundedDetails(nil); got != nil {
+			t.Fatalf("expected nil, got %v", got)
+		}
+	})
+
+	t.Run("short values pass through", func(t *testing.T) {
+		in := map[string]interface{}{
+			"request_id":   "abc-123",
+			"status":       "ok",
+			"count":        42,
+			"latency_ms":   1234,
+			"is_error":     false,
+			"short_string": strings.Repeat("a", boundedDetailsThreshold-1),
+		}
+		out := BoundedDetails(in)
+		for k, v := range in {
+			if got := out[k]; got != v {
+				t.Fatalf("%s: expected passthrough %v, got %v", k, v, got)
+			}
+		}
+	})
+
+	t.Run("long string is head+tailed", func(t *testing.T) {
+		long := strings.Repeat("word ", 100) // ~500 chars, ~100 words
+		in := map[string]interface{}{
+			"final_result": long,
+			"request_id":   "abc-123",
+		}
+		out := BoundedDetails(in)
+		if out["request_id"] != "abc-123" {
+			t.Fatalf("short field was changed: %v", out["request_id"])
+		}
+		got, ok := out["final_result"].(string)
+		if !ok {
+			t.Fatalf("final_result is not a string: %T", out["final_result"])
+		}
+		if !strings.Contains(got, "[..") || !strings.Contains(got, " chars..]") {
+			t.Fatalf("expected head+tail marker, got %q", got)
+		}
+		if len(got) >= len(long) {
+			t.Fatalf("expected truncation, length stayed %d", len(got))
+		}
+	})
+
+	t.Run("long []byte is bounded", func(t *testing.T) {
+		long := []byte(strings.Repeat("word ", 100))
+		out := BoundedDetails(map[string]interface{}{"body": long})
+		got, ok := out["body"].(string)
+		if !ok {
+			t.Fatalf("expected []byte to be coerced to string, got %T", out["body"])
+		}
+		if !strings.Contains(got, "[..") {
+			t.Fatalf("expected head+tail marker, got %q", got)
+		}
+	})
+
+	t.Run("nested maps are recursed", func(t *testing.T) {
+		long := strings.Repeat("word ", 100)
+		out := BoundedDetails(map[string]interface{}{
+			"outer": map[string]interface{}{
+				"inner_result": long,
+			},
+		})
+		nested, ok := out["outer"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("expected nested map, got %T", out["outer"])
+		}
+		got := nested["inner_result"].(string)
+		if !strings.Contains(got, "[..") {
+			t.Fatalf("nested long string was not bounded, got %q", got)
+		}
+	})
+}
+
 // itoa avoids fmt for tight tests.
 func itoa(n int) string {
 	if n == 0 {

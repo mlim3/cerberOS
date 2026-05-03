@@ -50,6 +50,62 @@ func PreviewWords(s string, maxWords, maxChars int) string {
 	return out
 }
 
+// boundedDetailsThreshold is the per-string char threshold at which
+// BoundedDetails switches a value over to PreviewHeadTail. Short strings
+// (request IDs, status enums, short error codes, key names) pass through
+// unchanged; long ones (tool output, agent results, raw bodies) are
+// truncated head+tail so the log line stays readable.
+const boundedDetailsThreshold = 200
+
+// BoundedDetails returns a debug-safe copy of an arbitrary
+// map[string]interface{} suitable for passing as a single slog attribute.
+// Long string values are replaced with the PreviewHeadTail format; long
+// []byte values are converted to string and bounded the same way; nested
+// maps are recursed into. All other types (numbers, bools, short strings,
+// slices of non-strings) pass through unchanged.
+//
+// Use this when you need to log a generic "details" / "metadata" bag
+// without trusting that every tool / handler keeps its values short. It
+// guarantees that a single oversized field (e.g. final_result, raw body,
+// stack trace) cannot blow up a log line. See docs/logging.md.
+func BoundedDetails(m map[string]interface{}) map[string]interface{} {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]interface{}, len(m))
+	for k, v := range m {
+		out[k] = boundValue(v)
+	}
+	return out
+}
+
+func boundValue(v interface{}) interface{} {
+	switch t := v.(type) {
+	case string:
+		if len(t) > boundedDetailsThreshold {
+			return PreviewHeadTail(t, 15, 10)
+		}
+		return t
+	case []byte:
+		if len(t) > boundedDetailsThreshold {
+			return PreviewHeadTail(string(t), 15, 10)
+		}
+		return string(t)
+	case map[string]interface{}:
+		return BoundedDetails(t)
+	case []interface{}:
+		// Bound each element but keep the slice shape so structured
+		// fields stay queryable in Loki.
+		bounded := make([]interface{}, len(t))
+		for i, el := range t {
+			bounded[i] = boundValue(el)
+		}
+		return bounded
+	default:
+		return v
+	}
+}
+
 // PreviewHeadTail builds a debug-safe head+tail preview suitable for long
 // conversation messages — typically content_preview (user → agent) and
 // result_preview (agent → user).
