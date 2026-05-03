@@ -79,6 +79,13 @@ function nextId(): string {
   return Math.random().toString(36).slice(2, 11)
 }
 
+/** Matches Memory-created conversation/task ids (UUID); offline-only tasks use short nextId() strings. */
+function isLikelyPersistedConversationId(id: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    id.trim(),
+  )
+}
+
 function timeLabel(): string {
   const d = new Date()
   return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
@@ -424,23 +431,30 @@ function App() {
       })
       const loadedTasks = conversations.map(taskFromConversation)
       setTasks(prev => {
-        const existing = new Map(prev.map(task => [task.id, task]))
-        for (const task of loadedTasks) {
-          const prior = existing.get(task.id)
-          if (!prior) {
-            existing.set(task.id, task)
-            continue
-          }
-          existing.set(task.id, {
+        const serverIds = new Set(loadedTasks.map(t => t.id))
+        /** Server list wins: drop persisted convs that vanished (e.g. after DELETE). */
+        const mergedFromApi = loadedTasks.map(task => {
+          const prior = prev.find(p => p.id === task.id)
+          if (!prior) return task
+          return {
             ...prior,
             title: task.title || prior.title,
             status: task.status,
             lastUpdate: task.lastUpdate,
             expectedNextInput: task.expectedNextInput,
             currentTaskId: task.currentTaskId ?? prior.currentTaskId,
-          })
-        }
-        const merged = Array.from(existing.values()).filter(t => {
+          }
+        })
+        /** Keep optimistic tasks when conversation POST failed — ids are not UUID-shaped. */
+        const keptLocalOnly = prev.filter(
+          t =>
+            !serverIds.has(t.id) &&
+            !isLikelyPersistedConversationId(t.id),
+        )
+        const byId = new Map<string, UITask>()
+        for (const t of mergedFromApi) byId.set(t.id, t)
+        for (const t of keptLocalOnly) byId.set(t.id, t)
+        const merged = Array.from(byId.values()).filter(t => {
           const ttl = (t.title ?? '').trim()
           return ttl !== MEMORY_ORCHESTRATOR_FALLBACK_CONVERSATION_TITLE
         })
@@ -949,12 +963,19 @@ function App() {
       setSelectedTaskId(null)
     }
     if (!DEMO_MODE) {
-      fetch(buildApiUrl(`/api/conversations/${encodeURIComponent(id)}`), {
+      void fetch(buildApiUrl(`/api/conversations/${encodeURIComponent(id)}`), {
         method: 'DELETE',
         headers: { 'X-User-Id': UI_USER_ID },
-      }).catch(() => {/* best-effort */})
+      })
+        .then(() => {
+          void refetchConversations()
+        })
+        .catch(() => {
+          /* best-effort server delete — refetch clears stale sidebar if DELETE actually succeeded elsewhere */
+          void refetchConversations()
+        })
     }
-  }, [selectedTaskId, DEMO_MODE])
+  }, [selectedTaskId, DEMO_MODE, refetchConversations])
 
   const handleRenameTask = useCallback((id: string, title: string) => {
     setTasks(prev => prev.map(t => t.id === id ? { ...t, title } : t))
