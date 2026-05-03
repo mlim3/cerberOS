@@ -139,6 +139,26 @@ func (e *PlanExecutor) UserIDForSubtask(orchRef string) (string, bool) {
 	return exec.ts.UserID, true
 }
 
+// TaskStateForSubtask resolves the parent TaskState from a subtask's orchestrator_task_ref.
+// Returns (nil, false) when the orchRef is not found in any active plan.
+// Used by the dispatcher to resolve the top-level task_id and user_id for credential requests.
+func (e *PlanExecutor) TaskStateForSubtask(orchRef string) (*types.TaskState, bool) {
+	planIDVal, ok := e.orchRefToPlan.Load(orchRef)
+	if !ok {
+		return nil, false
+	}
+	planID, _ := planIDVal.(string)
+	execVal, ok := e.activePlans.Load(planID)
+	if !ok {
+		return nil, false
+	}
+	exec, _ := execVal.(*planExecution)
+	if exec == nil || exec.ts == nil {
+		return nil, false
+	}
+	return exec.ts, true
+}
+
 // ── Execute — entry point from Task Dispatcher ────────────────────────────────
 
 // Execute initializes all subtasks as PENDING and dispatches those with no dependencies.
