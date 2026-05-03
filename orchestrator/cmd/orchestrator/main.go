@@ -217,14 +217,9 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 	gw.RegisterVaultExecuteHandler(taskDispatcher.HandleVaultExecuteRequest)
 
 	// Forward agent user_input credential requests to the IO Component.
-	gw.RegisterCredentialRequestHandler(func(_, taskID, requestID, keyName, label, traceID string) error {
-		return ioClient.PushCredentialRequest(ioclient.CredentialRequestPayload{
-			TaskID:    taskID,
-			RequestID: requestID,
-			KeyName:   keyName,
-			Label:     label,
-		}, traceID)
-	})
+	// HandleCredentialRequest resolves the top-level task_id from the subtask ref
+	// so the credential modal reaches the correct browser SSE stream.
+	gw.RegisterCredentialRequestHandler(taskDispatcher.HandleCredentialRequest)
 
 	healthHandler := health.New(vaultClient, memClient, natsClient, taskMonitor, cfg.NodeID)
 
