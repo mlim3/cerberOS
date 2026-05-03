@@ -32,6 +32,7 @@ import { traceMiddleware } from './trace-context'
 import { ioLog, logFromContext } from './logger'
 import { startHeartbeatEmitter } from './heartbeat'
 import { mirrorMemoryConfigured, persistOrchestratorOutcomeToMemory } from './scheduled-run-mirror'
+import { messageLooksLikeUserCronScheduling } from './scheduling-language'
 
 // =============================================================================
 // Planner input enrichment
@@ -255,12 +256,18 @@ if (natsClient) {
             payload.success === false
               ? `Task finished with errors: \`${taskId}\``
               : `Task completed: \`${taskId}\``
+          const rawInput =
+            typeof payload.raw_input === 'string' && payload.raw_input.trim()
+              ? payload.raw_input.trim()
+              : ''
           void persistOrchestratorOutcomeToMemory({
             userId: uid,
             taskId,
             payloadConversationId: cid,
             traceId: envelopeTrace,
-            contentLines: [headline, '', content],
+            contentLines: rawInput
+              ? [`Scheduled task: ${rawInput}`, '', headline, '', content]
+              : [headline, '', content],
           })
         }
       }
@@ -412,22 +419,27 @@ const app = new Hono<AppEnv>();
 // Middleware
 // =============================================================================
 
-app.use('/*', cors());
-app.use('/*', traceMiddleware);
+app.use('/*', cors())
+
+app.use('/*', async (c, next) => {
+  const path = c.req.path
+  if (path === '/health' || path === '/api/health') return next()
+  return traceMiddleware(c, next)
+})
 
 // =============================================================================
-// Health checks
+// Health checks (never pass through traceMiddleware — probes must not touch OTLP)
 // =============================================================================
 
 app.get('/health', (c) => {
-  logFromContext(c, 'info', 'http', 'GET /health')
-  return c.json({ status: 'ok', timestamp: new Date().toISOString() });
-});
+  ioLog('info', 'http', 'GET /health')
+  return c.json({ status: 'ok', timestamp: new Date().toISOString() })
+})
 
 app.get('/api/health', (c) => {
-  logFromContext(c, 'info', 'http', 'GET /api/health')
-  return c.json({ status: 'ok', timestamp: new Date().toISOString() });
-});
+  ioLog('info', 'http', 'GET /api/health')
+  return c.json({ status: 'ok', timestamp: new Date().toISOString() })
+})
 
 // =============================================================================
 // Status endpoint
@@ -630,6 +642,17 @@ app.post('/api/orchestrator/plan-decision', async (c) => {
 // Chat streaming
 // =============================================================================
 
+/** When recurrence language would hit NATS unnecessarily, steer to user crons. */
+const SCHEDULING_AUTOMATION_CHAT_REPLY =
+  [
+    'That kind of repeating message belongs in **Scheduled tasks**, not in the planner chat loop.',
+    '',
+    '- Open **Create recurring task** (or **Settings → Scheduling**), set the rhythm (e.g. every minute), and put your text — e.g. **I am waiting** — in what runs each time.',
+    '- Stopping automatically at a wall time like **9:15 PM** is **not modeled yet**. Delete or pause that scheduled task when you are finished; we could add end times later.',
+    '',
+    '(This chat endpoint does not run timers or impersonate cron.)',
+  ].join('\n')
+
 // Send a message (returns streaming response)
 app.post('/api/chat', async (c) => {
   const body = (await c.req.json()) as SendMessageRequest;
@@ -647,6 +670,9 @@ app.post('/api/chat', async (c) => {
   if (!conversationId) {
     return c.json({ error: 'conversationId is required' }, 400)
   }
+
+  const scheduleAutomationIntent = messageLooksLikeUserCronScheduling(content ?? '')
+
   // Log user message via memory client — fire-and-forget so the SSE stream opens immediately.
   appendLogEntry({
     conversationId,
@@ -664,7 +690,9 @@ app.post('/api/chat', async (c) => {
     expectedNextInputMinutes: 1,
     timestamp: Date.now(),
   };
-  persistAndBroadcastStatus(workingStatus);
+  if (!scheduleAutomationIntent) {
+    persistAndBroadcastStatus(workingStatus)
+  }
 
   const encoder = new TextEncoder();
 
@@ -678,7 +706,7 @@ app.post('/api/chat', async (c) => {
   let userTaskPublishError: string | null = null
 
   // Publish user message to orchestrator via NATS
-  if (useRealOrchestrator) {
+  if (useRealOrchestrator && !scheduleAutomationIntent) {
     try {
       // When conversationId is set the agent fetches prior turns natively from
       // its ConversationSnapshot; skip text injection to avoid double-context.
@@ -712,6 +740,33 @@ app.post('/api/chat', async (c) => {
 
   const stream = new ReadableStream({
     start(controller) {
+      const finishCronSteerAssistant = async (body: string) => {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ chunk: body })}\n\n`))
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true })}\n\n`))
+        controller.close()
+        await appendLogEntry({
+          conversationId,
+          userId: effectiveUserId,
+          role: 'assistant',
+          content: body,
+          taskId,
+          traceId,
+        })
+        const doneStatus: StatusUpdate = {
+          taskId,
+          status: 'awaiting_feedback',
+          lastUpdate: 'Response complete',
+          expectedNextInputMinutes: 0,
+          timestamp: Date.now(),
+        }
+        persistAndBroadcastStatus(doneStatus)
+      }
+
+      if (scheduleAutomationIntent) {
+        void finishCronSteerAssistant(SCHEDULING_AUTOMATION_CHAT_REPLY)
+        return
+      }
+
       // Not connected, not demo → clear fallback
       if (!DEMO_MODE && !natsClient?.connected) {
         const fallbackMsg = '[IO] Orchestrator is not connected. The message was logged but cannot be processed.\n\n' +
@@ -870,6 +925,7 @@ app.post('/api/chat', async (c) => {
       'Cache-Control': 'no-cache',
       Connection: 'keep-alive',
       'X-Content-Type-Options': 'nosniff',
+      ...(scheduleAutomationIntent ? { 'X-IO-Chat-Scheduling-Steer': '1' } : {}),
     },
   });
 });
@@ -995,6 +1051,25 @@ app.post('/api/user-crons', async (c) => {
   const { data, err } = jsonFromMemoryProxy(text, res.status)
   if (err !== null) {
     return c.text(err, res.status)
+  }
+  const conversationId = body.conversationId?.trim()
+  if (res.ok && conversationId) {
+    const scheduleText =
+      body.scheduleKind === 'cron'
+        ? `cron ${body.cronExpression ?? ''} (${body.timeZone?.trim() || 'UTC'})`
+        : `every ${body.intervalSeconds ?? 0}s`
+    await appendLogEntry({
+      conversationId,
+      userId,
+      role: 'user',
+      content: `Scheduled task "${body.name.trim()}" (${scheduleText}):\n\n${body.rawInput.trim()}`,
+      taskId: conversationId,
+    }).catch(error => {
+      ioLog('warn', 'memory', 'failed to append scheduled task note', {
+        conversation_id: conversationId,
+        error: String(error),
+      })
+    })
   }
   return c.json(data, res.status)
 })
@@ -1247,8 +1322,16 @@ const serverIdleTimeoutSeconds =
     ? configuredIdleTimeoutSeconds
     : 120
 
-export default {
+// Kubelet probes use the pod IP; must listen on all interfaces (not loopback-only).
+const listenHost = (process.env.IO_LISTEN_HOST ?? process.env.HOST ?? '0.0.0.0').trim() || '0.0.0.0'
+
+// Use Bun.serve() — the default-export object shape does not reliably accept `hostname`
+// across Bun versions and can crash at startup in containers.
+Bun.serve({
   port: 3001,
+  hostname: listenHost,
   idleTimeout: serverIdleTimeoutSeconds,
   fetch: app.fetch,
-};
+})
+
+ioLog('info', 'http', `IO API listening`, { host: listenHost, port: 3001 })

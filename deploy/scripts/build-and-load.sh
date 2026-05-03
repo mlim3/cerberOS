@@ -26,6 +26,11 @@ for arg in "$@"; do
 done
 
 CLUSTER="${1:-cerberos}"
+# Comment fragments sometimes become "$1" when commands are pasted wrong (e.g. `./script.sh # note`).
+if [ "$CLUSTER" = "#" ] || [ -z "${CLUSTER// /}" ]; then
+  echo "WARN: ignoring invalid cluster name '${CLUSTER:-empty}', using 'cerberos'" >&2
+  CLUSTER="cerberos"
+fi
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 TAG="local"
 
@@ -51,7 +56,7 @@ build_and_load cerberos-io             "${REPO_ROOT}/io"
 build_and_load cerberos-memory-api     "${REPO_ROOT}/memory"
 build_and_load cerberos-vault-engine   "${REPO_ROOT}/vault/engine"
 build_and_load cerberos-aegis-agents   "${REPO_ROOT}/agents-component"
-build_and_load cerberos-aegis-databus  "${REPO_ROOT}/aegis-databus" aegis-databus
+build_and_load cerberos-aegis-databus  "${REPO_ROOT}/databus" aegis-databus
 
 echo ""
 echo "==> All images loaded. Run 'kubectl get nodes' to verify the cluster."

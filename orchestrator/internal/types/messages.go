@@ -95,6 +95,7 @@ type TaskResult struct {
 	TaskID              string          `json:"task_id,omitempty"`
 	UserID              string          `json:"user_id,omitempty"`
 	ConversationID      string          `json:"conversation_id,omitempty"`
+	RawInput            string          `json:"raw_input,omitempty"`
 	AgentID             string          `json:"agent_id"`
 	Success             bool            `json:"success"`
 	Result              json.RawMessage `json:"result"`
@@ -142,11 +143,11 @@ type TaskCancel struct {
 // Outbound to User I/O Component.
 
 type ErrorResponse struct {
-	TaskID           string `json:"task_id"`
-	UserID           string `json:"user_id,omitempty"`
-	ConversationID   string `json:"conversation_id,omitempty"`
-	ErrorCode        string `json:"error_code"`
-	UserMessage      string `json:"user_message"`
+	TaskID         string `json:"task_id"`
+	UserID         string `json:"user_id,omitempty"`
+	ConversationID string `json:"conversation_id,omitempty"`
+	ErrorCode      string `json:"error_code"`
+	UserMessage    string `json:"user_message"`
 }
 
 type StatusResponse struct {

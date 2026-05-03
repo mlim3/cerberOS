@@ -1,5 +1,4 @@
 import './SettingsPanel.css'
-import UserCronSection from './UserCronSection'
 
 export interface UISettings {
   demoMode: boolean
@@ -25,10 +24,9 @@ interface SettingsPanelProps {
   settings: UISettings
   onSettingsChange: (settings: UISettings) => void
   onClose: () => void
-  userId: string
 }
 
-function SettingsPanel({ settings, onSettingsChange, onClose, userId }: SettingsPanelProps) {
+function SettingsPanel({ settings, onSettingsChange, onClose }: SettingsPanelProps) {
   const updateSetting = <K extends keyof UISettings>(key: K, value: UISettings[K]) => {
     onSettingsChange({ ...settings, [key]: value })
   }
@@ -152,7 +150,15 @@ function SettingsPanel({ settings, onSettingsChange, onClose, userId }: Settings
             </div>
           </section>
 
-          <UserCronSection userId={userId} />
+          <section className="settings-section">
+            <h3 className="settings-section-title">Recurring tasks</h3>
+            <p className="settings-muted-paragraph">
+              Repeating runs are configured entirely in chat. From the sidebar <strong>Recurring</strong> tab, choose{' '}
+              <strong>Create recurring task</strong> for a guided thread—or in <strong>any</strong> task chat, wording
+              like &quot;every morning&quot;, &quot;daily&quot;, or &quot;every hour&quot; switches that send into scheduler
+              setup (rhythm → first run → saved user cron).
+            </p>
+          </section>
         </div>
 
         <div className="settings-footer">

@@ -10,6 +10,47 @@ NAMESPACE="cerberos"
 SKIP_BUILD=false
 SKIP_INSTALL=false
 
+# Load repo `.env` keys only when not already set in the shell (same rule as io/api load-env).
+# Supports `KEY=value`, `export KEY=value`, and optional whitespace around `=`.
+merge_dotenv() {
+  local f="$1"
+  [ -f "$f" ] || return 0
+  echo "==> Merging $(basename "$f") from repo root (existing shell variables win)"
+  local line key v
+  while IFS= read -r line || [ -n "$line" ]; do
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    [[ -z "${line// /}" ]] && continue
+    # UTF-8 BOM (some editors prefix the first line)
+    if [[ "$line" == $'\xEF\xBB\xBF'* ]]; then
+      line="${line:3}"
+    fi
+    if [[ "$line" =~ ^[[:space:]]*export[[:space:]]+([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=[[:space:]]*(.*)$ ]]; then
+      key="${BASH_REMATCH[1]}"
+      v="${BASH_REMATCH[2]}"
+    elif [[ "$line" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=[[:space:]]*(.*)$ ]]; then
+      key="${BASH_REMATCH[1]}"
+      v="${BASH_REMATCH[2]}"
+    else
+      continue
+    fi
+    if [ -n "${!key+x}" ]; then
+      continue
+    fi
+    v="${v%$'\r'}"
+    if [[ "$v" =~ ^\".*\"$ ]]; then
+      v="${v:1:-1}"
+    elif [[ "$v" =~ ^\'.*\'$ ]]; then
+      v="${v:1:-1}"
+    else
+      v="${v#"${v%%[![:space:]]*}"}"
+      v="${v%%[[:space:]]#*}"
+    fi
+    export "${key}=${v}"
+  done <"$f"
+}
+
+merge_dotenv "${REPO_ROOT}/.env"
+
 for arg in "$@"; do
   case $arg in
     --skip-build) SKIP_BUILD=true ;;
@@ -28,10 +69,15 @@ for arg in "$@"; do
       echo "  ANTHROPIC_API_KEY   Anthropic API key"
       echo "  ANTHROPIC_BASE_URL  Anthropic API base URL (defaults to Anthropic's standard endpoint)"
       echo ""
+      echo "  Variables may be set in the shell or in repo-root .env (shell wins if both are set)."
+      echo ""
       echo "Examples:"
       echo "  ./deploy/scripts/kind-up.sh                   # full setup"
       echo "  ./deploy/scripts/kind-up.sh --skip-build      # reinstall chart without rebuilding images"
       echo "  ./deploy/scripts/kind-up.sh --skip-install    # rebuild & reload images only"
+      echo ""
+      echo "Manual helm upgrade after editing deploy/helm/charts/* templates:"
+      echo "  helm dependency update ./deploy/helm/cerberos && helm upgrade ..."
       exit 0
       ;;
   esac
@@ -80,10 +126,10 @@ if [ "$SKIP_INSTALL" = false ]; then
   helm dependency update "${REPO_ROOT}/deploy/helm/cerberos" >/dev/null
   HELM_SET_ARGS=()
   if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-    HELM_SET_ARGS+=(--set "aegis-agents.anthropicApiKey=${ANTHROPIC_API_KEY}")
+    HELM_SET_ARGS+=(--set-string "aegis-agents.anthropicApiKey=${ANTHROPIC_API_KEY}")
   fi
   if [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
-    HELM_SET_ARGS+=(--set "aegis-agents.anthropicBaseUrl=${ANTHROPIC_BASE_URL}")
+    HELM_SET_ARGS+=(--set-string "aegis-agents.anthropicBaseUrl=${ANTHROPIC_BASE_URL}")
   fi
 
   # Bash with `set -u` treats "${HELM_SET_ARGS[@]}" as an error when the array is empty
@@ -96,16 +142,18 @@ if [ "$SKIP_INSTALL" = false ]; then
   set -u
 
   echo ""
-  echo "    Waiting for core workloads to be ready (up to 5 min) ..."
+  echo "    Waiting for core workloads to be ready (StatefulSets up to 10 min; deployment/io up to 15 min) ..."
   # StatefulSets: use rollout status (handles the case where the pod
   # hasn't been created yet when we start waiting).
   for sts in memory-db openbao nats; do
-    kubectl rollout status statefulset "${sts}" -n "${NAMESPACE}" --timeout=5m \
+    kubectl rollout status statefulset "${sts}" -n "${NAMESPACE}" --timeout=10m \
       || echo "    (warning: statefulset/${sts} did not become ready in time)"
   done
-  # Deployments: wait on the deployment condition directly.
+  # Deployments: wait on the deployment condition directly (IO Bun image can be slow on first pull).
   for deploy in memory-api orchestrator io; do
-    kubectl rollout status deployment "${deploy}" -n "${NAMESPACE}" --timeout=5m \
+    deploy_timeout=10m
+    if [ "${deploy}" = io ]; then deploy_timeout=15m; fi
+    kubectl rollout status deployment "${deploy}" -n "${NAMESPACE}" --timeout="${deploy_timeout}" \
       || echo "    (warning: deployment/${deploy} did not become ready in time)"
   done
 else
@@ -136,7 +184,7 @@ else
   echo "    ANTHROPIC_API_KEY  ✗ not set"
   echo "      How to inject:"
   echo "        Live cluster:  kubectl set env deployment/aegis-agents ANTHROPIC_API_KEY=<key> -n ${NAMESPACE}"
-  echo "        Fresh start:   export ANTHROPIC_API_KEY=<key> && ./deploy/scripts/kind-up.sh --skip-build"
+  echo "        Fresh start:   put ANTHROPIC_API_KEY in repo-root .env or export it, then ./deploy/scripts/kind-up.sh --skip-build"
 fi
 if [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
   echo "    ANTHROPIC_BASE_URL ✓ injected: ${ANTHROPIC_BASE_URL}"
@@ -144,6 +192,6 @@ else
   echo "    ANTHROPIC_BASE_URL ✗ not set (using Anthropic default endpoint)"
   echo "      How to inject:"
   echo "        Live cluster:  kubectl set env deployment/aegis-agents ANTHROPIC_BASE_URL=<url> -n ${NAMESPACE}"
-  echo "        Fresh start:   export ANTHROPIC_BASE_URL=<url> && ./deploy/scripts/kind-up.sh --skip-build"
+  echo "        Fresh start:   put ANTHROPIC_BASE_URL in repo-root .env or export it, then ./deploy/scripts/kind-up.sh --skip-build"
 fi
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
