@@ -286,6 +286,21 @@ func (e *PlanExecutor) HandleSubtaskResult(ctx context.Context, result types.Tas
 	subCtx = observability.WithModule(subCtx, "plan_executor")
 	log = observability.LogFromContext(subCtx)
 
+	// Cross-tenant safety guard: drop the result if it claims to come from a
+	// different agent than the one this subtask was dispatched to. Without this,
+	// a buggy or compromised agent could publish a forged result against another
+	// task's orchestrator_task_ref and have it routed to the wrong user's SSE
+	// stream. The expected agent_id is set at dispatch time (capability response)
+	// and is server-side state, not agent-supplied. (MT-9 / #188)
+	if sub.AgentID != "" && result.AgentID != "" && sub.AgentID != result.AgentID {
+		log.Warn("dropped subtask result: agent_id mismatch (expected vs actual disagree); possible misrouting or forged result",
+			"expected_agent_id", sub.AgentID,
+			"actual_agent_id", result.AgentID,
+			"orchestrator_task_ref", result.OrchestratorTaskRef,
+		)
+		return nil
+	}
+
 	// Revoke credentials for this subtask's agent.
 	if err := e.policy.RevokeCredentials(subCtx, result.OrchestratorTaskRef); err != nil {
 		log.Error("could not revoke credentials for subtask agent; vault tokens may linger until ttl",
