@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -156,15 +157,21 @@ func main() {
 	// Note: We'll implement a proper repository wrapper for Personal Info
 	piRepo := &storage.BaseRepository{Pool: pool}
 
-	var embedder logic.Embedder
-	if apiKey := os.Getenv("OPENAI_API_KEY"); apiKey != "" {
-		logger.Info("using OpenAI embedder")
-		embedder = logic.NewOpenAIEmbedder(apiKey)
-	} else {
-		logger.Warn("OPENAI_API_KEY not set, using local embedder")
-		embedder = &logic.LocalEmbedder{}
+	embeddingAPIURL := os.Getenv("EMBEDDING_API_URL")
+	embeddingModel := os.Getenv("EMBEDDING_MODEL")
+	embeddingPromptStyle := getEnvOrDefault("EMBEDDING_PROMPT_STYLE", "embeddinggemma")
+	embeddingDim, err := strconv.Atoi(getEnvOrDefault("EMBEDDING_DIM", "768"))
+	if err != nil {
+		logger.Error("invalid EMBEDDING_DIM", "value", os.Getenv("EMBEDDING_DIM"), "error", err)
+		os.Exit(1)
 	}
-	piProcessor := logic.NewProcessor(piRepo, embedder)
+	embedder, err := logic.NewTEIEmbedder(embeddingAPIURL, embeddingModel, embeddingDim)
+	if err != nil {
+		logger.Error("failed to initialize embedding client", "error", err)
+		os.Exit(1)
+	}
+	logger.Info("using embedding API", "url", embeddingAPIURL, "model", embeddingModel, "dimensions", embeddingDim, "prompt_style", embeddingPromptStyle)
+	piProcessor := logic.NewProcessor(piRepo, embedder, logic.WithPromptStyle(embeddingPromptStyle))
 
 	// NATS: single connection for heartbeat + user_cron → orchestrator (JetStream).
 	var userDispatch storage.UserCronDispatch

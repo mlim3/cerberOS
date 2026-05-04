@@ -29,6 +29,14 @@ openbao:
   baoToken: ""
 
 # ── Application services ─────────────────────────────────────────────────────
+global:
+  embedding:
+    apiUrl: "http://embedding-api/v1/embeddings"
+    model: "microsoft/harrier-oss-v1-270m"
+    dimensions: "640"
+    promptStyle: "harrier"
+    hfToken: ""
+
 vault-engine:
   baoToken: ""
 
@@ -39,6 +47,14 @@ memory-api:
     name: memory_db
   vaultMasterKey: "CHANGE_ME_32_ASCII_CHARS_EXACTLY!"
   internalVaultApiKey: "CHANGE_ME_INTERNAL_VAULT_KEY"
+  embedding:
+    provider: tei
+    apiUrl: "http://embedding-api/v1/embeddings"
+    model: "microsoft/harrier-oss-v1-270m"
+    dimensions: "640"
+    promptStyle: "harrier"
+
+embedding-api: {}
 
 orchestrator: {}
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -69,14 +70,21 @@ func NewDBClient(ctx context.Context, dbURL string) (MemoryClient, error) {
 	agentLogsRepo := storage.NewAgentLogsRepository(pool)
 	logRepo := storage.NewLogRepository(pool)
 
-	var embedder logic.Embedder
-	if apiKey := os.Getenv("OPENAI_API_KEY"); apiKey != "" {
-		embedder = logic.NewOpenAIEmbedder(apiKey)
-	} else {
-		embedder = &logic.LocalEmbedder{}
+	embeddingDim, err := strconv.Atoi(getEnvOrDefault("EMBEDDING_DIM", "768"))
+	if err != nil {
+		return nil, fmt.Errorf("invalid EMBEDDING_DIM: %w", err)
+	}
+	embeddingPromptStyle := getEnvOrDefault("EMBEDDING_PROMPT_STYLE", "embeddinggemma")
+	embedder, err := logic.NewTEIEmbedder(
+		os.Getenv("EMBEDDING_API_URL"),
+		os.Getenv("EMBEDDING_MODEL"),
+		embeddingDim,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize embedding client: %w", err)
 	}
 
-	piProcessor := logic.NewProcessor(piRepo, embedder)
+	piProcessor := logic.NewProcessor(piRepo, embedder, logic.WithPromptStyle(embeddingPromptStyle))
 
 	return &dbClient{
 		db:            db,

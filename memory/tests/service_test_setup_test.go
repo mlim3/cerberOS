@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"testing"
 
 	"github.com/google/uuid"
@@ -35,11 +36,20 @@ func (d *deterministicTestEmbedder) Embed(ctx context.Context, text string) (pgv
 	_, _ = h.Write([]byte(text))
 	seed := h.Sum64()
 
-	v := make([]float32, 1536)
+	dim, err := strconv.Atoi(getEnvOrDefault("EMBEDDING_DIM", "768"))
+	if err != nil || dim <= 0 {
+		dim = 768
+	}
+
+	v := make([]float32, dim)
 	for i := range v {
 		v[i] = float32((seed+uint64(i*97))%1000) / 1000.0
 	}
 	return pgvector.NewVector(v), nil
+}
+
+func (d *deterministicTestEmbedder) ModelVersion() string {
+	return "test-model"
 }
 
 func TestMain(m *testing.M) {

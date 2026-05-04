@@ -25,6 +25,15 @@ spec:
               until nc -z {{ .Values.db.host }} {{ .Values.db.port }}; do
                 echo "Waiting for postgres..."; sleep 3;
               done
+        - name: wait-for-embedding-api
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z embedding-api 80; do
+                echo "Waiting for embedding-api..."; sleep 3;
+              done
       containers:
         - name: memory-api
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
@@ -49,6 +58,16 @@ spec:
               value: {{ .Values.observability.otlpEndpoint | quote }}
             - name: OTEL_SERVICE_NAME
               value: {{ .Values.observability.serviceName | quote }}
+            - name: EMBEDDING_PROVIDER
+              value: {{ .Values.embedding.provider | quote }}
+            - name: EMBEDDING_API_URL
+              value: {{ .Values.embedding.apiUrl | quote }}
+            - name: EMBEDDING_MODEL
+              value: {{ default .Values.embedding.model .Values.global.embedding.model | quote }}
+            - name: EMBEDDING_DIM
+              value: {{ default .Values.embedding.dimensions .Values.global.embedding.dimensions | quote }}
+            - name: EMBEDDING_PROMPT_STYLE
+              value: {{ default .Values.embedding.promptStyle .Values.global.embedding.promptStyle | quote }}
             - name: DB_PASSWORD
               valueFrom:
                 secretKeyRef:

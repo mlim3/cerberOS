@@ -76,7 +76,7 @@ data:
         id UUID PRIMARY KEY,
         user_id UUID NOT NULL,
         raw_text TEXT NOT NULL,
-        embedding VECTOR(1536),
+        embedding VECTOR({{ default "768" .Values.global.embedding.dimensions }}),
         model_version VARCHAR(50) NOT NULL,
         created_at TIMESTAMPTZ DEFAULT NOW()
     );

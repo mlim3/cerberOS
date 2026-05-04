@@ -1,15 +1,13 @@
-// Package skills — embed.go provides the Embedder interface and the default
-// feature-hashing embedder used for semantic skill search (EDD §13.5).
+// Package skills — embed.go provides the Embedder interface and a deterministic
+// local fallback used by the in-memory skill search manager (EDD §13.5).
 //
 // The default hashEmbedder maps text to a fixed-dimension float64 vector using
 // FNV-1a feature hashing on unigrams and bigrams. It requires no API calls,
 // no training data, and no corpus statistics — making it safe to use inside
 // internal/ packages that are prohibited from making network connections.
 //
-// Callers who need higher-quality embeddings (e.g. Anthropic voyage-3-lite,
-// OpenAI text-embedding-3-small) can inject a custom implementation via
-// WithEmbedder. The custom implementation lives outside internal/ where
-// network calls are permitted.
+// Production callers inject the shared embedding-api client via WithEmbedder.
+// That client lives outside internal/ where network calls are permitted.
 package skills
 
 import (
@@ -19,7 +17,7 @@ import (
 )
 
 const (
-	// defaultHashDim is the vector dimension used by the default hash embedder.
+	// defaultHashDim is the vector dimension used by the deterministic local embedder.
 	// 512 gives a good balance of precision and memory for small skill corpora.
 	defaultHashDim = 512
 )
@@ -144,7 +142,7 @@ func l2Normalize(vec []float64) {
 }
 
 // BatchEmbedder is an optional extension of Embedder that enables efficient
-// multi-text embedding in a single API call (e.g. a remote voyage-3-lite
+// multi-text embedding in a single API call (e.g. a shared embedding-api
 // request). Implementations must be safe for concurrent use.
 //
 // Callers detect support via type assertion:

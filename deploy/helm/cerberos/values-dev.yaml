@@ -61,6 +61,14 @@ memory-api:
   systemMaintenanceCron:
     enabled: true
 
+embedding-api:
+  image:
+    repository: cerberos-embedding-api
+    tag: local
+    pullPolicy: Never
+  auth:
+    hfToken: ""
+
 orchestrator:
   image:
     repository: cerberos-orchestrator

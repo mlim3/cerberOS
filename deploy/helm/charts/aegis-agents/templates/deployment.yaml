@@ -55,6 +55,14 @@ spec:
               value: {{ .Values.maxConcurrentTasks | quote }}
             - name: AEGIS_IDLE_SUSPEND_TIMEOUT
               value: {{ .Values.idleSuspendTimeout | quote }}
+            - name: AEGIS_EMBEDDING_API_URL
+              value: {{ default .Values.embedding.apiUrl .Values.global.embedding.apiUrl | quote }}
+            - name: AEGIS_EMBEDDING_MODEL
+              value: {{ default .Values.embedding.model .Values.global.embedding.model | quote }}
+            - name: AEGIS_EMBEDDING_DIM
+              value: {{ default .Values.embedding.dimensions .Values.global.embedding.dimensions | quote }}
+            - name: AEGIS_EMBEDDING_PROMPT_STYLE
+              value: {{ default .Values.embedding.promptStyle .Values.global.embedding.promptStyle | quote }}
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: {{ .Values.observability.otlpEndpoint | quote }}
             - name: OTEL_SERVICE_NAME

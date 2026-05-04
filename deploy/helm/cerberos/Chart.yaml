@@ -33,6 +33,10 @@ dependencies:
     version: "0.1.0"
     repository: "file://../charts/memory-api"
 
+  - name: embedding-api
+    version: "0.1.0"
+    repository: "file://../charts/embedding-api"
+
   - name: orchestrator
     version: "0.1.0"
     repository: "file://../charts/orchestrator"

@@ -5,7 +5,7 @@
 //   - Validation is completed before any shared state is touched. A single
 //     invalid command rejects the entire reload, leaving the live tree intact.
 //   - Embeddings for all commands are pre-computed outside the write lock so
-//     slow embedding calls (e.g. remote voyage model) do not stall concurrent
+//     slow embedding calls (e.g. the shared remote embedding-api) do not stall concurrent
 //     skill queries.
 //   - The atomic swap under the write lock guarantees that concurrent readers
 //     see either the full old tree or the full new tree — never a partial mix.
@@ -90,7 +90,7 @@ func (m *hierarchyManager) Reload(domains []*types.SkillNode) (ReloadResult, err
 	result := diffDomains(oldDomains, newDomains)
 
 	// Phase 4 — Compute embeddings incrementally outside the write lock so
-	// slow embedder calls (e.g. remote Voyage AI) do not stall readers.
+	// slow embedder calls (e.g. the shared embedding-api) do not stall readers.
 	// Only commands whose (domain, name, description) tuple has changed since
 	// the last load call the embedder; all others reuse their existing vector.
 	newEmbeddings := m.buildIncrementalEmbeddings(domains, oldEmbeddings)

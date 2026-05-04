@@ -175,7 +175,7 @@ func TestGetCommandsExposesContractFields(t *testing.T) {
 
 // ---- stubEmbedder ----
 // Returns a controllable fixed vector per keyword match. Used to make search
-// ranking tests deterministic and independent of the default hash embedder.
+// ranking tests deterministic and independent of the default local embedder.
 
 type stubEmbedder struct {
 	// vectors maps a keyword substring to the vector returned when the input

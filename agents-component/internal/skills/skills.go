@@ -69,10 +69,9 @@ type InvocationHook func(domain, command string)
 // Option configures a hierarchyManager.
 type Option func(*hierarchyManager)
 
-// WithEmbedder replaces the default feature-hashing embedder with a custom one.
-// Use this to inject a high-quality remote model (e.g. voyage-3-lite) from a
-// cmd/ binary where network calls are permitted. The embedder must be safe for
-// concurrent use.
+// WithEmbedder replaces the default deterministic embedder with a custom one.
+// Production wiring uses the shared embedding-api client from a cmd/ binary
+// where network calls are permitted. The embedder must be safe for concurrent use.
 func WithEmbedder(e Embedder) Option {
 	return func(m *hierarchyManager) {
 		m.embedder = e

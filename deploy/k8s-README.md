@@ -34,6 +34,55 @@ That's it. The script handles everything:
 - Loads them into the cluster (no registry needed)
 - Installs the umbrella Helm chart with `values-dev.yaml`
 
+### Embedding model selection
+
+`kind-up.sh` now configures the memory embedding model for you.
+
+- Default: `harrier`
+  - model: `microsoft/harrier-oss-v1-270m`
+  - dimensions: `640`
+  - prompt style: `harrier`
+- Optional preset: `embeddinggemma`
+  - model: `google/embeddinggemma-300m`
+  - dimensions: `768`
+  - prompt style: `embeddinggemma`
+  - requires `HF_TOKEN` because the model is gated on Hugging Face
+- Custom model:
+  - pass any Hugging Face model id with `--embedding-model`
+  - also provide `--embedding-dim`
+  - optionally provide `--embedding-prompt-style`
+
+Examples:
+
+```bash
+# Default local path: Harrier
+./deploy/scripts/kind-up.sh
+
+# Explicit Harrier
+./deploy/scripts/kind-up.sh --embedding-model harrier
+
+# EmbeddingGemma (requires Hugging Face token)
+HF_TOKEN=<token> ./deploy/scripts/kind-up.sh --embedding-model embeddinggemma
+
+# Any Hugging Face model id
+./deploy/scripts/kind-up.sh \
+  --embedding-model BAAI/bge-small-en-v1.5 \
+  --embedding-dim 384 \
+  --embedding-prompt-style plain
+```
+
+Important:
+- the selected embedding dimension is used consistently for:
+  - the embedding service
+  - `memory-api`
+  - the Postgres `VECTOR(...)` column created during DB init
+- if you change models, do a clean restart so the DB is recreated with the new vector size:
+
+```bash
+./deploy/scripts/kind-down.sh
+./deploy/scripts/kind-up.sh --embedding-model harrier
+```
+
 ---
 
 ## Manual step-by-step

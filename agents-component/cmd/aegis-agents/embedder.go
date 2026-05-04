@@ -1,13 +1,8 @@
-// Package main — embedder.go implements a Voyage AI embedding client for
-// production-quality semantic skill search.
+// Package main — embedder.go implements the shared embedding-api client used
+// for production skill search.
 //
-// The voyageEmbedder implements both skills.Embedder (single text) and
-// skills.BatchEmbedder (multi-text), allowing the Skill Hierarchy Manager to
-// embed an entire domain's commands in a single HTTP round-trip rather than
-// one call per command.
-//
-// Network calls are permitted in cmd/ binaries; this file MUST NOT be moved
-// to internal/ where the no-outbound-calls rule applies.
+// Network calls are permitted in cmd/ binaries; this file MUST NOT be moved to
+// internal/ where outbound calls are prohibited.
 package main
 
 import (
@@ -15,115 +10,151 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"sort"
+	"strings"
 	"time"
 )
 
-const (
-	voyageAPIURL         = "https://api.voyageai.com/v1/embeddings"
-	voyageDefaultModel   = "voyage-3-lite"
-	voyageRequestTimeout = 15 * time.Second
-)
+const embeddingRequestTimeout = 15 * time.Second
 
-// voyageEmbedder calls the Voyage AI embeddings API.
-// It satisfies skills.Embedder (via Embed) and skills.BatchEmbedder (via EmbedBatch).
-type voyageEmbedder struct {
-	apiKey string
-	model  string
-	client *http.Client
+type embeddingAPIEmbedder struct {
+	apiURL      string
+	model       string
+	dimensions  int
+	promptStyle string
+	client      *http.Client
 }
 
-// newVoyageEmbedder constructs a voyageEmbedder. model defaults to
-// voyageDefaultModel when empty.
-func newVoyageEmbedder(apiKey, model string) *voyageEmbedder {
-	if model == "" {
-		model = voyageDefaultModel
-	}
-	return &voyageEmbedder{
-		apiKey: apiKey,
-		model:  model,
-		client: &http.Client{Timeout: voyageRequestTimeout},
-	}
+type embeddingRequest struct {
+	Input      []string `json:"input"`
+	Model      string   `json:"model,omitempty"`
+	Dimensions int      `json:"dimensions,omitempty"`
 }
 
-// voyageRequest is the JSON body sent to the Voyage AI embeddings endpoint.
-type voyageRequest struct {
-	Input []string `json:"input"`
-	Model string   `json:"model"`
-}
-
-// voyageResponse is the JSON body returned by the Voyage AI embeddings endpoint.
-type voyageResponse struct {
+type embeddingResponse struct {
 	Data []struct {
 		Embedding []float64 `json:"embedding"`
 		Index     int       `json:"index"`
 	} `json:"data"`
 }
 
-// Embed returns the embedding vector for a single text. It delegates to
-// EmbedBatch internally.
-func (v *voyageEmbedder) Embed(text string) ([]float64, error) {
-	vecs, err := v.EmbedBatch([]string{text})
+func newEmbeddingAPIEmbedder(apiURL, model string, dimensions int, promptStyle string) (*embeddingAPIEmbedder, error) {
+	apiURL = strings.TrimSpace(apiURL)
+	model = strings.TrimSpace(model)
+	promptStyle = strings.TrimSpace(promptStyle)
+
+	if apiURL == "" {
+		return nil, fmt.Errorf("embedding API URL is required")
+	}
+	if model == "" {
+		return nil, fmt.Errorf("embedding model is required")
+	}
+	if dimensions <= 0 {
+		return nil, fmt.Errorf("embedding dimensions must be positive")
+	}
+	if promptStyle == "" {
+		promptStyle = "plain"
+	}
+
+	return &embeddingAPIEmbedder{
+		apiURL:      apiURL,
+		model:       model,
+		dimensions:  dimensions,
+		promptStyle: promptStyle,
+		client: &http.Client{
+			Timeout: embeddingRequestTimeout,
+		},
+	}, nil
+}
+
+func (e *embeddingAPIEmbedder) Embed(text string) ([]float64, error) {
+	vecs, err := e.embedTexts([]string{formatQueryText(e.promptStyle, text)})
 	if err != nil {
 		return nil, err
 	}
 	if len(vecs) == 0 || vecs[0] == nil {
-		return nil, fmt.Errorf("voyage: no embedding returned for input text")
+		return nil, fmt.Errorf("embedding API returned no embedding for input text")
 	}
 	return vecs[0], nil
 }
 
-// EmbedBatch returns embedding vectors for all texts in a single API call.
-// The returned slice has the same length as texts; entries are ordered by the
-// index field in the API response so the caller can correlate by position.
-func (v *voyageEmbedder) EmbedBatch(texts []string) ([][]float64, error) {
+func (e *embeddingAPIEmbedder) EmbedBatch(texts []string) ([][]float64, error) {
 	if len(texts) == 0 {
 		return nil, nil
 	}
+	formatted := make([]string, len(texts))
+	for i, text := range texts {
+		formatted[i] = formatDocumentText(e.promptStyle, text)
+	}
+	return e.embedTexts(formatted)
+}
 
-	body, err := json.Marshal(voyageRequest{
-		Input: texts,
-		Model: v.model,
+func (e *embeddingAPIEmbedder) embedTexts(texts []string) ([][]float64, error) {
+	reqBody, err := json.Marshal(embeddingRequest{
+		Input:      texts,
+		Model:      e.model,
+		Dimensions: e.dimensions,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("voyage: marshal request: %w", err)
+		return nil, fmt.Errorf("embedding request marshal failed: %w", err)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, voyageAPIURL, bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, e.apiURL, bytes.NewReader(reqBody))
 	if err != nil {
-		return nil, fmt.Errorf("voyage: create request: %w", err)
+		return nil, fmt.Errorf("embedding request creation failed: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+v.apiKey)
 
-	resp, err := v.client.Do(req)
+	resp, err := e.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("voyage: HTTP request: %w", err)
+		return nil, fmt.Errorf("embedding request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("voyage: unexpected HTTP status %d", resp.StatusCode)
+		return nil, fmt.Errorf("embedding API returned HTTP %d", resp.StatusCode)
 	}
 
-	var vr voyageResponse
-	if err := json.NewDecoder(resp.Body).Decode(&vr); err != nil {
-		return nil, fmt.Errorf("voyage: decode response: %w", err)
+	var payload embeddingResponse
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, fmt.Errorf("embedding response decode failed: %w", err)
 	}
-
-	if len(vr.Data) != len(texts) {
-		return nil, fmt.Errorf("voyage: expected %d embeddings, got %d", len(texts), len(vr.Data))
+	if len(payload.Data) != len(texts) {
+		return nil, fmt.Errorf("embedding API returned %d embeddings, expected %d", len(payload.Data), len(texts))
 	}
-
-	// Sort by index so results align with the input slice regardless of the
-	// order in which the API returns them.
-	sort.Slice(vr.Data, func(i, j int) bool {
-		return vr.Data[i].Index < vr.Data[j].Index
-	})
 
 	result := make([][]float64, len(texts))
-	for i, d := range vr.Data {
-		result[i] = d.Embedding
+	for _, datum := range payload.Data {
+		if datum.Index < 0 || datum.Index >= len(texts) {
+			return nil, fmt.Errorf("embedding API returned out-of-range index %d", datum.Index)
+		}
+		result[datum.Index] = datum.Embedding
+	}
+	for i, vec := range result {
+		if len(vec) == 0 {
+			return nil, fmt.Errorf("embedding API returned no embedding at index %d", i)
+		}
 	}
 	return result, nil
+}
+
+func formatDocumentText(promptStyle, text string) string {
+	switch promptStyle {
+	case "embeddinggemma":
+		return "title: skill command | text: " + text
+	case "harrier":
+		return text
+	default:
+		return text
+	}
+}
+
+func formatQueryText(promptStyle, query string) string {
+	switch promptStyle {
+	case "embeddinggemma":
+		return "task: search result | query: " + query
+	case "harrier":
+		return "Instruct: Retrieve semantically similar text\nQuery: " + query
+	default:
+		return query
+	}
 }

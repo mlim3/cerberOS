@@ -1,3 +1,6 @@
+-- Note: the embedding VECTOR dimension in this file is synced by
+-- memory/scripts/set-embedding-dimension.sh so it matches the selected model.
+
 -- Enable pgvector extension
 CREATE EXTENSION IF NOT EXISTS vector;
 
@@ -78,7 +81,7 @@ CREATE TABLE IF NOT EXISTS personal_info_schema.personal_info_chunks (
     id UUID PRIMARY KEY,
     user_id UUID NOT NULL,
     raw_text TEXT NOT NULL,
-    embedding VECTOR(1536),
+    embedding VECTOR(640),
     model_version VARCHAR(50) NOT NULL,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
