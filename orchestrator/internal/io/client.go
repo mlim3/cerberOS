@@ -183,13 +183,19 @@ func (c *Client) post(body any, traceID string) error {
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		// IO may be down — log but do not return an error that would fail the task.
-		c.logger.Warn("IO post failed", "task_id", taskIDFromEvent(body), "url", url, "error", err)
+		c.logger.Warn("could not deliver event to io http bridge; chat may not see this update (continuing without retry)",
+			"task_id", taskIDFromEvent(body),
+			"url", url,
+			"error", err)
 		return nil
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		c.logger.Warn("IO post returned non-OK", "task_id", taskIDFromEvent(body), "url", url, "status", resp.StatusCode)
+		c.logger.Warn("io http bridge returned non-OK status; ui may have missed this event",
+			"task_id", taskIDFromEvent(body),
+			"url", url,
+			"status", resp.StatusCode)
 	}
 	return nil
 }

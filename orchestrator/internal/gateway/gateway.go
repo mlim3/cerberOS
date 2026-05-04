@@ -218,7 +218,8 @@ func (g *Gateway) Start() error {
 		return fmt.Errorf("subscribe %s: %w", TopicVaultExecuteRequest, err)
 	}
 	observability.LogFromContext(observability.WithModule(context.Background(), "comms_gateway")).
-		Info("gateway started — subscribed to inbound topics", "node_id", g.nodeID)
+		Info("orchestrator gateway started; subscribed to inbound nats topics (user_task, agent.status, capability.response, task.accepted, task.result, task.failed, credential.request, plan.decision, vault.execute)",
+			"node_id", g.nodeID)
 	return nil
 }
 
@@ -261,14 +262,32 @@ func (g *Gateway) handleRawInboundTask(subject string, data []byte) error {
 	defer span.End()
 	observability.SpanSetTaskAttributes(span, task.TaskID, task.UserID)
 
-	observability.LogFromContext(ctx).Info("user task received",
+	observability.LogFromContext(ctx).Info("received user task from io; routing to dispatcher",
 		"user_id", task.UserID,
-		"priority", task.Priority)
+		"priority", task.Priority,
+		"content_preview", contentPreviewFromUserTask(task))
 
 	if g.taskHandler == nil {
 		return fmt.Errorf("no task handler registered")
 	}
 	return g.taskHandler(ctx, task)
+}
+
+// contentPreviewFromUserTask extracts the user-visible "raw_input" string out of
+// the opaque payload and returns a 20-word preview for log fields. Returns an
+// empty string when the payload is missing, malformed, or has no raw_input — never
+// the full untruncated value.
+func contentPreviewFromUserTask(task types.UserTask) string {
+	if len(task.Payload) == 0 {
+		return ""
+	}
+	var p struct {
+		RawInput string `json:"raw_input"`
+	}
+	if err := json.Unmarshal(task.Payload, &p); err != nil {
+		return ""
+	}
+	return observability.PreviewHeadTail(p.RawInput, 15, 10)
 }
 
 // handleRawAgentStatus handles aegis.agents.status.events.
@@ -327,15 +346,24 @@ func (g *Gateway) handleCapabilityResponse(subject string, data []byte) error {
 	}
 
 	queryID := firstNonEmpty(payload.QueryID, envelope.CorrelationID)
+	ctx := extractOrCreateCtx(envelope, "comms_gateway")
 	if ch, ok := g.pendingCapabilityQueries.Load(queryID); ok {
 		match := types.CapabilityMatch_NoMatch
 		if payload.HasMatch {
 			match = types.CapabilityMatch_Match
 		}
+		observability.LogFromContext(ctx).Info("received capability response from agents; delivering to waiting query",
+			"query_id", queryID,
+			"has_match", payload.HasMatch,
+			"domains", payload.Domains)
 		ch.(chan *types.CapabilityResponse) <- &types.CapabilityResponse{
 			OrchestratorTaskRef: queryID,
 			Match:               match,
 		}
+	} else {
+		observability.LogFromContext(ctx).Info("dropped capability response for unknown or already-completed query",
+			"query_id", queryID,
+			"has_match", payload.HasMatch)
 	}
 	return nil
 }
@@ -359,7 +387,14 @@ func (g *Gateway) handleRawTaskAccepted(subject string, data []byte) error {
 	if err := json.Unmarshal(envelope.Payload, &accepted); err != nil {
 		return fmt.Errorf("deserialize task.accepted: %w", err)
 	}
-	_ = accepted
+	ctx := extractOrCreateCtx(envelope, "comms_gateway")
+	if accepted.TaskID != "" {
+		ctx = observability.WithTaskID(ctx, accepted.TaskID)
+	}
+	observability.LogFromContext(ctx).Info("agent acknowledged task receipt",
+		"agent_id", accepted.AgentID,
+		"agent_type", accepted.AgentType,
+		"estimated_completion_at", accepted.EstimatedCompletionAt)
 	return nil
 }
 
@@ -393,7 +428,14 @@ func (g *Gateway) handleRawTaskResult(subject string, data []byte) error {
 	if payload.TaskID != "" {
 		ctx = observability.WithTaskID(ctx, payload.TaskID)
 	}
-	observability.LogFromContext(ctx).Info("received task result from agents")
+	resultBlob := firstNonEmptyJSON(payload.Result, payload.Output)
+	observability.LogFromContext(ctx).Info(
+		fmt.Sprintf("received task result from agent (success=%t); routing to executor", payload.Success),
+		"agent_id", payload.AgentID,
+		"success", payload.Success,
+		"error_code", payload.ErrorCode,
+		"result_preview", observability.PreviewHeadTail(string(resultBlob), 15, 10),
+	)
 
 	if g.taskResultHandler == nil {
 		return fmt.Errorf("no task result handler registered")
@@ -438,7 +480,10 @@ func (g *Gateway) handleRawTaskFailed(subject string, data []byte) error {
 	if payload.TaskID != "" {
 		ctx = observability.WithTaskID(ctx, payload.TaskID)
 	}
-	observability.LogFromContext(ctx).Info("received task failed from agents", "error_code", payload.ErrorCode)
+	observability.LogFromContext(ctx).Warn("received task failure from agent; routing to executor as failed result",
+		"agent_id", payload.AgentID,
+		"error_code", payload.ErrorCode,
+		"error_message_preview", observability.PreviewHeadTail(payload.ErrorMessage, 15, 10))
 
 	if g.taskResultHandler == nil {
 		return fmt.Errorf("no task result handler registered")
@@ -487,10 +532,22 @@ func (g *Gateway) handleRawCredentialRequest(subject string, data []byte) error 
 
 	if g.credentialRequestHandler == nil {
 		ctx := extractOrCreateCtx(envelope, "comms_gateway")
-		observability.LogFromContext(ctx).Warn("credential.request (user_input) received but no handler registered",
-			"task_id", payload.TaskID)
+		observability.LogFromContext(ctx).Warn("agent requested credential from user but no io handler is registered; ignoring",
+			"task_id", payload.TaskID,
+			"agent_id", payload.AgentID,
+			"key_name", payload.KeyName)
 		return nil
 	}
+	ctx := extractOrCreateCtx(envelope, "comms_gateway")
+	if payload.TaskID != "" {
+		ctx = observability.WithTaskID(ctx, payload.TaskID)
+	}
+	observability.LogFromContext(ctx).Info("agent requested credential from user; forwarding prompt to io",
+		"agent_id", payload.AgentID,
+		"request_id", payload.RequestID,
+		"key_name", payload.KeyName,
+		"label_preview", observability.PreviewWords(payload.Label, 20, 140),
+		"description_preview", observability.PreviewWords(payload.Description, 20, 140))
 	return g.credentialRequestHandler(
 		payload.AgentID, payload.TaskID, payload.RequestID, payload.KeyName, payload.Label,
 		envelope.TraceID,
@@ -522,16 +579,26 @@ func (g *Gateway) handleRawPlanDecision(subject string, data []byte) error {
 	if payload.TaskID != "" {
 		ctx = observability.WithTaskID(ctx, payload.TaskID)
 	}
-	observability.LogFromContext(ctx).Info("plan_decision received",
-		"task_id", payload.TaskID,
+	observability.LogFromContext(ctx).Info(
+		fmt.Sprintf("user %s plan; routing decision to dispatcher", planDecisionVerb(payload.Approved)),
 		"approved", payload.Approved,
+		"orchestrator_task_ref", payload.OrchestratorTaskRef,
+		"reason_preview", observability.PreviewWords(payload.Reason, 20, 140),
 	)
 
 	if g.planDecisionHandler == nil {
-		observability.LogFromContext(ctx).Warn("plan_decision received but no handler registered")
+		observability.LogFromContext(ctx).Warn("plan decision arrived but no dispatcher handler is registered; dropping",
+			"approved", payload.Approved)
 		return nil
 	}
 	return g.planDecisionHandler(ctx, payload)
+}
+
+func planDecisionVerb(approved bool) string {
+	if approved {
+		return "approved"
+	}
+	return "rejected"
 }
 
 // ── Agent Memory Bridge ───────────────────────────────────────────────────────

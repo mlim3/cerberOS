@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -82,9 +84,14 @@ func main() {
 
 	baseLogger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).
 		With("component", "databus")
+	// Make component=databus the default for global slog calls (e.g. retry
+	// helpers in pkg/bus). Without this, those records would be missing the
+	// canonical component/module fields required by docs/logging.md.
+	slog.SetDefault(baseLogger.With("module", "default"))
 	logger := baseLogger.With("module", "server")
+	httpLogger := baseLogger.With("module", "http")
 	if telemetry.Enabled() {
-		logger.Info("OpenTelemetry OTLP export enabled")
+		logger.Info("opentelemetry otlp exporter is enabled; spans will be shipped to the otel collector")
 	}
 
 	url := os.Getenv("AEGIS_NATS_URL")
@@ -99,13 +106,13 @@ func main() {
 	if seedErr == nil && seed != "" {
 		nc, err = security.NewConnectionWithNKeySeed(url, seed)
 		if err != nil {
-			logger.Error("connect failed (NKey)", "error", err)
+			logger.Error("could not connect to nats with nkey credential; databus cannot continue", "error", err, "nats_url", url)
 			os.Exit(1)
 		}
 		if os.Getenv("OPENBAO_ADDR") != "" {
-			logger.Info("connected with NKey from OpenBao")
+			logger.Info("connected to nats using nkey credential sourced from openbao", "nats_url", url)
 		} else {
-			logger.Info("connected with NKey (Zero Trust)")
+			logger.Info("connected to nats using nkey credential (zero trust mode)", "nats_url", url)
 		}
 	} else {
 		opts := []nats.Option{
@@ -119,7 +126,7 @@ func main() {
 		}
 		nc, err = nats.Connect(url, opts...)
 		if err != nil {
-			logger.Error("connect failed", "error", err)
+			logger.Error("could not connect to nats with non-nkey options; databus cannot continue", "error", err, "nats_url", url)
 			os.Exit(1)
 		}
 	}
@@ -132,51 +139,86 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		reqLog := requestLogger(httpLogger, r, "health.check")
+		start := time.Now()
 		w.Header().Set("Content-Type", "application/json")
 		if !streamsReady.Load() {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			w.Write([]byte(`{"ok":false,"reason":"streams_not_ready"}`))
+			reqLog.Warn("served databus healthz probe with not-ready response; jetstream streams have not finished reconciling",
+				"status", http.StatusServiceUnavailable,
+				"reason", "streams_not_ready",
+				"elapsed_ms", time.Since(start).Milliseconds())
 			return
 		}
 		w.Write([]byte(`{"ok":true}`))
+		reqLog.Debug("served databus healthz probe with ok response",
+			"status", http.StatusOK,
+			"elapsed_ms", time.Since(start).Milliseconds())
 	})
 	mux.HandleFunc("/audit", func(w http.ResponseWriter, r *http.Request) {
+		reqLog := requestLogger(httpLogger, r, "audit.list")
+		start := time.Now()
 		if r.Method != http.MethodGet {
+			reqLog.Warn("rejected audit list request: method not allowed; only GET is accepted",
+				"status", http.StatusMethodNotAllowed,
+				"elapsed_ms", time.Since(start).Milliseconds())
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 		if mem == nil {
+			reqLog.Warn("rejected audit list request: storage client not yet initialized; databus is still starting up",
+				"status", http.StatusServiceUnavailable,
+				"elapsed_ms", time.Since(start).Milliseconds())
 			http.Error(w, "not ready", http.StatusServiceUnavailable)
 			return
 		}
 		logs, err := mem.ListAuditLogs(r.Context(), 50)
 		if err != nil {
+			reqLog.Error("could not load audit log entries from storage; returning 500 to caller",
+				"status", http.StatusInternalServerError,
+				"error", err,
+				"elapsed_ms", time.Since(start).Milliseconds())
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(logs)
+		reqLog.Info("served audit log listing to caller; metadata only (payloads never returned)",
+			"status", http.StatusOK,
+			"entry_count", len(logs),
+			"elapsed_ms", time.Since(start).Milliseconds())
 	})
 	natsHTTP := os.Getenv("AEGIS_NATS_HTTP_URL")
 	if natsHTTP == "" {
 		natsHTTP = defaultNatsHTTPURL
 	}
 	proxy := httpproxy.ProxyToNATSMonitoring(strings.TrimSuffix(natsHTTP, "/"))
-	mux.HandleFunc("/varz", proxy)
-	mux.HandleFunc("/connz", proxy)
-	mux.HandleFunc("/jsz", proxy)
+	loggedProxy := func(opType string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			reqLog := requestLogger(httpLogger, r, opType)
+			reqLog.Debug("proxying nats monitoring request to upstream nats http endpoint",
+				"upstream", natsHTTP)
+			proxy(w, r)
+		}
+	}
+	mux.HandleFunc("/varz", loggedProxy("nats.monitoring.varz"))
+	mux.HandleFunc("/connz", loggedProxy("nats.monitoring.connz"))
+	mux.HandleFunc("/jsz", loggedProxy("nats.monitoring.jsz"))
 
 	srv := &http.Server{Addr: metricsAddr, Handler: mux}
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Warn("metrics server error", "error", err)
+			logger.Warn("databus http server stopped unexpectedly; metrics, healthz, and audit endpoints are no longer reachable", "error", err)
 		}
 	}()
 	defer func() {
 		_ = srv.Shutdown(context.Background())
 	}()
-	logger.Info("HTTP listening", "addr", ":9091", "note", "healthz=503 until JetStream streams ready")
+	logger.Info("databus http server starting; serving metrics, healthz, audit, and nats monitoring proxy",
+		"addr", ":9091",
+		"note", "healthz returns 503 until jetstream streams are ready")
 
 	// Retry EnsureStreams — cluster may need time to form; JetStream Raft requires quorum.
 	// AEGIS_NATS_REPLICAS defaults to 1 (single-node); set to 3 for a NATS cluster.
@@ -189,16 +231,19 @@ func main() {
 	const ensureMaxAttempts = 25
 	for attempt := 1; attempt <= ensureMaxAttempts; attempt++ {
 		if err := streams.EnsureStreamsWithReplicas(nc, natsReplicas); err != nil {
-			logger.Warn("ensure streams failed", "attempt", attempt, "max", ensureMaxAttempts, "error", err)
+			logger.Warn("could not ensure jetstream streams; will retry until quorum forms",
+				"attempt", attempt, "max_attempts", ensureMaxAttempts, "error", err)
 			if attempt < ensureMaxAttempts {
 				time.Sleep(3 * time.Second)
 				continue
 			}
-			logger.Error("ensure streams failed after max attempts", "max", ensureMaxAttempts, "error", err)
+			logger.Error("could not ensure jetstream streams after max attempts; databus cannot continue",
+				"max_attempts", ensureMaxAttempts, "error", err)
 			os.Exit(1)
 		}
 		elapsed := time.Since(startTime)
-		logger.Info("streams ready", "startup_s", elapsed.Seconds())
+		logger.Info("jetstream streams reconciled and ready; databus will now flip healthz to 200 ok",
+			"startup_seconds", elapsed.Seconds())
 		break
 	}
 	streamsReady.Store(true)
@@ -248,7 +293,7 @@ func main() {
 	if os.Getenv("AEGIS_DLQ_REPLAY_ENABLED") == "1" {
 		rh := &dlq.ReplayHandler{JS: js, Checker: checker, Logger: baseLogger.With("module", "dlq-replay"), Component: "aegis-databus"}
 		go rh.Start(ctx)
-		logger.Info("DLQ replay handler started")
+		logger.Info("dlq replay handler started; will pull dlq messages, check idempotency, and republish on success")
 	}
 
 	// Health heartbeat (legacy subject aegis.health.databus).
@@ -267,6 +312,31 @@ func main() {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	<-sig
-	logger.Info("shutting down")
+	logger.Info("databus received shutdown signal; cancelling background goroutines and closing nats connection")
 	cancel()
+}
+
+// requestLogger derives a per-request logger annotated with canonical
+// correlation fields. It accepts an X-Request-ID header from the caller and
+// generates a fresh one if missing.
+func requestLogger(base *slog.Logger, r *http.Request, operationType string) *slog.Logger {
+	requestID := r.Header.Get("X-Request-ID")
+	if requestID == "" {
+		var b [16]byte
+		if _, err := rand.Read(b[:]); err == nil {
+			requestID = hex.EncodeToString(b[:])
+		} else {
+			requestID = "req-" + time.Now().UTC().Format("20060102T150405.000000000Z")
+		}
+	}
+	logger := base.With(
+		"request_id", requestID,
+		"operation_type", operationType,
+		"method", r.Method,
+		"path", r.URL.Path,
+	)
+	if traceID := r.Header.Get("X-Trace-ID"); traceID != "" {
+		logger = logger.With("trace_id", traceID)
+	}
+	return logger
 }

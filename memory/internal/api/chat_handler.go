@@ -31,13 +31,13 @@ type CreateConversationRequest struct {
 }
 
 type ConversationResponse struct {
-	ConversationID     uuid.UUID `json:"conversationId"`
-	UserID             uuid.UUID `json:"userId"`
-	Title              string    `json:"title"`
-	CreatedAt          time.Time `json:"createdAt"`
-	UpdatedAt          time.Time `json:"updatedAt"`
-	LastMessagePreview string    `json:"lastMessagePreview,omitempty"`
-	MessageCount       int32     `json:"messageCount"`
+	ConversationID     uuid.UUID  `json:"conversationId"`
+	UserID             uuid.UUID  `json:"userId"`
+	Title              string     `json:"title"`
+	CreatedAt          time.Time  `json:"createdAt"`
+	UpdatedAt          time.Time  `json:"updatedAt"`
+	LastMessagePreview string     `json:"lastMessagePreview,omitempty"`
+	MessageCount       int32      `json:"messageCount"`
 	LatestTaskID       *uuid.UUID `json:"latestTaskId,omitempty"`
 	LatestTaskStatus   *string    `json:"latestTaskStatus,omitempty"`
 }
@@ -782,7 +782,8 @@ func (h *ChatHandler) HandleGetSessionHistory(w http.ResponseWriter, r *http.Req
 		MaxTurns:       maxTurns,
 	}
 
-	slog.Default().Info("session_history.served",
+	slog.Default().Info("served session history snapshot to agent factory; ready to inject as prior_turns",
+		"module", "chat",
 		"conversation_id", conversationID.String(),
 		"user_id", userID.String(),
 		"turn_count", len(turns),
