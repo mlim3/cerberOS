@@ -320,7 +320,7 @@ function App() {
     ;(async () => {
       try {
         const res = await fetch(buildApiUrl(`/api/conversations?userId=${encodeURIComponent(UI_USER_ID)}`), {
-          headers: { 'X-User-Id': UI_USER_ID },
+          headers: { 'X-Active-User': UI_USER_ID },
         })
         if (!res.ok) return
         const json = await res.json() as { conversations?: ConversationSummary[] }
@@ -358,7 +358,7 @@ function App() {
       try {
         const res = await fetch(
           buildApiUrl(`/api/conversations/${encodeURIComponent(task.id)}/logs?userId=${encodeURIComponent(UI_USER_ID)}`),
-          { headers: { 'X-User-Id': UI_USER_ID } },
+          { headers: { 'X-Active-User': UI_USER_ID } },
         )
         if (!res.ok) return
         const json = await res.json() as { logs?: Array<{ role: 'user' | 'orchestrator'; content: string; at: string }> }
@@ -489,7 +489,7 @@ function App() {
       try {
         const res = await fetch(buildApiUrl('/api/tasks'), {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-User-Id': UI_USER_ID },
+          headers: { 'Content-Type': 'application/json', 'X-Active-User': UI_USER_ID },
           body: JSON.stringify({
             userId: UI_USER_ID,
             conversationId,
@@ -675,7 +675,7 @@ function App() {
     if (!DEMO_MODE) {
       fetch(buildApiUrl(`/api/conversations/${encodeURIComponent(id)}`), {
         method: 'DELETE',
-        headers: { 'X-User-Id': UI_USER_ID },
+        headers: { 'X-Active-User': UI_USER_ID },
       }).catch(() => {/* best-effort */})
     }
   }, [selectedTaskId, DEMO_MODE])
@@ -685,7 +685,7 @@ function App() {
     if (!DEMO_MODE) {
       fetch(buildApiUrl(`/api/conversations/${encodeURIComponent(id)}`), {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json', 'X-User-Id': UI_USER_ID },
+        headers: { 'Content-Type': 'application/json', 'X-Active-User': UI_USER_ID },
         body: JSON.stringify({ title }),
       }).catch(() => {/* best-effort */})
     }
@@ -777,7 +777,7 @@ function App() {
       try {
         const res = await fetch(buildApiUrl('/api/tasks'), {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-User-Id': UI_USER_ID },
+          headers: { 'Content-Type': 'application/json', 'X-Active-User': UI_USER_ID },
           body: JSON.stringify({
             userId: UI_USER_ID,
             conversationId,

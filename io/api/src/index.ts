@@ -30,6 +30,7 @@ import {
 import { traceMiddleware } from './trace-context'
 import { ioLog, logFromContext, previewHeadTail, previewWords } from './logger'
 import { startHeartbeatEmitter } from './heartbeat'
+import { activeUserId, userIdRequired } from './identity'
 
 // =============================================================================
 // Planner input enrichment
@@ -124,17 +125,9 @@ type ChatResponseCallback = {
 }
 const pendingChatResponses = new Map<string, ChatResponseCallback>()
 
-const DEFAULT_UI_USER_ID = process.env.IO_DEFAULT_USER_ID ?? '00000000-0000-0000-0000-000000000001'
-
 /** Map key for pending chat — UUID string case must match (e.g. uuidgen vs NATS subject). */
 function chatPendingKey(taskId: string): string {
   return taskId.trim().toLowerCase()
-}
-
-function requestUserId(c: { req: { header: (name: string) => string | undefined; query: (name: string) => string | undefined } }): string {
-  const fromHeader = c.req.header('X-User-Id')
-  const fromQuery = c.req.query('userId')
-  return fromHeader || fromQuery || DEFAULT_UI_USER_ID
 }
 
 function deliverChatResponse(taskId: string, content: string, done: boolean): boolean {
@@ -437,10 +430,11 @@ app.get('/api/tasks/:taskId', (c) => {
 });
 
 app.post('/api/conversations', async (c) => {
-  const { title, userId } = await c.req.json()
-  const effectiveUserId = typeof userId === 'string' && userId ? userId : requestUserId(c)
+  const userId = activeUserId(c)
+  if (!userId) return userIdRequired(c)
+  const { title } = await c.req.json()
   const conversation = await createConversation({
-    userId: effectiveUserId,
+    userId,
     title: typeof title === 'string' ? title : undefined,
   })
   if (!conversation) {
@@ -463,8 +457,9 @@ app.post('/api/conversations', async (c) => {
 
 // Create a new task
 app.post('/api/tasks', async (c) => {
+  const userId = activeUserId(c)
+  if (!userId) return userIdRequired(c)
   const body = await c.req.json()
-  const userId = typeof body.userId === 'string' && body.userId ? body.userId : requestUserId(c)
   const conversationId = typeof body.conversationId === 'string' && body.conversationId ? body.conversationId : undefined
   const title = typeof body.title === 'string' ? body.title : undefined
   const inputSummary = typeof body.inputSummary === 'string' ? body.inputSummary : undefined
@@ -626,9 +621,10 @@ app.post('/api/orchestrator/plan-decision', async (c) => {
 
 // Send a message (returns streaming response)
 app.post('/api/chat', async (c) => {
+  const effectiveUserId = activeUserId(c)
+  if (!effectiveUserId) return userIdRequired(c)
   const body = (await c.req.json()) as SendMessageRequest;
-  const { taskId, userId, content, conversationHistory, conversationId, required_skill_domains } = body as SendMessageRequest & { userId?: string; required_skill_domains?: string[] };
-  const effectiveUserId = userId || requestUserId(c)
+  const { taskId, content, conversationHistory, conversationId, required_skill_domains } = body as SendMessageRequest & { required_skill_domains?: string[] };
   const traceId = c.get('traceId') as string | undefined;
   if (taskId) c.set('taskId', taskId)
   if (conversationId) c.set('conversationId', conversationId)
@@ -886,9 +882,10 @@ app.post('/api/chat', async (c) => {
 
 // Get logs for a task
 app.get('/api/logs/:taskId', async (c) => {
+  const userId = activeUserId(c)
+  if (!userId) return userIdRequired(c)
   const taskId = c.req.param('taskId');
   const traceId = c.get('traceId') as string | undefined;
-  const userId = requestUserId(c)
   c.set('taskId', taskId)
   const task = await getTask(taskId, userId)
   if (!task) {
@@ -903,15 +900,17 @@ app.get('/api/logs/:taskId', async (c) => {
 });
 
 app.get('/api/conversations', async (c) => {
-  const userId = requestUserId(c)
+  const userId = activeUserId(c)
+  if (!userId) return userIdRequired(c)
   const conversations = await listConversations(userId)
   logFromContext(c, 'debug', 'http', 'served conversation list to ui', { user_id: userId, conversation_count: conversations.length })
   return c.json({ conversations })
 })
 
 app.delete('/api/conversations/:conversationId', async (c) => {
+  const userId = activeUserId(c)
+  if (!userId) return userIdRequired(c)
   const conversationId = c.req.param('conversationId')
-  const userId = requestUserId(c)
   c.set('conversationId', conversationId)
   logFromContext(c, 'info', 'http', 'user deleted conversation thread', { user_id: userId })
   await deleteConversation(conversationId, userId)
@@ -919,8 +918,9 @@ app.delete('/api/conversations/:conversationId', async (c) => {
 })
 
 app.patch('/api/conversations/:conversationId', async (c) => {
+  const userId = activeUserId(c)
+  if (!userId) return userIdRequired(c)
   const conversationId = c.req.param('conversationId')
-  const userId = requestUserId(c)
   const body = await c.req.json() as { title?: string }
   c.set('conversationId', conversationId)
   if (body.title) {
@@ -936,8 +936,9 @@ app.patch('/api/conversations/:conversationId', async (c) => {
 })
 
 app.get('/api/conversations/:conversationId/logs', async (c) => {
+  const userId = activeUserId(c)
+  if (!userId) return userIdRequired(c)
   const conversationId = c.req.param('conversationId')
-  const userId = requestUserId(c)
   c.set('conversationId', conversationId)
   const memoryLogs = await getConversationLogs(conversationId, { userId })
   logFromContext(c, 'debug', 'http', 'served conversation logs to ui', {
@@ -960,14 +961,15 @@ app.get('/api/logs', (c) => {
 // Credential submission endpoint (proxies to Vault Engine, then notifies agent via NATS)
 // NEVER logs or exposes the credential value in responses or logs
 app.post('/api/credential', async (c) => {
+  const userId = activeUserId(c)
+  if (!userId) return userIdRequired(c)
   const body = (await c.req.json()) as {
     taskId: string;
     requestId: string;
-    userId: string;
     keyName: string;
     value: string;
   };
-  const { taskId, requestId, userId, keyName } = body;
+  const { taskId, requestId, keyName } = body;
   c.set('taskId', taskId)
   logFromContext(c, 'info', 'credential', 'received credential value from user; forwarding to memory vault (value not logged)', {
     request_id: requestId,
