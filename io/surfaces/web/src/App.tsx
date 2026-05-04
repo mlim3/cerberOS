@@ -8,7 +8,7 @@ import type {
   PlanPreview,
   PlanDecisionStatus,
 } from '@cerberos/io-core'
-import TaskSidebar from './components/TaskSidebar'
+import TaskSidebar, { type SidebarPrimaryTab } from './components/TaskSidebar'
 import ChatWindow from './components/ChatWindow'
 import CredentialModal from './components/CredentialModal'
 import PlanPreviewCard from './components/PlanPreviewCard'
@@ -26,11 +26,22 @@ import {
   formatExpectedNextInput,
   buildApiUrl,
 } from './api/orchestrator'
+import {
+  createUserCronJob,
+  deleteUserCronJob,
+  fetchUserCronJobs,
+  type UserCronJob,
+} from './api/userCrons'
 import { createWebSurface, type SurfaceAdapter } from './surface'
+import { parseFirstRunAt, parseRhythmReply } from './recurring/parseRhythm'
+import { extractPromptBodyForCron, looksLikeRepeatingSchedulingIntent } from './recurring/detectIntent'
 import './App.css'
 
 const DEMO_MODE = import.meta.env.VITE_DEMO_MODE === 'true'
 const UI_USER_ID = (import.meta.env.VITE_IO_USER_ID as string | undefined) ?? '00000000-0000-0000-0000-000000000001'
+
+/** Mirrors `scheduled-run-mirror` bucket title — omit from sidebar (not user-authored threads). */
+const MEMORY_ORCHESTRATOR_FALLBACK_CONVERSATION_TITLE = 'Scheduled task runs'
 
 const SETTINGS_STORAGE_KEY = 'cerberos-io-settings'
 
@@ -66,6 +77,13 @@ type UITask = Task & {
 
 function nextId(): string {
   return Math.random().toString(36).slice(2, 11)
+}
+
+/** Matches Memory-created conversation/task ids (UUID); offline-only tasks use short nextId() strings. */
+function isLikelyPersistedConversationId(id: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    id.trim(),
+  )
 }
 
 function timeLabel(): string {
@@ -234,6 +252,43 @@ const mockTasks: UITask[] = [
   },
 ]
 
+type RecurringSetupState =
+  | null
+  | { conversationId: string; step: 'prompt' }
+  | { conversationId: string; step: 'rhythm'; rawInput: string }
+  | {
+      conversationId: string
+      step: 'first_run'
+      rawInput: string
+      scheduleKind: 'interval' | 'cron'
+      intervalSeconds: number
+      cronExpression: string
+      timeZone: string
+    }
+
+const RECURRING_CHAT_INTRO =
+  '**Recurring task setup**\n\nDescribe what you want the agent to do **each time this schedule runs**, then reply here with **how often** and **when it should first run**. We\'ll prompt you step by step.\n\nSend **your task** as your **next message**.'
+
+const RECURRING_AFTER_PROMPT_AGENT =
+  '**How often should this repeat?**\n\nYou can reply in plain words or with cron:\n• `every hour`, `every 15 minutes`, `every 900 seconds` (minimum **60** seconds)\n• `daily at 9am` or `daily at 6:30pm` *(uses your device time zone)*\n• Cron: `0 7 * * * America/Los_Angeles` *(minute hour day month weekday — optional TZ at end)*'
+
+const RECURRING_FIRST_RUN_AGENT =
+  '**When should the first run happen?**\n\nSend local time as **`2026-05-03 14:30`** or datetime-local style **`2026-05-03T14:30`**. It must be a few minutes or more in the future so the scheduler can pick it up.'
+
+function rhythmRetryMessage(reason: string): string {
+  if (reason === 'interval_below_minute') {
+    return '**Intervals must be at least 60 seconds.** Try `every hour`, `every 120 seconds`, or a cron line like `0 * * * * UTC`.'
+  }
+  if (reason === 'bad_interval') {
+    return '**That number wasn’t usable as an interval.** Try `every 5 minutes`, `daily at 9am`, or cron `15 * * * * UTC`.'
+  }
+  return '**I didn’t catch that rhythm.** Try `hourly`, `daily at 7pm`, `every 300 seconds`, or a full cron like `15 9 * * * America/New_York`.'
+}
+
+function firstRunRetryMessage(): string {
+  return '**I couldn’t read that time.** Use `YYYY-MM-DD HH:MM` (24h) or paste a clear datetime; pick a moment at least a few minutes from now.'
+}
+
 type ConversationSummary = {
   conversationId: string
   title: string
@@ -257,8 +312,31 @@ function taskFromConversation(c: ConversationSummary): UITask {
   }
 }
 
+function fingerprintLogs(logs: Array<{ at?: string }>): string {
+  if (logs.length === 0) return '0:'
+  const lastAt = logs[logs.length - 1]?.at ?? ''
+  return `${logs.length}:${lastAt}`
+}
+
+function defaultCronName(raw: string): string {
+  const line = raw.trim().split('\n')[0] ?? ''
+  if (!line.length) return 'Recurring task'
+  return line.length > 80 ? `${line.slice(0, 77)}…` : line
+}
+
+function scheduleLabelParts(
+  kind: 'interval' | 'cron',
+  intervalSeconds: number,
+  cronExpr: string,
+  timeZone: string,
+): string {
+  return kind === 'cron' ? `cron ${cronExpr.trim()} (${timeZone})` : `every ${intervalSeconds}s`
+}
+
 function deriveConversationTitle(task: Pick<UITask, 'title' | 'messages'>, userContent: string): string {
-  if (task.title === 'New Task' && task.messages.length === 0) {
+  const isFreshTitle =
+    (task.title === 'New Task' || task.title === 'New recurring task') && task.messages.length <= 1
+  if (isFreshTitle) {
     return userContent.length > 60 ? `${userContent.slice(0, 57)}…` : userContent
   }
   return task.title
@@ -270,6 +348,12 @@ function App() {
     DEMO_MODE ? mockTasks[0].id : null
   )
   const [showSettings, setShowSettings] = useState(false)
+  const [sidebarPrimaryTab, setSidebarPrimaryTab] = useState<SidebarPrimaryTab>('tasks')
+  const [userCronJobs, setUserCronJobs] = useState<UserCronJob[]>([])
+  const [userCronListError, setUserCronListError] = useState<string | null>(null)
+  const [userCronListLoading, setUserCronListLoading] = useState(false)
+  const [recurringSetup, setRecurringSetup] = useState<RecurringSetupState>(null)
+  const [cronContextJob, setCronContextJob] = useState<UserCronJob | null>(null)
   const [streamingForTaskId, setStreamingForTaskId] = useState<string | null>(null)
   const [streamingContent, setStreamingContent] = useState('')
   const [uiSettings, setUISettings] = useState<UISettings>(loadSettings)
@@ -295,6 +379,26 @@ function App() {
 
   const selectedTask = tasks.find(t => t.id === selectedTaskId)
 
+  /** Fingerprint seen when conversation was focused / opened — detects new mirrored cron turns */
+  const readLogFingerprintsRef = useRef<Record<string, string>>({})
+  const [cronThreadUnreadIds, setCronThreadUnreadIds] = useState<Record<string, true>>({})
+  /** Last row from server transcript while viewing this chat — for “new pulse” styling */
+  const [liveLogPulseKeyByTask, setLiveLogPulseKeyByTask] = useState<Record<string, string>>({})
+
+  const selectedTaskIdRef = useRef(selectedTaskId)
+  selectedTaskIdRef.current = selectedTaskId
+
+  const consumeRecurringUserTurnRef = useRef<(cid: string, text: string) => Promise<boolean>>(async () => false)
+
+  const tryEmbeddedSchedulingIntentRef = useRef(
+    (_cid: string, _text: string, _task: UITask): boolean => false,
+  )
+
+  const createConversationBusyRef = useRef(false)
+
+  const selectedConversationSidebarPreview =
+    DEMO_MODE || !selectedTaskId ? '' : tasks.find(t => t.id === selectedTaskId)?.lastUpdate ?? ''
+
   const addLogEntry = useCallback((entry: Omit<LogEntry, 'id' | 'timestamp'>) => {
     const newEntry: LogEntry = {
       ...entry,
@@ -313,45 +417,172 @@ function App() {
     document.documentElement.setAttribute('data-high-contrast', uiSettings.highContrast ? 'true' : 'false')
   }, [uiSettings.fontSizeScale, uiSettings.highContrast])
 
-  useEffect(() => {
+  const refetchConversations = useCallback(async () => {
     if (DEMO_MODE) return
-    let cancelled = false
-
-    ;(async () => {
-      try {
-        const res = await fetch(buildApiUrl(`/api/conversations?userId=${encodeURIComponent(UI_USER_ID)}`), {
-          headers: { 'X-User-Id': UI_USER_ID },
-        })
-        if (!res.ok) return
-        const json = await res.json() as { conversations?: ConversationSummary[] }
-        const conversations = json.conversations ?? []
-        if (cancelled) return
-        const loadedTasks = conversations.map(taskFromConversation)
-        setTasks(prev => {
-          const existing = new Map(prev.map(task => [task.id, task]))
-          for (const task of loadedTasks) {
-            if (!existing.has(task.id)) {
-              existing.set(task.id, task)
-            }
+    try {
+      const res = await fetch(buildApiUrl(`/api/conversations?userId=${encodeURIComponent(UI_USER_ID)}`), {
+        headers: { 'X-User-Id': UI_USER_ID },
+      })
+      if (!res.ok) return
+      const json = await res.json() as { conversations?: ConversationSummary[] }
+      const conversations = (json.conversations ?? []).filter(c => {
+        const ttl = typeof c.title === 'string' ? c.title.trim() : ''
+        return ttl !== MEMORY_ORCHESTRATOR_FALLBACK_CONVERSATION_TITLE
+      })
+      const loadedTasks = conversations.map(taskFromConversation)
+      setTasks(prev => {
+        const serverIds = new Set(loadedTasks.map(t => t.id))
+        /** Server list wins: drop persisted convs that vanished (e.g. after DELETE). */
+        const mergedFromApi = loadedTasks.map(task => {
+          const prior = prev.find(p => p.id === task.id)
+          if (!prior) return task
+          return {
+            ...prior,
+            title: task.title || prior.title,
+            status: task.status,
+            lastUpdate: task.lastUpdate,
+            expectedNextInput: task.expectedNextInput,
+            currentTaskId: task.currentTaskId ?? prior.currentTaskId,
           }
-          return Array.from(existing.values()).sort((a, b) => a.id.localeCompare(b.id)).reverse()
         })
-      } catch {
-        // ignore bootstrap failures; the app can still create new tasks
-      }
-    })()
-
-    return () => {
-      cancelled = true
+        /** Keep optimistic tasks when conversation POST failed — ids are not UUID-shaped. */
+        const keptLocalOnly = prev.filter(
+          t =>
+            !serverIds.has(t.id) &&
+            !isLikelyPersistedConversationId(t.id),
+        )
+        const byId = new Map<string, UITask>()
+        for (const t of mergedFromApi) byId.set(t.id, t)
+        for (const t of keptLocalOnly) byId.set(t.id, t)
+        const merged = Array.from(byId.values()).filter(t => {
+          const ttl = (t.title ?? '').trim()
+          return ttl !== MEMORY_ORCHESTRATOR_FALLBACK_CONVERSATION_TITLE
+        })
+        return merged.sort((a, b) => a.id.localeCompare(b.id)).reverse()
+      })
+    } catch {
+      // ignore bootstrap failures; the app can still create new tasks
     }
   }, [DEMO_MODE])
 
   useEffect(() => {
     if (DEMO_MODE) return
+    void refetchConversations()
+  }, [DEMO_MODE, refetchConversations])
+
+  useEffect(() => {
+    if (DEMO_MODE) return
+    const id = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        void refetchConversations()
+      }
+    }, 20_000)
+    const onVis = () => {
+      if (document.visibilityState === 'visible') void refetchConversations()
+    }
+    document.addEventListener('visibilitychange', onVis)
+    return () => {
+      clearInterval(id)
+      document.removeEventListener('visibilitychange', onVis)
+    }
+  }, [DEMO_MODE, refetchConversations])
+
+  const reloadUserCrons = useCallback(async () => {
+    setUserCronListLoading(true)
+    setUserCronListError(null)
+    const result = await fetchUserCronJobs(UI_USER_ID)
+    if (result.ok) {
+      setUserCronJobs(result.jobs)
+    } else {
+      setUserCronListError(result.error)
+    }
+    setUserCronListLoading(false)
+  }, [])
+
+  useEffect(() => {
+    void reloadUserCrons()
+  }, [reloadUserCrons])
+
+  useEffect(() => {
+    if (DEMO_MODE) return
+
+    let cancelled = false
+
+    async function fingerprintFor(cid: string): Promise<string | null> {
+      try {
+        const res = await fetch(
+          buildApiUrl(`/api/conversations/${encodeURIComponent(cid)}/logs?userId=${encodeURIComponent(UI_USER_ID)}`),
+          { headers: { 'X-User-Id': UI_USER_ID } },
+        )
+        if (!res.ok) return null
+        const json = await res.json() as { logs?: Array<{ at: string }> }
+        return fingerprintLogs(json.logs ?? [])
+      } catch {
+        return null
+      }
+    }
+
+    const tick = async () => {
+      if (cancelled || document.visibilityState !== 'visible') return
+      const ids = [
+        ...new Set(
+          userCronJobs
+            .map(j => j.payload?.conversationId)
+            .filter((x): x is string => typeof x === 'string' && x.trim().length > 0),
+        ),
+      ]
+      if (ids.length === 0) return
+      const seenOpen = selectedTaskIdRef.current
+      for (const cid of ids) {
+        if (cancelled) break
+        if (cid === seenOpen) continue
+        const fp = await fingerprintFor(cid)
+        if (fp === null || cancelled) continue
+        const seen = readLogFingerprintsRef.current[cid]
+        if (seen === undefined) {
+          readLogFingerprintsRef.current[cid] = fp
+          continue
+        }
+        if (seen !== fp) {
+          setCronThreadUnreadIds(prev => ({ ...prev, [cid]: true }))
+        }
+      }
+    }
+
+    const iv = window.setInterval(tick, 22_000)
+    void tick()
+    return () => {
+      cancelled = true
+      window.clearInterval(iv)
+    }
+  }, [userCronJobs, DEMO_MODE])
+
+  const handleSidebarDeleteUserCronJob = useCallback(
+    async (jobId: string) => {
+      const r = await deleteUserCronJob(UI_USER_ID, jobId)
+      if (r.ok) {
+        setCronContextJob(prev => (prev?.id === jobId ? null : prev))
+        await reloadUserCrons()
+      }
+      return r
+    },
+    [reloadUserCrons],
+  )
+
+  const handleCloseSettings = useCallback(() => {
+    setShowSettings(false)
+  }, [])
+
+  const toggleSettings = useCallback(() => {
+    setShowSettings(prev => !prev)
+  }, [])
+
+  useEffect(() => {
+    if (DEMO_MODE) return
     if (!selectedTaskId) return
     const task = tasks.find(t => t.id === selectedTaskId)
-    if (!task || task.messages.length > 0) return
-    if (!task.id) return
+    if (!task?.id) return
+    if (streamingForTaskId === selectedTaskId) return
 
     let cancelled = false
     ;(async () => {
@@ -363,15 +594,51 @@ function App() {
         if (!res.ok) return
         const json = await res.json() as { logs?: Array<{ role: 'user' | 'orchestrator'; content: string; at: string }> }
         if (cancelled) return
-        const messages: ChatMessage[] = (json.logs ?? []).map((log, index) => ({
-          id: `${selectedTaskId}-${index}`,
-          role: log.role === 'user' ? 'user' : 'agent',
-          content: log.content,
-          timestamp: new Date(log.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        }))
+        const rawLogs = json.logs ?? []
+        const fpNew = fingerprintLogs(rawLogs)
+        const priorFp = readLogFingerprintsRef.current[selectedTaskId]
+        const messages: ChatMessage[] = rawLogs.map((log, index) => {
+          const isAgent = log.role !== 'user'
+          const scheduledRun = isAgent && log.content.startsWith('Scheduled task:')
+          return {
+            id: `${selectedTaskId}-log-${index}-${encodeURIComponent(log.at)}`,
+            role: isAgent ? 'agent' : 'user',
+            content: log.content,
+            timestamp: new Date(log.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            scheduledRun,
+          }
+        })
         setTasks(prev =>
-          prev.map(t => (t.id === selectedTaskId ? { ...t, messages } : t))
+          prev.map(t => {
+            if (t.id !== selectedTaskId) return t
+            if (messages.length === 0 && t.messages.length > 0) return t
+            return { ...t, messages }
+          }),
         )
+        if (cancelled || selectedTaskIdRef.current !== selectedTaskId) return
+        readLogFingerprintsRef.current[selectedTaskId] = fpNew
+        setCronThreadUnreadIds(prev => {
+          if (!prev[selectedTaskId]) return prev
+          const next = { ...prev }
+          delete next[selectedTaskId]
+          return next
+        })
+        const last = messages[messages.length - 1]
+        if (
+          priorFp !== undefined &&
+          priorFp !== fpNew &&
+          last?.scheduledRun &&
+          last.role === 'agent'
+        ) {
+          setLiveLogPulseKeyByTask(prev => ({ ...prev, [selectedTaskId]: last.id }))
+          window.setTimeout(() => {
+            setLiveLogPulseKeyByTask(prev => {
+              const copy = { ...prev }
+              if (copy[selectedTaskId] === last.id) delete copy[selectedTaskId]
+              return copy
+            })
+          }, 7000)
+        }
       } catch {
         // ignore load failures for now
       }
@@ -380,7 +647,7 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [DEMO_MODE, selectedTaskId])
+  }, [DEMO_MODE, selectedTaskId, selectedConversationSidebarPreview, streamingForTaskId])
 
   // Orchestrator → IO push stream (SSE) for status + credential_request
   const activeOrchestratorTaskId = tasks.find(t => t.id === selectedTaskId)?.currentTaskId
@@ -464,6 +731,8 @@ function App() {
   const tasksRef = useRef(tasks)
   const uiSettingsRef = useRef(uiSettings)
   const addLogEntryRef = useRef(addLogEntry)
+  const recurringSetupRef = useRef(recurringSetup)
+  recurringSetupRef.current = recurringSetup
 
   // Keep refs updated
   tasksRef.current = tasks
@@ -484,6 +753,12 @@ function App() {
       const currentTasks = tasksRef.current
       const task = currentTasks.find(t => t.id === conversationId)
       if (!task) return
+
+      if (await consumeRecurringUserTurnRef.current(conversationId, userContent)) return
+
+      const trimmedSend = userContent.trim()
+      if (tryEmbeddedSchedulingIntentRef.current(conversationId, trimmedSend, task)) return
+
       const conversationTitle = deriveConversationTitle(task, userContent)
       let activeTaskId = task.currentTaskId
       try {
@@ -583,7 +858,17 @@ function App() {
     // Register React callbacks with the adapter
     // The adapter can now be used by external orchestrator code
     surface.registerTaskCallbacks({
-      onSelectTask: setSelectedTaskId,
+      onSelectTask: id => {
+        setShowSettings(false)
+        setCronContextJob(null)
+        setCronThreadUnreadIds(prev => {
+          if (!prev[id]) return prev
+          const next = { ...prev }
+          delete next[id]
+          return next
+        })
+        setSelectedTaskId(id)
+      },
       onSendMessage: handleSendMessageWrapper,
     })
 
@@ -669,16 +954,28 @@ function App() {
 
   const handleDeleteTask = useCallback((id: string) => {
     setTasks(prev => prev.filter(t => t.id !== id))
+    setRecurringSetup(prev => (prev?.conversationId === id ? null : prev))
+    setCronContextJob(prev => {
+      if (!prev?.payload?.conversationId) return prev
+      return prev.payload.conversationId === id ? null : prev
+    })
     if (selectedTaskId === id) {
       setSelectedTaskId(null)
     }
     if (!DEMO_MODE) {
-      fetch(buildApiUrl(`/api/conversations/${encodeURIComponent(id)}`), {
+      void fetch(buildApiUrl(`/api/conversations/${encodeURIComponent(id)}`), {
         method: 'DELETE',
         headers: { 'X-User-Id': UI_USER_ID },
-      }).catch(() => {/* best-effort */})
+      })
+        .then(() => {
+          void refetchConversations()
+        })
+        .catch(() => {
+          /* best-effort server delete — refetch clears stale sidebar if DELETE actually succeeded elsewhere */
+          void refetchConversations()
+        })
     }
-  }, [selectedTaskId, DEMO_MODE])
+  }, [selectedTaskId, DEMO_MODE, refetchConversations])
 
   const handleRenameTask = useCallback((id: string, title: string) => {
     setTasks(prev => prev.map(t => t.id === id ? { ...t, title } : t))
@@ -692,42 +989,505 @@ function App() {
   }, [DEMO_MODE])
 
   const handleCreateTask = async () => {
-    let newConversationId: string
-
+    if (createConversationBusyRef.current) return
+    createConversationBusyRef.current = true
     try {
-      const res = await fetch(buildApiUrl('/api/conversations'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title: 'New Conversation', userId: UI_USER_ID }),
-      })
-      const data = await res.json()
-      newConversationId = data.conversationId
-    } catch {
-      // API unreachable — fall back to local ID
-      newConversationId = nextId()
-    }
+      setShowSettings(false)
+      setSidebarPrimaryTab('tasks')
+      setRecurringSetup(null)
+      setCronContextJob(null)
+      let newConversationId: string
 
-    const newTask: Task = {
-      id: newConversationId,
-      title: 'New Task',
-      status: 'awaiting_feedback',
-      lastUpdate: 'Describe what you want the agent to work on.',
-      expectedNextInput: 'Now',
-      messages: [],
-    }
+      try {
+        const res = await fetch(buildApiUrl('/api/conversations'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title: 'New Conversation', userId: UI_USER_ID }),
+        })
+        let parsed: unknown
+        try {
+          parsed = await res.json()
+        } catch {
+          parsed = null
+        }
+        const cid =
+          parsed && typeof parsed === 'object' && 'conversationId' in parsed
+            ? (parsed as { conversationId?: unknown }).conversationId
+            : undefined
+        newConversationId =
+          res.ok && typeof cid === 'string' && cid.length > 0 ? cid : nextId()
+      } catch {
+        // API unreachable — fall back to local ID
+        newConversationId = nextId()
+      }
 
-    setTasks(prev => [newTask, ...prev])
-    setSelectedTaskId(newConversationId)
+      const newTask: Task = {
+        id: newConversationId,
+        title: 'New Task',
+        status: 'awaiting_feedback',
+        lastUpdate: 'Describe what you want the agent to work on.',
+        expectedNextInput: 'Now',
+        messages: [],
+      }
 
-    if (uiSettings.showActivityLog) {
-      addLogEntry({
-        type: 'status_change',
-        taskId: newConversationId,
-        taskTitle: newTask.title.slice(0, 20),
-        message: 'New task created. Awaiting your description.',
-      })
+      setTasks(prev => [newTask, ...prev])
+      setSelectedTaskId(newConversationId)
+
+      if (uiSettings.showActivityLog) {
+        addLogEntry({
+          type: 'status_change',
+          taskId: newConversationId,
+          taskTitle: newTask.title.slice(0, 20),
+          message: 'New task created. Awaiting your description.',
+        })
+      }
+    } finally {
+      createConversationBusyRef.current = false
     }
   }
+
+  const handleCreateRecurringTask = async () => {
+    if (createConversationBusyRef.current) return
+    createConversationBusyRef.current = true
+    try {
+      setShowSettings(false)
+      setSidebarPrimaryTab('tasks')
+      setCronContextJob(null)
+      setRecurringSetup(null)
+      let newConversationId: string
+
+      try {
+        const res = await fetch(buildApiUrl('/api/conversations'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title: 'New recurring task', userId: UI_USER_ID }),
+        })
+        let parsed: unknown
+        try {
+          parsed = await res.json()
+        } catch {
+          parsed = null
+        }
+        const cid =
+          parsed && typeof parsed === 'object' && 'conversationId' in parsed
+            ? (parsed as { conversationId?: unknown }).conversationId
+            : undefined
+        newConversationId =
+          res.ok && typeof cid === 'string' && cid.length > 0 ? cid : nextId()
+      } catch {
+        newConversationId = nextId()
+      }
+
+      const introMsg: ChatMessage = {
+        id: nextId(),
+        role: 'agent',
+        content: RECURRING_CHAT_INTRO,
+        timestamp: timeLabel(),
+      }
+
+      const newTask: UITask = {
+        id: newConversationId,
+        title: 'New recurring task',
+        status: 'awaiting_feedback',
+        lastUpdate: 'Describe what should run on the schedule',
+        expectedNextInput: 'Your prompt',
+        messages: [introMsg],
+      }
+
+      setRecurringSetup({ conversationId: newConversationId, step: 'prompt' })
+      setTasks(prev => [newTask, ...prev])
+      setSelectedTaskId(newConversationId)
+
+      queueMicrotask(() => {
+        document.querySelector<HTMLInputElement>('.chat-input')?.focus()
+      })
+
+      if (uiSettings.showActivityLog) {
+        addLogEntry({
+          type: 'status_change',
+          taskId: newConversationId,
+          taskTitle: newTask.title.slice(0, 20),
+          message: 'Recurring task setup — describe the repeating work in chat, then rhythm and first-run time.',
+        })
+      }
+    } finally {
+      createConversationBusyRef.current = false
+    }
+  }
+
+  const finishRecurringFromChat = useCallback(
+    (detail: { name: string; rawInput: string; scheduleLabel: string; conversationId: string }) => {
+      setRecurringSetup(null)
+      const content = `Scheduled task "${detail.name}" (${detail.scheduleLabel}):\n\n${detail.rawInput}`
+      const userMsg: ChatMessage = {
+        id: nextId(),
+        role: 'user',
+        content,
+        timestamp: timeLabel(),
+      }
+      const agentMsg: ChatMessage = {
+        id: nextId(),
+        role: 'agent',
+        content: `**Recurring task saved.** It will run **${detail.scheduleLabel}**. Continue chatting anytime.`,
+        timestamp: timeLabel(),
+      }
+      setTasks(prev =>
+        prev.map(t =>
+          t.id === detail.conversationId
+            ? {
+                ...t,
+                messages: [...t.messages, userMsg, agentMsg],
+                lastUpdate: content,
+                status: 'awaiting_feedback',
+                expectedNextInput: 'Now',
+              }
+            : t,
+        ),
+      )
+      void refetchConversations()
+      void reloadUserCrons()
+    },
+    [refetchConversations, reloadUserCrons],
+  )
+
+  const consumeRecurringUserTurn = useCallback(
+    async (conversationId: string, userContent: string): Promise<boolean> => {
+      const trimmed = userContent.trim()
+      if (!trimmed) return false
+      const rs = recurringSetupRef.current
+      if (!rs || rs.conversationId !== conversationId) return false
+
+      const currentTasks = tasksRef.current
+      const task = currentTasks.find(t => t.id === conversationId)
+      if (!task) return false
+
+      const defaultTz =
+        typeof Intl !== 'undefined' && Intl.DateTimeFormat
+          ? Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+          : 'UTC'
+
+      if (rs.step === 'prompt') {
+        const rawStored = extractPromptBodyForCron(trimmed).trim()
+        const conversationTitle = deriveConversationTitle(task, rawStored.length >= 14 ? rawStored : trimmed)
+        const userMsg: ChatMessage = { id: nextId(), role: 'user', content: trimmed, timestamp: timeLabel() }
+        const parsedFromLine = parseRhythmReply(trimmed, defaultTz)
+
+        if (parsedFromLine.ok) {
+          const cadenceHint =
+            parsedFromLine.scheduleKind === 'interval'
+              ? scheduleLabelParts('interval', parsedFromLine.intervalSeconds, '', '')
+              : scheduleLabelParts(
+                  'cron',
+                  0,
+                  parsedFromLine.cronExpression,
+                  parsedFromLine.timeZone,
+                )
+          const agentMsg: ChatMessage = {
+            id: nextId(),
+            role: 'agent',
+            content:
+              `**Repeating cadence detected** (${cadenceHint}). Anything like **until 9:30 pm** does **not** auto-stop the job yet—pause or delete it when you are done.\n\n` +
+              RECURRING_FIRST_RUN_AGENT,
+            timestamp: timeLabel(),
+          }
+          const nextSetup =
+            parsedFromLine.scheduleKind === 'interval'
+              ? {
+                  conversationId,
+                  step: 'first_run' as const,
+                  rawInput: rawStored,
+                  scheduleKind: 'interval' as const,
+                  intervalSeconds: parsedFromLine.intervalSeconds,
+                  cronExpression: '',
+                  timeZone: 'UTC',
+                }
+              : {
+                  conversationId,
+                  step: 'first_run' as const,
+                  rawInput: rawStored,
+                  scheduleKind: 'cron' as const,
+                  intervalSeconds: 0,
+                  cronExpression: parsedFromLine.cronExpression,
+                  timeZone: parsedFromLine.timeZone,
+                }
+          setRecurringSetup(nextSetup)
+          setTasks(prev =>
+            prev.map(t =>
+              t.id === conversationId
+                ? {
+                    ...t,
+                    title: conversationTitle,
+                    messages: [...t.messages, userMsg, agentMsg],
+                    lastUpdate: 'First run time',
+                    expectedNextInput: 'Date & time',
+                  }
+                : t,
+            ),
+          )
+          return true
+        }
+
+        const agentMsg: ChatMessage = {
+          id: nextId(),
+          role: 'agent',
+          content: RECURRING_AFTER_PROMPT_AGENT,
+          timestamp: timeLabel(),
+        }
+        setTasks(prev =>
+          prev.map(t =>
+            t.id === conversationId
+              ? {
+                  ...t,
+                  title: conversationTitle,
+                  messages: [...t.messages, userMsg, agentMsg],
+                  lastUpdate: 'Pick how often',
+                  expectedNextInput: 'Rhythm',
+                }
+              : t,
+          ),
+        )
+        setRecurringSetup({ conversationId, step: 'rhythm', rawInput: rawStored })
+        return true
+      }
+
+      if (rs.step === 'rhythm') {
+        const parsed = parseRhythmReply(trimmed, defaultTz)
+        const userMsg: ChatMessage = { id: nextId(), role: 'user', content: trimmed, timestamp: timeLabel() }
+        if (!parsed.ok) {
+          const agentMsg: ChatMessage = {
+            id: nextId(),
+            role: 'agent',
+            content: rhythmRetryMessage(parsed.reason),
+            timestamp: timeLabel(),
+          }
+          setTasks(prev =>
+            prev.map(t =>
+              t.id === conversationId ? { ...t, messages: [...t.messages, userMsg, agentMsg] } : t,
+            ),
+          )
+          return true
+        }
+        const agentMsg: ChatMessage = {
+          id: nextId(),
+          role: 'agent',
+          content: RECURRING_FIRST_RUN_AGENT,
+          timestamp: timeLabel(),
+        }
+        const nextSetup =
+          parsed.scheduleKind === 'interval'
+            ? {
+                conversationId,
+                step: 'first_run' as const,
+                rawInput: rs.rawInput,
+                scheduleKind: 'interval' as const,
+                intervalSeconds: parsed.intervalSeconds,
+                cronExpression: '',
+                timeZone: 'UTC',
+              }
+            : {
+                conversationId,
+                step: 'first_run' as const,
+                rawInput: rs.rawInput,
+                scheduleKind: 'cron' as const,
+                intervalSeconds: 0,
+                cronExpression: parsed.cronExpression,
+                timeZone: parsed.timeZone,
+              }
+        setRecurringSetup(nextSetup)
+        setTasks(prev =>
+          prev.map(t =>
+            t.id === conversationId
+              ? {
+                  ...t,
+                  messages: [...t.messages, userMsg, agentMsg],
+                  lastUpdate: 'First run time',
+                  expectedNextInput: 'Date & time',
+                }
+              : t,
+          ),
+        )
+        return true
+      }
+
+      if (rs.step === 'first_run') {
+        const parsed = parseFirstRunAt(trimmed)
+        const userMsg: ChatMessage = { id: nextId(), role: 'user', content: trimmed, timestamp: timeLabel() }
+        if (!parsed.ok) {
+          const agentMsg: ChatMessage = {
+            id: nextId(),
+            role: 'agent',
+            content: firstRunRetryMessage(),
+            timestamp: timeLabel(),
+          }
+          setTasks(prev =>
+            prev.map(t =>
+              t.id === conversationId ? { ...t, messages: [...t.messages, userMsg, agentMsg] } : t,
+            ),
+          )
+          return true
+        }
+
+        const name = defaultCronName(rs.rawInput)
+        const scheduleLabel = scheduleLabelParts(
+          rs.scheduleKind,
+          rs.intervalSeconds,
+          rs.cronExpression,
+          rs.timeZone,
+        )
+
+        const result = await createUserCronJob({
+          name,
+          userId: UI_USER_ID,
+          rawInput: rs.rawInput,
+          conversationId: rs.conversationId,
+          scheduleKind: rs.scheduleKind,
+          intervalSeconds: rs.scheduleKind === 'interval' ? rs.intervalSeconds : 0,
+          cronExpression: rs.scheduleKind === 'cron' ? rs.cronExpression : '',
+          timeZone: rs.scheduleKind === 'cron' ? rs.timeZone : 'UTC',
+          nextRunAt: parsed.iso,
+        })
+
+        if (!result.ok) {
+          const agentMsg: ChatMessage = {
+            id: nextId(),
+            role: 'agent',
+            content: `**Couldn't save schedule:** ${result.error}\n\n${RECURRING_FIRST_RUN_AGENT}`,
+            timestamp: timeLabel(),
+          }
+          setTasks(prev =>
+            prev.map(t =>
+              t.id === conversationId ? { ...t, messages: [...t.messages, userMsg, agentMsg] } : t,
+            ),
+          )
+          return true
+        }
+
+        setTasks(prev =>
+          prev.map(t =>
+            t.id === conversationId ? { ...t, messages: [...t.messages, userMsg] } : t,
+          ),
+        )
+        finishRecurringFromChat({
+          name,
+          rawInput: rs.rawInput,
+          scheduleLabel,
+          conversationId: rs.conversationId,
+        })
+        return true
+      }
+
+      return false
+    },
+    [finishRecurringFromChat],
+  )
+
+  consumeRecurringUserTurnRef.current = consumeRecurringUserTurn
+
+  const tryEmbeddedSchedulingIntent = useCallback(
+    (conversationId: string, userContent: string, task: UITask): boolean => {
+      const trimmed = userContent.trim()
+      if (!trimmed) return false
+      if (!looksLikeRepeatingSchedulingIntent(trimmed)) return false
+
+      const rawInput = extractPromptBodyForCron(trimmed).trim()
+      if (rawInput.length < 4) return false
+
+      const titleBase = rawInput.length >= 10 ? rawInput : trimmed
+      const conversationTitle = deriveConversationTitle(task, titleBase)
+
+      const defaultTz =
+        typeof Intl !== 'undefined' && Intl.DateTimeFormat
+          ? Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+          : 'UTC'
+
+      /** If rhythm is readable from the same line (“every minute until …”), skip straight to first-run step. */
+      const parsedRhythm = parseRhythmReply(trimmed, defaultTz)
+
+      const userMsg: ChatMessage = { id: nextId(), role: 'user', content: trimmed, timestamp: timeLabel() }
+
+      setShowSettings(false)
+      setSidebarPrimaryTab('tasks')
+      setCronContextJob(null)
+
+      if (parsedRhythm.ok) {
+        const nextSetup =
+          parsedRhythm.scheduleKind === 'interval'
+            ? {
+                conversationId,
+                step: 'first_run' as const,
+                rawInput,
+                scheduleKind: 'interval' as const,
+                intervalSeconds: parsedRhythm.intervalSeconds,
+                cronExpression: '',
+                timeZone: 'UTC',
+              }
+            : {
+                conversationId,
+                step: 'first_run' as const,
+                rawInput,
+                scheduleKind: 'cron' as const,
+                intervalSeconds: 0,
+                cronExpression: parsedRhythm.cronExpression,
+                timeZone: parsedRhythm.timeZone,
+              }
+        const cadenceHint =
+          parsedRhythm.scheduleKind === 'interval'
+            ? scheduleLabelParts('interval', parsedRhythm.intervalSeconds, '', '')
+            : scheduleLabelParts('cron', 0, parsedRhythm.cronExpression, parsedRhythm.timeZone)
+        const agentMsg: ChatMessage = {
+          id: nextId(),
+          role: 'agent',
+          content:
+            `**Repeating cadence detected** (${cadenceHint}). Anything like **until 9:30 pm** does **not** auto-stop the job yet—pause or delete it when you are done.\n\n` +
+            RECURRING_FIRST_RUN_AGENT,
+          timestamp: timeLabel(),
+        }
+        setRecurringSetup(nextSetup)
+        setTasks(prev =>
+          prev.map(t =>
+            t.id === conversationId
+              ? {
+                  ...t,
+                  title: conversationTitle,
+                  messages: [...t.messages, userMsg, agentMsg],
+                  lastUpdate: 'First run time',
+                  expectedNextInput: 'Date & time',
+                }
+              : t,
+          ),
+        )
+        return true
+      }
+
+      const agentMsg: ChatMessage = {
+        id: nextId(),
+        role: 'agent',
+        content:
+          '**Sounds like you want this on a repeat.** We’ll configure **how often** and **when it first runs**, then save it as your **user cron** (same thread).\n\n' +
+          RECURRING_AFTER_PROMPT_AGENT,
+        timestamp: timeLabel(),
+      }
+
+      setTasks(prev =>
+        prev.map(t =>
+          t.id === conversationId
+            ? {
+                ...t,
+                title: conversationTitle,
+                messages: [...t.messages, userMsg, agentMsg],
+                lastUpdate: 'Schedule: how often?',
+                expectedNextInput: 'Rhythm',
+              }
+            : t,
+        ),
+      )
+      setRecurringSetup({ conversationId, step: 'rhythm', rawInput })
+      return true
+    },
+    [],
+  )
+
+  tryEmbeddedSchedulingIntentRef.current = tryEmbeddedSchedulingIntent
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -745,7 +1505,15 @@ function App() {
           ? Math.max(0, currentIndex - 1)
           : Math.min(tasks.length - 1, currentIndex + 1)
         if (newIndex !== currentIndex) {
-          setSelectedTaskId(tasks[newIndex].id)
+          const id = tasks[newIndex].id
+          setShowSettings(false)
+          setCronThreadUnreadIds(prev => {
+            if (!prev[id]) return prev
+            const next = { ...prev }
+            delete next[id]
+            return next
+          })
+          setSelectedTaskId(id)
         }
       }
 
@@ -772,6 +1540,12 @@ function App() {
     async (conversationId: string, userContent: string) => {
       const task = tasks.find(t => t.id === conversationId)
       if (!task) return
+
+      if (await consumeRecurringUserTurnRef.current(conversationId, userContent)) return
+
+      const trimmedSend = userContent.trim()
+      if (tryEmbeddedSchedulingIntentRef.current(conversationId, trimmedSend, task)) return
+
       const conversationTitle = deriveConversationTitle(task, userContent)
       let activeTaskId = task.currentTaskId
       try {
@@ -1004,38 +1778,100 @@ function App() {
       ? planPreviews[selectedTask.currentTaskId]
       : null
 
+  const cronStripVisible =
+    Boolean(cronContextJob &&
+      selectedTask &&
+      cronContextJob.payload?.conversationId === selectedTask.id)
+
+  const handleSelectTaskFromSidebar = useCallback((id: string) => {
+    setShowSettings(false)
+    setCronContextJob(null)
+    setCronThreadUnreadIds(prev => {
+      if (!prev[id]) return prev
+      const next = { ...prev }
+      delete next[id]
+      return next
+    })
+    setSelectedTaskId(id)
+  }, [])
+
+  const handleSelectRecurringJob = useCallback((job: UserCronJob) => {
+    setShowSettings(false)
+    setCronContextJob(job)
+    const cid = job.payload?.conversationId
+    if (!cid) {
+      setRecurringSetup(null)
+      setSelectedTaskId(null)
+      return
+    }
+    setCronThreadUnreadIds(prev => {
+      if (!prev[cid]) return prev
+      const next = { ...prev }
+      delete next[cid]
+      return next
+    })
+    setRecurringSetup(prev => (prev && prev.conversationId !== cid ? null : prev))
+    setSelectedTaskId(cid)
+  }, [])
+
   return (
     <div className="app">
       <TaskSidebar
+        sidebarTab={sidebarPrimaryTab}
+        onSidebarTabChange={setSidebarPrimaryTab}
         tasks={tasks}
         selectedTaskId={selectedTaskId}
-        onSelectTask={setSelectedTaskId}
+        onSelectTask={handleSelectTaskFromSidebar}
         settings={uiSettings}
         taskHeartbeats={taskHeartbeats}
         onCreateTask={handleCreateTask}
         onDeleteTask={handleDeleteTask}
         onRenameTask={handleRenameTask}
+        userCronJobs={userCronJobs}
+        userCronLoadError={userCronListError}
+        userCronListLoading={userCronListLoading}
+        onReloadUserCronJobs={reloadUserCrons}
+        onDeleteUserCronJob={handleSidebarDeleteUserCronJob}
+        onStartRecurringChatFlow={handleCreateRecurringTask}
+        onSelectRecurringJob={handleSelectRecurringJob}
+        highlightRecurringJobId={cronContextJob?.id ?? null}
+        conversationUnreadIds={cronThreadUnreadIds}
       />
       <main className="main-content">
         <header className="header">
           <div className="header-task-info">
-            <h1 className="header-title">
-              {selectedTask?.title ?? ''}
-            </h1>
-            {selectedTask && (
-              <div className="header-meta">
-                <span className={`header-status-dot ${selectedTask.status}`}></span>
-                <span className="header-status-text">
-                  {selectedTask.status === 'awaiting_feedback' && 'Awaiting feedback'}
-                  {selectedTask.status === 'working' && 'Working'}
-                  {selectedTask.status === 'completed' && 'Completed'}
-                </span>
+            <div className="header-task-primary">
+              <h1 className="header-title">
+                {selectedTask?.title ??
+                  (cronContextJob?.name ?? '')}
+              </h1>
+              {selectedTask && (
+                <div className="header-meta">
+                  <span className={`header-status-dot ${selectedTask.status}`}></span>
+                  <span className="header-status-text">
+                    {selectedTask.status === 'awaiting_feedback' && 'Awaiting feedback'}
+                    {selectedTask.status === 'working' && 'Working'}
+                    {selectedTask.status === 'completed' && 'Completed'}
+                  </span>
+                </div>
+              )}
+            </div>
+            {cronStripVisible && cronContextJob && (
+              <div className="header-recurring-strip">
+                <strong>Scheduled</strong> · next run {new Date(cronContextJob.nextRunAt).toLocaleString()} ·{' '}
+                {cronContextJob.scheduleKind === 'cron' ? (
+                  <code>
+                    {cronContextJob.cronExpression} ({cronContextJob.timeZone || 'UTC'})
+                  </code>
+                ) : (
+                  <span>every {cronContextJob.intervalSeconds}s</span>
+                )}
               </div>
             )}
           </div>
           <SettingsButton
             isOpen={showSettings}
-            onToggle={() => setShowSettings(!showSettings)}
+            onToggle={toggleSettings}
           />
         </header>
         {selectedTask ? (
@@ -1058,8 +1894,32 @@ function App() {
               credentialRequest={selectedTaskCredential?.request}
               credentialStatus={selectedTaskCredential?.status}
               onProvideCredential={handleOpenCredentialModal}
+              pulseMessageKey={liveLogPulseKeyByTask[selectedTask.id] ?? undefined}
+              inputPlaceholder={
+                recurringSetup?.conversationId === selectedTask.id
+                  ? recurringSetup.step === 'prompt'
+                    ? 'What should the agent run on each schedule?'
+                    : recurringSetup.step === 'rhythm'
+                      ? 'e.g. every hour · daily at 9am · 0 * * * * UTC'
+                      : 'First run · e.g. 2026-05-03 15:45'
+                  : undefined
+              }
             />
           </>
+        ) : cronContextJob ? (
+          <div className="empty-state cron-orphan-panel">
+            <h2 className="empty-state-title">{cronContextJob.name}</h2>
+            <p className="empty-state-text">This repeating task is not tied to an open conversation.</p>
+            <p className="cron-orphan-schedule">
+              Next run {new Date(cronContextJob.nextRunAt).toLocaleString()}
+              {cronContextJob.scheduleKind === 'cron'
+                ? ` · ${cronContextJob.cronExpression} (${cronContextJob.timeZone || 'UTC'})`
+                : ` · every ${cronContextJob.intervalSeconds}s`}
+            </p>
+            <button type="button" className="cron-orphan-close" onClick={() => setCronContextJob(null)}>
+              Close
+            </button>
+          </div>
         ) : (
           <div className="empty-state">
             <pre className="empty-state-ascii">{`
@@ -1077,7 +1937,7 @@ function App() {
           <SettingsPanel
             settings={uiSettings}
             onSettingsChange={setUISettings}
-            onClose={() => setShowSettings(false)}
+            onClose={handleCloseSettings}
           />
         )}
       </main>

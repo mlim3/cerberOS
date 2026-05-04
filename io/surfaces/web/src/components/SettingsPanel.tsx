@@ -149,6 +149,16 @@ function SettingsPanel({ settings, onSettingsChange, onClose }: SettingsPanelPro
               </label>
             </div>
           </section>
+
+          <section className="settings-section">
+            <h3 className="settings-section-title">Recurring tasks</h3>
+            <p className="settings-muted-paragraph">
+              Repeating runs are configured entirely in chat. From the sidebar <strong>Recurring</strong> tab, choose{' '}
+              <strong>Create recurring task</strong> for a guided thread—or in <strong>any</strong> task chat, wording
+              like &quot;every morning&quot;, &quot;daily&quot;, or &quot;every hour&quot; switches that send into scheduler
+              setup (rhythm → first run → saved user cron).
+            </p>
+          </section>
         </div>
 
         <div className="settings-footer">

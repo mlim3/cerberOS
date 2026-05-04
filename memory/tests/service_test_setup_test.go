@@ -106,7 +106,7 @@ func TestMain(m *testing.M) {
 	piHandler := api.NewPersonalInfoHandler(piProcessor, piRepo)
 	vaultHandler := api.NewVaultHandler(vaultRepo, vaultManager, logRepo)
 	agentHandler := api.NewAgentHandler(agentLogsRepo)
-	scheduledJobsHandler := api.NewScheduledJobsHandler(scheduledJobsRepo)
+	scheduledJobsHandler := api.NewScheduledJobsHandler(scheduledJobsRepo, nil)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/conversations", chatHandler.HandleListConversations)
@@ -130,9 +130,12 @@ func TestMain(m *testing.M) {
 	mux.HandleFunc("POST /api/v1/personal_info/{userId}/facts/{factId}/supersede", piHandler.SupersedeFact)
 	mux.HandleFunc("POST /api/v1/system/events", logHandler.HandleCreateSystemEvent)
 	mux.HandleFunc("GET /api/v1/system/events", logHandler.HandleListSystemEvents)
-	mux.HandleFunc("POST /api/v1/scheduled_jobs", scheduledJobsHandler.HandleCreateScheduledJob)
-	mux.HandleFunc("POST /api/v1/scheduled_jobs/run_due", scheduledJobsHandler.HandleRunDueJobs)
-	mux.HandleFunc("GET /api/v1/scheduled_jobs/{jobId}/runs", scheduledJobsHandler.HandleListScheduledJobRuns)
+	mux.Handle("POST /api/v1/scheduled_jobs", api.RequireVaultKey(http.HandlerFunc(scheduledJobsHandler.HandleCreateScheduledJob)))
+	mux.Handle("POST /api/v1/scheduled_jobs/run_due", api.RequireVaultKey(http.HandlerFunc(scheduledJobsHandler.HandleRunDueJobs)))
+	mux.Handle("GET /api/v1/scheduled_jobs/{jobId}/runs", api.RequireVaultKey(http.HandlerFunc(scheduledJobsHandler.HandleListScheduledJobRuns)))
+	mux.Handle("GET /api/v1/user_crons", api.RequireVaultKey(http.HandlerFunc(scheduledJobsHandler.HandleListUserCrons)))
+	mux.Handle("DELETE /api/v1/scheduled_jobs/{jobId}", api.RequireVaultKey(http.HandlerFunc(scheduledJobsHandler.HandleDeleteUserCron)))
+	mux.Handle("POST /api/v1/system/maintenance/run", api.RequireVaultKey(http.HandlerFunc(scheduledJobsHandler.HandleRunSystemMaintenance)))
 
 	vaultMux := http.NewServeMux()
 	vaultMux.HandleFunc("POST /api/v1/vault/{userId}/secrets", vaultHandler.HandleSaveSecret)
@@ -224,6 +227,10 @@ CREATE TABLE IF NOT EXISTS scheduling_schema.scheduled_jobs (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+ALTER TABLE scheduling_schema.scheduled_jobs ADD COLUMN IF NOT EXISTS user_id VARCHAR(64) NOT NULL DEFAULT '';
+ALTER TABLE scheduling_schema.scheduled_jobs ADD COLUMN IF NOT EXISTS time_zone VARCHAR(64) NOT NULL DEFAULT 'UTC';
+ALTER TABLE scheduling_schema.scheduled_jobs ADD COLUMN IF NOT EXISTS cron_expression TEXT NOT NULL DEFAULT '';
+
 CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_next_run
     ON scheduling_schema.scheduled_jobs (next_run_at)
     WHERE status = 'active';
@@ -253,7 +260,7 @@ func seedUser(t *testing.T, userID string) {
 	email := fmt.Sprintf("test-%s@example.com", u.String())
 	_, err = dbPool.Exec(context.Background(),
 		`INSERT INTO identity_schema.users (id, email) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING`,
-		pgtype.UUID{Bytes: u, Valid: true},
+		pgtype.UUID{Bytes: [16]byte(u), Valid: true},
 		email,
 	)
 	if err != nil {

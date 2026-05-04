@@ -97,6 +97,47 @@
   opacity: 0.6;
 }
 
+.scheduled-turn-badge {
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: oklch(0.52 0.12 250);
+  background: oklch(0.72 0.08 250 / 0.25);
+}
+
+.message-scheduled-run .markdown-body {
+  padding-left: var(--sp-3);
+  border-left: 3px solid oklch(0.62 0.12 156 / 0.75);
+}
+
+.message.agent.message-pulse-new {
+  animation: cron-msg-pulse 2.15s ease-out 1 both;
+}
+
+@keyframes cron-msg-pulse {
+  0% {
+    box-shadow:
+      inset 3px 0 0 transparent,
+      0 0 0 transparent;
+    filter: saturate(1);
+  }
+  40% {
+    box-shadow:
+      inset 4px 0 0 oklch(0.72 0.14 156 / 0.55),
+      0 10px 24px oklch(0.4 0.08 156 / 0.12);
+    filter: saturate(1.06);
+  }
+  100% {
+    box-shadow:
+      inset 3px 0 0 transparent,
+      0 0 0 transparent;
+    filter: saturate(1);
+  }
+}
+
 .message-text {
   padding: var(--sp-3) var(--sp-4);
   border-radius: var(--radius-md);
@@ -215,6 +256,14 @@
 .chat-input-area {
   background-color: var(--bg-primary);
   border-top: var(--border);
+}
+
+.composer-locked-hint {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-7) 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.35;
 }
 
 .suggestion-chips {

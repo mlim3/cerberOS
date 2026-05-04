@@ -4,8 +4,8 @@
 # Usage:
 #   ./deploy/scripts/kind-up.sh
 #
-#   ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL are read automatically from the
-#   environment by kind-up.sh — no --set flags needed.
+#   ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL are picked up by kind-up.sh from the
+#   shell or from repo-root `.env` (shell wins if both define a key).
 # =============================================================================
 
 # Use locally-built images (loaded via kind load docker-image)
@@ -57,6 +57,9 @@ memory-api:
     password: password
   vaultMasterKey: "00000000000000000000000000000000"
   internalVaultApiKey: "dev-internal-key"
+  # Applies default schedules from deploy/helm/charts/memory-api/values.yaml
+  systemMaintenanceCron:
+    enabled: true
 
 orchestrator:
   image:
@@ -69,6 +72,8 @@ io:
     repository: cerberos-io
     tag: local
     pullPolicy: Never
+  # Must match memory-api.internalVaultApiKey above (IO → Memory X-Internal-API-Key)
+  internalVaultApiKey: "dev-internal-key"
 
 aegis-databus:
   image:

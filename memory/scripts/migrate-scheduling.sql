@@ -13,10 +13,18 @@ CREATE TABLE IF NOT EXISTS scheduling_schema.scheduled_jobs (
     interval_seconds INT,
     name VARCHAR(255) NOT NULL,
     payload JSONB,
+    user_id VARCHAR(64) NOT NULL DEFAULT '',
+    time_zone VARCHAR(64) NOT NULL DEFAULT 'UTC',
+    cron_expression TEXT NOT NULL DEFAULT '',
     next_run_at TIMESTAMPTZ NOT NULL,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- Upgrade existing DBs created before user_cron columns existed
+ALTER TABLE scheduling_schema.scheduled_jobs ADD COLUMN IF NOT EXISTS user_id VARCHAR(64) NOT NULL DEFAULT '';
+ALTER TABLE scheduling_schema.scheduled_jobs ADD COLUMN IF NOT EXISTS time_zone VARCHAR(64) NOT NULL DEFAULT 'UTC';
+ALTER TABLE scheduling_schema.scheduled_jobs ADD COLUMN IF NOT EXISTS cron_expression TEXT NOT NULL DEFAULT '';
 
 CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_next_run
     ON scheduling_schema.scheduled_jobs (next_run_at)
