@@ -1,0 +1,40 @@
+.progress-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: var(--sp-1) 0;
+  animation: progressFadeIn 200ms ease-out;
+}
+
+.progress-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: progressPulse 2s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
+.progress-text {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+@keyframes progressFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes progressPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .progress-dot {
+    animation: none;
+  }
+  .progress-indicator {
+    animation: none;
+  }
+}
