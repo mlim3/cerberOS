@@ -8,6 +8,8 @@ replicaCount: 1
 service:
   port: 8081
 
+natsUrl: "nats://nats:4222"
+
 db:
   host: memory-db
   port: "5432"

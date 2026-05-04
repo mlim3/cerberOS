@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url'
 
 function applyEnvFile(filePath: string) {
   const raw = readFileSync(filePath, 'utf8')
-  for (const line of raw.split(/\n')) {
+  for (const line of raw.split(/\r?\n/)) {
     const s = line.trim()
     if (!s || s.startsWith('#')) continue
     const eq = s.indexOf('=')
