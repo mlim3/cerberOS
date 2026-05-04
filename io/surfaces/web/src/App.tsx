@@ -130,7 +130,10 @@ const mockTasks: UITask[] = [
     expectedNextInput: '~5 min',
     messages: [
       { id: '3a', role: 'user', content: 'Create a dashboard with user metrics and activity charts', timestamp: '11:00 AM' },
-      { id: '3b', role: 'agent', content: 'Working on the dashboard components. Currently implementing the activity chart using recharts library...', timestamp: '11:02 AM' },
+      { id: '3b', role: 'agent', content: 'Working on the dashboard components. Currently implementing the activity chart using recharts library...', timestamp: '11:02 AM', toolCalls: [
+        { toolName: 'fetch_docs', inputs: { query: 'recharts API' }, output: 'Retrieved chart component docs', status: 'completed' as const, durationMs: 1200 },
+        { toolName: 'scaffold_component', inputs: { name: 'ActivityChart', path: 'src/components' }, output: 'Component scaffolded', status: 'completed' as const, durationMs: 800 },
+      ] },
     ],
   },
   {

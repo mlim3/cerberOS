@@ -22,6 +22,15 @@ export interface Task {
 
 export type MessageRole = 'user' | 'assistant' | 'orchestrator';
 
+/** Tool call information for display in the chat */
+export interface ToolCallInfo {
+  toolName: string;
+  inputs: Record<string, unknown>;
+  output?: string;
+  status: 'running' | 'completed' | 'error';
+  durationMs?: number;
+}
+
 /** A chat message displayed in the UI */
 export interface ChatMessage {
   id: string;
@@ -30,6 +39,8 @@ export interface ChatMessage {
   timestamp: string;
   /** When true, content was a credential and should be displayed masked */
   isRedacted?: boolean;
+  /** Tool calls associated with this message */
+  toolCalls?: ToolCallInfo[];
 }
 
 // ============================================

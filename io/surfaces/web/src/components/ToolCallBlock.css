@@ -1,0 +1,97 @@
+.tool-call-block {
+  padding: 10px 14px;
+  border-left: 2px solid rgba(100, 149, 237, 0.4);
+  background: rgba(255, 255, 255, 0.015);
+  border-radius: 0 6px 6px 0;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+
+.tool-call-block.expanded {
+  border-left-color: rgba(100, 149, 237, 0.6);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.tool-call-block:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.tool-call-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tool-call-arrow {
+  color: var(--accent);
+  font-size: 9px;
+  width: 10px;
+}
+
+.tool-call-name {
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+}
+
+.tool-call-success {
+  color: var(--success);
+  font-size: 9px;
+}
+
+.tool-call-error {
+  color: var(--warning);
+  font-size: 9px;
+}
+
+.tool-call-duration {
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.tool-call-detail {
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tool-call-section {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tool-call-label {
+  font-size: 9px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.tool-call-value {
+  font-size: 10px;
+  color: var(--text-secondary);
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  word-break: break-all;
+}
+
+.tool-call-value.completed {
+  color: var(--success);
+}
+
+.tool-call-value.error {
+  color: var(--warning);
+}
+
+.tool-call-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 85%;
+}
