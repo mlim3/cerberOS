@@ -61,7 +61,9 @@ func (h *VaultHandler) logAccessEvent(ctx context.Context, userID, status, path 
 	})
 
 	if err != nil {
-		slog.Error("failed to log vault access event", "error", err, "traceID", traceID.String())
+		slog.Error("could not append vault access event to audit log; access still proceeded",
+			"error", err,
+			"trace_id", traceID.String())
 	}
 }
 

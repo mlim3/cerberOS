@@ -13,6 +13,7 @@ import (
 	"fmt"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/cerberOS/agents-component/internal/logfields"
 	"github.com/cerberOS/agents-component/pkg/types"
 )
 
@@ -73,10 +74,11 @@ func executeVaultStorageRead(ctx context.Context, ve *VaultExecutor, raw json.Ra
 	}
 
 	onUpdate := func(p types.VaultOperationProgress) {
-		ve.log.Info("vault storage_read: progress",
+		ve.log.Info("vault forwarded a progress update for in-flight storage_read operation",
+			"operation_type", "storage_read",
 			"request_id", p.RequestID,
 			"progress_type", p.ProgressType,
-			"message", p.Message,
+			"message_preview", logfields.PreviewWords(p.Message, 20, 140),
 			"elapsed_ms", p.ElapsedMS,
 		)
 	}
@@ -154,10 +156,11 @@ func executeVaultStorageWrite(ctx context.Context, ve *VaultExecutor, raw json.R
 	}
 
 	onUpdate := func(p types.VaultOperationProgress) {
-		ve.log.Info("vault storage_write: progress",
+		ve.log.Info("vault forwarded a progress update for in-flight storage_write operation",
+			"operation_type", "storage_write",
 			"request_id", p.RequestID,
 			"progress_type", p.ProgressType,
-			"message", p.Message,
+			"message_preview", logfields.PreviewWords(p.Message, 20, 140),
 			"elapsed_ms", p.ElapsedMS,
 		)
 	}
@@ -230,10 +233,11 @@ func executeVaultStorageList(ctx context.Context, ve *VaultExecutor, raw json.Ra
 	}
 
 	onUpdate := func(p types.VaultOperationProgress) {
-		ve.log.Info("vault storage_list: progress",
+		ve.log.Info("vault forwarded a progress update for in-flight storage_list operation",
+			"operation_type", "storage_list",
 			"request_id", p.RequestID,
 			"progress_type", p.ProgressType,
-			"message", p.Message,
+			"message_preview", logfields.PreviewWords(p.Message, 20, 140),
 			"elapsed_ms", p.ElapsedMS,
 		)
 	}

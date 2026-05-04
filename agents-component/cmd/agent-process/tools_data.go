@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/cerberOS/agents-component/internal/logfields"
 	"github.com/cerberOS/agents-component/pkg/types"
 )
 
@@ -251,10 +252,11 @@ func executeVaultDataRead(ctx context.Context, ve *VaultExecutor, raw json.RawMe
 	}
 
 	onUpdate := func(p types.VaultOperationProgress) {
-		ve.log.Info("vault data_read: progress",
+		ve.log.Info("vault forwarded a progress update for in-flight data_read operation",
+			"operation_type", "data_read",
 			"request_id", p.RequestID,
 			"progress_type", p.ProgressType,
-			"message", p.Message,
+			"message_preview", logfields.PreviewWords(p.Message, 20, 140),
 			"elapsed_ms", p.ElapsedMS,
 		)
 	}
@@ -328,10 +330,11 @@ func executeVaultDataWrite(ctx context.Context, ve *VaultExecutor, raw json.RawM
 	}
 
 	onUpdate := func(p types.VaultOperationProgress) {
-		ve.log.Info("vault data_write: progress",
+		ve.log.Info("vault forwarded a progress update for in-flight data_write operation",
+			"operation_type", "data_write",
 			"request_id", p.RequestID,
 			"progress_type", p.ProgressType,
-			"message", p.Message,
+			"message_preview", logfields.PreviewWords(p.Message, 20, 140),
 			"elapsed_ms", p.ElapsedMS,
 		)
 	}

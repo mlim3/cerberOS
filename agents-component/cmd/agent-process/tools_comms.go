@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/cerberOS/agents-component/internal/logfields"
 	"github.com/cerberOS/agents-component/pkg/types"
 )
 
@@ -141,10 +142,11 @@ func executeVaultCommsSend(ctx context.Context, ve *VaultExecutor, raw json.RawM
 	}
 
 	onUpdate := func(p types.VaultOperationProgress) {
-		ve.log.Info("vault comms_send: progress",
+		ve.log.Info("vault forwarded a progress update for in-flight comms_send operation",
+			"operation_type", "comms_send",
 			"request_id", p.RequestID,
 			"progress_type", p.ProgressType,
-			"message", p.Message,
+			"message_preview", logfields.PreviewWords(p.Message, 20, 140),
 			"elapsed_ms", p.ElapsedMS,
 		)
 	}

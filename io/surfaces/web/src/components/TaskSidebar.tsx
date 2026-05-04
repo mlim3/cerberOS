@@ -8,10 +8,16 @@ import './UserCronSection.css'
 
 export type SidebarPrimaryTab = 'tasks' | 'recurring'
 
+// SidebarTask extends Task with the optional in-flight task id used by the
+// dashboard. Each row in the sidebar represents a *conversation* — task.id is
+// the conversation_id — and currentTaskId, when present, is the orchestrator
+// task currently running inside that conversation.
+type SidebarTask = Task & { currentTaskId?: string }
+
 interface TaskSidebarProps {
   sidebarTab: SidebarPrimaryTab
   onSidebarTabChange: (tab: SidebarPrimaryTab) => void
-  tasks: Task[]
+  tasks: SidebarTask[]
   selectedTaskId: string | null
   onSelectTask: (id: string) => void
   settings: UISettings
@@ -28,6 +34,18 @@ interface TaskSidebarProps {
   onSelectRecurringJob: (job: UserCronJob) => void
   highlightRecurringJobId: string | null
   conversationUnreadIds: Record<string, true>
+}
+
+function buildTaskHoverTitle(task: SidebarTask): string {
+  const lines = [`Title: ${task.title}`, `Conversation ID: ${task.id}`]
+  if (task.currentTaskId && task.currentTaskId !== task.id) {
+    lines.push(`Current task ID: ${task.currentTaskId}`)
+  }
+  lines.push(`Status: ${task.status}`)
+  if (task.lastUpdate) {
+    lines.push(`Last update: ${task.lastUpdate}`)
+  }
+  return lines.join('\n')
 }
 
 function TaskSidebar({
@@ -198,15 +216,20 @@ function TaskSidebar({
                   />
                 ) : (
                   <>
-                    <button type="button" className="task-item-btn" onClick={() => onSelectTask(task.id)}>
+                    <button
+                      type="button"
+                      className="task-item-btn"
+                      onClick={() => onSelectTask(task.id)}
+                      title={buildTaskHoverTitle(task)}
+                    >
                       <div className="task-status">
                         {task.status === 'awaiting_feedback' && (
                           <span className="status-icon urgent-dot" title="Awaiting feedback">
                             <span className="pulse-dot urgent"></span>
                           </span>
                         )}
-                        {task.status === 'working' && (
-                          settings.showHeartbeatSeconds ? (
+                        {task.status === 'working' &&
+                          (settings.showHeartbeatSeconds ? (
                             <span className="status-icon heartbeat" title="Seconds since last heartbeat">
                               {Math.max(0, (tick - (taskHeartbeats[task.id] ?? tick)) / 1000).toFixed(1)}s
                             </span>
@@ -214,10 +237,11 @@ function TaskSidebar({
                             <span className="status-icon working-dot" title="Working">
                               <span className="pulse-dot"></span>
                             </span>
-                          )
-                        )}
+                          ))}
                         {task.status === 'completed' && (
-                          <span className="status-icon completed" title="Completed">✓</span>
+                          <span className="status-icon completed" title="Completed">
+                            ✓
+                          </span>
                         )}
                       </div>
                       <div className="task-info">
