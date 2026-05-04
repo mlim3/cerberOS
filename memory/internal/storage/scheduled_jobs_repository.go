@@ -339,6 +339,61 @@ func (r *ScheduledJobsRepository) FactCountForDecayScan(ctx context.Context) (in
 	return n, nil
 }
 
+// CountActiveScheduledJobs returns jobs with status=active.
+func (r *ScheduledJobsRepository) CountActiveScheduledJobs(ctx context.Context) (int64, error) {
+	const q = `SELECT COUNT(*) FROM scheduling_schema.scheduled_jobs WHERE status = 'active'`
+	var n int64
+	if err := r.pool.QueryRow(ctx, q).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// CountDueScheduledJobs counts active jobs whose next_run_at is at or before `before`.
+func (r *ScheduledJobsRepository) CountDueScheduledJobs(ctx context.Context, before time.Time) (int64, error) {
+	const q = `
+SELECT COUNT(*) FROM scheduling_schema.scheduled_jobs
+WHERE status = 'active' AND next_run_at <= $1`
+	var n int64
+	if err := r.pool.QueryRow(ctx, q, before).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// CountRunsByStatusSince counts job runs by status whose started_at is at or after `since`.
+func (r *ScheduledJobsRepository) CountRunsByStatusSince(ctx context.Context, status string, since time.Time) (int64, error) {
+	const q = `
+SELECT COUNT(*) FROM scheduling_schema.scheduled_job_runs
+WHERE status = $1 AND started_at >= $2`
+	var n int64
+	if err := r.pool.QueryRow(ctx, q, status, since).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// CountOrphanScheduledJobRuns returns runs without a backing job row (normally zero with FK).
+func (r *ScheduledJobsRepository) CountOrphanScheduledJobRuns(ctx context.Context) (int64, error) {
+	const q = `
+SELECT COUNT(*) FROM scheduling_schema.scheduled_job_runs r
+WHERE NOT EXISTS (SELECT 1 FROM scheduling_schema.scheduled_jobs j WHERE j.id = r.job_id)`
+	var n int64
+	if err := r.pool.QueryRow(ctx, q).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// DBPingLatency returns round-trip latency for pool.Ping(ctx).
+func (r *ScheduledJobsRepository) DBPingLatency(ctx context.Context) (time.Duration, error) {
+	start := time.Now()
+	if err := r.pool.Ping(ctx); err != nil {
+		return 0, err
+	}
+	return time.Since(start), nil
+}
+
 // MarshalPayloadMap encodes a map for JSONB storage.
 func MarshalPayloadMap(m map[string]any) ([]byte, error) {
 	if m == nil {

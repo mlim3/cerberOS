@@ -34,3 +34,52 @@ resources:
   limits:
     cpu: 200m
     memory: 256Mi
+
+# Deterministic POST /api/v1/system/maintenance/run (X-Internal-API-Key) — complements the 1m in-process RunDue ticker.
+# Schedules are Kubernetes cron syntax (typically UTC).
+# Toggle enabled per environment (e.g. kind: values-dev sets enabled: true).
+systemMaintenanceCron:
+  enabled: false
+  cronJobNamePrefix: memory-api-sysmaint
+  curlImage: curlimages/curl:8.11.1
+  serviceHost: memory-api
+  servicePort: 8081
+  secretName: memory-api-secrets
+  secretKey: INTERNAL_VAULT_API_KEY
+  jobs:
+    # Heartbeat / monitoring (~5–15 min band)
+    - name: monitor-heartbeat
+      schedule: "*/10 * * * *"
+      jobType: system_monitoring_heartbeat
+    # Dead-job sweep (~1–5 min band); explicit CronJob audit trail vs in-process ticker
+    - name: run-due-sweep
+      schedule: "*/3 * * * *"
+      jobType: scheduled_run_due_sweep
+    # Reconciliation inventory (daily)
+    - name: reconcile-daily
+      schedule: "0 6 * * *"
+      jobType: reconciliation_inventory
+    # Orphan cleanup inventory check (weekly, Sunday UTC)
+    - name: orphan-inventory-weekly
+      schedule: "0 7 * * 0"
+      jobType: orphan_cleanup_inventory
+    # Credential posture audit (daily — booleans only; rotate secrets elsewhere)
+    - name: credential-audit-daily
+      schedule: "30 8 * * *"
+      jobType: credential_rotation_audit
+    # Performance signal (~/15–60 min band — pair with Prometheus scrape)
+    - name: perf-health
+      schedule: "*/30 * * * *"
+      jobType: performance_health_check
+    # Disaster recovery coordinator prompt (weekly, Monday UTC)
+    - name: dr-coord-weekly
+      schedule: "15 9 * * 1"
+      jobType: disaster_recovery_coordination
+    # DB reachability backup-adjacent ping (hourly)
+    - name: backup-verify-hourly
+      schedule: "0 * * * *"
+      jobType: backup_verification_ping
+    # Queue depth / NATS JetStream reminder (every 6h — real lag lives in observability stack)
+    - name: journal-queue-reminder
+      schedule: "0 */6 * * *"
+      jobType: journal_queue_audit

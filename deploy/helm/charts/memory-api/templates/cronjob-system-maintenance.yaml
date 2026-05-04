@@ -1,0 +1,49 @@
+{{- if .Values.systemMaintenanceCron.enabled }}
+{{- range .Values.systemMaintenanceCron.jobs }}
+{{- $payload := dict "jobType" .jobType }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $.Values.systemMaintenanceCron.cronJobNamePrefix }}-{{ .name | trunc 35 | trimSuffix "-" }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "memory-api.labels" $ | nindent 4 }}
+spec:
+  schedule: {{ .schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  suspend: {{ .suspend | default false }}
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 86400
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            {{- include "memory-api.selectorLabels" $ | nindent 12 }}
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: sysmaint
+              image: {{ $.Values.systemMaintenanceCron.curlImage }}
+              env:
+                - name: BODY_B64
+                  value: {{ $payload | toJson | b64enc | quote }}
+                - name: INTERNAL_VAULT_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $.Values.systemMaintenanceCron.secretName }}
+                      key: {{ $.Values.systemMaintenanceCron.secretKey }}
+              command:
+                - /bin/sh
+                - -ec
+                - |
+                  BODY="$(printf '%s' "$BODY_B64" | base64 -d)"
+                  curl -sfS -X POST "http://{{ $.Values.systemMaintenanceCron.serviceHost }}:{{ $.Values.systemMaintenanceCron.servicePort }}/api/v1/system/maintenance/run" \
+                    -H "Content-Type: application/json" \
+                    -H "X-Internal-API-Key: ${INTERNAL_VAULT_API_KEY}" \
+                    --data-binary "${BODY}"
+{{- end }}
+{{- end }}
