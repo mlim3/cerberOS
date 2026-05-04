@@ -57,6 +57,9 @@ memory-api:
     password: password
   vaultMasterKey: "00000000000000000000000000000000"
   internalVaultApiKey: "dev-internal-key"
+  # Applies default schedules from deploy/helm/charts/memory-api/values.yaml
+  systemMaintenanceCron:
+    enabled: true
 
 orchestrator:
   image:

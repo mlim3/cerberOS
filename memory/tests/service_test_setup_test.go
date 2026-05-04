@@ -135,6 +135,7 @@ func TestMain(m *testing.M) {
 	mux.Handle("GET /api/v1/scheduled_jobs/{jobId}/runs", api.RequireVaultKey(http.HandlerFunc(scheduledJobsHandler.HandleListScheduledJobRuns)))
 	mux.Handle("GET /api/v1/user_crons", api.RequireVaultKey(http.HandlerFunc(scheduledJobsHandler.HandleListUserCrons)))
 	mux.Handle("DELETE /api/v1/scheduled_jobs/{jobId}", api.RequireVaultKey(http.HandlerFunc(scheduledJobsHandler.HandleDeleteUserCron)))
+	mux.Handle("POST /api/v1/system/maintenance/run", api.RequireVaultKey(http.HandlerFunc(scheduledJobsHandler.HandleRunSystemMaintenance)))
 
 	vaultMux := http.NewServeMux()
 	vaultMux.HandleFunc("POST /api/v1/vault/{userId}/secrets", vaultHandler.HandleSaveSecret)

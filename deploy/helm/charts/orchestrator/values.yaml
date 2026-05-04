@@ -30,3 +30,24 @@ resources:
   limits:
     cpu: 500m
     memory: 512Mi
+
+# When secretName is set, CRON_WAKE_SECRET is mounted into the orchestrator Deployment
+# and POST /v1/cron/wake becomes active (still returns 404 if secret is absent at runtime).
+cronWake:
+  secretName: ""
+  secretKey: secret
+
+# Optional Kubernetes CronJobs that POST to /v1/cron/wake (Planner maintenance tasks).
+systemCronWake:
+  enabled: false
+  curlImage: curlimages/curl:8.11.1
+  jobs: []
+  # Example (enable after creating a Secret with matching secretKey):
+  # jobs:
+  #   - name: maint-planner
+  #     schedule: "*/30 * * * *"
+  #     suspend: false
+  #     jobName: planner-maintenance
+  #     rawInput: |-
+  #       Review scheduling health; schedule fact decay scans if warranted.
+  #     systemPrompt: ""

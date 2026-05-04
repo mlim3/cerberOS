@@ -344,19 +344,235 @@ func (h *ScheduledJobsHandler) runUserCron(ctx context.Context, job storage.Sche
 }
 
 func (h *ScheduledJobsHandler) runInternalJob(ctx context.Context, job storage.ScheduledJob) (map[string]any, string) {
-	switch job.JobType {
+	detail, status := h.execInternalMaintenance(ctx, job.JobType)
+	if job.ID != uuid.Nil {
+		detail["scheduledJobId"] = job.ID.String()
+	}
+	return detail, status
+}
+
+func systemMaintenanceJobTypes() []string {
+	return []string{
+		// Sweeps — execute due scheduled jobs immediately (normally also on 1m ticker).
+		"scheduled_run_due_sweep",
+		"dead_job_reprocessing_sweep",
+		// Observability heartbeat / inventory.
+		"system_monitoring_heartbeat",
+		"reconciliation_inventory",
+		// Data maintenance.
+		"fact_decay_scan",
+		"orphan_cleanup_inventory",
+		// Credential / key rotation audits (operators perform rotation in Vault/Secrets; never log secrets).
+		"credential_rotation_audit",
+		// Performance + infra hooks (stubs extend per environment).
+		"performance_health_check",
+		"journal_queue_audit",
+		// DR / backups (coordinate with Postgres operator snapshots or pg_dump; verify separately).
+		"disaster_recovery_coordination",
+		"backup_verification_ping",
+	}
+}
+
+func allowedSystemMaintenance(jobType string) bool {
+	jobType = strings.TrimSpace(jobType)
+	for _, t := range systemMaintenanceJobTypes() {
+		if t == jobType {
+			return true
+		}
+	}
+	return false
+}
+
+type systemMaintenanceRequest struct {
+	JobType string `json:"jobType"`
+}
+
+// HandleRunSystemMaintenance POST /api/v1/system/maintenance/run
+// Dispatches deterministic internal maintenance without persisting synthetic scheduled_jobs rows.
+func (h *ScheduledJobsHandler) HandleRunSystemMaintenance(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req systemMaintenanceRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "invalid JSON body", nil))
+		return
+	}
+	jobType := strings.TrimSpace(req.JobType)
+	if jobType == "" || !allowedSystemMaintenance(jobType) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "unsupported or missing jobType", nil))
+		return
+	}
+
+	detail, status := h.execInternalMaintenance(r.Context(), jobType)
+
+	w.Header().Set("Content-Type", "application/json")
+	if status == "completed" {
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(SuccessResponse(map[string]any{"status": status, "detail": detail}))
+		return
+	}
+	w.WriteHeader(http.StatusUnprocessableEntity)
+	json.NewEncoder(w).Encode(ErrorResponse("failed", strings.TrimSpace(detailErrString(detail)), detail))
+}
+
+func detailErrString(detail map[string]any) string {
+	if detail == nil {
+		return "maintenance step failed"
+	}
+	if v, ok := detail["error"].(string); ok && v != "" {
+		return v
+	}
+	return "maintenance step failed"
+}
+
+// execInternalMaintenance runs a named maintenance step (persisted internal jobs reuse the same switch).
+func (h *ScheduledJobsHandler) execInternalMaintenance(ctx context.Context, jobType string) (map[string]any, string) {
+	jobType = strings.TrimSpace(jobType)
+	switch jobType {
+
+	case "scheduled_run_due_sweep", "dead_job_reprocessing_sweep":
+		if err := h.RunDue(ctx); err != nil {
+			return map[string]any{"jobType": jobType, "error": err.Error()}, "failed"
+		}
+		return map[string]any{
+			"jobType": jobType,
+			"ok":      true,
+			"note":    "RunDue sweep completed",
+		}, "completed"
+
+	case "system_monitoring_heartbeat":
+		now := time.Now().UTC()
+		since := now.Add(-24 * time.Hour)
+		active, err := h.repo.CountActiveScheduledJobs(ctx)
+		if err != nil {
+			return map[string]any{"jobType": jobType, "error": err.Error()}, "failed"
+		}
+		due, err := h.repo.CountDueScheduledJobs(ctx, now)
+		if err != nil {
+			return map[string]any{"jobType": jobType, "error": err.Error()}, "failed"
+		}
+		failedRuns24h, err := h.repo.CountRunsByStatusSince(ctx, "failed", since)
+		if err != nil {
+			return map[string]any{"jobType": jobType, "error": err.Error()}, "failed"
+		}
+		okRuns24h, err := h.repo.CountRunsByStatusSince(ctx, "completed", since)
+		if err != nil {
+			return map[string]any{"jobType": jobType, "error": err.Error()}, "failed"
+		}
+		return map[string]any{
+			"jobType":          jobType,
+			"asOf":             now.Format(time.RFC3339Nano),
+			"activeJobs":       active,
+			"dueJobsNow":       due,
+			"completedRuns24h": okRuns24h,
+			"failedRuns24h":    failedRuns24h,
+			"natsUrlSet":       strings.TrimSpace(os.Getenv("NATS_URL")) != "",
+			"orchestratorWebhookSet": func() bool {
+				return strings.TrimSpace(os.Getenv("ORCHESTRATOR_SCHEDULED_JOB_URL")) != ""
+			}(),
+		}, "completed"
+
+	case "reconciliation_inventory":
+		active, err := h.repo.CountActiveScheduledJobs(ctx)
+		if err != nil {
+			return map[string]any{"jobType": jobType, "error": err.Error()}, "failed"
+		}
+		due, err := h.repo.CountDueScheduledJobs(ctx, time.Now().UTC())
+		if err != nil {
+			return map[string]any{"jobType": jobType, "error": err.Error()}, "failed"
+		}
+		orphans, err := h.repo.CountOrphanScheduledJobRuns(ctx)
+		if err != nil {
+			return map[string]any{"jobType": jobType, "error": err.Error()}, "failed"
+		}
+		return map[string]any{
+			"jobType":                   jobType,
+			"activeScheduledJobs":       active,
+			"dueScheduledJobs":          due,
+			"orphanScheduledJobRunsEst": orphans,
+			"note":                      "Orphan runs should stay 0 while FK enforced; nonzero indicates schema/load issues.",
+		}, "completed"
+
 	case "fact_decay_scan":
 		n, err := h.repo.FactCountForDecayScan(ctx)
 		if err != nil {
-			return map[string]any{"error": err.Error()}, "failed"
+			return map[string]any{"jobType": jobType, "error": err.Error()}, "failed"
 		}
 		return map[string]any{
-			"jobType":       job.JobType,
+			"jobType":       jobType,
 			"factsObserved": n,
-			"note":          "fact_decay_scan completed (stub scan)",
+			"note":          "fact_decay_scan completed (stub TTL/decay wiring can extend this step)",
 		}, "completed"
+
+	case "orphan_cleanup_inventory":
+		n, err := h.repo.CountOrphanScheduledJobRuns(ctx)
+		if err != nil {
+			return map[string]any{"jobType": jobType, "error": err.Error()}, "failed"
+		}
+		return map[string]any{
+			"jobType":    jobType,
+			"orphanRuns": n,
+			"note":       "Automated deletes are risky; DELETE orphans only after operator review.",
+		}, "completed"
+
+	case "credential_rotation_audit":
+		internalKey := strings.TrimSpace(os.Getenv("INTERNAL_VAULT_API_KEY")) != ""
+		return map[string]any{
+			"jobType": jobType,
+			"signals": map[string]any{
+				"memoryInternalVaultAuthConfigured": internalKey,
+				"natsUrlConfigured":               strings.TrimSpace(os.Getenv("NATS_URL")) != "",
+				"orchestratorScheduledWebhookConfigured": strings.TrimSpace(os.Getenv(
+					"ORCHESTRATOR_SCHEDULED_JOB_URL")) != "",
+			},
+			"note": "Rotate API/JWT/signing secrets via cluster Secret rotation (IO, orchestrator); OpenBao handles broker creds.",
+		}, "completed"
+
+	case "performance_health_check":
+		latency, err := h.repo.DBPingLatency(ctx)
+		if err != nil {
+			return map[string]any{"jobType": jobType, "error": err.Error()}, "failed"
+		}
+		return map[string]any{
+			"jobType":          jobType,
+			"dbPingMsApprox":   float64(latency.Nanoseconds()) / 1e6,
+			"metricsPathHint":  "/internal/metrics",
+			"histogramScraper": "Prefer Prometheus scraping memory-api pods for CPU/GC histograms.",
+		}, "completed"
+
+	case "journal_queue_audit":
+		return map[string]any{
+			"jobType": jobType,
+			"natsUrlConfigured": strings.TrimSpace(os.Getenv("NATS_URL")) != "",
+			"note": "JetStream / consumer lag is visible on NATS monitoring (e.g. :8222/conz). Replay DLQ via databus/orchestrator policy.",
+		}, "completed"
+
+	case "disaster_recovery_coordination":
+		return map[string]any{
+			"jobType": jobType,
+			"note":    "Run Postgres base backups (operator snapshot, WAL archive, or pg_dump CronJob); store off-cluster.",
+			"verify":  "Pair with backup_verification_ping restores in lower environments.",
+		}, "completed"
+
+	case "backup_verification_ping":
+		latency, err := h.repo.DBPingLatency(ctx)
+		if err != nil {
+			return map[string]any{"jobType": jobType, "error": err.Error()}, "failed"
+		}
+		return map[string]any{
+			"jobType":                  jobType,
+			"dbReachablePingMsApprox":  float64(latency.Nanoseconds()) / 1e6,
+			"note":                     "Full restore drills are operator-owned; this only checks live DB connectivity.",
+		}, "completed"
+
 	default:
-		return map[string]any{"error": "unsupported internal jobType", "jobType": job.JobType}, "failed"
+		return map[string]any{"error": "unsupported internal jobType", "jobType": jobType}, "failed"
 	}
 }
 
