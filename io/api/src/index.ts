@@ -16,6 +16,7 @@ import {
   getTask,
   getConversationLogs,
   listConversations,
+  listUsers,
   deleteConversation,
   renameConversation,
   type MemoryLogEntry,
@@ -905,6 +906,15 @@ app.get('/api/conversations', async (c) => {
   const conversations = await listConversations(userId)
   logFromContext(c, 'debug', 'http', 'served conversation list to ui', { user_id: userId, conversation_count: conversations.length })
   return c.json({ conversations })
+})
+
+// Demo-mode user-switcher roster. Bootstrap endpoint — intentionally does NOT
+// require X-Active-User, since the UI calls this before a user is selected.
+// Real auth (MT-1) replaces the dropdown entirely.
+app.get('/api/users', async (c) => {
+  const users = await listUsers()
+  logFromContext(c, 'debug', 'http', 'served user roster to ui', { user_count: users.length })
+  return c.json({ users })
 })
 
 app.delete('/api/conversations/:conversationId', async (c) => {

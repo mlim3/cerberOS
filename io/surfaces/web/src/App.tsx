@@ -13,6 +13,8 @@ import ChatWindow from './components/ChatWindow'
 import CredentialModal from './components/CredentialModal'
 import PlanPreviewCard from './components/PlanPreviewCard'
 import SettingsButton from './components/SettingsButton'
+import UserSwitcher from './components/UserSwitcher'
+import { getActiveUserId } from './lib/active-user'
 import SettingsPanel, { defaultUISettings } from './components/SettingsPanel'
 import type { UISettings } from './components/SettingsPanel'
 import ActivityLog from './components/ActivityLog'
@@ -30,7 +32,9 @@ import { createWebSurface, type SurfaceAdapter } from './surface'
 import './App.css'
 
 const DEMO_MODE = import.meta.env.VITE_DEMO_MODE === 'true'
-const UI_USER_ID = (import.meta.env.VITE_IO_USER_ID as string | undefined) ?? '00000000-0000-0000-0000-000000000001'
+// Resolved once at module init from localStorage (set by UserSwitcher) or env.
+// The switcher reloads the page on change, so this stays stable during a session.
+const UI_USER_ID = getActiveUserId()
 
 const SETTINGS_STORAGE_KEY = 'cerberos-io-settings'
 
@@ -1033,6 +1037,7 @@ function App() {
               </div>
             )}
           </div>
+          <UserSwitcher />
           <SettingsButton
             isOpen={showSettings}
             onToggle={() => setShowSettings(!showSettings)}

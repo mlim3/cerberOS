@@ -17,10 +17,18 @@ type Repository interface {
 	Querier() *Queries
 	WithTx(ctx context.Context, fn func(q *Queries) error) error
 	UserExists(ctx context.Context, userID pgtype.UUID) (bool, error)
+	ListUsers(ctx context.Context) ([]UserRecord, error)
 	QueryChunksBySimilarity(ctx context.Context, userID pgtype.UUID, embedding pgvector.Vector, limit int32) ([]PersonalInfoChunkMatch, error)
 	ListFacts(ctx context.Context, userID pgtype.UUID, includeArchived bool) ([]FactRecord, error)
 	ArchiveFact(ctx context.Context, userID, factID pgtype.UUID, reason string) error
 	SupersedeFact(ctx context.Context, userID, factID pgtype.UUID, category pgtype.Text, factKey string, factValue []byte, confidence float64) (pgtype.UUID, error)
+}
+
+// UserRecord is the demo-mode shape returned by ListUsers — only what the
+// dropdown needs (no PII beyond email, which is what seed data already exposes).
+type UserRecord struct {
+	ID    pgtype.UUID
+	Email string
 }
 
 type PersonalInfoChunkMatch struct {
@@ -72,6 +80,27 @@ func (r *BaseRepository) UserExists(ctx context.Context, userID pgtype.UUID) (bo
 	var exists bool
 	err := r.Pool.QueryRow(ctx, q, userID).Scan(&exists)
 	return exists, err
+}
+
+func (r *BaseRepository) ListUsers(ctx context.Context) ([]UserRecord, error) {
+	const q = `SELECT id, email FROM identity_schema.users ORDER BY created_at ASC`
+	rows, err := r.Pool.Query(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("query users: %w", err)
+	}
+	defer rows.Close()
+	users := make([]UserRecord, 0)
+	for rows.Next() {
+		var u UserRecord
+		if err := rows.Scan(&u.ID, &u.Email); err != nil {
+			return nil, fmt.Errorf("scan user: %w", err)
+		}
+		users = append(users, u)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate users: %w", err)
+	}
+	return users, nil
 }
 
 func (r *BaseRepository) QueryChunksBySimilarity(ctx context.Context, userID pgtype.UUID, embedding pgvector.Vector, limit int32) ([]PersonalInfoChunkMatch, error) {

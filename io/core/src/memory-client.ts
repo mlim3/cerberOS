@@ -398,6 +398,37 @@ export async function renameConversation(conversationId: string, userId: string,
   }
 }
 
+export interface MemoryUser {
+  id: string
+  email: string
+}
+
+const DEMO_USERS: MemoryUser[] = [
+  { id: '00000000-0000-0000-0000-000000000001', email: 'dev-default@example.com' },
+  { id: '11111111-1111-1111-1111-111111111111', email: 'alice@example.com' },
+  { id: '22222222-2222-2222-2222-222222222222', email: 'bob@example.com' },
+]
+
+export async function listUsers(): Promise<MemoryUser[]> {
+  if (DEMO_MODE) {
+    return DEMO_USERS
+  }
+  try {
+    const res = await fetch(`${MEMORY_API_BASE}/api/v1/users`, {
+      headers: { 'X-Internal-API-Key': MEMORY_API_KEY },
+    })
+    if (!res.ok) {
+      memoryClientLog('error', 'list users failed', { status: res.status })
+      return []
+    }
+    const json = await res.json() as { data: { users: MemoryUser[] } }
+    return json.data?.users ?? []
+  } catch (err) {
+    memoryClientLog('error', 'list users network error', { error: String(err) })
+    return []
+  }
+}
+
 export async function listConversations(
   userId: string,
   options?: { limit?: number }
