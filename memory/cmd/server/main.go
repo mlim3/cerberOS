@@ -201,6 +201,7 @@ func main() {
 	vaultHandler := api.NewVaultHandler(vaultRepo, vaultManager, logRepo)
 	agentHandler := api.NewAgentHandler(agentLogsRepo)
 	scheduledJobsHandler := api.NewScheduledJobsHandler(scheduledJobsRepo, userDispatch)
+	usersHandler := api.NewUsersHandler(piRepo, logger)
 
 	// Set up the router using Go 1.22's enhanced mux
 	mux := http.NewServeMux()
@@ -213,6 +214,9 @@ func main() {
 
 	// Healthz endpoint
 	mux.HandleFunc("GET /api/v1/healthz", newHealthzHandler(db, logger))
+
+	// Users endpoint (demo-mode user switcher roster)
+	mux.HandleFunc("GET /api/v1/users", usersHandler.HandleListUsers)
 
 	// Chat endpoints
 	mux.HandleFunc("GET /api/v1/conversations", chatHandler.HandleListConversations)
