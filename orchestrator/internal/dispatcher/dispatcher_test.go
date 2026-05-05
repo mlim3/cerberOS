@@ -182,7 +182,7 @@ func newDispatcher(t *testing.T) (*dispatcher.Dispatcher, *gatewayMock, *policyM
 		// its own test below.
 		PlanApprovalMode: "off",
 	}
-	d := dispatcher.New(cfg, mem, nil /* vault unused */, gw, pol, mon, exec, ioclient.New("") /* disabled */)
+	d := dispatcher.New(cfg, mem, &mocks.VaultMock{}, gw, pol, mon, exec, ioclient.New("") /* disabled */)
 	return d, gw, pol, mon, exec, mem
 }
 
@@ -1008,6 +1008,30 @@ func TestHandleAgentSpawnRequest_DispatchesChildTaskAndReturnsResult(t *testing.
 	}
 	if child.RequiredSkillDomains[0] != "web" {
 		t.Fatalf("child required skills = %v", child.RequiredSkillDomains)
+	}
+
+	vaultResult, err := d.HandleVaultExecuteRequest(context.Background(), types.VaultExecuteRequest{
+		RequestID:       "vault-child-1",
+		AgentID:         "agent-child",
+		TaskID:          child.OrchestratorTaskRef,
+		PermissionToken: child.PolicyScope.TokenRef,
+		OperationType:   "vault_google_search",
+		CredentialType:  "serper_api_key",
+		OperationParams: json.RawMessage(`{"query":"OpenAI structured outputs API","num_results":3}`),
+		TimeoutSeconds:  35,
+	})
+	if err != nil {
+		t.Fatalf("HandleVaultExecuteRequest(child) error = %v", err)
+	}
+	if vaultResult.Status != types.VaultExecStatusSuccess {
+		t.Fatalf("child vault execute status = %q, want success: %+v", vaultResult.Status, vaultResult)
+	}
+	var opResult map[string]any
+	if err := json.Unmarshal(vaultResult.OperationResult, &opResult); err != nil {
+		t.Fatalf("decode child vault result: %v", err)
+	}
+	if opResult["user_id"] != parent.UserID {
+		t.Fatalf("child vault execute user_id = %v, want %q", opResult["user_id"], parent.UserID)
 	}
 
 	result := types.TaskResult{

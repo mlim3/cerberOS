@@ -926,12 +926,15 @@ func (d *Dispatcher) HandlePlanDecision(ctx context.Context, decision types.Plan
 func (d *Dispatcher) HandleVaultExecuteRequest(ctx context.Context, req types.VaultExecuteRequest) (types.VaultExecuteResult, error) {
 	// Resolve user_id from trusted task state — never from the agent's request.
 	// First try the parent task (req.TaskID == parent task_id), then fall back
-	// to the executor's subtask-orchRef → plan → user_id path (req.TaskID == subtask orchRef).
+	// to the executor's subtask-orchRef → plan → user_id path (req.TaskID == plan
+	// subtask orchRef), then spawned child-agent context (req.TaskID == child_ref).
 	var userID string
 	if tsVal, ok := d.activeTasks.Load(req.TaskID); ok {
 		userID = tsVal.(*types.TaskState).UserID
 	} else if uid, ok := d.executor.UserIDForSubtask(req.TaskID); ok {
 		userID = uid
+	} else if v, ok := d.agentSpawnContexts.Load(req.TaskID); ok {
+		userID = v.(*agentSpawnContext).UserID
 	} else {
 		return types.VaultExecuteResult{
 			RequestID:    req.RequestID,
