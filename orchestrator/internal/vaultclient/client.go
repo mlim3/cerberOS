@@ -79,9 +79,9 @@ func (c *Client) ValidateAndScope(userID string, requiredSkillDomains []string, 
 	// When requiredSkillDomains is empty the caller imposes no ceiling —
 	// return empty Domains (nil) so the dispatcher's scope check
 	// (len(scopeDomains)==0 → allow any domain) passes for all subtasks.
-	// This mirrors VaultMock behaviour and the "domain policy is permissive"
-	// intent: non-credentialed skills like web.fetch must still be usable
-	// even when the user has no vault credential registered.
+	// This mirrors the "domain policy is permissive" intent: non-credentialed
+	// skills like web.fetch must still be usable even when the user has no
+	// vault credential registered.
 	//
 	// When requiredSkillDomains is non-empty it acts as an explicit ceiling.
 	// We expand it with "general" and any domain the user has credentials for

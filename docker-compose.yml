@@ -99,6 +99,8 @@ services:
     depends_on:
       nats-1:
         condition: service_healthy
+      orchestrator:
+        condition: service_started
     environment:
       NODE_ENV: production
       DEMO_MODE: "false"
@@ -106,6 +108,8 @@ services:
       LOG_LEVEL: debug
       STT_PROVIDER: disabled
       MEMORY_API_BASE: http://memory-api:8081
+      INTERNAL_VAULT_API_KEY: ${INTERNAL_VAULT_API_KEY:?Set INTERNAL_VAULT_API_KEY in .env}
+      MEMORY_API_KEY: ${INTERNAL_VAULT_API_KEY:?Set INTERNAL_VAULT_API_KEY in .env}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
       OTEL_SERVICE_NAME: io
     restart: unless-stopped
@@ -361,6 +365,7 @@ services:
       AEGIS_NATS_URL: nats://nats:4222
       AEGIS_AGENT_PROCESS_PATH: /app/agent-process
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://api.anthropic.com}
       # Concurrency cap for inbound task dispatch. Without parallel workers,
       # JetStream delivers task.inbound serially and each HandleTaskSpec
       # (Firecracker provision) blocks subsequent tasks — two back-to-back
@@ -393,8 +398,9 @@ services:
 # NETWORKS
 # =============================================================================
 networks:
+  # No explicit `name:` — Compose uses `{project}_{network}` so we never clash with a
+  # manually created or legacy Docker network also called `cerberos`.
   cerberos:
-    name: cerberos
 
 # =============================================================================
 # VOLUMES

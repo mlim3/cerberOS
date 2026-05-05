@@ -65,6 +65,7 @@ import (
 	"strconv"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/cerberOS/agents-component/internal/logfields"
 	"github.com/cerberOS/agents-component/internal/skills"
 	"github.com/cerberOS/agents-component/internal/telemetry"
 	"github.com/cerberOS/agents-component/pkg/types"
@@ -249,7 +250,12 @@ func runOneTask(rootCtx context.Context, rootLog *slog.Logger, spawnCtx *SpawnCo
 		return nil, err
 	}
 
-	log.Info("agent-process task started", "skill_domain", spawnCtx.SkillDomain)
+	log.Info("agent-process started for task; loading skills, vault, steerer, spawner",
+		"skill_domain", spawnCtx.SkillDomain,
+		"prior_turn_count", len(priorTurns),
+		"is_followup", len(priorTurns) > 0,
+		"recovered_from_crash", spawnCtx.RecoveredContext != "",
+		"content_preview", logfields.PreviewHeadTail(spawnCtx.Instructions, 15, 10))
 
 	taskCtx, cancel := context.WithCancel(rootCtx)
 	defer cancel()
@@ -298,13 +304,16 @@ func runOneTask(rootCtx context.Context, rootLog *slog.Logger, spawnCtx *SpawnCo
 		Result:  result,
 	}
 	if err := encoder.Encode(out); err != nil {
-		log.Error("encode output failed", "error", err)
+		log.Error("could not write task output to stdout protocol; aborting agent process so factory respawns",
+			"error", err)
 		// Encode failure means stdout is broken — can't meaningfully continue
 		// the loop because the host can't observe our outputs.
 		os.Exit(1)
 	}
 
-	log.Info("agent-process task completed")
+	log.Info("agent-process finished task (success); returning final result to factory",
+		"result_preview", logfields.PreviewHeadTail(result, 15, 10),
+		"final_turn_count", len(finalHistory))
 	return finalHistory, nil
 }
 

@@ -20,6 +20,7 @@ import (
 	"github.com/cerberOS/agents-component/internal/comms"
 	"github.com/cerberOS/agents-component/internal/credentials"
 	"github.com/cerberOS/agents-component/internal/lifecycle"
+	"github.com/cerberOS/agents-component/internal/logfields"
 	"github.com/cerberOS/agents-component/internal/memory"
 	"github.com/cerberOS/agents-component/internal/registry"
 	"github.com/cerberOS/agents-component/internal/skills"
@@ -222,7 +223,7 @@ func (f *Factory) LoadSynthesizedSkills(ctx context.Context) error {
 	var records []types.MemoryWrite
 	var err error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		records, err = f.memory.ReadAllByType("skill_cache")
+		records, err = f.memory.ReadAllByType("skill_cache", "")
 		if err != nil {
 			return fmt.Errorf("factory: load synthesized skills: read: %w", err)
 		}
@@ -443,11 +444,12 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 	// On VAULT_UNREACHABLE the broker has already exhausted its retry budget.
 	token, err := f.credentials.PreAuthorize(agentID, spec.TaskID, spec.TraceID, spec.RequiredSkills)
 	if err != nil {
-		f.log.Warn("credential.event",
+		f.log.Warn("vault denied pre-authorization for new agent; cannot dispatch task",
 			"operation_type", "authorize",
 			"agent_id", agentID,
 			"outcome", "failed",
 			"trace_id", spec.TraceID,
+			"error", err,
 		)
 		if credDenied(err) {
 			f.emit(types.AuditEvent{
@@ -463,7 +465,7 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 			"agent credential pre-authorization failed", spec.TraceID, "")
 		return fmt.Errorf("factory: credentials.PreAuthorize: %w", err)
 	}
-	f.log.Info("credential.event",
+	f.log.Info("vault granted pre-authorization for new agent; dispatching task",
 		"operation_type", "authorize",
 		"agent_id", agentID,
 		"outcome", "granted",
@@ -554,12 +556,13 @@ func (f *Factory) assignTask(agentID string, spec *types.TaskSpec) error {
 	// token was revoked in CompleteTask and credentials must stay task-scoped.
 	token, err := f.credentials.PreAuthorize(agentID, spec.TaskID, spec.TraceID, spec.RequiredSkills)
 	if err != nil {
-		f.log.Warn("credential.event",
+		f.log.Warn("vault denied pre-authorization for warm-reused agent; cannot reassign task",
 			"operation_type", "authorize",
 			"agent_id", agentID,
 			"outcome", "failed",
 			"trace_id", spec.TraceID,
 			"reuse_path", true,
+			"error", err,
 		)
 		if credDenied(err) {
 			f.emit(types.AuditEvent{
@@ -574,7 +577,7 @@ func (f *Factory) assignTask(agentID string, spec *types.TaskSpec) error {
 			"agent credential re-authorization failed on reuse", spec.TraceID, "reuse")
 		return fmt.Errorf("factory: assignTask: credentials.PreAuthorize: %w", err)
 	}
-	f.log.Info("credential.event",
+	f.log.Info("vault granted pre-authorization for warm-reused agent; reassigning task",
 		"operation_type", "authorize",
 		"agent_id", agentID,
 		"outcome", "granted",
@@ -720,6 +723,26 @@ func (f *Factory) processCompletionHandler(agentID string) func(string, []byte, 
 
 // CompleteTask collects results, writes to Memory, publishes task_result, and
 // tears down the agent.
+// stringifyResult coerces an interface{} output into a string suitable for
+// PreviewHeadTail. Strings pass through unchanged; everything else is
+// json-marshalled so the preview still has stable text to slice. Returns ""
+// when output is nil or marshal fails.
+func stringifyResult(output interface{}) string {
+	if output == nil {
+		return ""
+	}
+	if s, ok := output.(string); ok {
+		return s
+	}
+	if b, ok := output.([]byte); ok {
+		return string(b)
+	}
+	if blob, err := json.Marshal(output); err == nil {
+		return string(blob)
+	}
+	return ""
+}
+
 func (f *Factory) CompleteTask(agentID, sessionID, traceID string, output interface{}, taskErr error) error {
 	agent, err := f.registry.Get(agentID)
 	if err != nil {
@@ -728,12 +751,13 @@ func (f *Factory) CompleteTask(agentID, sessionID, traceID string, output interf
 
 	// Publish tagged output via Memory Interface. The Orchestrator routes it to the Memory Component.
 	mw := &types.MemoryWrite{
-		AgentID:   agentID,
-		SessionID: sessionID,
-		DataType:  "task_result",
-		TTLHint:   86400,
-		Payload:   output,
-		Tags:      map[string]string{"context": "result", "task_id": agent.AssignedTask},
+		AgentID:     agentID,
+		SessionID:   sessionID,
+		DataType:    "task_result",
+		TTLHint:     86400,
+		Payload:     output,
+		Tags:        map[string]string{"context": "result", "task_id": agent.AssignedTask},
+		WireTraceID: traceID,
 	}
 	if err := f.memory.Write(mw); err != nil {
 		return fmt.Errorf("factory: memory.Write: %w", err)
@@ -751,7 +775,7 @@ func (f *Factory) CompleteTask(agentID, sessionID, traceID string, output interf
 	if taskErr != nil {
 		result.Error = taskErr.Error()
 	}
-	f.log.Info("msg.outbound",
+	publishAttrs := []any{
 		"topic", comms.SubjectTaskResult,
 		"message_type", comms.MsgTypeTaskResult,
 		"agent_id", agentID,
@@ -759,7 +783,15 @@ func (f *Factory) CompleteTask(agentID, sessionID, traceID string, output interf
 		"correlation_id", agent.AssignedTask,
 		"trace_id", traceID,
 		"success", taskErr == nil,
-	)
+	}
+	if taskErr == nil {
+		publishAttrs = append(publishAttrs,
+			"result_preview", logfields.PreviewHeadTail(stringifyResult(output), 15, 10))
+	} else {
+		publishAttrs = append(publishAttrs,
+			"error_message_preview", logfields.PreviewHeadTail(taskErr.Error(), 15, 10))
+	}
+	f.log.Info("publishing task_result envelope to orchestrator on nats", publishAttrs...)
 	f.emit(types.AuditEvent{
 		EventType: types.AuditEventTaskCompleted,
 		AgentID:   agentID,
@@ -768,7 +800,7 @@ func (f *Factory) CompleteTask(agentID, sessionID, traceID string, output interf
 	})
 	if err := f.comms.Publish(
 		comms.SubjectTaskResult,
-		comms.PublishOptions{MessageType: comms.MsgTypeTaskResult, CorrelationID: agent.AssignedTask},
+		comms.PublishOptions{MessageType: comms.MsgTypeTaskResult, CorrelationID: agent.AssignedTask, TraceID: traceID},
 		result,
 	); err != nil {
 		return fmt.Errorf("factory: comms.Publish task.result: %w", err)
@@ -793,15 +825,16 @@ func (f *Factory) CompleteTask(agentID, sessionID, traceID string, output interf
 	// whether or not we keep the underlying process alive for reuse, the token
 	// itself must not outlive its task (CLAUDE.md §5; EDD §6.2).
 	if err := f.credentials.Revoke(agentID); err != nil {
-		f.log.Warn("credential.event",
+		f.log.Warn("vault failed to revoke agent permission token after task completion; token may linger until ttl",
 			"operation_type", "revoke",
 			"agent_id", agentID,
 			"outcome", "failed",
 			"trace_id", traceID,
+			"error", err,
 		)
 		return fmt.Errorf("factory: credentials.Revoke: %w", err)
 	}
-	f.log.Info("credential.event",
+	f.log.Info("vault revoked agent permission token after task completion",
 		"operation_type", "revoke",
 		"agent_id", agentID,
 		"outcome", "ok",
@@ -880,11 +913,12 @@ func (f *Factory) HandleCrash(agentID string) error {
 		CrashedAt:              time.Now().UTC(),
 	}
 	mw := &types.MemoryWrite{
-		AgentID:   agentID,
-		SessionID: agent.AssignedTask, // task ID serves as session scope for crash snapshots
-		DataType:  "snapshot",
-		TTLHint:   86400,
-		Payload:   snapshot,
+		AgentID:     agentID,
+		SessionID:   agent.AssignedTask, // task ID serves as session scope for crash snapshots
+		DataType:    "snapshot",
+		TTLHint:     86400,
+		Payload:     snapshot,
+		WireTraceID: agent.TraceID,
 		Tags: map[string]string{
 			"context": "crash_snapshot",
 			"task_id": agent.AssignedTask,
@@ -929,13 +963,14 @@ func (f *Factory) HandleCrash(agentID string) error {
 		// Exceeded retry budget — permanently terminate.
 		// Best-effort credential revocation; the process is already dead.
 		if err := f.credentials.Revoke(agentID); err != nil {
-			f.log.Warn("credential.event",
+			f.log.Warn("vault failed to revoke permission token for crashed agent; token may linger until ttl",
 				"operation_type", "revoke",
 				"agent_id", agentID,
 				"outcome", "failed",
+				"error", err,
 			)
 		} else {
-			f.log.Info("credential.event",
+			f.log.Info("vault revoked permission token for crashed agent",
 				"operation_type", "revoke",
 				"agent_id", agentID,
 				"outcome", "ok",
@@ -962,10 +997,11 @@ func (f *Factory) HandleCrash(agentID string) error {
 	// Step 6: Credential re-authorization — fresh permission token for the new VM.
 	token, err := f.credentials.PreAuthorize(agentID, agent.AssignedTask, agent.TraceID, agent.SkillDomains)
 	if err != nil {
-		f.log.Warn("credential.event",
+		f.log.Warn("vault denied pre-authorization for respawning agent after crash; cannot recover task",
 			"operation_type", "authorize",
 			"agent_id", agentID,
 			"outcome", "failed",
+			"error", err,
 		)
 		if credDenied(err) {
 			f.emit(types.AuditEvent{
@@ -981,7 +1017,7 @@ func (f *Factory) HandleCrash(agentID string) error {
 			"agent credential re-authorization failed during crash recovery", "", "")
 		return fmt.Errorf("factory: HandleCrash: credentials.PreAuthorize: %w", err)
 	}
-	f.log.Info("credential.event",
+	f.log.Info("vault granted pre-authorization for respawning agent after crash; recovering task",
 		"operation_type", "authorize",
 		"agent_id", agentID,
 		"outcome", "granted",
@@ -1131,7 +1167,7 @@ func (f *Factory) publishStatus(agentID, taskID, state, traceID string) error {
 	}
 	if err := f.comms.Publish(
 		comms.SubjectAgentStatus,
-		comms.PublishOptions{MessageType: comms.MsgTypeAgentStatus, CorrelationID: taskID},
+		comms.PublishOptions{MessageType: comms.MsgTypeAgentStatus, CorrelationID: taskID, TraceID: traceID},
 		update,
 	); err != nil {
 		return fmt.Errorf("factory: comms.Publish agent.status: %w", err)
@@ -1145,7 +1181,7 @@ func (f *Factory) publishStatus(agentID, taskID, state, traceID string) error {
 // phase is the provisioning phase where the failure occurred (e.g. "skill_resolution");
 // pass "" when the phase is not applicable.
 func (f *Factory) publishFailed(agentID, taskID, errorCode, errorMessage, traceID, phase string) error {
-	f.log.Warn("msg.outbound",
+	f.log.Warn("publishing task_failed envelope to orchestrator on nats",
 		"topic", comms.SubjectTaskFailed,
 		"message_type", comms.MsgTypeTaskFailed,
 		"agent_id", agentID,
@@ -1153,6 +1189,8 @@ func (f *Factory) publishFailed(agentID, taskID, errorCode, errorMessage, traceI
 		"error_code", errorCode,
 		"correlation_id", taskID,
 		"trace_id", traceID,
+		"phase", phase,
+		"error_message_preview", logfields.PreviewHeadTail(errorMessage, 15, 10),
 	)
 	f.emit(types.AuditEvent{
 		EventType: types.AuditEventTaskFailed,
@@ -1182,7 +1220,7 @@ func (f *Factory) publishFailed(agentID, taskID, errorCode, errorMessage, traceI
 	}
 	if err := f.comms.Publish(
 		comms.SubjectTaskFailed,
-		comms.PublishOptions{MessageType: comms.MsgTypeTaskFailed, CorrelationID: taskID},
+		comms.PublishOptions{MessageType: comms.MsgTypeTaskFailed, CorrelationID: taskID, TraceID: traceID},
 		failed,
 	); err != nil {
 		return fmt.Errorf("factory: comms.Publish task.failed: %w", err)
@@ -1201,10 +1239,11 @@ func credErrorCode(err error) string {
 // publishAccepted sends a TaskAccepted to the Orchestrator. Must be called before
 // any provisioning work so the Orchestrator knows the task has been received.
 func (f *Factory) publishAccepted(agentID, agentType string, spec *types.TaskSpec) error {
-	f.log.Info("msg.outbound",
+	f.log.Info("publishing task_accepted envelope to orchestrator on nats; agent will start work",
 		"topic", comms.SubjectTaskAccepted,
 		"message_type", comms.MsgTypeTaskAccepted,
 		"agent_id", agentID,
+		"agent_type", agentType,
 		"task_id", spec.TaskID,
 		"correlation_id", spec.TaskID,
 		"trace_id", spec.TraceID,
@@ -1226,7 +1265,7 @@ func (f *Factory) publishAccepted(agentID, agentType string, spec *types.TaskSpe
 	}
 	if err := f.comms.Publish(
 		comms.SubjectTaskAccepted,
-		comms.PublishOptions{MessageType: comms.MsgTypeTaskAccepted, CorrelationID: spec.TaskID},
+		comms.PublishOptions{MessageType: comms.MsgTypeTaskAccepted, CorrelationID: spec.TaskID, TraceID: spec.TraceID},
 		accepted,
 	); err != nil {
 		return fmt.Errorf("factory: comms.Publish task.accepted: %w", err)
@@ -1331,7 +1370,7 @@ func (f *Factory) fetchAgentMemory(domain, traceID string) string {
 	if domain == "" {
 		return ""
 	}
-	records, err := f.memory.Read("domain:"+domain, "agent_memory")
+	records, err := f.memory.Read("domain:"+domain, "agent_memory", traceID)
 	if err != nil || len(records) == 0 {
 		if err != nil {
 			f.log.Warn("factory: fetchAgentMemory failed", "domain", domain, "error", err, "trace_id", traceID)
@@ -1351,7 +1390,7 @@ func (f *Factory) fetchUserProfile(userContextID, traceID string) string {
 	if userContextID == "" {
 		return ""
 	}
-	records, err := f.memory.Read("user:"+userContextID, "user_profile")
+	records, err := f.memory.Read("user:"+userContextID, "user_profile", traceID)
 	if err != nil || len(records) == 0 {
 		if err != nil {
 			f.log.Warn("factory: fetchUserProfile failed", "user_context_id", userContextID, "error", err, "trace_id", traceID)
@@ -1375,7 +1414,7 @@ func (f *Factory) fetchPriorTurns(conversationID, traceID string) ([]anthropic.M
 	if conversationID == "" {
 		return nil, 0
 	}
-	records, err := f.memory.Read("conversation:"+conversationID, "conversation_snapshot")
+	records, err := f.memory.Read("conversation:"+conversationID, "conversation_snapshot", traceID)
 	if err != nil || len(records) == 0 {
 		if err != nil {
 			f.log.Warn("factory: fetchPriorTurns failed", "conversation_id", conversationID, "error", err, "trace_id", traceID)
@@ -1656,11 +1695,12 @@ func (f *Factory) wakeAgent(agentID string, spec *types.TaskSpec) error {
 	// suspension. Required before the new VM can be spawned (EDD §6.2, CLAUDE.md §5).
 	token, err := f.credentials.PreAuthorize(agentID, spec.TaskID, spec.TraceID, agent.SkillDomains)
 	if err != nil {
-		f.log.Warn("credential.event",
+		f.log.Warn("vault denied pre-authorization for waking idle agent; cannot dispatch task",
 			"operation_type", "authorize",
 			"agent_id", agentID,
 			"outcome", "failed",
 			"trace_id", spec.TraceID,
+			"error", err,
 		)
 		if credDenied(err) {
 			f.emit(types.AuditEvent{
@@ -1676,7 +1716,7 @@ func (f *Factory) wakeAgent(agentID string, spec *types.TaskSpec) error {
 			"agent credential re-authorization failed on wake from suspended state", spec.TraceID, "wake")
 		return fmt.Errorf("factory: wakeAgent: credentials.PreAuthorize: %w", err)
 	}
-	f.log.Info("credential.event",
+	f.log.Info("vault granted pre-authorization for waking idle agent; dispatching task",
 		"operation_type", "authorize",
 		"agent_id", agentID,
 		"outcome", "granted",

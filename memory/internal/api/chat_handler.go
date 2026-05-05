@@ -3,8 +3,10 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -29,13 +31,13 @@ type CreateConversationRequest struct {
 }
 
 type ConversationResponse struct {
-	ConversationID     uuid.UUID `json:"conversationId"`
-	UserID             uuid.UUID `json:"userId"`
-	Title              string    `json:"title"`
-	CreatedAt          time.Time `json:"createdAt"`
-	UpdatedAt          time.Time `json:"updatedAt"`
-	LastMessagePreview string    `json:"lastMessagePreview,omitempty"`
-	MessageCount       int32     `json:"messageCount"`
+	ConversationID     uuid.UUID  `json:"conversationId"`
+	UserID             uuid.UUID  `json:"userId"`
+	Title              string     `json:"title"`
+	CreatedAt          time.Time  `json:"createdAt"`
+	UpdatedAt          time.Time  `json:"updatedAt"`
+	LastMessagePreview string     `json:"lastMessagePreview,omitempty"`
+	MessageCount       int32      `json:"messageCount"`
 	LatestTaskID       *uuid.UUID `json:"latestTaskId,omitempty"`
 	LatestTaskStatus   *string    `json:"latestTaskStatus,omitempty"`
 }
@@ -618,6 +620,261 @@ func taskResponse(rec storage.TaskRecord) TaskResponse {
 		UpdatedAt:           rec.UpdatedAt.Time,
 		CompletedAt:         completedAt,
 	}
+}
+
+// SessionHistoryTurn is a single turn returned by the session-history
+// endpoint. Field names are JSON-camelCase to match the rest of the chat API
+// so Orchestrator and Agents can reuse their existing deserialization.
+type SessionHistoryTurn struct {
+	MessageID  uuid.UUID `json:"messageId"`
+	Role       string    `json:"role"`
+	Content    string    `json:"content"`
+	TokenCount *int32    `json:"tokenCount,omitempty"`
+	CreatedAt  time.Time `json:"createdAt"`
+}
+
+// SessionHistoryResponse is the body of GET /api/v1/chat/{conversationId}/history.
+type SessionHistoryResponse struct {
+	ConversationID uuid.UUID            `json:"conversationId"`
+	Turns          []SessionHistoryTurn `json:"turns"`
+	TotalTokens    int                  `json:"totalTokens"`
+	Truncated      bool                 `json:"truncated"`
+	TokenBudget    int                  `json:"tokenBudget"`
+	MaxTurns       int                  `json:"maxTurns"`
+}
+
+// Defaults for session-history retrieval. These match the budget the Agents
+// ReAct-loop system-prompt builder documents; the Orchestrator can always
+// override them per-request.
+const (
+	defaultSessionHistoryMaxTurns    = 40
+	defaultSessionHistoryTokenBudget = 4000
+	// sessionHistoryMaxTurnsCap is the absolute ceiling for max_turns to
+	// guard the DB from unbounded requests regardless of caller input.
+	sessionHistoryMaxTurnsCap = 500
+)
+
+// HandleGetSessionHistory returns the most-recent conversation turns in
+// chronological order, trimmed to a token budget so the caller can inject
+// the transcript into an LLM prompt without blowing the model's context
+// window.
+//
+// @Summary Get conversation session history
+// @Description Returns recent turns in chronological order, trimmed to a token budget. Intended for Orchestrator/Agents to inject session context into LLM prompts.
+// @Tags chat
+// @Produce json
+// @Param conversationId path string true "Conversation ID"
+// @Param userId query string true "User ID (ownership check)"
+// @Param max_turns query int false "Hard cap on the number of recent turns to consider (default 40, max 500)"
+// @Param token_budget query int false "Drop oldest turns until sum(tokenCount) <= budget. 0 disables trimming. Default 4000."
+// @Param include_roles query string false "Comma-separated roles to include. Default 'user,assistant'."
+// @Success 200 {object} SessionHistoryResponse "OK"
+// @Failure 400 {object} map[string]interface{} "Bad Request"
+// @Failure 404 {object} map[string]interface{} "Not Found"
+// @Failure 500 {object} map[string]interface{} "Internal Server Error"
+// @Router /api/v1/chat/{conversationId}/history [get]
+func (h *ChatHandler) HandleGetSessionHistory(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	conversationID, err := uuid.Parse(conversationPathValue(r))
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid_argument", "invalid conversationId format", nil)
+		return
+	}
+	userID, ok := parseUserIDQuery(r)
+	if !ok {
+		writeJSONError(w, http.StatusBadRequest, "invalid_argument", "userId query parameter is required", nil)
+		return
+	}
+
+	maxTurns, err := parseNonNegativeIntQuery(r, "max_turns", defaultSessionHistoryMaxTurns)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid_argument", err.Error(), nil)
+		return
+	}
+	if maxTurns <= 0 || maxTurns > sessionHistoryMaxTurnsCap {
+		if maxTurns <= 0 {
+			maxTurns = defaultSessionHistoryMaxTurns
+		} else {
+			maxTurns = sessionHistoryMaxTurnsCap
+		}
+	}
+	tokenBudget, err := parseNonNegativeIntQuery(r, "token_budget", defaultSessionHistoryTokenBudget)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid_argument", err.Error(), nil)
+		return
+	}
+
+	roles, err := parseIncludeRoles(r.URL.Query().Get("include_roles"))
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid_argument", err.Error(), nil)
+		return
+	}
+
+	userExists, err := h.repo.UserExists(ctx, pgtype.UUID{Bytes: userID, Valid: true})
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "internal", "failed to validate user", err.Error())
+		return
+	}
+	if !userExists {
+		writeJSONError(w, http.StatusNotFound, "not_found", "user not found", nil)
+		return
+	}
+
+	if err := h.repo.ValidateConversationOwnership(
+		ctx,
+		pgtype.UUID{Bytes: conversationID, Valid: true},
+		pgtype.UUID{Bytes: userID, Valid: true},
+	); err != nil {
+		if errors.Is(err, storage.ErrConversationOwnership) || errors.Is(err, storage.ErrConversationNotFound) {
+			writeJSONError(w, http.StatusNotFound, "not_found", "conversation not found", nil)
+			return
+		}
+		writeJSONError(w, http.StatusInternalServerError, "internal", "failed to validate conversation ownership", err.Error())
+		return
+	}
+
+	// Pull one extra row beyond max_turns so we can detect truncation even
+	// when the token budget leaves the result exactly at max_turns.
+	fetchLimit := int32(maxTurns + 1)
+	rawMessages, err := h.repo.ListRecentMessagesByConversation(
+		ctx,
+		pgtype.UUID{Bytes: conversationID, Valid: true},
+		roles,
+		fetchLimit,
+	)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "internal", "failed to list recent messages", err.Error())
+		return
+	}
+
+	truncated := false
+	if len(rawMessages) > maxTurns {
+		rawMessages = rawMessages[:maxTurns]
+		truncated = true
+	}
+
+	// rawMessages is newest-first; iterate newest → oldest, keep appending
+	// until the budget would be exceeded, then drop the rest.
+	kept := make([]storage.ChatSchemaMessage, 0, len(rawMessages))
+	totalTokens := 0
+	for _, m := range rawMessages {
+		t := estimateMessageTokens(m)
+		if tokenBudget > 0 && totalTokens+t > tokenBudget {
+			truncated = true
+			break
+		}
+		kept = append(kept, m)
+		totalTokens += t
+	}
+
+	// Reverse to chronological (oldest-first) order for the response.
+	turns := make([]SessionHistoryTurn, len(kept))
+	for i, m := range kept {
+		turns[len(kept)-1-i] = sessionHistoryTurn(m)
+	}
+
+	resp := SessionHistoryResponse{
+		ConversationID: conversationID,
+		Turns:          turns,
+		TotalTokens:    totalTokens,
+		Truncated:      truncated,
+		TokenBudget:    tokenBudget,
+		MaxTurns:       maxTurns,
+	}
+
+	slog.Default().Info("served session history snapshot to agent factory; ready to inject as prior_turns",
+		"module", "chat",
+		"conversation_id", conversationID.String(),
+		"user_id", userID.String(),
+		"turn_count", len(turns),
+		"total_tokens", totalTokens,
+		"token_budget", tokenBudget,
+		"max_turns", maxTurns,
+		"truncated", truncated,
+	)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(SuccessResponse(resp))
+}
+
+func sessionHistoryTurn(m storage.ChatSchemaMessage) SessionHistoryTurn {
+	var tokenCount *int32
+	if m.TokenCount.Valid {
+		tokenCount = &m.TokenCount.Int32
+	}
+	return SessionHistoryTurn{
+		MessageID:  uuid.UUID(m.ID.Bytes),
+		Role:       m.Role,
+		Content:    m.Content,
+		TokenCount: tokenCount,
+		CreatedAt:  m.CreatedAt.Time,
+	}
+}
+
+// estimateMessageTokens returns the persisted token_count when available, or
+// a conservative ~4-chars-per-token estimate otherwise. Budget callers should
+// treat this as an upper bound rather than an exact value.
+func estimateMessageTokens(m storage.ChatSchemaMessage) int {
+	if m.TokenCount.Valid && m.TokenCount.Int32 > 0 {
+		return int(m.TokenCount.Int32)
+	}
+	if m.Content == "" {
+		return 0
+	}
+	estimated := (len(m.Content) + 3) / 4
+	if estimated < 1 {
+		estimated = 1
+	}
+	return estimated
+}
+
+func parseNonNegativeIntQuery(r *http.Request, key string, def int) (int, error) {
+	raw := strings.TrimSpace(r.URL.Query().Get(key))
+	if raw == "" {
+		return def, nil
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, errors.New(key + " must be a non-negative integer")
+	}
+	if v < 0 {
+		return 0, errors.New(key + " must be a non-negative integer")
+	}
+	return v, nil
+}
+
+var validSessionRoles = map[string]struct{}{
+	"user":      {},
+	"assistant": {},
+	"system":    {},
+}
+
+func parseIncludeRoles(raw string) ([]string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return []string{"user", "assistant"}, nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, p := range parts {
+		role := strings.ToLower(strings.TrimSpace(p))
+		if role == "" {
+			continue
+		}
+		if _, ok := validSessionRoles[role]; !ok {
+			return nil, errors.New("include_roles must only contain user,assistant,system")
+		}
+		if _, dup := seen[role]; dup {
+			continue
+		}
+		seen[role] = struct{}{}
+		out = append(out, role)
+	}
+	if len(out) == 0 {
+		return nil, errors.New("include_roles must contain at least one role")
+	}
+	return out, nil
 }
 
 func parseLimit(raw string, def int32) int32 {

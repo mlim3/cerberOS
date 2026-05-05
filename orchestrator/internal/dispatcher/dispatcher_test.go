@@ -157,6 +157,10 @@ func (e *executorMock) UserIDForSubtask(_ string) (string, bool) {
 	return "", false
 }
 
+func (e *executorMock) TaskStateForSubtask(_ string) (*types.TaskState, bool) {
+	return nil, false
+}
+
 // ── Test Helpers ─────────────────────────────────────────────────────────────
 
 // newDispatcher builds a fully wired Dispatcher with fresh mocks.

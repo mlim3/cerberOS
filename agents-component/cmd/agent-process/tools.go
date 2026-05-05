@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/cerberOS/agents-component/internal/logfields"
 	"github.com/cerberOS/agents-component/internal/skillsconfig"
 	"github.com/cerberOS/agents-component/pkg/types"
 )
@@ -384,10 +385,10 @@ func executeVaultWebFetch(ctx context.Context, ve *VaultExecutor, raw json.RawMe
 	// onUpdate logs progress events to monitoring (stderr via slog). Progress events
 	// must not enter LLM context — they are forwarded here for observability only.
 	onUpdate := func(p types.VaultOperationProgress) {
-		ve.log.Info("vault execute: progress",
+		ve.log.Info("vault forwarded a progress update for in-flight credentialed operation",
 			"request_id", p.RequestID,
 			"progress_type", p.ProgressType,
-			"message", p.Message,
+			"message_preview", logfields.PreviewWords(p.Message, 20, 140),
 			"elapsed_ms", p.ElapsedMS,
 		)
 	}
@@ -446,7 +447,9 @@ func executeVaultGoogleSearch(ctx context.Context, ve *VaultExecutor, raw json.R
 		return ToolResult{Content: fmt.Sprintf("failed to encode params: %v", err), IsError: true}
 	}
 	onUpdate := func(p types.VaultOperationProgress) {
-		ve.log.Info("vault execute: progress", "request_id", p.RequestID, "message", p.Message)
+		ve.log.Info("vault google_search progress update from vault engine",
+			"request_id", p.RequestID,
+			"message_preview", logfields.PreviewWords(p.Message, 20, 140))
 	}
 	return ve.Execute(ctx, "vault_google_search", "serper_api_key", opParams, 35, onUpdate)
 }
@@ -506,7 +509,9 @@ func executeVaultGitHubRequest(ctx context.Context, ve *VaultExecutor, raw json.
 		return ToolResult{Content: fmt.Sprintf("failed to encode params: %v", err), IsError: true}
 	}
 	onUpdate := func(p types.VaultOperationProgress) {
-		ve.log.Info("vault execute: progress", "request_id", p.RequestID, "message", p.Message)
+		ve.log.Info("vault github_request progress update from vault engine",
+			"request_id", p.RequestID,
+			"message_preview", logfields.PreviewWords(p.Message, 20, 140))
 	}
 	return ve.Execute(ctx, "vault_github_request", "github_token", opParams, 35, onUpdate)
 }

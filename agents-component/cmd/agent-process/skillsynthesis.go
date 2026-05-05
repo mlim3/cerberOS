@@ -173,7 +173,7 @@ Rules:
 - recipe must reference every parameter defined in spec.parameters using {{param_name}} syntax.
 - Generalise the procedure: replace task-specific values with named parameters.
 - If the task used no novel procedure worth reusing (e.g. a trivial single-step lookup),
-  output exactly: {"name":"","label":"","description":"","recipe":""}`, domain)
+  output exactly: {"name":"","label":"","description":""}`, domain)
 }
 
 // attemptSkillSynthesis is the top-level driver called at task completion.
@@ -221,5 +221,7 @@ func attemptSkillSynthesis(
 		"skill_name", node.Name, "domain", spawnCtx.SkillDomain)
 
 	// Notify the orchestrator (and via it, the UI) that a new skill was created.
-	ve.EmitSkillSynthesized(spawnCtx.SkillDomain, node.Name)
+	if ve != nil {
+		ve.EmitSkillSynthesized(spawnCtx.SkillDomain, node.Name)
+	}
 }

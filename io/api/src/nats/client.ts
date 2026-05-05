@@ -1,8 +1,8 @@
 /**
  * NATS client for cerberOS IO API.
  *
- * Connects to NATS JetStream and:
- *   - Publishes UserTask envelopes on aegis.orchestrator.task.inbound
+ * Connects to NATS (core + optional JetStream stream setup) and:
+ *   - Publishes UserTask envelopes on aegis.orchestrator.tasks.inbound (core publish)
  *   - Subscribes to orchestrator response channels for task results,
  *     agent status, credential requests, and errors
  *
@@ -10,7 +10,7 @@
  * (agents-component/internal/comms/comms.go outboundEnvelope).
  */
 
-import { connect, type NatsConnection, type JetStreamClient, type Subscription } from 'nats'
+import { connect, type NatsConnection, type Subscription } from 'nats'
 import { ioLog } from '../logger'
 
 // ── NATS subjects (aligned with agents-component/internal/comms/subjects.go) ──
@@ -131,7 +131,6 @@ export function createNatsClient(config: NatsConfig): IONatsClient | null {
   }
 
   let nc: NatsConnection | null = null
-  let js: JetStreamClient | null = null
   const subscriptions: Subscription[] = []
   let isConnected = false
 
@@ -178,7 +177,6 @@ export function createNatsClient(config: NatsConfig): IONatsClient | null {
         maxReconnectAttempts: -1,
         reconnectTimeWait: 500,
       })
-      js = nc.jetstream()
 
       // Ensure the AEGIS_ORCHESTRATOR stream exists (idempotent — safe if the
       // orchestrator already created it). This mirrors agents-component
@@ -228,7 +226,7 @@ export function createNatsClient(config: NatsConfig): IONatsClient | null {
     },
 
     async publishUserTask(task: UserTaskPayload) {
-      if (!js) throw new Error('NATS JetStream not connected')
+      if (!nc) throw new Error('NATS not connected')
       const natsPayload = {
         task_id: task.task_id,
         user_id: task.user_id,
@@ -252,7 +250,10 @@ export function createNatsClient(config: NatsConfig): IONatsClient | null {
       }
       const envelope = buildEnvelope('user_task', task.task_id, natsPayload, task.trace_id)
       const data = new TextEncoder().encode(JSON.stringify(envelope))
-      await js.publish(SUBJECT_TASK_INBOUND, data)
+      // Core publish — orchestrator subscribes with nc.Subscribe (not JetStream). JetStream-only
+      // js.publish() can miss core subscribers in some broker configurations.
+      nc.publish(SUBJECT_TASK_INBOUND, data)
+      await nc.flush()
     },
 
     async publishPlanDecision(decision: PlanDecisionPayload) {

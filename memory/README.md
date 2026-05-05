@@ -319,6 +319,36 @@ Response data:
 
 - `messages`: array of chat messages
 
+#### `GET /api/v1/chat/{conversationId}/history?userId=<uuid>&max_turns=<n>&token_budget=<n>&include_roles=<csv>`
+
+Purpose:
+
+- return recent conversation turns in chronological order, trimmed to a token budget, so the Orchestrator / Agents can fold session context into an LLM prompt without blowing the model's context window
+- same storage as `/messages` (reads `chat_schema.messages`); no new data type
+
+Query parameters:
+
+- `userId` — required; ownership check (same rule as `/messages`)
+- `max_turns` — optional, default `40`, hard cap `500`
+- `token_budget` — optional, default `4000`; drops oldest turns until `sum(tokenCount) <= budget`. `0` disables the token trim.
+- `include_roles` — optional, default `user,assistant`. Accepts a CSV of `user`, `assistant`, `system`.
+
+Token-count fallback:
+
+- when a persisted message has no `token_count`, the budget uses a conservative `ceil(len(content) / 4)` estimate
+
+Response data:
+
+- `conversationId`
+- `turns`: array of `{ messageId, role, content, tokenCount?, createdAt }` in chronological (oldest → newest) order
+- `totalTokens`: sum of (estimated) token counts actually returned
+- `truncated`: `true` when any older turns were dropped by `max_turns` or `token_budget`
+- `tokenBudget`, `maxTurns`: the effective values that were applied
+
+Observability:
+
+- every served request emits a structured log entry `session_history.served` with `conversation_id`, `user_id`, `turn_count`, `total_tokens`, `token_budget`, `max_turns`, `truncated` — satisfies the "token budget bounded and logged" acceptance criterion from the multi-team session-context issue.
+
 ### C. Personal Info And Fact Lifecycle
 
 #### `POST /api/v1/personal_info/{userId}/save`

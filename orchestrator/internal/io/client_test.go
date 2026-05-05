@@ -109,7 +109,7 @@ func TestPushSkillActivity_Disabled_IsNoop(t *testing.T) {
 
 func TestPushStatus_PostsCorrectEventType(t *testing.T) {
 	body, _ := capturePost(t, func(c *ioclient.Client) {
-		_ = c.PushStatus("task-1", "working", "Starting...", nil)
+		_ = c.PushStatus("task-1", "working", "Starting...", nil, "")
 	})
 
 	if body["type"] != "status" {
@@ -127,7 +127,7 @@ func TestPushCredentialRequest_PostsCorrectEventType(t *testing.T) {
 			UserID:    "user-1",
 			KeyName:   "api_key",
 			Label:     "API Key",
-		})
+		}, "")
 	})
 
 	if body["type"] != "credential_request" {

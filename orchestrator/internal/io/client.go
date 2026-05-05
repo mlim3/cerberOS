@@ -120,7 +120,8 @@ func (c *Client) Disabled() bool {
 // PushStatus sends a task status update to the IO Component.
 // expectedNextInputMinutes is the number of minutes until the next user input is
 // expected: 0 = now, nil = unknown/done.
-func (c *Client) PushStatus(taskID, status, lastUpdate string, expectedNextInputMinutes *int) error {
+// traceID is propagated on the traceparent header so IO logs match orchestrator NATS traces.
+func (c *Client) PushStatus(taskID, status, lastUpdate string, expectedNextInputMinutes *int, traceID string) error {
 	if c.Disabled() {
 		return nil
 	}
@@ -135,7 +136,7 @@ func (c *Client) PushStatus(taskID, status, lastUpdate string, expectedNextInput
 			Timestamp:                time.Now().UnixMilli(),
 		},
 	}
-	return c.post(evt)
+	return c.post(evt, traceID)
 }
 
 // PushPlanPreview asks the IO Component to show the user a plan preview card
@@ -145,13 +146,13 @@ func (c *Client) PushPlanPreview(payload PlanPreviewPayload) error {
 	if c.Disabled() {
 		return nil
 	}
-	return c.post(planPreviewEvent{Type: "plan_preview", Payload: payload})
+	return c.post(planPreviewEvent{Type: "plan_preview", Payload: payload}, "")
 }
 
 // PushCredentialRequest asks the IO Component to surface a credential-input
 // modal to the user. The user's submitted value goes directly to the Memory
 // vault — the orchestrator never sees the plaintext.
-func (c *Client) PushCredentialRequest(req CredentialRequestPayload) error {
+func (c *Client) PushCredentialRequest(req CredentialRequestPayload, traceID string) error {
 	if c.Disabled() {
 		return nil
 	}
@@ -159,7 +160,7 @@ func (c *Client) PushCredentialRequest(req CredentialRequestPayload) error {
 		Type:    "credential_request",
 		Payload: req,
 	}
-	return c.post(evt)
+	return c.post(evt, traceID)
 }
 
 // SkillActivityPayload carries the data for a skill_activity SSE event pushed
@@ -189,27 +190,42 @@ func (c *Client) PushSkillActivity(payload SkillActivityPayload) error {
 	if c.Disabled() {
 		return nil
 	}
-	return c.post(skillActivityEvent{Type: "skill_activity", Payload: payload})
+	return c.post(skillActivityEvent{Type: "skill_activity", Payload: payload}, "")
 }
 
 // post marshals body as JSON and POSTs it to the IO stream-events endpoint.
-func (c *Client) post(body any) error {
+func (c *Client) post(body any, traceID string) error {
 	data, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("io-client: marshal event: %w", err)
 	}
 
 	url := c.baseURL + streamEventsPath
-	resp, err := c.httpClient.Post(url, "application/json", bytes.NewReader(data))
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("io-client: new request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if tp := observability.TraceparentForOutgoingHTTP(traceID); tp != "" {
+		req.Header.Set("traceparent", tp)
+	}
+
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		// IO may be down — log but do not return an error that would fail the task.
-		c.logger.Warn("IO post failed", "task_id", taskIDFromEvent(body), "url", url, "error", err)
+		c.logger.Warn("could not deliver event to io http bridge; chat may not see this update (continuing without retry)",
+			"task_id", taskIDFromEvent(body),
+			"url", url,
+			"error", err)
 		return nil
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		c.logger.Warn("IO post returned non-OK", "task_id", taskIDFromEvent(body), "url", url, "status", resp.StatusCode)
+		c.logger.Warn("io http bridge returned non-OK status; ui may have missed this event",
+			"task_id", taskIDFromEvent(body),
+			"url", url,
+			"status", resp.StatusCode)
 	}
 	return nil
 }

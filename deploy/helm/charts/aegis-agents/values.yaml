@@ -15,6 +15,7 @@ natsUrl: "nats://nats:4222"
 agentProcessPath: "/app/agent-process"
 
 anthropicApiKey: ""
+anthropicBaseUrl: ""
 
 maxConcurrentTasks: "8"
 idleSuspendTimeout: "10m"

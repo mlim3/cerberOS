@@ -30,6 +30,7 @@ import (
 	"github.com/mlim3/cerberOS/memory/internal/logic"
 	"github.com/mlim3/cerberOS/memory/internal/storage"
 	"github.com/mlim3/cerberOS/memory/internal/telemetry"
+	"github.com/mlim3/cerberOS/memory/internal/usercron"
 	"github.com/nats-io/nats.go"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	httpSwagger "github.com/swaggo/http-swagger"
@@ -143,7 +144,7 @@ func main() {
 	logRepo := storage.NewLogRepository(pool)
 	vaultRepo := storage.NewVaultRepository(pool)
 	agentLogsRepo := storage.NewAgentLogsRepository(pool)
-	schedulerRepo := storage.NewSchedulerRepository(pool)
+	scheduledJobsRepo := storage.NewScheduledJobsRepository(pool)
 
 	// Initialize Vault Manager
 	vaultManager, err := logic.NewVaultManager()
@@ -165,6 +166,33 @@ func main() {
 	}
 	piProcessor := logic.NewProcessor(piRepo, embedder)
 
+	// NATS: single connection for heartbeat + user_cron → orchestrator (JetStream).
+	var userDispatch storage.UserCronDispatch
+	if natsURL := os.Getenv("NATS_URL"); natsURL != "" {
+		nc, nerr := nats.Connect(natsURL,
+			nats.Name("memory-nats"),
+			nats.RetryOnFailedConnect(true),
+			nats.MaxReconnects(-1),
+			nats.ReconnectWait(500*time.Millisecond),
+		)
+		if nerr != nil {
+			logger.Warn("NATS connect failed — heartbeat and user_cron dispatch disabled", "error", nerr)
+		} else {
+			defer nc.Close()
+			emitter := heartbeat.New(nc, "memory", logger)
+			go emitter.Start(ctx)
+			js, jerr := nc.JetStream()
+			if jerr != nil {
+				logger.Warn("JetStream unavailable for user_cron", "error", jerr)
+			} else {
+				p := &usercron.NatsDispatcher{JS: js}
+				userDispatch = p.DispatchUserCron
+			}
+		}
+	} else {
+		logger.Info("NATS_URL unset — heartbeat and user_cron dispatch disabled")
+	}
+
 	// 3. Initialize the Handlers
 	chatHandler := api.NewChatHandler(chatRepo)
 	orchestratorHandler := api.NewOrchestratorHandler(orchestratorRepo)
@@ -172,7 +200,7 @@ func main() {
 	piHandler := api.NewPersonalInfoHandler(piProcessor, piRepo)
 	vaultHandler := api.NewVaultHandler(vaultRepo, vaultManager, logRepo)
 	agentHandler := api.NewAgentHandler(agentLogsRepo)
-	scheduledJobsHandler := api.NewScheduledJobsHandler(schedulerRepo)
+	scheduledJobsHandler := api.NewScheduledJobsHandler(scheduledJobsRepo, userDispatch)
 
 	// Set up the router using Go 1.22's enhanced mux
 	mux := http.NewServeMux()
@@ -193,6 +221,7 @@ func main() {
 	mux.HandleFunc("GET /api/v1/tasks/{taskId}", chatHandler.HandleGetTask)
 	mux.HandleFunc("POST /api/v1/chat/{conversationId}/messages", chatHandler.HandleCreateMessage)
 	mux.HandleFunc("GET /api/v1/chat/{conversationId}/messages", chatHandler.HandleListMessages)
+	mux.HandleFunc("GET /api/v1/chat/{conversationId}/history", chatHandler.HandleGetSessionHistory)
 
 	// Orchestrator persistence endpoints (Internal Only)
 	orchestratorMux := http.NewServeMux()
@@ -215,10 +244,13 @@ func main() {
 	mux.HandleFunc("GET /api/v1/system/events", logHandler.HandleListSystemEvents)
 	mux.HandleFunc("GET /api/v1/system/events/search", logHandler.HandleSearchSystemEvents)
 
-	// Scheduled Jobs endpoints
-	mux.HandleFunc("POST /api/v1/scheduled_jobs", scheduledJobsHandler.HandleCreateScheduledJob)
-	mux.HandleFunc("POST /api/v1/scheduled_jobs/run_due", scheduledJobsHandler.HandleRunDueJobs)
-	mux.HandleFunc("GET /api/v1/scheduled_jobs/{jobId}/runs", scheduledJobsHandler.HandleListScheduledJobRuns)
+	// Scheduled jobs (protected — use same internal API key as vault)
+	mux.Handle("POST /api/v1/scheduled_jobs", api.RequireVaultKey(http.HandlerFunc(scheduledJobsHandler.HandleCreateScheduledJob)))
+	mux.Handle("POST /api/v1/scheduled_jobs/run_due", api.RequireVaultKey(http.HandlerFunc(scheduledJobsHandler.HandleRunDueJobs)))
+	mux.Handle("GET /api/v1/scheduled_jobs/{jobId}/runs", api.RequireVaultKey(http.HandlerFunc(scheduledJobsHandler.HandleListScheduledJobRuns)))
+	mux.Handle("GET /api/v1/user_crons", api.RequireVaultKey(http.HandlerFunc(scheduledJobsHandler.HandleListUserCrons)))
+	mux.Handle("DELETE /api/v1/scheduled_jobs/{jobId}", api.RequireVaultKey(http.HandlerFunc(scheduledJobsHandler.HandleDeleteUserCron)))
+	mux.Handle("POST /api/v1/system/maintenance/run", api.RequireVaultKey(http.HandlerFunc(scheduledJobsHandler.HandleRunSystemMaintenance)))
 
 	// Vault endpoints (Internal Only)
 	vaultMux := http.NewServeMux()
@@ -254,34 +286,28 @@ func main() {
 		Handler: telemetry.WrapHandler(handler, "memory-api"),
 	}
 
-	// Heartbeat emitter — non-fatal if NATS is unavailable or unset.
-	// The orchestrator's heartbeat sweeper subscribes to
-	// aegis.heartbeat.service.* and uses these beats to track memory's
-	// liveness. See docs/heartbeat.md.
-	if natsURL := os.Getenv("NATS_URL"); natsURL != "" {
-		nc, err := nats.Connect(natsURL,
-			nats.Name("memory-heartbeat"),
-			nats.RetryOnFailedConnect(true),
-			nats.MaxReconnects(-1),
-			nats.ReconnectWait(500*time.Millisecond),
-		)
-		if err != nil {
-			logger.Warn("heartbeat: NATS connect failed — liveness will not be published", "error", err)
-		} else {
-			defer nc.Close()
-			emitter := heartbeat.New(nc, "memory", logger)
-			go emitter.Start(ctx)
-		}
-	} else {
-		logger.Info("heartbeat: NATS_URL unset — emitter disabled")
-	}
-
 	// Start server in a goroutine
 	go func() {
 		logger.Info("starting server", "port", port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Error("server failed", "error", err)
 			os.Exit(1)
+		}
+	}()
+
+	// Due-job runner (user_cron dispatch + internal schedulers) — 1m tick
+	go func() {
+		t := time.NewTicker(1 * time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if err := scheduledJobsHandler.RunDue(ctx); err != nil {
+					logger.Error("scheduled_jobs run_due failed", "error", err)
+				}
+			}
 		}
 	}()
 
@@ -294,11 +320,11 @@ func main() {
 	defer shutdownCancel()
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		logger.Error("server shutdown failed", "error", err)
+		logger.Error("memory server shutdown failed; some in-flight requests may have been dropped", "error", err)
 		os.Exit(1)
 	}
 
-	logger.Info("server stopped")
+	logger.Info("memory server stopped cleanly")
 }
 
 func getEnvOrDefault(key, defaultValue string) string {
@@ -308,8 +334,12 @@ func getEnvOrDefault(key, defaultValue string) string {
 	return defaultValue
 }
 
-// loggingMiddleware adds basic request logging
+// loggingMiddleware adds basic request logging. Each request line carries
+// component=memory module=http and a human-readable msg describing the
+// request outcome at INFO; 5xx errors are logged at WARN to make them stand
+// out in dashboards.
 func loggingMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
+	httpLogger := logger.With("module", "http")
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 
@@ -319,11 +349,18 @@ func loggingMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 		next.ServeHTTP(rw, r)
 
 		duration := time.Since(start)
-		logger.Info("http request",
-			"method", r.Method,
-			"path", r.URL.Path,
-			"status", rw.statusCode,
-			"duration", duration,
+		level := slog.LevelInfo
+		if rw.statusCode >= 500 {
+			level = slog.LevelWarn
+		} else if rw.statusCode >= 400 {
+			level = slog.LevelInfo
+		}
+		httpLogger.LogAttrs(r.Context(), level,
+			"memory http request handled",
+			slog.String("method", r.Method),
+			slog.String("path", r.URL.Path),
+			slog.Int("status", rw.statusCode),
+			slog.Duration("duration", duration),
 		)
 	})
 }

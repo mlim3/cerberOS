@@ -28,30 +28,31 @@ func main() {
 	manager := secretmanager.NewOpenBaoSecretManager(auditor)
 	pp := preprocessor.New(manager, auditor)
 
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).
+		With("component", "vault", "module", "server")
+	httpLogger := logger.With("module", "http")
+
 	mux := http.NewServeMux()
 
-	injHandler := &inject.Handler{PP: pp, Auditor: auditor}
+	injHandler := &inject.Handler{PP: pp, Auditor: auditor, Logger: httpLogger}
 	injHandler.Register(mux)
 
-	secHandler := &secrets.Handler{Manager: manager, Auditor: auditor}
+	secHandler := &secrets.Handler{Manager: manager, Auditor: auditor, Logger: httpLogger}
 	secHandler.Register(mux)
 
-	credHandler := &credentials.Handler{Manager: manager, Auditor: auditor}
+	credHandler := &credentials.Handler{Manager: manager, Auditor: auditor, Logger: httpLogger}
 	credHandler.Register(mux)
 
-	execHandler := &execute.Handler{Manager: manager, Auditor: auditor}
+	execHandler := &execute.Handler{Manager: manager, Auditor: auditor, Logger: httpLogger}
 	execHandler.Register(mux)
 
-	hzHandler := &healthz.Handler{Auditor: auditor}
+	hzHandler := &healthz.Handler{Auditor: auditor, Logger: httpLogger}
 	hzHandler.Register(mux)
 
 	httpSrv := &http.Server{Addr: ":8000", Handler: mux}
 
 	sigCtx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
-
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).
-		With("component", "vault", "module", "server")
 
 	// Heartbeat emitter — non-fatal if NATS is unavailable.
 	if natsURL := os.Getenv("NATS_URL"); natsURL != "" {
@@ -62,14 +63,14 @@ func main() {
 			nats.ReconnectWait(500*time.Millisecond),
 		)
 		if err != nil {
-			logger.Warn("heartbeat: NATS connect failed — liveness will not be published", "error", err)
+			logger.Warn("could not connect to nats for heartbeat emitter; vault will run without publishing liveness", "error", err)
 		} else {
 			defer nc.Close()
 			emitter := heartbeat.New(nc, "vault", logger)
 			go emitter.Start(sigCtx)
 		}
 	} else {
-		logger.Info("heartbeat: NATS_URL unset — emitter disabled")
+		logger.Info("nats_url not configured; heartbeat emitter disabled (vault will not publish liveness)")
 	}
 
 	go func() {
@@ -77,9 +78,10 @@ func main() {
 		_ = httpSrv.Shutdown(context.Background())
 	}()
 
-	logger.Info("vault listening", "addr", ":8000")
+	logger.Info("vault http server starting; ready to accept secret/credential/execute/inject requests", "addr", ":8000")
 	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		logger.Error("server error", "error", err)
+		logger.Error("vault http server stopped unexpectedly; process will exit", "error", err)
 		os.Exit(1)
 	}
+	logger.Info("vault http server stopped cleanly after shutdown signal")
 }

@@ -31,6 +31,13 @@ type PublishOptions struct {
 	// query_id as appropriate. For vault.execute.request it MUST be the request_id.
 	CorrelationID string
 
+	// TraceID propagates the W3C trace_id across the NATS envelope so distributed
+	// trace continuity is preserved. Callers SHOULD set this to the trace_id of
+	// the inbound message they are reacting to (msg.TraceID), or — for messages
+	// that originate a new task — the trace_id assigned by the originating
+	// component. When empty, downstream consumers will mint a fresh trace_id.
+	TraceID string
+
 	// Transient uses at-most-once core NATS publish instead of JetStream.
 	// Use only for explicitly at-most-once subjects (e.g. capability.response).
 	Transient bool
@@ -43,7 +50,8 @@ type outboundEnvelope struct {
 	MessageType     string      `json:"message_type"`
 	SourceComponent string      `json:"source_component"`
 	CorrelationID   string      `json:"correlation_id,omitempty"`
-	Timestamp       string      `json:"timestamp"` // ISO 8601
+	TraceID         string      `json:"trace_id,omitempty"` // W3C trace_id for distributed trace continuity
+	Timestamp       string      `json:"timestamp"`          // ISO 8601
 	SchemaVersion   string      `json:"schema_version"`
 	Payload         interface{} `json:"payload"`
 }
@@ -53,6 +61,7 @@ type inboundEnvelope struct {
 	MessageID     string          `json:"message_id"`
 	MessageType   string          `json:"message_type"`
 	CorrelationID string          `json:"correlation_id,omitempty"`
+	TraceID       string          `json:"trace_id,omitempty"`
 	Payload       json.RawMessage `json:"payload"`
 }
 
@@ -62,6 +71,7 @@ type Message struct {
 	Subject       string
 	MessageType   string
 	CorrelationID string
+	TraceID       string
 	Data          []byte
 
 	// Ack acknowledges successful processing (JetStream at-least-once subjects).
@@ -195,6 +205,7 @@ func (c *natsClient) Publish(subject string, opts PublishOptions, payload interf
 		MessageType:     opts.MessageType,
 		SourceComponent: c.componentID,
 		CorrelationID:   opts.CorrelationID,
+		TraceID:         opts.TraceID,
 		Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
 		SchemaVersion:   "1.0",
 		Payload:         payload,
@@ -241,38 +252,63 @@ func (c *natsClient) SubscribeDurable(subject, durable string, handler MessageHa
 	if handler == nil {
 		return fmt.Errorf("comms: nil handler for subject %q", subject)
 	}
-	sub, err := c.js.Subscribe(
-		subject,
-		func(natsMsg *nats.Msg) {
-			rawData := natsMsg.Data
-			msg := unwrapOrRaw(rawData)
-			msg.Subject = natsMsg.Subject
-			msg.Ack = func() error { return natsMsg.Ack() }
-			msg.Nak = func() error { return natsMsg.Nak() }
 
-			// Dead-letter intercept: when this is the last permitted delivery and
-			// the handler signals failure (Nak), publish the original envelope to
-			// aegis.orchestrator.error and terminally ack so JetStream never
-			// redelivers it. The handler still runs normally — we only replace
-			// what happens if it chooses to Nak.
-			if meta, err := natsMsg.Metadata(); err == nil &&
-				int(meta.NumDelivered) >= c.maxDeliver {
-				correlationID := msg.CorrelationID
-				msgType := msg.MessageType
-				msg.Nak = func() error {
-					c.publishDeadLetter(subject, durable, rawData,
-						int(meta.NumDelivered), msgType, correlationID)
-					return natsMsg.Term() // terminal ack — prevents any further redelivery
-				}
+	msgHandler := func(natsMsg *nats.Msg) {
+		rawData := natsMsg.Data
+		msg := unwrapOrRaw(rawData)
+		msg.Subject = natsMsg.Subject
+		msg.Ack = func() error { return natsMsg.Ack() }
+		msg.Nak = func() error { return natsMsg.Nak() }
+
+		// Dead-letter intercept: when this is the last permitted delivery and
+		// the handler signals failure (Nak), publish the original envelope to
+		// aegis.orchestrator.error and terminally ack so JetStream never
+		// redelivers it. The handler still runs normally — we only replace
+		// what happens if it chooses to Nak.
+		if meta, err := natsMsg.Metadata(); err == nil &&
+			int(meta.NumDelivered) >= c.maxDeliver {
+			correlationID := msg.CorrelationID
+			msgType := msg.MessageType
+			msg.Nak = func() error {
+				c.publishDeadLetter(subject, durable, rawData,
+					int(meta.NumDelivered), msgType, correlationID)
+				return natsMsg.Term() // terminal ack — prevents any further redelivery
 			}
+		}
 
-			handler(msg)
-		},
-		nats.Durable(durable),
-		nats.DeliverNew(),
-		nats.AckExplicit(),
-		nats.MaxDeliver(c.maxDeliver),
-	)
+		handler(msg)
+	}
+
+	// Retry binding the durable consumer with backoff. During a rolling update the
+	// old pod holds the push-consumer binding until its NATS connection closes.
+	// Rather than crashing, we wait for the old pod to drain (typically <30s).
+	const maxBindAttempts = 20
+	backoff := 2 * time.Second
+	var sub *nats.Subscription
+	var err error
+	for attempt := 1; attempt <= maxBindAttempts; attempt++ {
+		sub, err = c.js.Subscribe(
+			subject,
+			msgHandler,
+			nats.Durable(durable),
+			nats.DeliverNew(),
+			nats.AckExplicit(),
+			nats.MaxDeliver(c.maxDeliver),
+		)
+		if err == nil {
+			break
+		}
+		if attempt == maxBindAttempts {
+			break
+		}
+		slog.Warn("comms: durable consumer already bound, retrying",
+			"subject", subject, "consumer", durable,
+			"attempt", attempt, "backoff", backoff)
+		time.Sleep(backoff)
+		if backoff < 30*time.Second {
+			backoff *= 2
+		}
+	}
 	if err != nil {
 		return fmt.Errorf("comms: durable subscribe %q (consumer %q): %w", subject, durable, err)
 	}
@@ -398,10 +434,13 @@ func (c *stubClient) Publish(subject string, opts PublishOptions, payload interf
 	c.mu.RUnlock()
 
 	msg := &Message{
-		Subject: subject,
-		Data:    data,
-		Ack:     noop,
-		Nak:     noop,
+		Subject:       subject,
+		MessageType:   opts.MessageType,
+		CorrelationID: opts.CorrelationID,
+		TraceID:       opts.TraceID,
+		Data:          data,
+		Ack:           noop,
+		Nak:           noop,
 	}
 	for _, h := range handlers {
 		h(msg)
@@ -445,6 +484,7 @@ func unwrapOrRaw(data []byte) *Message {
 	return &Message{
 		MessageType:   env.MessageType,
 		CorrelationID: env.CorrelationID,
+		TraceID:       env.TraceID,
 		Data:          []byte(env.Payload),
 	}
 }

@@ -2,10 +2,17 @@
  * Memory service client for IO component logging and conversation/task metadata.
  */
 
-const MEMORY_API_BASE = process.env.MEMORY_API_BASE ?? ''
-const MEMORY_API_KEY = process.env.MEMORY_API_KEY ?? ''
+function memoryApiBase(): string {
+  return (process.env.MEMORY_API_BASE ?? '').trim().replace(/\/$/, '')
+}
 
-const DEMO_MODE = !MEMORY_API_BASE
+function memoryApiKey(): string {
+  return (process.env.MEMORY_API_KEY ?? process.env.INTERNAL_VAULT_API_KEY ?? '').trim()
+}
+
+function demoMode(): boolean {
+  return !memoryApiBase()
+}
 
 type CoreLogLevel = 'debug' | 'info' | 'warn' | 'error'
 
@@ -92,6 +99,8 @@ export interface AppendLogParams {
   content: string
   taskId?: string
   idempotencyKey?: string
+  /** W3C trace_id (32 hex) — same as HTTP / NATS user_task; keeps Memory rows aligned with IO + orchestrator */
+  traceId?: string
 }
 
 const demoLogs: DemoLogEntry[] = []
@@ -101,7 +110,7 @@ const demoTasks = new Map<string, MemoryTask>()
 function authHeaders(): HeadersInit {
   return {
     'Content-Type': 'application/json',
-    'X-Internal-API-Key': MEMORY_API_KEY,
+    'X-Internal-API-Key': memoryApiKey(),
   }
 }
 
@@ -132,12 +141,12 @@ function touchDemoConversation(conversationId: string, update: Partial<MemoryCon
 }
 
 export async function createConversation(params: CreateConversationParams): Promise<MemoryConversation | null> {
-  if (DEMO_MODE) {
+  if (demoMode()) {
     return ensureDemoConversation(params)
   }
 
   try {
-    const res = await fetch(`${MEMORY_API_BASE}/api/v1/conversations`, {
+    const res = await fetch(`${memoryApiBase()}/api/v1/conversations`, {
       method: 'POST',
       headers: authHeaders(),
       body: JSON.stringify(params),
@@ -156,7 +165,7 @@ export async function createConversation(params: CreateConversationParams): Prom
 }
 
 export async function createTask(params: CreateTaskParams): Promise<MemoryTask | null> {
-  if (DEMO_MODE) {
+  if (demoMode()) {
     const conversation = ensureDemoConversation({
       userId: params.userId,
       conversationId: params.conversationId,
@@ -185,7 +194,7 @@ export async function createTask(params: CreateTaskParams): Promise<MemoryTask |
   }
 
   try {
-    const res = await fetch(`${MEMORY_API_BASE}/api/v1/tasks`, {
+    const res = await fetch(`${memoryApiBase()}/api/v1/tasks`, {
       method: 'POST',
       headers: authHeaders(),
       body: JSON.stringify(params),
@@ -204,17 +213,17 @@ export async function createTask(params: CreateTaskParams): Promise<MemoryTask |
 }
 
 export async function getTask(taskId: string, userId: string): Promise<MemoryTask | null> {
-  if (DEMO_MODE) {
+  if (demoMode()) {
     const task = demoTasks.get(taskId)
     if (!task || task.userId !== userId) return null
     return task
   }
 
   try {
-    const url = new URL(`${MEMORY_API_BASE}/api/v1/tasks/${taskId}`)
+    const url = new URL(`${memoryApiBase()}/api/v1/tasks/${taskId}`)
     url.searchParams.set('userId', userId)
     const res = await fetch(url.toString(), {
-      headers: { 'X-Internal-API-Key': MEMORY_API_KEY },
+      headers: { 'X-Internal-API-Key': memoryApiKey() },
     })
     if (!res.ok) {
       memoryClientLog('error', 'fetch task failed', { task_id: taskId, status: res.status })
@@ -229,7 +238,7 @@ export async function getTask(taskId: string, userId: string): Promise<MemoryTas
 }
 
 export async function appendLogEntry(params: AppendLogParams): Promise<MemoryLogEntry | null> {
-  if (DEMO_MODE) {
+  if (demoMode()) {
     const conversation = ensureDemoConversation({
       userId: params.userId,
       conversationId: params.conversationId,
@@ -274,9 +283,16 @@ export async function appendLogEntry(params: AppendLogParams): Promise<MemoryLog
   if (params.idempotencyKey) body['idempotencyKey'] = params.idempotencyKey
 
   try {
-    const res = await fetch(`${MEMORY_API_BASE}/api/v1/chat/${params.conversationId}/messages`, {
+    const headers: Record<string, string> = {
+      ...authHeaders() as Record<string, string>,
+    }
+    if (params.traceId) {
+      headers['X-Trace-ID'] = params.traceId
+    }
+
+    const res = await fetch(`${memoryApiBase()}/api/v1/chat/${params.conversationId}/messages`, {
       method: 'POST',
-      headers: authHeaders(),
+      headers,
       body: JSON.stringify(body),
     })
 
@@ -300,9 +316,9 @@ export async function appendLogEntry(params: AppendLogParams): Promise<MemoryLog
 
 export async function getConversationLogs(
   conversationId: string,
-  options?: { userId?: string; taskId?: string; limit?: number }
+  options?: { userId?: string; taskId?: string; limit?: number; traceId?: string }
 ): Promise<MemoryLogEntry[]> {
-  if (DEMO_MODE) {
+  if (demoMode()) {
     let entries = demoLogs.filter(m => m.conversationId === conversationId)
     if (options?.userId) {
       entries = entries.filter(m => m.userId === options.userId)
@@ -317,14 +333,19 @@ export async function getConversationLogs(
   }
 
   try {
-    const url = new URL(`${MEMORY_API_BASE}/api/v1/chat/${conversationId}/messages`)
+    const url = new URL(`${memoryApiBase()}/api/v1/chat/${conversationId}/messages`)
     if (options?.userId) url.searchParams.set('userId', options.userId)
     if (options?.limit) url.searchParams.set('limit', String(options.limit))
 
+    const headers: Record<string, string> = {
+      'X-Internal-API-Key': memoryApiKey(),
+    }
+    if (options?.traceId) {
+      headers['X-Trace-ID'] = options.traceId
+    }
+
     const res = await fetch(url.toString(), {
-      headers: {
-        'X-Internal-API-Key': MEMORY_API_KEY,
-      },
+      headers,
     })
 
     if (!res.ok) {
@@ -345,11 +366,50 @@ export async function getConversationLogs(
   }
 }
 
+export async function deleteConversation(conversationId: string, userId: string): Promise<boolean> {
+  if (demoMode()) {
+    demoConversations.delete(conversationId)
+    return true
+  }
+
+  try {
+    const url = new URL(`${memoryApiBase()}/api/v1/conversations/${conversationId}`)
+    url.searchParams.set('userId', userId)
+    const res = await fetch(url.toString(), {
+      method: 'DELETE',
+      headers: { 'X-Internal-API-Key': memoryApiKey() },
+    })
+    return res.ok
+  } catch (err) {
+    memoryClientLog('error', 'delete conversation network error', { conversation_id: conversationId, error: String(err) })
+    return false
+  }
+}
+
+export async function renameConversation(conversationId: string, userId: string, title: string): Promise<boolean> {
+  if (demoMode()) {
+    touchDemoConversation(conversationId, { title })
+    return true
+  }
+
+  try {
+    const res = await fetch(`${memoryApiBase()}/api/v1/conversations/${conversationId}`, {
+      method: 'PATCH',
+      headers: authHeaders(),
+      body: JSON.stringify({ userId, title }),
+    })
+    return res.ok
+  } catch (err) {
+    memoryClientLog('error', 'rename conversation network error', { conversation_id: conversationId, error: String(err) })
+    return false
+  }
+}
+
 export async function listConversations(
   userId: string,
   options?: { limit?: number }
 ): Promise<MemoryConversation[]> {
-  if (DEMO_MODE) {
+  if (demoMode()) {
     const conversations = Array.from(demoConversations.values())
       .filter(c => c.userId === userId)
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
@@ -360,12 +420,12 @@ export async function listConversations(
   }
 
   try {
-    const url = new URL(`${MEMORY_API_BASE}/api/v1/conversations`)
+    const url = new URL(`${memoryApiBase()}/api/v1/conversations`)
     url.searchParams.set('userId', userId)
     if (options?.limit) url.searchParams.set('limit', String(options.limit))
     const res = await fetch(url.toString(), {
       headers: {
-        'X-Internal-API-Key': MEMORY_API_KEY,
+        'X-Internal-API-Key': memoryApiKey(),
       },
     })
     if (!res.ok) {

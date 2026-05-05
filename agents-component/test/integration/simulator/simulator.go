@@ -442,7 +442,9 @@ func (s *Simulator) handleStateReadRequest(msg *nats.Msg) {
 		Records: []types.MemoryWrite{},
 		TraceID: req.TraceID,
 	}
-	if err := s.publish("aegis.agents.state.read.response", "state.read.response", req.AgentID, resp); err != nil {
+	// correlation_id must match the inbound state.read request (TraceID) so the
+	// agents memory client can route the response to the waiting Read() call.
+	if err := s.publish("aegis.agents.state.read.response", "state.read.response", req.TraceID, resp); err != nil {
 		s.log.Error("simulator: publish state.read.response", "err", err, "agent_id", req.AgentID)
 		_ = msg.Nak()
 		return
