@@ -298,6 +298,13 @@ func main() {
 
 	f.StartIdleSweep(ctx)
 
+	// Rehydrate any skills synthesized in prior sessions into the live skill
+	// tree. Must run after static skills are loaded (loadSkills above) because
+	// synthesized commands are registered under existing domain nodes.
+	if err := f.LoadSynthesizedSkills(ctx); err != nil {
+		log.Warn("synthesized skill load failed — skills from prior sessions unavailable", "error", err)
+	}
+
 	// Bounded-concurrency worker pool for inbound task dispatch. Without this,
 	// the JetStream durable subscriber runs HandleTaskSpec (which includes
 	// Firecracker provisioning — several seconds) inline before Ack'ing,

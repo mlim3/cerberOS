@@ -60,6 +60,12 @@ type Manager interface {
 	// Contract (EDD §13.2). Used to load synthesized skills at startup and to
 	// accept new skills created during task execution.
 	RegisterCommand(domain string, node *types.SkillNode) error
+
+	// GetSynthesizedSkills returns the full SynthesizedSkillRecord for every
+	// command in the domain whose Origin is "synthesized". Unlike GetCommands,
+	// this returns the Recipe and Spec so the factory can pass these records to
+	// the agent process at spawn time for dynamic tool construction.
+	GetSynthesizedSkills(domain string) ([]types.SynthesizedSkillRecord, error)
 }
 
 // InvocationHook is called after each successful GetSpec call. It receives the
@@ -387,6 +393,33 @@ func (m *hierarchyManager) RegisterCommand(domain string, node *types.SkillNode)
 		m.embeddings = append(m.embeddings, newEntries...)
 	}
 	return nil
+}
+
+// GetSynthesizedSkills returns the full SynthesizedSkillRecord for every command
+// in the domain whose Origin is "synthesized". Recipe and Spec are included so
+// the factory can build dynamic SkillTool entries at spawn time.
+func (m *hierarchyManager) GetSynthesizedSkills(domain string) ([]types.SynthesizedSkillRecord, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	d, ok := m.domains[domain]
+	if !ok {
+		return nil, fmt.Errorf("skills: domain %q not found", domain)
+	}
+
+	var records []types.SynthesizedSkillRecord
+	for _, cmd := range d.Children {
+		if cmd.Origin != "synthesized" {
+			continue
+		}
+		records = append(records, types.SynthesizedSkillRecord{
+			Name:        cmd.Name,
+			Description: cmd.Description,
+			Recipe:      cmd.Recipe,
+			Spec:        cmd.Spec,
+		})
+	}
+	return records, nil
 }
 
 // ValidateCommandContract enforces the Tool Contract from EDD §13.2 for a single

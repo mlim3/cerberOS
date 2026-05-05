@@ -31,13 +31,15 @@ const (
 	StatusSuccess        = "success"
 	StatusScopeViolation = "scope_violation"
 	StatusExecutionError = "execution_error"
+	StatusExecError      = StatusExecutionError
 	StatusTimedOut       = "timed_out"
 )
 
 // Error codes for ExecuteResponse.
 const (
-	ErrCodeMissingCredential  = "MISSING_CREDENTIAL"
-	ErrCodeUnsupportedOp      = "UNSUPPORTED_OPERATION"
-	ErrCodeInvalidParams      = "INVALID_PARAMS"
-	ErrCodeUpstreamError      = "UPSTREAM_ERROR"
+	ErrCodeMissingCredential     = "MISSING_CREDENTIAL"
+	ErrCodeCredentialUnavailable = "CREDENTIAL_UNAVAILABLE"
+	ErrCodeUnsupportedOp         = "UNSUPPORTED_OPERATION"
+	ErrCodeInvalidParams         = "INVALID_PARAMS"
+	ErrCodeUpstreamError         = "UPSTREAM_ERROR"
 )

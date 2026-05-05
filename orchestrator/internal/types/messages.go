@@ -103,6 +103,34 @@ type TaskResult struct {
 	CompletedAt         time.Time       `json:"completed_at"`
 }
 
+// AgentSpawnRequest is published by a running agent when it wants the
+// Orchestrator to route a self-contained child task to another skill-scoped
+// agent. The parent agent supplies task intent and required skill domains; the
+// Orchestrator resolves trusted user/policy context from the parent task state.
+type AgentSpawnRequest struct {
+	RequestID      string   `json:"request_id"`
+	ParentAgentID  string   `json:"parent_agent_id"`
+	ParentTaskID   string   `json:"parent_task_id"`
+	RequiredSkills []string `json:"required_skills"`
+	Instructions   string   `json:"instructions"`
+	TimeoutSeconds int      `json:"timeout_seconds,omitempty"`
+	TraceID        string   `json:"trace_id"`
+	UserContextID  string   `json:"user_context_id,omitempty"`
+}
+
+// AgentSpawnResponse is returned to the parent agent once the child task reaches
+// a terminal task.result/task.failed event.
+type AgentSpawnResponse struct {
+	RequestID     string `json:"request_id"`
+	ParentAgentID string `json:"parent_agent_id"`
+	ChildAgentID  string `json:"child_agent_id,omitempty"`
+	Status        string `json:"status"` // success | failed
+	Result        string `json:"result,omitempty"`
+	ErrorCode     string `json:"error_code,omitempty"`
+	ErrorMessage  string `json:"error_message,omitempty"`
+	TraceID       string `json:"trace_id"`
+}
+
 // ─── Agent Status Update ──────────────────────────────────────────────────────
 // Internal orchestrator view of agent lifecycle status updates. The Gateway
 // maps the agents-component status payload into this shape.

@@ -9,6 +9,7 @@ import {
   type SendMessageRequest,
   type OrchestratorStreamEvent,
   type CredentialRequest,
+  type SkillActivity,
 } from '@cerberos/io-core';
 import {
   appendLogEntry,

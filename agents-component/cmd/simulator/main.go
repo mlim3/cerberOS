@@ -121,9 +121,17 @@ func (s *simulator) start() error {
 
 	subs := []sub{
 		{subjectCredentialRequest, consumerCredentialRequest, s.handleCredentialRequest},
-		{subjectVaultExecuteRequest, consumerVaultExecuteRequest, s.handleVaultExecuteRequest},
 		{subjectStateWrite, consumerStateWrite, s.handleStateWrite},
 		{subjectStateReadRequest, consumerStateReadRequest, s.handleStateReadRequest},
+	}
+
+	// When SIMULATOR_SKIP_VAULT_EXECUTE=true a real vault engine is handling
+	// vault.execute.request — skip the mock handler to avoid a race where the
+	// simulator's empty {} result wins over the real vault's response.
+	if os.Getenv("SIMULATOR_SKIP_VAULT_EXECUTE") != "true" {
+		subs = append(subs, sub{subjectVaultExecuteRequest, consumerVaultExecuteRequest, s.handleVaultExecuteRequest})
+	} else {
+		s.log.Info("simulator: vault execute simulation disabled (SIMULATOR_SKIP_VAULT_EXECUTE=true)")
 	}
 
 	for _, entry := range subs {
@@ -281,6 +289,20 @@ func (s *simulator) handleStateReadRequest(msg *nats.Msg) {
 	if err := json.Unmarshal(env.Payload, &req); err != nil {
 		s.log.Error("simulator: unmarshal state.read.request", "error", err)
 		_ = msg.Nak()
+		return
+	}
+	// Some data types are answered by the orchestrator — skip these to avoid
+	// racing with the real response and beating it with empty records.
+	switch req.DataType {
+	case "system_log":
+		// Served by the orchestrator's Loki bridge.
+		s.log.Info("simulator: skipping system_log read (routed to Loki via orchestrator)", "agent_id", req.AgentID)
+		_ = msg.Ack()
+		return
+	case "skill_cache":
+		// Served by the orchestrator's in-process agentStore.
+		s.log.Info("simulator: skipping skill_cache read (answered by orchestrator agentStore)", "agent_id", req.AgentID)
+		_ = msg.Ack()
 		return
 	}
 	resp := types.MemoryResponse{

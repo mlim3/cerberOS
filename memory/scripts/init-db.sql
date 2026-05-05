@@ -221,6 +221,10 @@ CREATE TABLE IF NOT EXISTS service_log_schema.system_events (
 CREATE INDEX IF NOT EXISTS idx_system_events_trace_id ON service_log_schema.system_events(trace_id);
 CREATE INDEX IF NOT EXISTS idx_system_events_service_name ON service_log_schema.system_events(service_name);
 CREATE INDEX IF NOT EXISTS idx_system_events_severity ON service_log_schema.system_events(severity);
+CREATE INDEX IF NOT EXISTS idx_system_events_created_at ON service_log_schema.system_events(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_system_events_message_fts
+    ON service_log_schema.system_events
+    USING gin(to_tsvector('english', message));
 
 -- ==========================================
 -- scheduler_schema

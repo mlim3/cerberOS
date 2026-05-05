@@ -8,6 +8,7 @@ export interface UISettings {
   fontSizeScale: 'normal' | 'large'
   highContrast: boolean
   showActivityLog: boolean
+  showSkillToasts: boolean
 }
 
 export const defaultUISettings: UISettings = {
@@ -18,6 +19,7 @@ export const defaultUISettings: UISettings = {
   fontSizeScale: 'normal',
   highContrast: false,
   showActivityLog: false,
+  showSkillToasts: true,
 }
 
 interface SettingsPanelProps {
@@ -114,6 +116,19 @@ function SettingsPanel({ settings, onSettingsChange, onClose }: SettingsPanelPro
                   type="checkbox"
                   checked={settings.showActivityLog}
                   onChange={e => updateSetting('showActivityLog', e.target.checked)}
+                />
+                <span className="toggle-switch"></span>
+              </label>
+
+              <label className="settings-toggle">
+                <span className="toggle-info">
+                  <span className="toggle-label">Skill activity notifications</span>
+                  <span className="toggle-description">Show toast notifications for web searches, log queries, and other notable skill invocations</span>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={settings.showSkillToasts}
+                  onChange={e => updateSetting('showSkillToasts', e.target.checked)}
                 />
                 <span className="toggle-switch"></span>
               </label>
