@@ -162,6 +162,15 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 		return nil, err
 	}
 	gw := gateway.New(natsClient, cfg.NodeID)
+	if isHTTPMemoryEndpoint(cfg.MemoryEndpoint) {
+		gw.SetMemoryEndpoint(cfg.MemoryEndpoint)
+	}
+	if cfg.VaultEngineURL != "" {
+		gw.SetVaultEngineEndpoint(cfg.VaultEngineURL)
+	}
+	if cfg.LokiURL != "" {
+		gw.SetLokiURL(cfg.LokiURL)
+	}
 
 	recoveryBridge := &recoveryProxy{}
 	taskMonitor := monitor.New(cfg, memClient, recoveryBridge)
@@ -214,12 +223,38 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 	gw.RegisterAgentStatusHandler(taskMonitor.HandleAgentStatusUpdate)
 	gw.RegisterTaskResultHandler(taskDispatcher.HandleTaskResult)
 	gw.RegisterPlanDecisionHandler(taskDispatcher.HandlePlanDecision)
+	gw.RegisterAgentSpawnHandler(taskDispatcher.HandleAgentSpawnRequest)
 	gw.RegisterVaultExecuteHandler(taskDispatcher.HandleVaultExecuteRequest)
 
 	// Forward agent user_input credential requests to the IO Component.
 	// HandleCredentialRequest resolves the top-level task_id from the subtask ref
 	// so the credential modal reaches the correct browser SSE stream.
 	gw.RegisterCredentialRequestHandler(taskDispatcher.HandleCredentialRequest)
+
+	// Forward notable skill_invocation audit events to the IO Component so
+	// the web dashboard can display skill-activity toasts.
+	gw.RegisterSkillActivityHandler(func(agentID, taskID, domain, command, outcome string, elapsedMS int64, vaultDelegated, synthesized bool) {
+		// taskID here is the subtask's orchRef (internal UUID). Resolve it to the
+		// frontend-visible parent task ID so broadcastStreamEvent in IO can match
+		// the SSE client registered at /api/events/{parentTaskID}.
+		parentTaskID := planExecutor.ParentTaskIDForOrchRef(taskID)
+		if parentTaskID == "" {
+			parentTaskID = taskID // fallback: planner task or already-completed plan
+		}
+		if err := ioClient.PushSkillActivity(ioclient.SkillActivityPayload{
+			TaskID:         parentTaskID,
+			AgentID:        agentID,
+			Domain:         domain,
+			Command:        command,
+			ElapsedMS:      elapsedMS,
+			VaultDelegated: vaultDelegated,
+			Synthesized:    synthesized,
+			Outcome:        outcome,
+			Timestamp:      time.Now().UnixMilli(),
+		}); err != nil {
+			observability.LogFromContext(context.Background()).Warn("skill_activity push to IO failed", "error", err)
+		}
+	})
 
 	healthHandler := health.New(vaultClient, memClient, natsClient, taskMonitor, cfg.NodeID)
 

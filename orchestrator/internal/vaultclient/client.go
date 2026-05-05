@@ -25,7 +25,7 @@ import (
 // domainCredTypes maps each skill domain to the credential types it requires.
 // Mirrors the mapping in mocks/vault_mock.go — keep them in sync.
 var domainCredTypes = map[string][]string{
-	"web":           {"web_api_key"},
+	"web":           {"web_api_key", "search_api_key"},
 	"data":          {"data_read_key", "data_write_key"},
 	"comms":         {"comms_api_key"},
 	"storage":       {"storage_credential"},

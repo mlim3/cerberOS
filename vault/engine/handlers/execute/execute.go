@@ -11,13 +11,26 @@ import (
 	"github.com/mlim3/cerberOS/vault/engine/audit"
 	"github.com/mlim3/cerberOS/vault/engine/handlers/common"
 	"github.com/mlim3/cerberOS/vault/engine/secretmanager"
+	"github.com/mlim3/cerberOS/vault/engine/websearch"
 )
 
 // Handler serves POST /execute.
 type Handler struct {
-	Manager secretmanager.SecretManager
-	Auditor *audit.Logger
-	Logger  *slog.Logger
+	Manager  secretmanager.SecretManager
+	Auditor  *audit.Logger
+	Logger   *slog.Logger
+	searcher websearch.SearchProvider
+}
+
+// New returns a Handler wired with the default Tavily search provider.
+func New(manager secretmanager.SecretManager, auditor *audit.Logger) *Handler {
+	return &Handler{Manager: manager, Auditor: auditor, searcher: websearch.NewTavilyProvider(0)}
+}
+
+// NewWithSearcher returns a Handler with a custom SearchProvider injected.
+// Intended for unit tests only.
+func NewWithSearcher(manager secretmanager.SecretManager, auditor *audit.Logger, s websearch.SearchProvider) *Handler {
+	return &Handler{Manager: manager, Auditor: auditor, searcher: s}
 }
 
 // Register mounts this handler on mux.
@@ -42,23 +55,73 @@ func (h *Handler) Execute(w http.ResponseWriter, r *http.Request) {
 
 	var req ExecuteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		elapsed := time.Since(start).Milliseconds()
 		logger.Warn("rejected credential execute request: malformed json body",
-			"status", http.StatusBadRequest,
+			"status", StatusExecutionError,
+			"error_code", ErrCodeInvalidParams,
 			"error", err,
-			"elapsed_ms", time.Since(start).Milliseconds())
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+			"elapsed_ms", elapsed)
+		writeExecuteError(w, ExecuteResponse{
+			Status:       StatusExecutionError,
+			ErrorCode:    ErrCodeInvalidParams,
+			ErrorMessage: "invalid request body",
+			ElapsedMS:    elapsed,
+		})
 		return
 	}
 
-	if req.UserID == "" || req.CredentialType == "" || req.OperationType == "" {
-		logger.Warn("rejected credential execute request: user_id, credential_type, and operation_type are required",
-			"status", http.StatusBadRequest,
-			"elapsed_ms", time.Since(start).Milliseconds())
-		http.Error(w, "user_id, credential_type, and operation_type are required", http.StatusBadRequest)
+	req.CredentialType = defaultCredentialType(req.OperationType, req.CredentialType)
+	if req.OperationType == "" {
+		elapsed := time.Since(start).Milliseconds()
+		logger.Warn("rejected credential execute request: operation_type is required",
+			"status", StatusExecutionError,
+			"error_code", ErrCodeInvalidParams,
+			"elapsed_ms", elapsed)
+		writeExecuteError(w, ExecuteResponse{
+			RequestID:    req.RequestID,
+			AgentID:      req.AgentID,
+			Status:       StatusExecutionError,
+			ErrorCode:    ErrCodeInvalidParams,
+			ErrorMessage: "operation_type is required",
+			ElapsedMS:    elapsed,
+		})
+		return
+	}
+	if req.RequestID == "" || req.AgentID == "" || req.PermissionToken == "" {
+		elapsed := time.Since(start).Milliseconds()
+		logger.Warn("rejected credential execute request: request_id, agent_id, and permission_token are required",
+			"status", StatusExecutionError,
+			"error_code", ErrCodeInvalidParams,
+			"elapsed_ms", elapsed)
+		writeExecuteError(w, ExecuteResponse{
+			RequestID:    req.RequestID,
+			AgentID:      req.AgentID,
+			Status:       StatusExecutionError,
+			ErrorCode:    ErrCodeInvalidParams,
+			ErrorMessage: "request_id, agent_id, and permission_token are required",
+			ElapsedMS:    elapsed,
+		})
+		return
+	}
+	if !isSupportedOperation(req.OperationType) {
+		elapsed := time.Since(start).Milliseconds()
+		logger.Warn("rejected credential execute request: unsupported operation type",
+			"status", StatusScopeViolation,
+			"error_code", ErrCodeUnsupportedOp,
+			"vault_op", req.OperationType,
+			"elapsed_ms", elapsed)
+		writeExecuteError(w, ExecuteResponse{
+			RequestID:    req.RequestID,
+			AgentID:      req.AgentID,
+			Status:       StatusScopeViolation,
+			ErrorCode:    ErrCodeUnsupportedOp,
+			ErrorMessage: "unsupported operation type",
+			ElapsedMS:    elapsed,
+		})
 		return
 	}
 
-	credKey := fmt.Sprintf("users/%s/credentials/%s", req.UserID, req.CredentialType)
+	credKey := credentialSecretKey(req.UserID, req.CredentialType)
 	if req.RequestID != "" {
 		logger = logger.With("request_id", req.RequestID)
 	}
@@ -83,19 +146,17 @@ func (h *Handler) Execute(w http.ResponseWriter, r *http.Request) {
 	secrets, err := h.Manager.GetSecrets([]string{credKey})
 	if err != nil {
 		elapsed := time.Since(start).Milliseconds()
-		logger.Warn("denied credential execute: per-user credential could not be resolved or access is denied",
-			"status", http.StatusForbidden,
-			"error_code", ErrCodeMissingCredential,
+		logger.Warn("denied credential execute: credential could not be resolved or access is denied",
+			"status", StatusExecutionError,
+			"error_code", ErrCodeCredentialUnavailable,
 			"error", err,
 			"elapsed_ms", elapsed)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusForbidden)
-		_ = json.NewEncoder(w).Encode(ExecuteResponse{
+		writeExecuteError(w, ExecuteResponse{
 			RequestID:    req.RequestID,
 			AgentID:      req.AgentID,
-			Status:       StatusScopeViolation,
-			ErrorCode:    ErrCodeMissingCredential,
-			ErrorMessage: "credential not found or access denied",
+			Status:       StatusExecutionError,
+			ErrorCode:    ErrCodeCredentialUnavailable,
+			ErrorMessage: "credential unavailable",
 			ElapsedMS:    elapsed,
 		})
 		return
@@ -115,7 +176,7 @@ func (h *Handler) Execute(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	// Dispatch operation — credential is used here and goes no further.
-	res := dispatchOperation(opCtx, req.OperationType, credential, req.OperationParams)
+	res := dispatchOperation(opCtx, req.OperationType, credential, req.OperationParams, h.searcher)
 	elapsed := time.Since(start).Milliseconds()
 
 	h.Auditor.Log(audit.Event{
@@ -158,4 +219,47 @@ func (h *Handler) Execute(w http.ResponseWriter, r *http.Request) {
 	logger.Info("completed credentialed execute successfully; returning result to agent (result body not logged)",
 		"status", StatusSuccess,
 		"elapsed_ms", elapsed)
+}
+
+func writeExecuteError(w http.ResponseWriter, resp ExecuteResponse) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func defaultCredentialType(operationType, credentialType string) string {
+	if credentialType != "" {
+		return credentialType
+	}
+	if operationType == OperationTypeWebSearch {
+		return CredentialTypeSearchAPIKey
+	}
+	return credentialType
+}
+
+func credentialSecretKey(userID, credentialType string) string {
+	if userID != "" {
+		return fmt.Sprintf("users/%s/credentials/%s", userID, credentialType)
+	}
+	if credentialType == CredentialTypeSearchAPIKey {
+		return SecretKeyTavily
+	}
+	return credentialType
+}
+
+func isSupportedOperation(operationType string) bool {
+	switch operationType {
+	case "vault_google_search",
+		"vault_github_request",
+		"vault_web_fetch",
+		OperationTypeWebSearch,
+		"vault_data_read",
+		"vault_data_write",
+		"vault_comms_send",
+		"vault_storage_read",
+		"vault_storage_write",
+		"vault_storage_list":
+		return true
+	default:
+		return false
+	}
 }

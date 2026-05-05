@@ -17,7 +17,9 @@
 // emission is a no-op — telemetry must never affect the ReAct loop.
 package main
 
-import "strings"
+import (
+	"strings"
+)
 
 // Drill-down depth values for skill_invocation events.
 // They encode how far into the skill hierarchy the agent travelled before
@@ -50,6 +52,31 @@ func outcomeFromResult(r ToolResult) string {
 		return OutcomeTimeout
 	}
 	return OutcomeError
+}
+
+// isVaultDelegated returns true when the named tool requires vault execution
+// (non-empty RequiredCredentialTypes). Used to populate the vault_delegated
+// field in skill_invocation audit events.
+func isVaultDelegated(tools []SkillTool, name string) bool {
+	for _, t := range tools {
+		if t.Definition.Name == name {
+			return len(t.RequiredCredentialTypes) > 0
+		}
+	}
+	return false
+}
+
+// isSynthesized returns true when the named tool was dynamically synthesized in
+// a prior session (SkillTool.Synthesized). Used to populate the synthesized
+// field in skill_invocation audit events so the orchestrator can surface a
+// "learned skill used" toast in the UI.
+func isSynthesized(tools []SkillTool, name string) bool {
+	for _, t := range tools {
+		if t.Definition.Name == name {
+			return t.Synthesized
+		}
+	}
+	return false
 }
 
 // drillDownDepth returns the drill-down depth for a tool invocation.

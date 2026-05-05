@@ -28,6 +28,43 @@ func (r *AgentLogsRepository) GetExecutionsByTaskID(ctx context.Context, taskID 
 	return queries.GetExecutionsByTaskID(ctx, taskID)
 }
 
+// GetExecutionsByAgentID returns execution log entries for a specific agent across all tasks,
+// ordered chronologically. Used by the logs.agent skill to retrieve an agent's full history.
+func (r *AgentLogsRepository) GetExecutionsByAgentID(ctx context.Context, agentID string, limit int32) ([]AgentLogsSchemaTaskExecution, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	const q = `
+SELECT id, task_id, agent_id, action_type, payload, status, error_context, created_at
+FROM agent_logs_schema.task_executions
+WHERE agent_id = $1
+ORDER BY created_at ASC
+LIMIT $2`
+
+	rows, err := r.Pool.Query(ctx, q, agentID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get agent executions: %w", err)
+	}
+	defer rows.Close()
+
+	executions := make([]AgentLogsSchemaTaskExecution, 0)
+	for rows.Next() {
+		var e AgentLogsSchemaTaskExecution
+		if err := rows.Scan(&e.ID, &e.TaskID, &e.AgentID, &e.ActionType, &e.Payload, &e.Status, &e.ErrorContext, &e.CreatedAt); err != nil {
+			return nil, fmt.Errorf("failed to scan agent execution: %w", err)
+		}
+		executions = append(executions, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read agent executions: %w", err)
+	}
+	return executions, nil
+}
+
 func (r *AgentLogsRepository) GetExecutionsByTaskIDLimit(ctx context.Context, taskID pgtype.UUID, limit int32) ([]AgentLogsSchemaTaskExecution, error) {
 	if limit <= 0 {
 		limit = 100

@@ -45,6 +45,11 @@ const (
 // state.read.response before giving up.
 const sessionReadTimeout = 5 * time.Second
 
+// logsReadTimeout is the maximum time ReadSystemLogs waits for a
+// state.read.response before giving up. Slightly longer than sessionReadTimeout
+// because log queries may involve Memory Component DB lookups.
+const logsReadTimeout = 10 * time.Second
+
 // ---- context key types ----
 // These are unexported to prevent collisions with keys from other packages.
 
@@ -553,6 +558,102 @@ func formatSearchResults(entries []types.SessionEntry) string {
 		b = append(b, fmt.Sprintf("[%d] (%s) %s", i+1, e.TurnType, e.Content)...)
 	}
 	return string(b)
+}
+
+// ReadSystemLogs issues a state.read.request for system logs (DataType "system_log")
+// and returns the results as a JSON string. contextTag identifies the log query variant
+// (e.g. "logs.query", "logs.search", "logs.tail", "logs.agent"). queryParams carries
+// the structured filter parameters that the Orchestrator passes to the Memory Component.
+//
+// A unique traceID is generated per call so concurrent log tool invocations in Phase 2
+// fan-out do not cross-correlate each other's responses.
+//
+// ReadSystemLogs is nil-safe; callers receive an informative string when NATS is absent.
+func (sl *SessionLog) ReadSystemLogs(contextTag string, queryParams json.RawMessage) string {
+	if sl == nil {
+		return "(logs unavailable: NATS not connected)"
+	}
+
+	requestTraceID := newUUID()
+
+	// Subscribe BEFORE publishing to avoid a race where the response arrives
+	// before we start listening.
+	sub, err := sl.js.SubscribeSync(
+		comms.SubjectStateReadResponse,
+		nats.DeliverNew(),
+		nats.AckNone(),
+	)
+	if err != nil {
+		sl.log.Warn("logs read: subscribe failed", "error", err)
+		return "(logs unavailable: subscribe failed)"
+	}
+	defer func() { _ = sub.Unsubscribe() }()
+
+	req := types.MemoryReadRequest{
+		AgentID:     sl.agentID,
+		DataType:    "system_log",
+		ContextTag:  contextTag,
+		TraceID:     requestTraceID,
+		QueryParams: queryParams,
+	}
+	env := agentEnvelope{
+		MessageID:       newUUID(),
+		MessageType:     comms.MsgTypeStateReadRequest,
+		SourceComponent: "agents",
+		CorrelationID:   sl.taskID,
+		TraceID:         requestTraceID,
+		Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
+		SchemaVersion:   "1.0",
+		Payload:         req,
+	}
+	data, err := json.Marshal(env)
+	if err != nil {
+		sl.log.Warn("logs read: marshal failed", "error", err)
+		return "(logs unavailable: marshal failed)"
+	}
+	if _, err := sl.js.Publish(comms.SubjectStateReadRequest, data); err != nil {
+		sl.log.Warn("logs read: publish failed", "error", err)
+		return "(logs unavailable: publish failed)"
+	}
+
+	deadline := time.Now().Add(logsReadTimeout)
+	for time.Now().Before(deadline) {
+		msg, err := sub.NextMsg(time.Until(deadline))
+		if err != nil {
+			break
+		}
+		_ = msg.Ack()
+
+		var envelope struct {
+			Payload json.RawMessage `json:"payload"`
+		}
+		if err := json.Unmarshal(msg.Data, &envelope); err != nil {
+			continue
+		}
+		var resp types.MemoryResponse
+		if err := json.Unmarshal(envelope.Payload, &resp); err != nil {
+			continue
+		}
+		// Filter: only our own agent's response with the matching request trace ID.
+		if resp.AgentID != sl.agentID || resp.TraceID != requestTraceID {
+			continue
+		}
+		if len(resp.Records) == 0 {
+			return "(no log entries found)"
+		}
+		out, err := json.MarshalIndent(resp.Records, "", "  ")
+		if err != nil {
+			return "(logs unavailable: marshal response failed)"
+		}
+		result := string(out)
+		if len(result) > maxContentBytes {
+			result = result[:maxContentBytes] + "\n[CONTENT TRUNCATED — log results exceeded 16KB limit]"
+		}
+		return result
+	}
+
+	sl.log.Warn("logs read: timed out", "context_tag", contextTag, "timeout", logsReadTimeout)
+	return "(logs query timed out — the Memory Component did not respond in time)"
 }
 
 // extractSessionEntries unpacks MemoryWrite.Payload into SessionEntry values.

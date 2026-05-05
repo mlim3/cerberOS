@@ -242,6 +242,7 @@ func main() {
 	// System Log endpoints
 	mux.HandleFunc("POST /api/v1/system/events", logHandler.HandleCreateSystemEvent)
 	mux.HandleFunc("GET /api/v1/system/events", logHandler.HandleListSystemEvents)
+	mux.HandleFunc("GET /api/v1/system/events/search", logHandler.HandleSearchSystemEvents)
 
 	// Scheduled jobs (protected — use same internal API key as vault)
 	mux.Handle("POST /api/v1/scheduled_jobs", api.RequireVaultKey(http.HandlerFunc(scheduledJobsHandler.HandleCreateScheduledJob)))
@@ -262,6 +263,7 @@ func main() {
 	// Agent Log endpoints
 	mux.HandleFunc("POST /api/v1/agent/{taskId}/executions", agentHandler.HandleCreateTaskExecution)
 	mux.HandleFunc("GET /api/v1/agent/{taskId}/executions", agentHandler.HandleGetExecutions)
+	mux.HandleFunc("GET /api/v1/agents/{agentId}/logs", agentHandler.HandleGetAgentLogs)
 	// Legacy routes retained temporarily for backward compatibility.
 	mux.HandleFunc("POST /api/v1/agents/tasks/{taskId}/executions", agentHandler.HandleCreateTaskExecution)
 	mux.HandleFunc("GET /api/v1/agents/tasks/{taskId}/executions", agentHandler.HandleGetExecutions)

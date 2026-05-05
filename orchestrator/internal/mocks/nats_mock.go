@@ -68,6 +68,11 @@ func (m *NATSMock) Subscribe(subject string, handler interfaces.MessageHandler) 
 	return nil
 }
 
+// SubscribeDurable delegates to Subscribe in the mock — no historical replay in tests.
+func (m *NATSMock) SubscribeDurable(subject, consumer string, handler interfaces.MessageHandler) error {
+	return m.Subscribe(subject, handler)
+}
+
 func (m *NATSMock) IsConnected() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

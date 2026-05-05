@@ -68,6 +68,7 @@ import (
 	"github.com/cerberOS/agents-component/internal/logfields"
 	"github.com/cerberOS/agents-component/internal/skills"
 	"github.com/cerberOS/agents-component/internal/telemetry"
+	"github.com/cerberOS/agents-component/pkg/types"
 )
 
 // mmdsPayload is the envelope written to the Firecracker MMDS by the Lifecycle
@@ -81,18 +82,19 @@ type mmdsPayload struct {
 // SpawnContext is the initial context injected by the Lifecycle Manager at spawn.
 // It is delivered as JSON via stdin.
 type SpawnContext struct {
-	TaskID           string                   `json:"task_id"`
-	SkillDomain      string                   `json:"skill_domain"`
-	PermissionToken  string                   `json:"permission_token"` // opaque credential ref — never a raw credential value
-	Instructions     string                   `json:"instructions"`
-	CommandManifest  string                   `json:"command_manifest,omitempty"`  // "- name: description" list built by factory; injected into system prompt
-	RecoveredContext string                   `json:"recovered_context,omitempty"` // non-empty on respawn
-	AgentMemory      string                   `json:"agent_memory,omitempty"`      // distilled facts from past tasks in this domain; injected into system prompt
-	UserProfile      string                   `json:"user_profile,omitempty"`      // user preference observations; injected into system prompt
-	TraceID          string                   `json:"trace_id"`
-	UserContextID    string                   `json:"user_context_id,omitempty"` // propagated from parent TaskSpec; echoed in all outbound events (issue #67)
-	ConversationID   string                   `json:"conversation_id,omitempty"` // non-empty when this task continues a prior conversation
-	PriorTurns       []anthropic.MessageParam `json:"prior_turns,omitempty"`     // reconstructed history from factory; nil for standalone tasks
+	TaskID            string                         `json:"task_id"`
+	SkillDomain       string                         `json:"skill_domain"`
+	PermissionToken   string                         `json:"permission_token"` // opaque credential ref — never a raw credential value
+	Instructions      string                         `json:"instructions"`
+	CommandManifest   string                         `json:"command_manifest,omitempty"`  // "- name: description" list built by factory; injected into system prompt
+	RecoveredContext  string                         `json:"recovered_context,omitempty"` // non-empty on respawn
+	AgentMemory       string                         `json:"agent_memory,omitempty"`      // distilled facts from past tasks in this domain; injected into system prompt
+	UserProfile       string                         `json:"user_profile,omitempty"`      // user preference observations; injected into system prompt
+	TraceID           string                         `json:"trace_id"`
+	UserContextID     string                         `json:"user_context_id,omitempty"`    // propagated from parent TaskSpec; echoed in all outbound events (issue #67)
+	ConversationID    string                         `json:"conversation_id,omitempty"`    // non-empty when this task continues a prior conversation
+	PriorTurns        []anthropic.MessageParam       `json:"prior_turns,omitempty"`        // reconstructed history from factory; nil for standalone tasks
+	SynthesizedSkills []types.SynthesizedSkillRecord `json:"synthesized_skills,omitempty"` // skills created by prior synthesis; each gets a dynamic SkillTool with LLM-based execution
 }
 
 // TaskOutput is the result written to stdout when the task completes or fails.

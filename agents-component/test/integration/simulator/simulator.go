@@ -423,6 +423,20 @@ func (s *Simulator) handleStateReadRequest(msg *nats.Msg) {
 		return
 	}
 
+	// Some data types are answered by the orchestrator (e.g. system_log via the
+	// Loki bridge, skill_cache from the agentStore). If the simulator responds
+	// first with empty records it races and beats the real answer, so skip these.
+	switch req.DataType {
+	case "system_log":
+		_ = msg.Ack()
+		s.log.Info("simulator: skipping system_log read (routed to Loki via orchestrator)", "agent_id", req.AgentID)
+		return
+	case "skill_cache":
+		_ = msg.Ack()
+		s.log.Info("simulator: skipping skill_cache read (answered by orchestrator agentStore)", "agent_id", req.AgentID)
+		return
+	}
+
 	resp := types.MemoryResponse{
 		AgentID: req.AgentID,
 		Records: []types.MemoryWrite{},

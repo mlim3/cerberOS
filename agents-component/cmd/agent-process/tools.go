@@ -57,6 +57,7 @@ type SkillTool struct {
 	Label                   string   // human-readable display name — monitoring/audit only, never shown to the LLM
 	RequiredCredentialTypes []string // empty = local execution; non-empty = vault execution required (M3)
 	TimeoutSeconds          int      // 0 = default (30s); hard max 300s; enforced by dispatchTool
+	Synthesized             bool     // true when this tool was dynamically synthesized in a prior session
 
 	// Anthropic API definition: name (≤64 chars), description (≤300 chars), input schema.
 	Definition anthropic.ToolParam
@@ -323,7 +324,7 @@ func vaultWebFetchTool(ve *VaultExecutor) SkillTool {
 	return SkillTool{
 		Label:                   "Vault Web Fetch",
 		RequiredCredentialTypes: []string{"web_api_key"},
-		TimeoutSeconds:          35, // must be >= vault TimeoutSeconds (30) + 5s buffer
+		TimeoutSeconds:          40, // must be > VaultExecutor local timer (30+5=35s) to ensure timer.C fires before ctx.Done()
 		Definition: anthropic.ToolParam{
 			Name: "vault_web_fetch",
 			Description: anthropic.String(

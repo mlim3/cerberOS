@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/mlim3/cerberOS/vault/engine/websearch"
 )
 
 // opResult is returned by each operation executor.
@@ -19,7 +21,7 @@ type opResult struct {
 
 // dispatchOperation routes to the correct executor based on operationType.
 // credential is the resolved raw API key/token — never logged or returned to callers.
-func dispatchOperation(ctx context.Context, operationType, credential string, params map[string]any) opResult {
+func dispatchOperation(ctx context.Context, operationType, credential string, params map[string]any, searcher websearch.SearchProvider) opResult {
 	switch operationType {
 	case "vault_google_search":
 		return execGoogleSearch(ctx, credential, params)
@@ -27,6 +29,8 @@ func dispatchOperation(ctx context.Context, operationType, credential string, pa
 		return execGitHubRequest(ctx, credential, params)
 	case "vault_web_fetch":
 		return execWebFetch(ctx, credential, params)
+	case "web_search":
+		return execWebSearch(ctx, credential, params, searcher)
 	case "vault_data_read":
 		return opResult{err: fmt.Errorf("vault_data_read not yet implemented"), code: ErrCodeUnsupportedOp}
 	case "vault_data_write":
@@ -210,4 +214,59 @@ func httpRequest(ctx context.Context, method, rawURL string, headers map[string]
 	}
 
 	return respBody, resp.StatusCode, nil
+}
+
+// execWebSearch calls the Tavily AI Search API via the injected SearchProvider.
+// credential is the Tavily API key. params must include "query".
+func execWebSearch(ctx context.Context, credential string, params map[string]any, searcher websearch.SearchProvider) opResult {
+	if searcher == nil {
+		searcher = websearch.NewTavilyProvider(0)
+	}
+	query, ok := params["query"].(string)
+	if !ok || query == "" {
+		return opResult{err: fmt.Errorf("query parameter is required"), code: ErrCodeInvalidParams}
+	}
+
+	maxResults := 5
+	if v, ok := params["max_results"].(float64); ok && v > 0 {
+		if int(v) < 20 {
+			maxResults = int(v)
+		} else {
+			maxResults = 20
+		}
+	}
+
+	var includeDomains, excludeDomains []string
+	if v, ok := params["include_domains"].([]any); ok {
+		for _, d := range v {
+			if s, ok := d.(string); ok {
+				includeDomains = append(includeDomains, s)
+			}
+		}
+	}
+	if v, ok := params["exclude_domains"].([]any); ok {
+		for _, d := range v {
+			if s, ok := d.(string); ok {
+				excludeDomains = append(excludeDomains, s)
+			}
+		}
+	}
+
+	res, err := searcher.Search(ctx, credential, websearch.SearchParams{
+		Query:          query,
+		MaxResults:     maxResults,
+		IncludeDomains: includeDomains,
+		ExcludeDomains: excludeDomains,
+	})
+	if err != nil {
+		return opResult{err: fmt.Errorf("web search failed: %w", err), code: ErrCodeUpstreamError}
+	}
+
+	out, err := json.Marshal(res)
+	if err != nil {
+		return opResult{err: fmt.Errorf("failed to serialize search results"), code: ErrCodeUpstreamError}
+	}
+	var m map[string]any
+	_ = json.Unmarshal(out, &m)
+	return opResult{result: m}
 }

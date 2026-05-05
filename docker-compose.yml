@@ -60,6 +60,7 @@ services:
       NATS_URL: nats://nats:4222
       NATS_CREDS_PATH: ""
       VAULT_ADDR: http://openbao:8200
+      VAULT_ENGINE_ENDPOINT: http://vault:8000
       MEMORY_ENDPOINT: http://memory-api:8081
       VAULT_ENGINE_URL: http://vault:8000 #for keys test
       IO_API_BASE: http://io:3001
@@ -70,6 +71,7 @@ services:
       # agent-process via lifecycle.Deliver (see aegis-agents comments) and
       # typically complete in 2–10s; the high ceiling is harmless on those.
       DECOMPOSITION_TIMEOUT_SECONDS: "120"
+      PLAN_APPROVAL_MODE: "off"
       # Observability: gRPC OTLP ingest into Tempo, structured JSON logs scraped by Promtail → Loki.
       OTEL_EXPORTER_OTLP_ENDPOINT: tempo:4317
       LOG_LEVEL: info

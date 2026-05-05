@@ -137,6 +137,80 @@ func (h *AgentHandler) HandleCreateTaskExecution(w http.ResponseWriter, r *http.
 	}))
 }
 
+// HandleGetAgentLogs fetches execution history for a specific agent across all tasks.
+// @Summary Get agent execution history
+// @Description Returns the chronological execution log for an agent (all tasks)
+// @Tags agents
+// @Produce json
+// @Param agentId path string true "Agent ID"
+// @Param limit query int false "Max entries (default: 50, max: 200)"
+// @Success 200 {object} map[string]interface{} "OK"
+// @Failure 400 {object} map[string]interface{} "Bad Request"
+// @Failure 500 {object} map[string]interface{} "Internal Server Error"
+// @Router /api/v1/agents/{agentId}/logs [get]
+func (h *AgentHandler) HandleGetAgentLogs(w http.ResponseWriter, r *http.Request) {
+	agentId := r.PathValue("agentId")
+	if agentId == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "agentId is required", nil))
+		return
+	}
+
+	limit := int32(50)
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		parsed, err := strconv.ParseInt(limitStr, 10, 32)
+		if err != nil || parsed <= 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "invalid limit", nil))
+			return
+		}
+		limit = int32(parsed)
+	}
+
+	executions, err := h.repo.GetExecutionsByAgentID(r.Context(), agentId, limit)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(ErrorResponse("internal", "failed to get agent logs", err.Error()))
+		return
+	}
+
+	type executionResponse struct {
+		ExecutionID  uuid.UUID       `json:"executionId"`
+		TaskID       uuid.UUID       `json:"taskId"`
+		AgentID      string          `json:"agentId"`
+		ActionType   string          `json:"actionType"`
+		Payload      json.RawMessage `json:"payload"`
+		Status       string          `json:"status"`
+		ErrorContext *string         `json:"errorContext,omitempty"`
+		CreatedAt    time.Time       `json:"createdAt"`
+	}
+
+	formatted := make([]executionResponse, 0, len(executions))
+	for _, e := range executions {
+		row := executionResponse{
+			ExecutionID: uuid.UUID(e.ID.Bytes),
+			TaskID:      uuid.UUID(e.TaskID.Bytes),
+			AgentID:     e.AgentID,
+			ActionType:  e.ActionType,
+			Payload:     e.Payload,
+			Status:      e.Status,
+			CreatedAt:   e.CreatedAt.Time,
+		}
+		if e.ErrorContext.Valid {
+			v := e.ErrorContext.String
+			row.ErrorContext = &v
+		}
+		formatted = append(formatted, row)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(SuccessResponse(map[string]any{"executions": formatted}))
+}
+
 // HandleGetExecutions fetches and returns the chronological log of an agent's work for a specific taskId
 // @Summary Get task executions
 // @Description Fetches and returns the chronological log of an agent's work for a specific taskId
