@@ -97,7 +97,7 @@ func loadSkillsConfig() *skillsconfig.Config {
 // as may be nil (agent spawning unavailable) — spawn_agent tool is omitted.
 // task_complete and skills_search are always included.
 func toolsForDomain(domain string, ve *VaultExecutor, as *AgentSpawner) []SkillTool {
-	base := []SkillTool{taskCompleteTool(), skillsSearchTool(getSkillsManager())}
+	base := []SkillTool{taskCompleteTool(), skillsSearchTool(getSkillsManager(), domain, as != nil)}
 	if as != nil {
 		base = append(base, spawnAgentTool(as))
 	}

@@ -14,12 +14,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/cerberOS/agents-component/internal/logfields"
 	"github.com/cerberOS/agents-component/internal/skills"
-	"github.com/cerberOS/agents-component/pkg/types"
+	"github.com/cerberOS/agents-component/internal/skillsconfig"
 )
 
 var (
@@ -32,7 +34,11 @@ var (
 func getSkillsManager() skills.Manager {
 	skillsMgrOnce.Do(func() {
 		mgr := skills.New()
-		for _, domain := range agentProcessDomainNodes() {
+		cfg := loadSkillsConfig()
+		if cfg == nil {
+			cfg = &skillsconfig.Config{}
+		}
+		for _, domain := range cfg.ToSkillNodes() {
 			_ = mgr.RegisterDomain(domain) // validation errors mean a bug in this file
 		}
 		skillsMgr = mgr
@@ -40,39 +46,9 @@ func getSkillsManager() skills.Manager {
 	return skillsMgr
 }
 
-// agentProcessDomainNodes returns metadata-only SkillNode trees for every domain
-// known to this binary. These mirror the tool definitions in tools.go but contain
-// only the fields needed to populate the search index (name, label, description).
-// Keep this in sync with toolsForDomain when adding new tools.
-func agentProcessDomainNodes() []*types.SkillNode {
-	return []*types.SkillNode{
-		{
-			Name:  "web",
-			Level: "domain",
-			Children: map[string]*types.SkillNode{
-				"web_fetch": {
-					Name:           "web_fetch",
-					Level:          "command",
-					Label:          "Web Fetch",
-					Description:    "Fetch the content of a URL via HTTP GET or POST. Use for public web pages and unauthenticated REST APIs. Do NOT use for operations requiring authentication — use vault_web_fetch instead.",
-					TimeoutSeconds: 30,
-				},
-				"vault_web_fetch": {
-					Name:                    "vault_web_fetch",
-					Level:                   "command",
-					Label:                   "Vault Web Fetch",
-					RequiredCredentialTypes: []string{"web_api_key"},
-					Description:             "Fetch a URL using a stored API credential via the Vault. Use for authenticated HTTP requests requiring an API key. Do NOT use for public URLs — use web_fetch instead.",
-					TimeoutSeconds:          35,
-				},
-			},
-		},
-	}
-}
-
 // skillsSearchTool returns a SkillTool that searches the skill index semantically.
 // mgr is the skills.Manager holding the pre-computed embedding index.
-func skillsSearchTool(mgr skills.Manager) SkillTool {
+func skillsSearchTool(mgr skills.Manager, currentDomain string, spawnAvailable bool) SkillTool {
 	return SkillTool{
 		Label:                   "Skills Search",
 		RequiredCredentialTypes: nil,
@@ -99,17 +75,22 @@ func skillsSearchTool(mgr skills.Manager) SkillTool {
 			},
 		},
 		Execute: func(_ context.Context, raw json.RawMessage) ToolResult {
-			return executeSkillsSearch(mgr, raw)
+			return executeSkillsSearch(mgr, currentDomain, spawnAvailable, raw)
 		},
 	}
 }
 
-func executeSkillsSearch(mgr skills.Manager, raw json.RawMessage) ToolResult {
+func executeSkillsSearch(mgr skills.Manager, currentDomain string, spawnAvailable bool, raw json.RawMessage) ToolResult {
+	log := slog.Default()
 	var params struct {
 		Query string `json:"query"`
 		TopK  int    `json:"top_k"`
 	}
 	if err := json.Unmarshal(raw, &params); err != nil {
+		log.Warn("skills_search: invalid parameters",
+			"current_domain", currentDomain,
+			"error", err,
+		)
 		return ToolResult{
 			Content: fmt.Sprintf("invalid parameters: %v", err),
 			IsError: true,
@@ -117,15 +98,32 @@ func executeSkillsSearch(mgr skills.Manager, raw json.RawMessage) ToolResult {
 		}
 	}
 	if params.Query == "" {
+		log.Warn("skills_search: empty query",
+			"current_domain", currentDomain,
+		)
 		return ToolResult{
 			Content: "query must not be empty",
 			IsError: true,
 			Details: map[string]interface{}{"error": "empty query"},
 		}
 	}
+	if params.TopK <= 0 {
+		params.TopK = 3
+	}
+
+	log.Info("skills_search: executing semantic search",
+		"current_domain", currentDomain,
+		"top_k", params.TopK,
+		"query_preview", logfields.PreviewWords(params.Query, 20, 180),
+	)
 
 	results, err := mgr.Search(params.Query, params.TopK)
 	if err != nil {
+		log.Error("skills_search: search failed",
+			"current_domain", currentDomain,
+			"query_preview", logfields.PreviewWords(params.Query, 20, 180),
+			"error", err,
+		)
 		return ToolResult{
 			Content: fmt.Sprintf("skills search failed: %v", err),
 			IsError: true,
@@ -134,24 +132,74 @@ func executeSkillsSearch(mgr skills.Manager, raw json.RawMessage) ToolResult {
 	}
 
 	if len(results) == 0 {
+		log.Info("skills_search: no matching skills found",
+			"current_domain", currentDomain,
+			"query_preview", logfields.PreviewWords(params.Query, 20, 180),
+		)
 		return ToolResult{
 			Content: "No matching skills found for that query.",
 			Details: map[string]interface{}{"query": params.Query, "result_count": 0},
 		}
 	}
 
+	top := results[0]
+	log.Info("skills_search: results ready",
+		"current_domain", currentDomain,
+		"query_preview", logfields.PreviewWords(params.Query, 20, 180),
+		"result_count", len(results),
+		"top_domain", top.Domain,
+		"top_command", top.Name,
+		"top_description", logfields.PreviewWords(top.Description, 24, 200),
+	)
+
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "Found %d matching skill(s):\n\n", len(results))
 	for i, r := range results {
 		fmt.Fprintf(&sb, "%d. %s.%s\n   %s\n\n", i+1, r.Domain, r.Name, r.Description)
 	}
-	sb.WriteString("Use the tool name directly in your next action if it matches what you need.")
+	details := map[string]interface{}{
+		"query":          params.Query,
+		"result_count":   len(results),
+		"current_domain": currentDomain,
+		"top_domain":     top.Domain,
+		"top_command":    top.Name,
+	}
+	if top.Domain != "" && top.Domain != currentDomain && spawnAvailable {
+		spawnInstructions := fmt.Sprintf(
+			"Handle this request using the %s skill domain: %s\n\nPrefer the %s.%s capability if it fits. Return only the final result.",
+			top.Domain,
+			params.Query,
+			top.Domain,
+			top.Name,
+		)
+		log.Info("skills_search: top result outside current domain; recommending spawn_agent handoff",
+			"current_domain", currentDomain,
+			"query_preview", logfields.PreviewWords(params.Query, 20, 180),
+			"delegated_domain", top.Domain,
+			"delegated_command", top.Name,
+		)
+		fmt.Fprintf(&sb, "Top result is outside the current %q domain. Call spawn_agent next with required_skills=[%q]. Suggested instructions: %q\n", currentDomain, top.Domain, spawnInstructions)
+		details["recommended_action"] = "spawn_agent"
+		details["spawn_required_skills"] = []string{top.Domain}
+		details["spawn_instructions"] = spawnInstructions
+	} else {
+		if top.Domain == currentDomain {
+			log.Info("skills_search: top result stays within current domain; agent can use it directly",
+				"current_domain", currentDomain,
+				"top_command", top.Name,
+			)
+		} else {
+			log.Info("skills_search: top result outside current domain but no spawn available; agent must continue without handoff",
+				"current_domain", currentDomain,
+				"top_domain", top.Domain,
+				"top_command", top.Name,
+			)
+		}
+		sb.WriteString("Use the tool name directly in your next action if it matches what you need.")
+	}
 
 	return ToolResult{
 		Content: sb.String(),
-		Details: map[string]interface{}{
-			"query":        params.Query,
-			"result_count": len(results),
-		},
+		Details: details,
 	}
 }
