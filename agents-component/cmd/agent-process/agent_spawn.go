@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/cerberOS/agents-component/internal/comms"
+	"github.com/cerberOS/agents-component/internal/logfields"
 	"github.com/cerberOS/agents-component/pkg/types"
 	nats "github.com/nats-io/nats.go"
 )
@@ -239,6 +240,13 @@ func (as *AgentSpawner) Spawn(ctx context.Context, raw json.RawMessage) ToolResu
 		UserContextID:  as.userContextID,
 	}
 
+	as.log.Info("agent spawn: prepared child delegation request",
+		"request_id", req.RequestID,
+		"required_skills", req.RequiredSkills,
+		"timeout_seconds", req.TimeoutSeconds,
+		"instructions_preview", logfields.PreviewHeadTail(req.Instructions, 18, 10),
+	)
+
 	// Step 1: Record request_id in session log BEFORE the goroutine yields.
 	// This is the invariant for crash recovery — an in-flight spawn with no
 	// response can be identified and re-requested on recovery.
@@ -304,6 +312,12 @@ func (as *AgentSpawner) Spawn(ctx context.Context, raw json.RawMessage) ToolResu
 	localDeadline := time.Duration(req.TimeoutSeconds)*time.Second + spawnLocalDeadlineBuffer
 	timer := time.NewTimer(localDeadline)
 	defer timer.Stop()
+
+	as.log.Info("agent spawn: waiting for child response",
+		"request_id", req.RequestID,
+		"required_skills", req.RequiredSkills,
+		"local_deadline_seconds", int(localDeadline.Seconds()),
+	)
 
 	select {
 	case spawnResp := <-resultCh:
@@ -396,6 +410,7 @@ func (as *AgentSpawner) publishRequest(req types.AgentSpawnRequest) error {
 			MessageType:     comms.MsgTypeAgentSpawnRequest,
 			SourceComponent: "agents",
 			CorrelationID:   req.RequestID, // stable — Orchestrator routing key
+			TraceID:         as.traceID,
 			Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
 			SchemaVersion:   "1.0",
 			Payload:         req,
@@ -405,11 +420,27 @@ func (as *AgentSpawner) publishRequest(req types.AgentSpawnRequest) error {
 			// Marshal failure is not transient — abort immediately.
 			return fmt.Errorf("marshal agent spawn request envelope: %w", err)
 		}
+		as.log.Info("agent spawn: publishing request envelope",
+			"request_id", req.RequestID,
+			"attempt", attempt+1,
+			"required_skills", req.RequiredSkills,
+			"instructions_preview", logfields.PreviewHeadTail(req.Instructions, 18, 10),
+		)
 		if _, err := as.js.Publish(comms.SubjectAgentSpawnRequest, data); err != nil {
 			lastErr = fmt.Errorf("jetstream publish agent spawn request (attempt %d/%d): %w",
 				attempt+1, as.publishMaxAttempts, err)
+			as.log.Warn("agent spawn: publish attempt failed",
+				"request_id", req.RequestID,
+				"attempt", attempt+1,
+				"max_attempts", as.publishMaxAttempts,
+				"error", err,
+			)
 			continue
 		}
+		as.log.Info("agent spawn: publish attempt succeeded",
+			"request_id", req.RequestID,
+			"attempt", attempt+1,
+		)
 		return nil
 	}
 	return fmt.Errorf("agent spawn: NATS unavailable after %d attempts: %w",
