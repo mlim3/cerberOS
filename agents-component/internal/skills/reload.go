@@ -93,7 +93,10 @@ func (m *hierarchyManager) Reload(domains []*types.SkillNode) (ReloadResult, err
 	// slow embedder calls (e.g. the shared embedding-api) do not stall readers.
 	// Only commands whose (domain, name, description) tuple has changed since
 	// the last load call the embedder; all others reuse their existing vector.
-	newEmbeddings := m.buildIncrementalEmbeddings(domains, oldEmbeddings)
+	newEmbeddings, err := m.buildIncrementalEmbeddings(domains, oldEmbeddings)
+	if err != nil {
+		return ReloadResult{}, fmt.Errorf("skills reload: embedding rebuild failed: %w", err)
+	}
 
 	// Phase 5 — Atomic swap. Readers see either the full old state or the
 	// full new state — never a partial mix.
@@ -119,7 +122,7 @@ func embeddingCacheKey(domain, name, description string) string {
 // Called outside the write lock; safe for concurrent reads.
 func (m *hierarchyManager) buildIncrementalEmbeddings(
 	domains []*types.SkillNode, oldEmbs []commandEmbedding,
-) []commandEmbedding {
+) ([]commandEmbedding, error) {
 	// Index existing vectors by cache key.
 	cache := make(map[string][]float64, len(oldEmbs))
 	for _, e := range oldEmbs {
@@ -161,7 +164,7 @@ func (m *hierarchyManager) buildIncrementalEmbeddings(
 	}
 
 	if len(toEmbed) == 0 {
-		return result
+		return result, nil
 	}
 
 	// Batch-embed all new/changed commands in a single call when possible.
@@ -169,7 +172,10 @@ func (m *hierarchyManager) buildIncrementalEmbeddings(
 	for i, p := range toEmbed {
 		texts[i] = p.text
 	}
-	vecs := m.embedTexts(texts)
+	vecs, err := m.embedTexts(texts)
+	if err != nil {
+		return nil, err
+	}
 	for i, p := range toEmbed {
 		if i < len(vecs) && vecs[i] != nil {
 			result = append(result, commandEmbedding{
@@ -179,10 +185,8 @@ func (m *hierarchyManager) buildIncrementalEmbeddings(
 				vector:      vecs[i],
 			})
 		}
-		// Non-fatal: commands with nil vectors are excluded from search
-		// results but structural queries (GetSpec etc.) still work.
 	}
-	return result
+	return result, nil
 }
 
 // diffDomains computes the added/removed/modified sets between two domain maps.

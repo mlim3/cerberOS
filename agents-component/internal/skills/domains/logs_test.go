@@ -53,7 +53,7 @@ func TestLogsDomain_RegistersWithManager(t *testing.T) {
 }
 
 func TestLogsDomain_SearchFindsRelevantCommands(t *testing.T) {
-	mgr := skills.New()
+	mgr := newSearchManager()
 	if err := mgr.RegisterDomain(domains.LogsDomain()); err != nil {
 		t.Fatalf("RegisterDomain failed: %v", err)
 	}

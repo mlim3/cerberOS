@@ -138,7 +138,6 @@ func Load() (*Config, error) {
 	if c.ComponentID == "" {
 		c.ComponentID = "aegis-agents"
 	}
-	// EmbeddingAPIURL is optional — when absent the local hashEmbedder is used.
 	if c.EmbeddingPromptStyle == "" {
 		c.EmbeddingPromptStyle = "plain"
 	}

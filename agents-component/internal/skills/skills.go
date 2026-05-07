@@ -75,7 +75,7 @@ type InvocationHook func(domain, command string)
 // Option configures a hierarchyManager.
 type Option func(*hierarchyManager)
 
-// WithEmbedder replaces the default deterministic embedder with a custom one.
+// WithEmbedder configures the embedder used for semantic skill search.
 // Production wiring uses the shared embedding-api client from a cmd/ binary
 // where network calls are permitted. The embedder must be safe for concurrent use.
 func WithEmbedder(e Embedder) Option {
@@ -111,11 +111,11 @@ type hierarchyManager struct {
 }
 
 // New returns a ready-to-use Skill Hierarchy Manager.
-// Zero or more Option values can be passed to override defaults (e.g. WithEmbedder).
+// Zero or more Option values can be passed to configure dependencies such as
+// the semantic-search embedder.
 func New(opts ...Option) Manager {
 	m := &hierarchyManager{
-		domains:  make(map[string]*types.SkillNode),
-		embedder: newHashEmbedder(defaultHashDim),
+		domains: make(map[string]*types.SkillNode),
 	}
 	for _, o := range opts {
 		o(m)
@@ -147,7 +147,10 @@ func (m *hierarchyManager) RegisterDomain(node *types.SkillNode) error {
 
 	// Pre-compute embeddings BEFORE taking the write lock so the (potentially
 	// slow) embedding call does not block concurrent readers.
-	newEntries := m.buildEmbeddings(node)
+	newEntries, err := m.buildEmbeddings(node)
+	if err != nil {
+		return fmt.Errorf("skills: domain %q registration embedding failed: %w", node.Name, err)
+	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -163,7 +166,7 @@ func (m *hierarchyManager) RegisterDomain(node *types.SkillNode) error {
 // buildEmbeddings computes commandEmbedding entries for all command-level
 // children of the domain. Called without holding the mutex.
 // Uses embedTexts for batch embedding when the configured embedder supports it.
-func (m *hierarchyManager) buildEmbeddings(domain *types.SkillNode) []commandEmbedding {
+func (m *hierarchyManager) buildEmbeddings(domain *types.SkillNode) ([]commandEmbedding, error) {
 	type cmdMeta struct {
 		name string
 		desc string
@@ -175,7 +178,7 @@ func (m *hierarchyManager) buildEmbeddings(domain *types.SkillNode) []commandEmb
 		}
 	}
 	if len(cmds) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	// Embed all command texts in a single batch call when possible.
@@ -185,7 +188,10 @@ func (m *hierarchyManager) buildEmbeddings(domain *types.SkillNode) []commandEmb
 		// identifiers and natural-language intent are captured.
 		texts[i] = c.name + " " + c.desc
 	}
-	vecs := m.embedTexts(texts)
+	vecs, err := m.embedTexts(texts)
+	if err != nil {
+		return nil, err
+	}
 
 	var entries []commandEmbedding
 	for i, c := range cmds {
@@ -197,10 +203,10 @@ func (m *hierarchyManager) buildEmbeddings(domain *types.SkillNode) []commandEmb
 				vector:      vecs[i],
 			})
 		}
-		// Non-fatal: commands with nil vectors are excluded from search results
-		// but structural queries (GetSpec etc.) still work.
+		// Commands with nil vectors are excluded from search results but
+		// structural queries (GetSpec etc.) still work.
 	}
-	return entries
+	return entries, nil
 }
 
 // GetDomain returns a shallow copy of the domain node with no children exposed.
@@ -297,6 +303,9 @@ func (m *hierarchyManager) Search(query string, topK int) ([]types.SkillSearchRe
 	if topK <= 0 {
 		topK = defaultSearchTop
 	}
+	if m.embedder == nil {
+		return nil, fmt.Errorf("skills: semantic search unavailable: no embedder configured")
+	}
 
 	// Embed the query outside the lock — may be slow for remote models.
 	queryVec, err := m.embedder.Embed(query)
@@ -363,7 +372,10 @@ func (m *hierarchyManager) RegisterCommand(domain string, node *types.SkillNode)
 		Level:    "domain",
 		Children: map[string]*types.SkillNode{node.Name: node},
 	}
-	newEntries := m.buildEmbeddings(proxy)
+	newEntries, err := m.buildEmbeddings(proxy)
+	if err != nil {
+		return fmt.Errorf("skills: RegisterCommand embedding failed: %w", err)
+	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()

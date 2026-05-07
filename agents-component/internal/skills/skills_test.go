@@ -1,8 +1,11 @@
 package skills_test
 
 import (
+	"hash/fnv"
+	"math"
 	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/cerberOS/agents-component/internal/skills"
 	"github.com/cerberOS/agents-component/pkg/types"
@@ -199,7 +202,7 @@ func storageDomain() *types.SkillNode {
 }
 
 func TestSearch_EmptyQueryReturnsError(t *testing.T) {
-	m := skills.New()
+	m := newSearchManager()
 	m.RegisterDomain(multiCommandDomain())
 
 	_, err := m.Search("", 3)
@@ -209,7 +212,7 @@ func TestSearch_EmptyQueryReturnsError(t *testing.T) {
 }
 
 func TestSearch_EmptyIndexReturnsEmptySlice(t *testing.T) {
-	m := skills.New()
+	m := newSearchManager()
 
 	results, err := m.Search("fetch a URL", 3)
 	if err != nil {
@@ -221,7 +224,7 @@ func TestSearch_EmptyIndexReturnsEmptySlice(t *testing.T) {
 }
 
 func TestSearch_ResultsAreDescendingScore(t *testing.T) {
-	m := skills.New()
+	m := newSearchManager()
 	if err := m.RegisterDomain(multiCommandDomain()); err != nil {
 		t.Fatalf("RegisterDomain: %v", err)
 	}
@@ -239,7 +242,7 @@ func TestSearch_ResultsAreDescendingScore(t *testing.T) {
 }
 
 func TestSearch_TopKLimitsResults(t *testing.T) {
-	m := skills.New()
+	m := newSearchManager()
 	if err := m.RegisterDomain(multiCommandDomain()); err != nil {
 		t.Fatalf("RegisterDomain: %v", err)
 	}
@@ -254,7 +257,7 @@ func TestSearch_TopKLimitsResults(t *testing.T) {
 }
 
 func TestSearch_ZeroTopKUsesDefault(t *testing.T) {
-	m := skills.New()
+	m := newSearchManager()
 	// Register two domains to get more than 3 commands total.
 	if err := m.RegisterDomain(multiCommandDomain()); err != nil {
 		t.Fatalf("RegisterDomain web: %v", err)
@@ -274,7 +277,7 @@ func TestSearch_ZeroTopKUsesDefault(t *testing.T) {
 }
 
 func TestSearch_TopKLargerThanIndexReturnsAll(t *testing.T) {
-	m := skills.New()
+	m := newSearchManager()
 	if err := m.RegisterDomain(multiCommandDomain()); err != nil {
 		t.Fatalf("RegisterDomain: %v", err)
 	}
@@ -289,7 +292,7 @@ func TestSearch_TopKLargerThanIndexReturnsAll(t *testing.T) {
 }
 
 func TestSearch_CrossDomain_MatchesCorrectDomain(t *testing.T) {
-	m := skills.New()
+	m := newSearchManager()
 	if err := m.RegisterDomain(multiCommandDomain()); err != nil {
 		t.Fatalf("RegisterDomain web: %v", err)
 	}
@@ -315,7 +318,7 @@ func TestSearch_CrossDomain_MatchesCorrectDomain(t *testing.T) {
 }
 
 func TestSearch_AuthenticatedQueryRanksVaultToolFirst(t *testing.T) {
-	m := skills.New()
+	m := newSearchManager()
 	if err := m.RegisterDomain(multiCommandDomain()); err != nil {
 		t.Fatalf("RegisterDomain: %v", err)
 	}
@@ -335,7 +338,7 @@ func TestSearch_AuthenticatedQueryRanksVaultToolFirst(t *testing.T) {
 }
 
 func TestSearch_ResultDomainMatchesRegistration(t *testing.T) {
-	m := skills.New()
+	m := newSearchManager()
 	if err := m.RegisterDomain(storageDomain()); err != nil {
 		t.Fatalf("RegisterDomain: %v", err)
 	}
@@ -457,7 +460,7 @@ func emailDomain() *types.SkillNode {
 // ---- Search tests ----
 
 func TestSearch_EmptyQuery(t *testing.T) {
-	m := skills.New()
+	m := newSearchManager()
 	if err := m.RegisterDomain(webDomain()); err != nil {
 		t.Fatal(err)
 	}
@@ -468,7 +471,7 @@ func TestSearch_EmptyQuery(t *testing.T) {
 }
 
 func TestSearch_EmptyIndex(t *testing.T) {
-	m := skills.New()
+	m := newSearchManager()
 	results, err := m.Search("fetch a web page", 3)
 	if err != nil {
 		t.Fatalf("empty index: unexpected error: %v", err)
@@ -479,7 +482,7 @@ func TestSearch_EmptyIndex(t *testing.T) {
 }
 
 func TestSearch_ReturnsAtMostTopK(t *testing.T) {
-	m := skills.New()
+	m := newSearchManager()
 	if err := m.RegisterDomain(fetchDomain()); err != nil {
 		t.Fatal(err)
 	}
@@ -497,7 +500,7 @@ func TestSearch_ReturnsAtMostTopK(t *testing.T) {
 }
 
 func TestSearch_DefaultTopKWhenZero(t *testing.T) {
-	m := skills.New()
+	m := newSearchManager()
 	// Register enough commands (two domains, one command each).
 	if err := m.RegisterDomain(fetchDomain()); err != nil {
 		t.Fatal(err)
@@ -516,7 +519,7 @@ func TestSearch_DefaultTopKWhenZero(t *testing.T) {
 }
 
 func TestSearch_TopKLargerThanCorpus(t *testing.T) {
-	m := skills.New()
+	m := newSearchManager()
 	if err := m.RegisterDomain(fetchDomain()); err != nil {
 		t.Fatal(err)
 	}
@@ -531,7 +534,7 @@ func TestSearch_TopKLargerThanCorpus(t *testing.T) {
 }
 
 func TestSearch_ProgressiveDisclosure_NoSpec(t *testing.T) {
-	m := skills.New()
+	m := newSearchManager()
 	if err := m.RegisterDomain(webDomain()); err != nil {
 		t.Fatal(err)
 	}
@@ -630,11 +633,11 @@ func (c *countingEmbedder) Embed(text string) ([]float64, error) {
 //
 // Actually: just use a stubEmbedder with a large known vector.
 func newHashEmbedderForTest() skills.Embedder {
-	return &stubEmbedder{dim: 512, vectors: map[string][]float64{}}
+	return &lexicalHashEmbedder{dim: 512}
 }
 
 func TestSearch_ResultContainsDomainPath(t *testing.T) {
-	m := skills.New()
+	m := newSearchManager()
 	if err := m.RegisterDomain(fetchDomain()); err != nil {
 		t.Fatal(err)
 	}
@@ -647,5 +650,83 @@ func TestSearch_ResultContainsDomainPath(t *testing.T) {
 	}
 	if results[0].Domain != "web" {
 		t.Errorf("domain path: want %q, got %q", "web", results[0].Domain)
+	}
+}
+
+func TestSearch_NoEmbedderConfiguredReturnsError(t *testing.T) {
+	m := skills.New()
+	if err := m.RegisterDomain(fetchDomain()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Search("fetch", 1); err == nil {
+		t.Fatal("expected missing embedder error, got nil")
+	}
+}
+
+func newSearchManager() skills.Manager {
+	return skills.New(skills.WithEmbedder(newHashEmbedderForTest()))
+}
+
+type lexicalHashEmbedder struct {
+	dim int
+}
+
+func (e *lexicalHashEmbedder) Embed(text string) ([]float64, error) {
+	tokens := tokenizeForTest(text)
+	vec := make([]float64, e.dim)
+	for _, token := range tokens {
+		idx := int(hashTokenForTest(token) % uint32(e.dim))
+		vec[idx]++
+	}
+	normalizeForTest(vec)
+	return vec, nil
+}
+
+func tokenizeForTest(text string) []string {
+	text = strings.ToLower(text)
+	var unigrams []string
+	var cur strings.Builder
+
+	flush := func() {
+		if cur.Len() >= 2 {
+			unigrams = append(unigrams, cur.String())
+		}
+		cur.Reset()
+	}
+
+	for _, r := range text {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' {
+			cur.WriteRune(r)
+		} else {
+			flush()
+		}
+	}
+	flush()
+
+	tokens := make([]string, 0, len(unigrams)*2)
+	tokens = append(tokens, unigrams...)
+	for i := 0; i < len(unigrams)-1; i++ {
+		tokens = append(tokens, unigrams[i]+"_"+unigrams[i+1])
+	}
+	return tokens
+}
+
+func hashTokenForTest(token string) uint32 {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(token))
+	return h.Sum32()
+}
+
+func normalizeForTest(vec []float64) {
+	sum := 0.0
+	for _, v := range vec {
+		sum += v * v
+	}
+	if sum == 0 {
+		return
+	}
+	norm := math.Sqrt(sum)
+	for i := range vec {
+		vec[i] /= norm
 	}
 }

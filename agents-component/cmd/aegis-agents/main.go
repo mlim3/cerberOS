@@ -130,27 +130,29 @@ func main() {
 	reg := registry.New(registry.WithStateChangeHook(rec.ObserveStateChange))
 
 	skillOpts := []skills.Option{skills.WithGetSpecHook(rec.ObserveSkillInvocation)}
-	if cfg.EmbeddingAPIURL != "" {
-		embedder, err := newEmbeddingAPIEmbedder(
-			cfg.EmbeddingAPIURL,
-			cfg.EmbeddingModel,
-			cfg.EmbeddingDimensions,
-			cfg.EmbeddingPromptStyle,
+	if cfg.EmbeddingAPIURL == "" {
+		log.Error("embedding configuration missing",
+			"error", "AEGIS_EMBEDDING_API_URL must be set; local fallback embedders are disabled",
 		)
-		if err != nil {
-			log.Error("embedding client init failed", "error", err)
-			os.Exit(1)
-		}
-		log.Info("embedding: using shared embedding API",
-			"url", cfg.EmbeddingAPIURL,
-			"model", cfg.EmbeddingModel,
-			"dimensions", cfg.EmbeddingDimensions,
-			"prompt_style", cfg.EmbeddingPromptStyle,
-		)
-		skillOpts = append(skillOpts, skills.WithEmbedder(embedder))
-	} else {
-		log.Info("embedding: AEGIS_EMBEDDING_API_URL not set — using local hash embedder")
+		os.Exit(1)
 	}
+	embedder, err := newEmbeddingAPIEmbedder(
+		cfg.EmbeddingAPIURL,
+		cfg.EmbeddingModel,
+		cfg.EmbeddingDimensions,
+		cfg.EmbeddingPromptStyle,
+	)
+	if err != nil {
+		log.Error("embedding client init failed", "error", err)
+		os.Exit(1)
+	}
+	log.Info("embedding: using shared embedding API",
+		"url", cfg.EmbeddingAPIURL,
+		"model", cfg.EmbeddingModel,
+		"dimensions", cfg.EmbeddingDimensions,
+		"prompt_style", cfg.EmbeddingPromptStyle,
+	)
+	skillOpts = append(skillOpts, skills.WithEmbedder(embedder))
 	skillMgr := skills.New(skillOpts...)
 	credBroker, err := credentials.NewNATSBroker(commsClient,
 		credentials.WithBrokerConfig(credentials.BrokerConfig{
@@ -242,7 +244,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	loadSkills(cfg.SkillsConfigPath, skillMgr, log)
+	if err := loadSkills(cfg.SkillsConfigPath, skillMgr, log); err != nil {
+		log.Error("skill loading failed", "error", err)
+		os.Exit(1)
+	}
 
 	// Start the SIGHUP hot-reload goroutine now that the skill manager is
 	// initialised and the initial skill tree is loaded.
@@ -530,18 +535,10 @@ func main() {
 // loadSkills loads skill definitions from configPath (YAML or JSON) and registers
 // every domain with the Skill Hierarchy Manager. When configPath is empty the
 // embedded default_skills.yaml is used automatically.
-//
-// Registration failures are logged as warnings rather than fatal errors so that
-// a single malformed command definition does not prevent all other domains from
-// being served.
-func loadSkills(configPath string, mgr skills.Manager, log *slog.Logger) {
+func loadSkills(configPath string, mgr skills.Manager, log *slog.Logger) error {
 	cfg, err := skillsconfig.Load(configPath)
 	if err != nil {
-		log.Error("skills config load failed — no skills registered",
-			"path", configPath,
-			"error", err,
-		)
-		return
+		return fmt.Errorf("skills config load failed for %q: %w", configPath, err)
 	}
 
 	source := "embedded default"
@@ -552,14 +549,14 @@ func loadSkills(configPath string, mgr skills.Manager, log *slog.Logger) {
 
 	for _, node := range cfg.ToSkillNodes() {
 		if err := mgr.RegisterDomain(node); err != nil {
-			log.Warn("skill domain registration failed", "domain", node.Name, "error", err)
-		} else {
-			log.Info("skill domain registered",
-				"domain", node.Name,
-				"commands", len(node.Children),
-			)
+			return fmt.Errorf("skill domain registration failed for %q: %w", node.Name, err)
 		}
+		log.Info("skill domain registered",
+			"domain", node.Name,
+			"commands", len(node.Children),
+		)
 	}
+	return nil
 }
 
 // reloadSkills hot-reloads the skill tree from configPath into mgr on SIGHUP.

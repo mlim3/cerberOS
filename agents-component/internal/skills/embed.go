@@ -1,24 +1,16 @@
-// Package skills — embed.go provides the Embedder interface and a deterministic
-// local fallback used by the in-memory skill search manager (EDD §13.5).
-//
-// The default hashEmbedder maps text to a fixed-dimension float64 vector using
-// FNV-1a feature hashing on unigrams and bigrams. It requires no API calls,
-// no training data, and no corpus statistics — making it safe to use inside
-// internal/ packages that are prohibited from making network connections.
-//
-// Production callers inject the shared embedding-api client via WithEmbedder.
-// That client lives outside internal/ where network calls are permitted.
+// Package skills — embed.go provides embedding utilities used by the in-memory
+// skill search manager (EDD §13.5).
 package skills
 
 import (
+	"fmt"
 	"math"
 	"strings"
 	"unicode"
 )
 
 const (
-	// defaultHashDim is the vector dimension used by the deterministic local embedder.
-	// 512 gives a good balance of precision and memory for small skill corpora.
+	// defaultHashDim is retained for explicit test embedders.
 	defaultHashDim = 512
 )
 
@@ -30,14 +22,9 @@ type Embedder interface {
 	Embed(text string) ([]float64, error)
 }
 
-// hashEmbedder is the default Embedder. It uses FNV-1a feature hashing on
-// unigrams and bigrams extracted from the input text. The result is L2-normalised.
-//
-// Properties:
-//   - Fixed output dimension (no vocabulary needed).
-//   - Deterministic and stateless — identical inputs always produce identical vectors.
-//   - O(tokens) time, O(dim) space.
-//   - No network calls, no external dependencies.
+// hashEmbedder is a lightweight deterministic Embedder useful in tests. It uses
+// feature hashing on unigrams and bigrams extracted from the input text. The
+// result is L2-normalised.
 type hashEmbedder struct {
 	dim int
 }
@@ -155,27 +142,42 @@ type BatchEmbedder interface {
 
 // embedTexts embeds all texts in a single call when the configured embedder
 // implements BatchEmbedder, and falls back to sequential Embed calls otherwise.
-// The returned slice is always the same length as texts; entries where
-// embedding failed are nil (non-fatal — those commands are excluded from search
-// results but structural queries still work).
-func (m *hierarchyManager) embedTexts(texts []string) [][]float64 {
+// When no embedder is configured it returns nil vectors without error so
+// structural manager operations can still work in lightweight tests.
+func (m *hierarchyManager) embedTexts(texts []string) ([][]float64, error) {
 	if len(texts) == 0 {
-		return nil
+		return nil, nil
+	}
+	if m.embedder == nil {
+		return nil, nil
 	}
 	if be, ok := m.embedder.(BatchEmbedder); ok {
 		vecs, err := be.EmbedBatch(texts)
-		if err == nil && len(vecs) == len(texts) {
-			return vecs
+		if err != nil {
+			return nil, err
 		}
-		// Fall through to one-at-a-time on error or unexpected length.
+		if len(vecs) != len(texts) {
+			return nil, fmt.Errorf("skills: batch embed returned %d vectors for %d texts", len(vecs), len(texts))
+		}
+		for i, vec := range vecs {
+			if vec == nil {
+				return nil, fmt.Errorf("skills: batch embed returned nil vector at index %d", i)
+			}
+		}
+		return vecs, nil
 	}
 	result := make([][]float64, len(texts))
 	for i, t := range texts {
-		if vec, err := m.embedder.Embed(t); err == nil {
-			result[i] = vec
+		vec, err := m.embedder.Embed(t)
+		if err != nil {
+			return nil, err
 		}
+		if vec == nil {
+			return nil, fmt.Errorf("skills: embed returned nil vector for text index %d", i)
+		}
+		result[i] = vec
 	}
-	return result
+	return result, nil
 }
 
 // cosineSimilarity computes the dot product of two L2-normalised vectors.
