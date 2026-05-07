@@ -199,24 +199,33 @@ func TestPersonalInfoAndConcurrency(t *testing.T) {
 }
 
 func TestPersonalInfoRetrievalOrdering(t *testing.T) {
-	userID := uuid.New().String()
-	seedUser(t, userID)
-
 	ctx := context.Background()
-	var userUUID pgtype.UUID
-	if err := userUUID.Scan(userID); err != nil {
-		t.Fatalf("failed to scan user id: %v", err)
+	embedder := &deterministicTestEmbedder{}
+	queryEmbeddingText := func(query string) string {
+		return fmt.Sprintf("task: search result | query: %s", query)
+	}
+	newTestUser := func(t *testing.T) (string, pgtype.UUID) {
+		t.Helper()
+
+		userID := uuid.New().String()
+		seedUser(t, userID)
+
+		var userUUID pgtype.UUID
+		if err := userUUID.Scan(userID); err != nil {
+			t.Fatalf("failed to scan user id: %v", err)
+		}
+
+		return userID, userUUID
 	}
 
-	embedder := &deterministicTestEmbedder{}
-
 	t.Run("More Relevant Chunk Ranks Ahead", func(t *testing.T) {
+		userID, userUUID := newTestUser(t)
 		queryText := "ranking exact match query"
-		matchingEmbedding, err := embedder.Embed(ctx, queryText)
+		matchingEmbedding, err := embedder.Embed(ctx, queryEmbeddingText(queryText))
 		if err != nil {
 			t.Fatalf("failed to create matching embedding: %v", err)
 		}
-		otherEmbedding, err := embedder.Embed(ctx, "completely different query text")
+		otherEmbedding, err := embedder.Embed(ctx, queryEmbeddingText("completely different query text"))
 		if err != nil {
 			t.Fatalf("failed to create comparison embedding: %v", err)
 		}
@@ -277,8 +286,9 @@ func TestPersonalInfoRetrievalOrdering(t *testing.T) {
 	})
 
 	t.Run("Tie Break Uses Most Recent Chunk", func(t *testing.T) {
+		userID, userUUID := newTestUser(t)
 		queryText := "tie break ranking query"
-		tiedEmbedding, err := embedder.Embed(ctx, queryText)
+		tiedEmbedding, err := embedder.Embed(ctx, queryEmbeddingText(queryText))
 		if err != nil {
 			t.Fatalf("failed to create tied embedding: %v", err)
 		}

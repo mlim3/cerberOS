@@ -20,6 +20,7 @@ jobs:
       DB_USER: user
       DB_PASSWORD: password
       DB_NAME: memory_db
+      EMBEDDING_DIM: "640"
       VAULT_MASTER_KEY: 0123456789abcdef0123456789abcdef
       INTERNAL_VAULT_API_KEY: test-vault-key
       GOCACHE: /tmp/go-build
@@ -48,4 +49,27 @@ jobs:
       - name: Test API packages
         run: go test -v ./internal/api ./cmd/server
       - name: Test full Memory suite
-        run: go test -v ./tests -count=1
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -v ./tests -count=1 2>&1 | tee /tmp/memory-tests.log
+      - name: Summarize failing tests
+        if: failure()
+        shell: bash
+        run: |
+          {
+            echo "## Memory test failures"
+            echo
+            if [ -f /tmp/memory-tests.log ]; then
+              grep -E -- '--- FAIL:|^FAIL[[:space:]]' /tmp/memory-tests.log || echo "No failing test lines found in log."
+            else
+              echo "No memory test log was produced."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload memory test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: memory-test-log
+          path: /tmp/memory-tests.log
+          if-no-files-found: ignore
