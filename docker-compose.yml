@@ -96,7 +96,8 @@ services:
       args:
         ENABLE_VOICE: "false"
     env_file:
-      - .env
+      - path: .env
+        required: false
     command:
       - /bin/sh
       - -lc
@@ -152,7 +153,8 @@ services:
     build:
       context: ./embedding-api
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       MODEL_ID: ${EMBEDDING_MODEL:-microsoft/harrier-oss-v1-270m}
       EMBEDDING_DIM: ${EMBEDDING_DIM:-640}
@@ -178,7 +180,8 @@ services:
     build:
       context: ./memory
     env_file:
-      - .env
+      - path: .env
+        required: false
     depends_on:
       memory-db:
         condition: service_healthy
@@ -234,7 +237,8 @@ services:
     build:
       context: ./vault/engine
     env_file:
-      - .env
+      - path: .env
+        required: false
     ports:
       - "8000:8000"
     environment:
@@ -396,7 +400,8 @@ services:
     build:
       context: ./agents-component
     env_file:
-      - .env
+      - path: .env
+        required: false
     depends_on:
       nats-1:
         condition: service_healthy
