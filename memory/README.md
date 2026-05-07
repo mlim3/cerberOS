@@ -950,7 +950,26 @@ go run ./cmd/server
 The current memory test suite passes with the local Postgres-backed test setup:
 
 ```bash
+go build -o memory-cli ./cmd/cli
 GOCACHE=/tmp/go-build \
+EMBEDDING_DIM=640 \
+DB_HOST=localhost \
+DB_PORT=5432 \
+DB_USER=user \
+DB_PASSWORD=password \
+DB_NAME=memory_db \
+VAULT_MASTER_KEY=0123456789abcdef0123456789abcdef \
+INTERNAL_VAULT_API_KEY=test-vault-key \
+go test ./tests -count=1
+```
+
+The CLI-oriented tests expect a local `memory-cli` binary at `memory/memory-cli`,
+and the personal-info tests must use an `EMBEDDING_DIM` that matches the
+database schema created from `scripts/init-db.sql`:
+
+```bash
+GOCACHE=/tmp/go-build \
+EMBEDDING_DIM=640 \
 DB_HOST=localhost \
 DB_PORT=5432 \
 DB_USER=user \

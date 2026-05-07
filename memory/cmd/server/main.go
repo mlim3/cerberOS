@@ -160,7 +160,7 @@ func main() {
 	embeddingAPIURL := os.Getenv("EMBEDDING_API_URL")
 	embeddingModel := os.Getenv("EMBEDDING_MODEL")
 	embeddingPromptStyle := getEnvOrDefault("EMBEDDING_PROMPT_STYLE", "embeddinggemma")
-	embeddingDim, err := strconv.Atoi(getEnvOrDefault("EMBEDDING_DIM", "768"))
+	embeddingDim, err := strconv.Atoi(getEnvOrDefault("EMBEDDING_DIM", "640"))
 	if err != nil {
 		logger.Error("invalid EMBEDDING_DIM", "value", os.Getenv("EMBEDDING_DIM"), "error", err)
 		os.Exit(1)

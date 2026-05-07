@@ -70,7 +70,7 @@ func NewDBClient(ctx context.Context, dbURL string) (MemoryClient, error) {
 	agentLogsRepo := storage.NewAgentLogsRepository(pool)
 	logRepo := storage.NewLogRepository(pool)
 
-	embeddingDim, err := strconv.Atoi(getEnvOrDefault("EMBEDDING_DIM", "768"))
+	embeddingDim, err := strconv.Atoi(getEnvOrDefault("EMBEDDING_DIM", "640"))
 	if err != nil {
 		return nil, fmt.Errorf("invalid EMBEDDING_DIM: %w", err)
 	}

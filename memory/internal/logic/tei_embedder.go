@@ -49,7 +49,7 @@ func NewTEIEmbedder(apiURL, model string, dimensions int) (Embedder, error) {
 	model = strings.TrimSpace(model)
 	if apiURL == "" {
 		if dimensions <= 0 {
-			dimensions = 768
+			dimensions = 640
 		}
 		return &noopEmbedder{dim: dimensions}, nil
 	}

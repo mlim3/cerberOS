@@ -36,9 +36,9 @@ func (d *deterministicTestEmbedder) Embed(ctx context.Context, text string) (pgv
 	_, _ = h.Write([]byte(text))
 	seed := h.Sum64()
 
-	dim, err := strconv.Atoi(getEnvOrDefault("EMBEDDING_DIM", "768"))
+	dim, err := strconv.Atoi(getEnvOrDefault("EMBEDDING_DIM", "640"))
 	if err != nil || dim <= 0 {
-		dim = 768
+		dim = 640
 	}
 
 	v := make([]float32, dim)
