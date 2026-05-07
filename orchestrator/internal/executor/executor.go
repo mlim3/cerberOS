@@ -95,6 +95,14 @@ type PlanExecutor struct {
 	// Used in HandleSubtaskResult to find the plan a result belongs to.
 	orchRefToPlan sync.Map
 
+	// orchRefToParentTaskID maps orchestrator_task_ref (subtask) → parent TaskID
+	// (the user-visible task ID). Unlike orchRefToPlan this is NOT deleted when
+	// a subtask completes, so late-arriving skill_invocation audit events (which
+	// are published in a background goroutine and can race subtask completion)
+	// can still resolve the correct SSE broadcast target.
+	// Entries are removed after a 60 s grace period in a background goroutine.
+	orchRefToParentTaskID sync.Map
+
 	onPlanComplete OnPlanCompleteFn
 	onPlanFailed   OnPlanFailedFn
 }
@@ -286,6 +294,21 @@ func (e *PlanExecutor) HandleSubtaskResult(ctx context.Context, result types.Tas
 	subCtx = observability.WithModule(subCtx, "plan_executor")
 	log = observability.LogFromContext(subCtx)
 
+	// Cross-tenant safety guard: drop the result if it claims to come from a
+	// different agent than the one this subtask was dispatched to. Without this,
+	// a buggy or compromised agent could publish a forged result against another
+	// task's orchestrator_task_ref and have it routed to the wrong user's SSE
+	// stream. The expected agent_id is set at dispatch time (capability response)
+	// and is server-side state, not agent-supplied. (MT-9 / #188)
+	if sub.AgentID != "" && result.AgentID != "" && sub.AgentID != result.AgentID {
+		log.Warn("dropped subtask result: agent_id mismatch (expected vs actual disagree); possible misrouting or forged result",
+			"expected_agent_id", sub.AgentID,
+			"actual_agent_id", result.AgentID,
+			"orchestrator_task_ref", result.OrchestratorTaskRef,
+		)
+		return nil
+	}
+
 	// Revoke credentials for this subtask's agent.
 	if err := e.policy.RevokeCredentials(subCtx, result.OrchestratorTaskRef); err != nil {
 		log.Error("could not revoke credentials for subtask agent; vault tokens may linger until ttl",
@@ -315,6 +338,13 @@ func (e *PlanExecutor) HandleSubtaskResult(ctx context.Context, result types.Tas
 	atomic.AddInt32(&exec.dispatchedCount, -1)
 
 	e.orchRefToPlan.Delete(result.OrchestratorTaskRef)
+	// Keep orchRefToParentTaskID for 60 s so late-arriving skill_invocation
+	// audit events (published in background goroutines by agent-process) can
+	// still resolve the parent task ID for SSE toast routing.
+	go func(orchRef string) {
+		time.Sleep(60 * time.Second)
+		e.orchRefToParentTaskID.Delete(orchRef)
+	}(result.OrchestratorTaskRef)
 
 	if result.Success {
 		// Dispatch any subtasks that are now unblocked.
@@ -381,6 +411,7 @@ func (e *PlanExecutor) dispatchSubtask(ctx context.Context, exec *planExecution,
 	// Register reverse lookup before publishing (prevents lost results on race).
 	exec.orchRefIndex[orchRef] = sub.SubtaskID
 	e.orchRefToPlan.Store(orchRef, exec.plan.PlanID)
+	e.orchRefToParentTaskID.Store(orchRef, exec.ts.TaskID)
 
 	log.Info("dispatching subtask", "depends_on", sub.DependsOn, "orchRef", orchRef)
 
@@ -591,6 +622,35 @@ func (e *PlanExecutor) collectPriorResults(exec *planExecution, deps []string) [
 		}
 	}
 	return results
+}
+
+// ParentTaskIDForOrchRef returns the parent TaskState.TaskID for a given
+// subtask orchRef, or "" if the orchRef is not currently tracked.
+// Used by the skill-activity handler to map the agent's internal orchRef
+// back to the frontend-visible task ID for SSE routing.
+//
+// Checks orchRefToPlan first (authoritative, deleted on subtask completion),
+// then falls back to orchRefToParentTaskID (kept for 60 s after completion)
+// so late-arriving skill_invocation audit events still resolve correctly.
+func (e *PlanExecutor) ParentTaskIDForOrchRef(orchRef string) string {
+	// Fast path: subtask still active.
+	planIDVal, ok := e.orchRefToPlan.Load(orchRef)
+	if ok {
+		planID, _ := planIDVal.(string)
+		execVal, ok := e.activePlans.Load(planID)
+		if ok {
+			if exec, _ := execVal.(*planExecution); exec != nil {
+				return exec.ts.TaskID
+			}
+		}
+	}
+	// Fallback: subtask already completed but grace-period cache still has it.
+	if v, ok := e.orchRefToParentTaskID.Load(orchRef); ok {
+		if taskID, _ := v.(string); taskID != "" {
+			return taskID
+		}
+	}
+	return ""
 }
 
 // ── Memory Persistence ────────────────────────────────────────────────────────

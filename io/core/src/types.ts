@@ -145,12 +145,26 @@ export interface PlanDecisionSubmission {
   reason?: string;
 }
 
+/** A notable skill invocation forwarded from the orchestrator to drive UI toasts. */
+export interface SkillActivity {
+  taskId: string;
+  agentId: string;
+  domain: string;
+  command: string;
+  elapsedMs: number;
+  vaultDelegated: boolean;
+  synthesized?: boolean; // true when the command was dynamically synthesized, or outcome === 'synthesized'
+  outcome: string;
+  timestamp: number; // Unix ms
+}
+
 /** One frame on the orchestrator→IO push channel (per task stream). */
 export type OrchestratorStreamEvent =
   | { type: 'status'; payload: StatusUpdate }
   | { type: 'credential_request'; payload: CredentialRequest }
   | { type: 'chat_response'; payload: ChatResponsePayload }
-  | { type: 'plan_preview'; payload: PlanPreview };
+  | { type: 'plan_preview'; payload: PlanPreview }
+  | { type: 'skill_activity'; payload: SkillActivity };
 
 function isRecord(x: unknown): x is Record<string, unknown> {
   return typeof x === 'object' && x !== null;
@@ -235,6 +249,27 @@ export function parseOrchestratorStreamEvent(raw: unknown): OrchestratorStreamEv
           planId: p.planId as string,
           subtasks,
           expiresInSeconds: typeof p.expiresInSeconds === 'number' ? p.expiresInSeconds : 0,
+        },
+      };
+    }
+    return null;
+  }
+
+  if (raw.type === 'skill_activity' && isRecord(raw.payload)) {
+    const p = raw.payload;
+    if (typeof p.taskId === 'string' && typeof p.command === 'string') {
+      return {
+        type: 'skill_activity',
+        payload: {
+          taskId: p.taskId as string,
+          agentId: typeof p.agentId === 'string' ? p.agentId : '',
+          domain: typeof p.domain === 'string' ? p.domain : '',
+          command: p.command as string,
+          elapsedMs: typeof p.elapsedMs === 'number' ? p.elapsedMs : 0,
+          vaultDelegated: p.vaultDelegated === true,
+          synthesized: p.synthesized === true,
+          outcome: typeof p.outcome === 'string' ? p.outcome : '',
+          timestamp: typeof p.timestamp === 'number' ? p.timestamp : Date.now(),
         },
       };
     }

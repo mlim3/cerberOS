@@ -124,6 +124,19 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 	ctx = WithSessionLog(ctx, sl)
 
 	tools := toolsForDomain(spawnCtx.SkillDomain, ve, as)
+	// Build dynamic SkillTools for skills synthesized in prior sessions.
+	// Each tool's Execute makes an inline LLM call using the stored recipe with
+	// caller parameters substituted in. Existing builtins take precedence: a
+	// synthesized name that matches a builtin is skipped (the builtin is more
+	// reliable than the LLM-executed recipe for that operation).
+	if len(spawnCtx.SynthesizedSkills) > 0 {
+		existingNames := make(map[string]bool, len(tools))
+		for _, t := range tools {
+			existingNames[t.Definition.Name] = true
+		}
+		synthTools := buildSynthesizedTools(client, spawnCtx.SynthesizedSkills, existingNames)
+		tools = append(tools, synthTools...)
+	}
 	// Memory tools (memory_update, profile_update, memory_search) are available
 	// in every domain — they are not domain-specific skills.
 	tools = append(tools, memoryTools(sl, spawnCtx.SkillDomain, spawnCtx.UserContextID)...)
@@ -250,7 +263,7 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 		if resp.StopReason == anthropic.StopReasonEndTurn {
 			for _, block := range resp.Content {
 				if block.Type == "text" && block.Text != "" {
-					attemptSkillSynthesis(ctx, client, log, spawnCtx, sl, history, toolCallCount)
+					attemptSkillSynthesis(ctx, client, log, spawnCtx, sl, ve, history, toolCallCount)
 					// Append the final assistant turn to history before snapshotting
 					// so the next task in this conversation includes the full exchange.
 					history = append(history, resp.ToParam())
@@ -282,7 +295,7 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 						"output_tokens", resp.Usage.OutputTokens,
 						"result_preview", logfields.PreviewHeadTail(block.Text, 15, 10),
 					)
-					attemptSkillSynthesis(ctx, client, log, spawnCtx, sl, history, toolCallCount)
+					attemptSkillSynthesis(ctx, client, log, spawnCtx, sl, ve, history, toolCallCount)
 					history = append(history, resp.ToParam())
 					if err := sl.WriteConversationSnapshot(spawnCtx.ConversationID, spawnCtx.TaskID, history, totalTokens); err != nil {
 						log.Warn("could not persist conversation snapshot to memory after max_tokens stop; next follow-up turn will lack this exchange",
@@ -463,6 +476,8 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 					drillDownDepth(o.call.name),
 					o.elapsedMS,
 					outcomeFromResult(o.result),
+					isVaultDelegated(tools, o.call.name),
+					isSynthesized(tools, o.call.name),
 				)
 			}
 
@@ -476,7 +491,7 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 				"result_preview", logfields.PreviewHeadTail(finalResult, 15, 10),
 				"result_len", len(finalResult),
 				"tool_call_count", toolCallCount)
-			attemptSkillSynthesis(ctx, client, log, spawnCtx, sl, history, toolCallCount)
+			attemptSkillSynthesis(ctx, client, log, spawnCtx, sl, ve, history, toolCallCount)
 
 			// Close the tool_use → tool_result turn pair BEFORE snapshotting so
 			// the persisted history always ends on a well-formed boundary.

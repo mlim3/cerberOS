@@ -97,6 +97,10 @@ type PlanExecutor interface {
 	TaskStateForSubtask(orchRef string) (*types.TaskState, bool)
 }
 
+type subtaskParentResolver interface {
+	TaskStateForSubtask(orchRef string) (*types.TaskState, bool)
+}
+
 // ── Dispatcher ────────────────────────────────────────────────────────────────
 
 // Dispatcher is M2: Task Dispatcher.
@@ -128,9 +132,14 @@ type Dispatcher struct {
 	// (approve/reject). key = top-level orchestrator_task_ref → *pendingApproval.
 	pendingApprovals sync.Map
 
-	// pendingAgentSpawns tracks child-agent requests waiting for a terminal child result.
-	// key = child orchestrator_task_ref → *pendingAgentSpawn.
+	// pendingAgentSpawns tracks child tasks requested by a parent agent via the
+	// spawn_agent tool. key = child orchestrator_task_ref → *pendingAgentSpawn.
 	pendingAgentSpawns sync.Map
+
+	// agentSpawnContexts lets spawned children act as parents for a bounded
+	// next generation without trusting user_id/policy fields from agent input.
+	// key = child orchestrator_task_ref → *agentSpawnContext.
+	agentSpawnContexts sync.Map
 
 	// Metrics — use atomic operations to avoid a global lock.
 	tasksReceived       int64
@@ -411,7 +420,7 @@ func (d *Dispatcher) HandleTaskResult(ctx context.Context, result types.TaskResu
 	if pendingVal, ok := d.pendingAgentSpawns.Load(result.OrchestratorTaskRef); ok {
 		d.pendingAgentSpawns.Delete(result.OrchestratorTaskRef)
 		pending := pendingVal.(*pendingAgentSpawn)
-		return d.handleAgentSpawnResult(ctx, pending, result)
+		return d.handleAgentSpawnChildResult(ctx, pending, result)
 	}
 
 	if _, ok := d.pendingDecompositions.Load(result.OrchestratorTaskRef); ok {
@@ -457,163 +466,41 @@ func (d *Dispatcher) HandleTaskResult(ctx context.Context, result types.TaskResu
 		})
 	}
 
+	if pendingVal, ok := d.pendingAgentSpawns.LoadAndDelete(result.OrchestratorTaskRef); ok {
+		d.agentSpawnContexts.Delete(result.OrchestratorTaskRef)
+		pending := pendingVal.(*pendingAgentSpawn)
+		return d.handleAgentSpawnChildResult(ctx, pending, result)
+	}
+
 	return d.executor.HandleSubtaskResult(ctx, result)
 }
 
-// HandleAgentSpawnRequest receives a child-agent delegation request from a running agent,
-// resolves the parent task context, and dispatches the child through the normal
-// capability-query + task.inbound flow.
-func (d *Dispatcher) HandleAgentSpawnRequest(ctx context.Context, req types.AgentSpawnRequest) error {
+func (d *Dispatcher) handleAgentSpawnChildResult(ctx context.Context, pending *pendingAgentSpawn, result types.TaskResult) error {
 	ctx = observability.WithModule(ctx, "task_dispatcher")
-	log := observability.LogFromContext(ctx)
-
-	log.Info("received agent.spawn.request from parent agent",
-		"request_id", req.RequestID,
-		"parent_agent_id", req.ParentAgentID,
-		"parent_task_id", req.ParentTaskID,
-		"required_skills", req.RequiredSkills,
-		"timeout_seconds", req.TimeoutSeconds,
-		"instructions_preview", observability.PreviewHeadTail(req.Instructions, 18, 10))
-
-	var ts *types.TaskState
-	if direct := d.activeTaskByOrchRef(req.ParentTaskID); direct != nil {
-		ts = direct
-	} else if resolved, ok := d.executor.TaskStateForSubtask(req.ParentTaskID); ok {
-		ts = resolved
-	}
-	if ts == nil {
-		log.Warn("dropping agent.spawn.request: parent task context could not be resolved",
-			"request_id", req.RequestID,
-			"parent_task_id", req.ParentTaskID)
-		return d.gateway.PublishAgentSpawnResponse(ctx, types.AgentSpawnResponse{
-			RequestID:     req.RequestID,
-			ParentAgentID: req.ParentAgentID,
-			Status:        "failed",
-			ErrorCode:     types.ErrCodeInvalidTaskSpec,
-			ErrorMessage:  "parent task context not found",
-			TraceID:       firstNonEmptyString(req.TraceID),
-		})
-	}
-
-	if req.TimeoutSeconds <= 0 {
-		req.TimeoutSeconds = 300
-	}
-
-	childOrchRef := newUUID()
-	childCtx := observability.WithTaskID(ctx, ts.TaskID)
-	childCtx = observability.WithConversationID(childCtx, ts.ConversationID)
-
-	log.Info("agent spawn: dispatching child task through standard agent routing",
-		"request_id", req.RequestID,
-		"child_orchestrator_task_ref", childOrchRef,
-		"user_id", ts.UserID,
-		"required_skills", req.RequiredSkills)
-
-	capResp, err := d.gateway.PublishCapabilityQuery(childCtx, types.CapabilityQuery{
-		OrchestratorTaskRef:  childOrchRef,
-		RequiredSkillDomains: req.RequiredSkills,
-		TraceID:              firstNonEmptyString(req.TraceID, ts.TraceID),
-	})
-	if err != nil {
-		log.Error("agent spawn: capability query failed",
-			"request_id", req.RequestID,
-			"child_orchestrator_task_ref", childOrchRef,
-			"error", err)
-		return d.gateway.PublishAgentSpawnResponse(childCtx, types.AgentSpawnResponse{
-			RequestID:     req.RequestID,
-			ParentAgentID: req.ParentAgentID,
-			Status:        "failed",
-			ErrorCode:     types.ErrCodeAgentsUnavailable,
-			ErrorMessage:  "no agent was available for the requested skills",
-			TraceID:       firstNonEmptyString(req.TraceID, ts.TraceID),
-		})
-	}
-
-	spec := types.TaskSpec{
-		OrchestratorTaskRef:  childOrchRef,
-		TaskID:               childOrchRef,
-		UserID:               ts.UserID,
-		RequiredSkillDomains: req.RequiredSkills,
-		PolicyScope:          ts.PolicyScope,
-		TimeoutSeconds:       req.TimeoutSeconds,
-		Instructions:         req.Instructions,
-		Metadata: map[string]string{
-			"task_kind":        "agent_spawn_child",
-			"parent_task_id":   ts.TaskID,
-			"parent_agent_id":  req.ParentAgentID,
-			"spawn_request_id": req.RequestID,
-		},
-		CallbackTopic:  ts.CallbackTopic,
-		UserContextID:  firstNonEmptyString(req.UserContextID, ts.UserContextID),
-		ConversationID: ts.ConversationID,
-		TraceID:        firstNonEmptyString(req.TraceID, ts.TraceID),
-	}
-
-	if err := d.gateway.PublishTaskSpec(childCtx, spec); err != nil {
-		log.Error("agent spawn: child task dispatch failed",
-			"request_id", req.RequestID,
-			"child_orchestrator_task_ref", childOrchRef,
-			"error", err)
-		return d.gateway.PublishAgentSpawnResponse(childCtx, types.AgentSpawnResponse{
-			RequestID:     req.RequestID,
-			ParentAgentID: req.ParentAgentID,
-			Status:        "failed",
-			ErrorCode:     types.ErrCodeAgentsUnavailable,
-			ErrorMessage:  "child task could not be dispatched",
-			TraceID:       firstNonEmptyString(req.TraceID, ts.TraceID),
-		})
-	}
-
-	d.pendingAgentSpawns.Store(childOrchRef, &pendingAgentSpawn{
-		RequestID:     req.RequestID,
-		ParentAgentID: req.ParentAgentID,
-		ParentTaskID:  req.ParentTaskID,
-		ChildOrchRef:  childOrchRef,
-		TraceID:       firstNonEmptyString(req.TraceID, ts.TraceID),
-	})
-
-	log.Info("agent spawn: child task dispatched; awaiting terminal child result",
-		"request_id", req.RequestID,
-		"child_orchestrator_task_ref", childOrchRef,
-		"child_agent_id", capResp.AgentID)
-	return nil
-}
-
-func (d *Dispatcher) handleAgentSpawnResult(ctx context.Context, pending *pendingAgentSpawn, result types.TaskResult) error {
-	ctx = observability.WithModule(ctx, "task_dispatcher")
-	log := observability.LogFromContext(ctx)
-
-	if err := d.policy.RevokeCredentials(ctx, result.OrchestratorTaskRef); err != nil {
-		log.Error("agent spawn: failed to revoke child credentials after terminal child result",
-			"request_id", pending.RequestID,
-			"child_orchestrator_task_ref", result.OrchestratorTaskRef,
-			"error", err)
-	}
-
 	resp := types.AgentSpawnResponse{
-		RequestID:     pending.RequestID,
-		ParentAgentID: pending.ParentAgentID,
+		RequestID:     pending.req.RequestID,
+		ParentAgentID: pending.req.ParentAgentID,
 		ChildAgentID:  result.AgentID,
-		TraceID:       pending.TraceID,
+		TraceID:       firstNonEmpty(pending.req.TraceID, pending.ctx.TraceID, observability.TraceIDFrom(ctx)),
 	}
 	if result.Success {
 		resp.Status = "success"
-		resp.Result = renderSpawnResult(result.Result)
-		log.Info("agent spawn: child task completed successfully; returning response to parent agent",
-			"request_id", pending.RequestID,
-			"child_orchestrator_task_ref", result.OrchestratorTaskRef,
-			"child_agent_id", result.AgentID,
-			"result_preview", observability.PreviewHeadTail(resp.Result, 15, 10))
+		resp.Result = string(result.Result)
 	} else {
 		resp.Status = "failed"
-		resp.ErrorCode = result.ErrorCode
-		resp.ErrorMessage = humanReadableError(result.ErrorCode)
-		log.Warn("agent spawn: child task failed; returning failure to parent agent",
-			"request_id", pending.RequestID,
-			"child_orchestrator_task_ref", result.OrchestratorTaskRef,
-			"child_agent_id", result.AgentID,
-			"error_code", result.ErrorCode)
+		resp.ErrorCode = firstNonEmpty(result.ErrorCode, types.ErrCodeSubtaskFailed)
+		resp.ErrorMessage = humanReadableError(resp.ErrorCode)
+		if resp.ErrorMessage == "" {
+			resp.ErrorMessage = resp.ErrorCode
+		}
 	}
+
+	observability.LogFromContext(ctx).Info("agent_spawn child task completed",
+		"request_id", pending.req.RequestID,
+		"child_ref", pending.childRef,
+		"child_agent_id", result.AgentID,
+		"status", resp.Status,
+	)
 
 	return d.gateway.PublishAgentSpawnResponse(ctx, resp)
 }
@@ -818,12 +705,182 @@ type pendingApproval struct {
 	cancel context.CancelFunc
 }
 
+type agentSpawnContext struct {
+	UserID         string
+	PolicyScope    types.PolicyScope
+	CallbackTopic  string
+	UserContextID  string
+	ConversationID string
+	TraceID        string
+	Depth          int
+}
+
 type pendingAgentSpawn struct {
-	RequestID     string
-	ParentAgentID string
-	ParentTaskID  string
-	ChildOrchRef  string
-	TraceID       string
+	req      types.AgentSpawnRequest
+	ctx      agentSpawnContext
+	childRef string
+}
+
+const (
+	defaultAgentSpawnTimeoutSeconds = 300
+	maxAgentSpawnTimeoutSeconds     = 900
+	maxAgentSpawnDepth              = 2
+	maxAgentSpawnSkills             = 4
+)
+
+// HandleAgentSpawnRequest turns a parent agent's spawn_agent tool request into a
+// normal child TaskSpec and later correlates the child task result back to the
+// parent via AgentSpawnResponse.
+func (d *Dispatcher) HandleAgentSpawnRequest(ctx context.Context, req types.AgentSpawnRequest) error {
+	ctx = observability.WithModule(ctx, "task_dispatcher")
+	log := observability.LogFromContext(ctx)
+
+	parentCtx, err := d.resolveAgentSpawnContext(req.ParentTaskID)
+	if err != nil {
+		log.Warn("agent_spawn rejected: parent context not found", "request_id", req.RequestID, "parent_task_id", req.ParentTaskID, "error", err)
+		return d.publishAgentSpawnFailure(ctx, req, "UNKNOWN_PARENT_TASK", "parent task context not found")
+	}
+	if err := validateAgentSpawnRequest(req, parentCtx.Depth); err != nil {
+		log.Warn("agent_spawn rejected: invalid request", "request_id", req.RequestID, "error", err)
+		return d.publishAgentSpawnFailure(ctx, req, types.ErrCodeInvalidTaskSpec, err.Error())
+	}
+
+	childRef := newUUID()
+	timeoutSec := req.TimeoutSeconds
+	if timeoutSec <= 0 {
+		timeoutSec = defaultAgentSpawnTimeoutSeconds
+	}
+	if timeoutSec > maxAgentSpawnTimeoutSeconds {
+		timeoutSec = maxAgentSpawnTimeoutSeconds
+	}
+
+	childCtx := parentCtx
+	childCtx.Depth = parentCtx.Depth + 1
+	if strings.TrimSpace(req.TraceID) != "" {
+		childCtx.TraceID = strings.TrimSpace(req.TraceID)
+	}
+	if strings.TrimSpace(req.UserContextID) != "" {
+		childCtx.UserContextID = strings.TrimSpace(req.UserContextID)
+	}
+
+	d.pendingAgentSpawns.Store(childRef, &pendingAgentSpawn{
+		req:      req,
+		ctx:      childCtx,
+		childRef: childRef,
+	})
+	d.agentSpawnContexts.Store(childRef, &childCtx)
+
+	spec := types.TaskSpec{
+		OrchestratorTaskRef:  childRef,
+		TaskID:               childRef,
+		UserID:               childCtx.UserID,
+		RequiredSkillDomains: append([]string(nil), req.RequiredSkills...),
+		PolicyScope:          childCtx.PolicyScope,
+		TimeoutSeconds:       timeoutSec,
+		Payload:              json.RawMessage(`{}`),
+		Instructions:         strings.TrimSpace(req.Instructions),
+		Metadata: map[string]string{
+			"task_kind":              "agent_spawn_child",
+			"parent_task_id":         req.ParentTaskID,
+			"parent_agent_id":        req.ParentAgentID,
+			"agent_spawn_request_id": req.RequestID,
+			"spawn_depth":            fmt.Sprintf("%d", childCtx.Depth),
+		},
+		CallbackTopic:   childCtx.CallbackTopic,
+		UserContextID:   childCtx.UserContextID,
+		ConversationID:  childCtx.ConversationID,
+		ProgressSummary: "Running delegated child agent task",
+		TraceID:         childCtx.TraceID,
+	}
+	if spec.TraceID == "" {
+		spec.TraceID = observability.TraceIDFrom(ctx)
+	}
+
+	if err := d.gateway.PublishTaskSpec(ctx, spec); err != nil {
+		d.pendingAgentSpawns.Delete(childRef)
+		d.agentSpawnContexts.Delete(childRef)
+		log.Error("agent_spawn child task publish failed", "request_id", req.RequestID, "child_ref", childRef, "error", err)
+		return d.publishAgentSpawnFailure(ctx, req, types.ErrCodeAgentsUnavailable, "could not dispatch child agent task")
+	}
+
+	log.Info("agent_spawn child task dispatched",
+		"request_id", req.RequestID,
+		"parent_agent_id", req.ParentAgentID,
+		"child_ref", childRef,
+		"required_skills", req.RequiredSkills,
+		"spawn_depth", childCtx.Depth,
+	)
+	return nil
+}
+
+func validateAgentSpawnRequest(req types.AgentSpawnRequest, parentDepth int) error {
+	if strings.TrimSpace(req.RequestID) == "" {
+		return fmt.Errorf("request_id is required")
+	}
+	if strings.TrimSpace(req.ParentAgentID) == "" {
+		return fmt.Errorf("parent_agent_id is required")
+	}
+	if strings.TrimSpace(req.ParentTaskID) == "" {
+		return fmt.Errorf("parent_task_id is required")
+	}
+	if strings.TrimSpace(req.Instructions) == "" {
+		return fmt.Errorf("instructions are required")
+	}
+	if len(req.RequiredSkills) == 0 {
+		return fmt.Errorf("required_skills must contain at least one skill domain")
+	}
+	if len(req.RequiredSkills) > maxAgentSpawnSkills {
+		return fmt.Errorf("required_skills exceeds maximum of %d domains", maxAgentSpawnSkills)
+	}
+	if parentDepth >= maxAgentSpawnDepth {
+		return fmt.Errorf("agent spawn depth limit exceeded")
+	}
+	for _, s := range req.RequiredSkills {
+		if strings.TrimSpace(s) == "" {
+			return fmt.Errorf("required_skills contains an empty domain")
+		}
+	}
+	return nil
+}
+
+func (d *Dispatcher) resolveAgentSpawnContext(parentTaskID string) (agentSpawnContext, error) {
+	if tsVal, ok := d.activeTasks.Load(parentTaskID); ok {
+		ts := tsVal.(*types.TaskState)
+		return agentSpawnContextFromTaskState(ts, 0), nil
+	}
+	if resolver, ok := d.executor.(subtaskParentResolver); ok {
+		if ts, ok := resolver.TaskStateForSubtask(parentTaskID); ok {
+			return agentSpawnContextFromTaskState(ts, 0), nil
+		}
+	}
+	if v, ok := d.agentSpawnContexts.Load(parentTaskID); ok {
+		return *(v.(*agentSpawnContext)), nil
+	}
+	return agentSpawnContext{}, fmt.Errorf("unknown parent_task_id %q", parentTaskID)
+}
+
+func agentSpawnContextFromTaskState(ts *types.TaskState, depth int) agentSpawnContext {
+	return agentSpawnContext{
+		UserID:         ts.UserID,
+		PolicyScope:    ts.PolicyScope,
+		CallbackTopic:  ts.CallbackTopic,
+		UserContextID:  ts.UserContextID,
+		ConversationID: ts.ConversationID,
+		TraceID:        ts.TraceID,
+		Depth:          depth,
+	}
+}
+
+func (d *Dispatcher) publishAgentSpawnFailure(ctx context.Context, req types.AgentSpawnRequest, code, msg string) error {
+	resp := types.AgentSpawnResponse{
+		RequestID:     req.RequestID,
+		ParentAgentID: req.ParentAgentID,
+		Status:        "failed",
+		ErrorCode:     code,
+		ErrorMessage:  msg,
+		TraceID:       req.TraceID,
+	}
+	return d.gateway.PublishAgentSpawnResponse(ctx, resp)
 }
 
 // HandlePlanDecision processes an approve/reject decision from User I/O.
@@ -878,12 +935,15 @@ func (d *Dispatcher) HandlePlanDecision(ctx context.Context, decision types.Plan
 func (d *Dispatcher) HandleVaultExecuteRequest(ctx context.Context, req types.VaultExecuteRequest) (types.VaultExecuteResult, error) {
 	// Resolve user_id from trusted task state — never from the agent's request.
 	// First try the parent task (req.TaskID == parent task_id), then fall back
-	// to the executor's subtask-orchRef → plan → user_id path (req.TaskID == subtask orchRef).
+	// to the executor's subtask-orchRef → plan → user_id path (req.TaskID == plan
+	// subtask orchRef), then spawned child-agent context (req.TaskID == child_ref).
 	var userID string
 	if tsVal, ok := d.activeTasks.Load(req.TaskID); ok {
 		userID = tsVal.(*types.TaskState).UserID
 	} else if uid, ok := d.executor.UserIDForSubtask(req.TaskID); ok {
 		userID = uid
+	} else if v, ok := d.agentSpawnContexts.Load(req.TaskID); ok {
+		userID = v.(*agentSpawnContext).UserID
 	} else {
 		return types.VaultExecuteResult{
 			RequestID:    req.RequestID,
@@ -938,11 +998,11 @@ func (d *Dispatcher) HandleCredentialRequest(agentID, subtaskRef, requestID, key
 	}
 
 	return d.io.PushCredentialRequest(ioclient.CredentialRequestPayload{
-		TaskID:      topTaskID,
-		RequestID:   requestID,
-		UserID:      userID,
-		KeyName:     keyName,
-		Label:       label,
+		TaskID:    topTaskID,
+		RequestID: requestID,
+		UserID:    userID,
+		KeyName:   keyName,
+		Label:     label,
 	}, traceID)
 }
 
@@ -1449,6 +1509,8 @@ func buildDecompositionInstructionsWithFacts(taskID, rawInput string, scope type
 	if len(allowedDomains) == 0 {
 		// Empty scope.Domains means "no restriction" — grant the planner access to
 		// all registered skill domains so it can assign the right domain per subtask.
+		// Previously this fell back to ["general"] which forced every subtask to run
+		// without web/data/comms/storage tools.
 		allowedDomains = allSkillDomains
 	}
 
@@ -1624,6 +1686,15 @@ func humanReadableError(code string) string {
 	default:
 		return "Task failed. Please retry or contact support."
 	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // isValidUUID returns true if s matches the general UUID string format.

@@ -13,10 +13,14 @@ import ChatWindow from './components/ChatWindow'
 import CredentialModal from './components/CredentialModal'
 import PlanPreviewCard from './components/PlanPreviewCard'
 import SettingsButton from './components/SettingsButton'
+import UserSwitcher from './components/UserSwitcher'
+import { getActiveUserId } from './lib/active-user'
 import SettingsPanel, { defaultUISettings } from './components/SettingsPanel'
 import type { UISettings } from './components/SettingsPanel'
 import ActivityLog from './components/ActivityLog'
 import type { LogEntry } from './components/ActivityLog'
+import SkillActivityToast from './components/SkillActivityToast'
+import type { SkillToastItem } from './components/SkillActivityToast'
 import {
   streamOrchestratorReply,
   submitCredential,
@@ -38,7 +42,9 @@ import { extractPromptBodyForCron, looksLikeRepeatingSchedulingIntent } from './
 import './App.css'
 
 const DEMO_MODE = import.meta.env.VITE_DEMO_MODE === 'true'
-const UI_USER_ID = (import.meta.env.VITE_IO_USER_ID as string | undefined) ?? '00000000-0000-0000-0000-000000000001'
+// Resolved once at module init from localStorage (set by UserSwitcher) or env.
+// The switcher reloads the page on change, so this stays stable during a session.
+const UI_USER_ID = getActiveUserId()
 
 /** Mirrors `scheduled-run-mirror` bucket title — omit from sidebar (not user-authored threads). */
 const MEMORY_ORCHESTRATOR_FALLBACK_CONVERSATION_TITLE = 'Scheduled task runs'
@@ -377,6 +383,13 @@ function App() {
     Record<string, { preview: PlanPreview; status: PlanDecisionStatus; error?: string }>
   >({})
 
+  // Skill-activity toast state — populated by orchestrator 'skill_activity' SSE events.
+  const [skillToasts, setSkillToasts] = useState<SkillToastItem[]>([])
+
+  const dismissSkillToast = useCallback((id: string) => {
+    setSkillToasts(prev => prev.filter(t => t.id !== id))
+  }, [])
+
   const selectedTask = tasks.find(t => t.id === selectedTaskId)
 
   /** Fingerprint seen when conversation was focused / opened — detects new mirrored cron turns */
@@ -421,7 +434,7 @@ function App() {
     if (DEMO_MODE) return
     try {
       const res = await fetch(buildApiUrl(`/api/conversations?userId=${encodeURIComponent(UI_USER_ID)}`), {
-        headers: { 'X-User-Id': UI_USER_ID },
+        headers: { 'X-Active-User': UI_USER_ID },
       })
       if (!res.ok) return
       const json = await res.json() as { conversations?: ConversationSummary[] }
@@ -512,7 +525,7 @@ function App() {
       try {
         const res = await fetch(
           buildApiUrl(`/api/conversations/${encodeURIComponent(cid)}/logs?userId=${encodeURIComponent(UI_USER_ID)}`),
-          { headers: { 'X-User-Id': UI_USER_ID } },
+          { headers: { 'X-Active-User': UI_USER_ID } },
         )
         if (!res.ok) return null
         const json = await res.json() as { logs?: Array<{ at: string }> }
@@ -589,7 +602,7 @@ function App() {
       try {
         const res = await fetch(
           buildApiUrl(`/api/conversations/${encodeURIComponent(task.id)}/logs?userId=${encodeURIComponent(UI_USER_ID)}`),
-          { headers: { 'X-User-Id': UI_USER_ID } },
+          { headers: { 'X-Active-User': UI_USER_ID } },
         )
         if (!res.ok) return
         const json = await res.json() as { logs?: Array<{ role: 'user' | 'orchestrator'; content: string; at: string }> }
@@ -650,9 +663,16 @@ function App() {
   }, [DEMO_MODE, selectedTaskId, selectedConversationSidebarPreview, streamingForTaskId])
 
   // Orchestrator → IO push stream (SSE) for status + credential_request
-  const activeOrchestratorTaskId = tasks.find(t => t.id === selectedTaskId)?.currentTaskId
+  // activeTaskId is derived here so it can be a useEffect dependency: when the
+  // user sends a follow-up in the same conversation the task's currentTaskId
+  // changes (new task submitted) while selectedTaskId stays the same, so the
+  // effect must re-run to resubscribe to the new task's SSE stream.
+  const activeTaskId = tasks.find(t => t.id === selectedTaskId)?.currentTaskId
+
+
   useEffect(() => {
     if (!orchestratorSseEnabled()) return
+    if (!activeTaskId) return
 
     let cancelled = false
 
@@ -693,11 +713,16 @@ function App() {
           ...prev,
           [p.taskId]: { preview: p, status: 'pending' },
         }))
+      } else if (ev.type === 'skill_activity' && uiSettingsRef.current.showSkillToasts) {
+        setSkillToasts(prev => [
+          ...prev.slice(-9), // keep at most 10 toasts
+          { id: nextId(), activity: ev.payload, createdAt: Date.now() },
+        ])
       }
     }
 
-    if (!activeOrchestratorTaskId) return
-    const unsub = subscribeOrchestratorTaskStream(activeOrchestratorTaskId, {
+    if (!activeTaskId) return
+    const unsub = subscribeOrchestratorTaskStream(activeTaskId, {
       onOpen: () => {
         if (!cancelled) setUseMockHeartbeat(false)
       },
@@ -711,7 +736,7 @@ function App() {
       cancelled = true
       unsub()
     }
-  }, [selectedTaskId, activeOrchestratorTaskId])
+  }, [selectedTaskId, activeTaskId])
 
   // Offline / API-down: still show credential demo for task 13 (matches IO API demo push)
   useEffect(() => {
@@ -764,7 +789,7 @@ function App() {
       try {
         const res = await fetch(buildApiUrl('/api/tasks'), {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-User-Id': UI_USER_ID },
+          headers: { 'Content-Type': 'application/json', 'X-Active-User': UI_USER_ID },
           body: JSON.stringify({
             userId: UI_USER_ID,
             conversationId,
@@ -965,7 +990,7 @@ function App() {
     if (!DEMO_MODE) {
       void fetch(buildApiUrl(`/api/conversations/${encodeURIComponent(id)}`), {
         method: 'DELETE',
-        headers: { 'X-User-Id': UI_USER_ID },
+        headers: { 'X-Active-User': UI_USER_ID },
       })
         .then(() => {
           void refetchConversations()
@@ -982,7 +1007,7 @@ function App() {
     if (!DEMO_MODE) {
       fetch(buildApiUrl(`/api/conversations/${encodeURIComponent(id)}`), {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json', 'X-User-Id': UI_USER_ID },
+        headers: { 'Content-Type': 'application/json', 'X-Active-User': UI_USER_ID },
         body: JSON.stringify({ title }),
       }).catch(() => {/* best-effort */})
     }
@@ -1551,7 +1576,7 @@ function App() {
       try {
         const res = await fetch(buildApiUrl('/api/tasks'), {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-User-Id': UI_USER_ID },
+          headers: { 'Content-Type': 'application/json', 'X-Active-User': UI_USER_ID },
           body: JSON.stringify({
             userId: UI_USER_ID,
             conversationId,
@@ -1869,6 +1894,7 @@ function App() {
               </div>
             )}
           </div>
+          <UserSwitcher />
           <SettingsButton
             isOpen={showSettings}
             onToggle={toggleSettings}
@@ -1955,6 +1981,11 @@ function App() {
           isSubmitting={credentialRequests[activeCredentialTaskId].status === 'submitting'}
         />
       )}
+
+      <SkillActivityToast
+        toasts={skillToasts}
+        onDismiss={dismissSkillToast}
+      />
     </div>
   )
 }
