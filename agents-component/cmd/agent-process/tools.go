@@ -141,11 +141,11 @@ func spawnAgentTool(as *AgentSpawner) SkillTool {
 		Definition: anthropic.ToolParam{
 			Name: "spawn_agent",
 			Description: anthropic.String(
-				"Spawn a child agent to handle a self-contained sub-task. " +
-					"The child runs independently and returns its result when done. " +
-					"Use this when the sub-task requires a different skill domain or can run in parallel. " +
-					"Do NOT use for simple operations already available via other tools. " +
-					"Do NOT pass credential values or secrets in instructions."),
+				"Spawn a child agent for a sub-task requiring a different skill domain. " +
+					"Returns the child's result when done. " +
+					"To run sub-tasks in parallel, emit multiple spawn_agent calls in a single response. " +
+					"Do NOT use for operations your current tools can handle. " +
+					"Do NOT pass credentials in instructions."),
 			InputSchema: anthropic.ToolInputSchemaParam{
 				Properties: map[string]interface{}{
 					"instructions": map[string]interface{}{
@@ -224,7 +224,7 @@ func webFetchTool() SkillTool {
 				Properties: map[string]interface{}{
 					"url": map[string]interface{}{
 						"type":        "string",
-						"description": "The fully-qualified URL to fetch (must include scheme: https:// or http://).",
+						"description": "URL to fetch, including scheme (https:// or http://).",
 					},
 					"method": map[string]interface{}{
 						"type":        "string",
@@ -327,15 +327,15 @@ func vaultWebFetchTool(ve *VaultExecutor) SkillTool {
 		Definition: anthropic.ToolParam{
 			Name: "vault_web_fetch",
 			Description: anthropic.String(
-				"Fetch a URL using a stored API credential managed by the Vault. " +
-					"Use for authenticated HTTP requests (APIs requiring an API key). " +
+				"Fetch a URL via the Vault using a stored API credential. " +
+					"Use for authenticated HTTP requests requiring an API key. " +
 					"Do NOT use for public URLs — use web_fetch instead. " +
 					"Do NOT include credential values in any parameter."),
 			InputSchema: anthropic.ToolInputSchemaParam{
 				Properties: map[string]interface{}{
 					"url": map[string]interface{}{
 						"type":        "string",
-						"description": "The fully-qualified URL to fetch (must include scheme: https:// or http://).",
+						"description": "URL to fetch, including scheme (https:// or http://).",
 					},
 					"method": map[string]interface{}{
 						"type":        "string",
@@ -405,10 +405,9 @@ func vaultGoogleSearchTool(ve *VaultExecutor) SkillTool {
 		Definition: anthropic.ToolParam{
 			Name: "vault_google_search",
 			Description: anthropic.String(
-				"Search the web using Google Custom Search API via the Vault. " +
-					"Returns titles, URLs, and snippets for the top results. " +
+				"Search the web via the Vault and return titles, URLs, and snippets for top results. " +
 					"Use for current information, research, and fact-finding. " +
-					"Do NOT use for private or internal data — use vault_data_read for that. " +
+					"Do NOT use for private or internal data — use vault_data_read. " +
 					"Do NOT include credential values in any parameter."),
 			InputSchema: anthropic.ToolInputSchemaParam{
 				Properties: map[string]interface{}{
@@ -463,8 +462,8 @@ func vaultGitHubRequestTool(ve *VaultExecutor) SkillTool {
 			Name: "vault_github_request",
 			Description: anthropic.String(
 				"Make an authenticated request to the GitHub REST API via the Vault. " +
-					"Use for reading repos, issues, pull requests, code, and user data. " +
-					"Do NOT use for public unauthenticated GitHub data — use web_fetch instead. " +
+					"Use for repos, issues, pull requests, code, and user data — supports read and write. " +
+					"Do NOT use for public GitHub data — use web_fetch instead. " +
 					"Do NOT include credential values in any parameter."),
 			InputSchema: anthropic.ToolInputSchemaParam{
 				Properties: map[string]interface{}{
@@ -479,7 +478,7 @@ func vaultGitHubRequestTool(ve *VaultExecutor) SkillTool {
 					},
 					"body": map[string]interface{}{
 						"type":        "string",
-						"description": "Request body as a JSON-encoded string. Only used for POST and PATCH.",
+						"description": "JSON body for POST and PATCH requests.",
 					},
 				},
 				Required: []string{"path"},

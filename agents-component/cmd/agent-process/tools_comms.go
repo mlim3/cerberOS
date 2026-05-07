@@ -91,8 +91,8 @@ func vaultCommsSendTool(ve *VaultExecutor) SkillTool {
 			Name: "vault_comms_send",
 			Description: anthropic.String(
 				"Send a formatted message to an authenticated channel (email, Slack, webhook) via the Vault. " +
-					"Compose the message first with comms_format. " +
-					"Do NOT use for channels that require no credentials. " +
+					"Compose the message with comms_format before calling this tool. " +
+					"Do NOT use for unauthenticated webhooks — use web_fetch instead. " +
 					"Do NOT include credential values in any parameter."),
 			InputSchema: anthropic.ToolInputSchemaParam{
 				Properties: map[string]interface{}{
@@ -102,7 +102,7 @@ func vaultCommsSendTool(ve *VaultExecutor) SkillTool {
 					},
 					"message": map[string]interface{}{
 						"type":        "string",
-						"description": "The fully-rendered message body to send. Use comms_format to render templates before calling this tool.",
+						"description": "Fully-rendered message body to send. Use comms_format to render templates first.",
 					},
 					"subject": map[string]interface{}{
 						"type":        "string",
