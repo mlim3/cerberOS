@@ -48,8 +48,9 @@ func TestToolsForDomain_Unknown(t *testing.T) {
 	tools := toolsForDomain("unknown-domain", nil, nil)
 	names := toolNames(tools)
 	mustContain(t, names, "task_complete")
-	if len(tools) != 1 {
-		t.Errorf("unknown domain: want 1 tool (task_complete), got %d", len(tools))
+	mustContain(t, names, "skills_search")
+	if len(tools) != 2 {
+		t.Errorf("unknown domain: want 2 tools (task_complete + skills_search), got %d", len(tools))
 	}
 }
 

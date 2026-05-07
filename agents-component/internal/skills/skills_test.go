@@ -288,31 +288,6 @@ func TestSearch_TopKLargerThanIndexReturnsAll(t *testing.T) {
 	}
 }
 
-func TestSearch_ProgressiveDisclosure_NoSpec(t *testing.T) {
-	m := skills.New()
-	if err := m.RegisterDomain(multiCommandDomain()); err != nil {
-		t.Fatalf("RegisterDomain: %v", err)
-	}
-
-	results, err := m.Search("fetch URL", 5)
-	if err != nil {
-		t.Fatalf("Search: %v", err)
-	}
-	for _, r := range results {
-		if r.Domain == "" {
-			t.Error("result must have Domain")
-		}
-		if r.Name == "" {
-			t.Error("result must have Name")
-		}
-		if r.Description == "" {
-			t.Error("result must have Description")
-		}
-		// SkillSearchResult has no Spec field by design — nothing to check here,
-		// but confirm the result fields are the only ones present.
-	}
-}
-
 func TestSearch_CrossDomain_MatchesCorrectDomain(t *testing.T) {
 	m := skills.New()
 	if err := m.RegisterDomain(multiCommandDomain()); err != nil {

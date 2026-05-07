@@ -49,7 +49,7 @@ func TestGetSkillsManager_WebCommandsIndexed(t *testing.T) {
 }
 
 func TestToolsForDomain_IncludesSkillsSearch(t *testing.T) {
-	tools := toolsForDomain("web", nil)
+	tools := toolsForDomain("web", nil, nil)
 
 	found := false
 	for _, tool := range tools {
