@@ -1,0 +1,36 @@
+image:
+  repository: pgvector/pgvector
+  tag: pg16
+  pullPolicy: IfNotPresent
+
+# Service name used by memory-api and other components.
+# A second Service named "db" is also created as an alias for openbao.hcl.
+service:
+  port: 5432
+
+storage:
+  size: 2Gi
+  # Set to a specific StorageClass for your cluster; empty string = cluster default.
+  storageClass: ""
+
+auth:
+  # Values here become a Secret. Override with --set or -f secrets.yaml (gitignored).
+  user: user
+  password: password
+  database: memory_db
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# ---------------------------------------------------------------------------
+# Extension hook: CloudNativePG operator (off by default)
+# Set operator.enabled: true and install the CloudNativePG operator first.
+# When enabled the StatefulSet is skipped and a Cluster CR is created instead.
+# ---------------------------------------------------------------------------
+operator:
+  enabled: false

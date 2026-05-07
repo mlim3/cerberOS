@@ -299,7 +299,7 @@ func TestAgentComponentFlow(t *testing.T) {
 		}
 
 		// Memory record must be written with the result tag.
-		records, err := h.mem.Read(agent.AgentID, "result")
+		records, err := h.mem.Read(agent.AgentID, "result", "")
 		if err != nil {
 			t.Fatalf("memory.Read: %v", err)
 		}

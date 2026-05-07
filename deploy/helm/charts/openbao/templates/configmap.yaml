@@ -1,0 +1,29 @@
+{{- if not .Values.devMode }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openbao-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "openbao.labels" . | nindent 4 }}
+data:
+  openbao.hcl: |
+    ui = true
+    api_addr = "http://0.0.0.0:8200"
+
+    listener "tcp" {
+      address     = "0.0.0.0:8200"
+      tls_disable = 1
+    }
+
+    {{- if .Values.devMode }}
+    storage "inmem" {}
+    {{- else }}
+    storage "postgresql" {
+      connection_url = "postgres://{{ .Values.postgres.user }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.database }}?sslmode=disable"
+      table          = "openbao_kv_store"
+      ha_enabled     = "true"
+      ha_table       = "openbao_ha_locks"
+    }
+    {{- end }}
+{{- end }}

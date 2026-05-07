@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: nats
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nats.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "nats.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: client
+      port: {{ .Values.service.clientPort }}
+      targetPort: client
+      {{- if eq .Values.service.type "NodePort" }}
+      nodePort: {{ .Values.service.clientNodePort }}
+      {{- end }}
+    - name: monitor
+      port: {{ .Values.service.monitorPort }}
+      targetPort: monitor
+---
+# Headless service used by the StatefulSet for stable pod DNS
+apiVersion: v1
+kind: Service
+metadata:
+  name: nats-headless
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nats.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    {{- include "nats.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: client
+      port: 4222
+      targetPort: client
+    - name: monitor
+      port: 8222
+      targetPort: monitor

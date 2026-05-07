@@ -13,16 +13,16 @@ import (
 
 const createChatMessage = `-- name: CreateChatMessage :one
 INSERT INTO chat_schema.messages (
-    id, session_id, user_id, role, content, token_count, idempotency_key, created_at
+    id, conversation_id, user_id, role, content, token_count, idempotency_key, created_at
 ) VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8
 )
-RETURNING id, session_id, user_id, role, content, token_count, idempotency_key, created_at
+RETURNING id, conversation_id, user_id, role, content, token_count, idempotency_key, created_at
 `
 
 type CreateChatMessageParams struct {
 	ID             pgtype.UUID        `json:"id"`
-	SessionID      pgtype.UUID        `json:"session_id"`
+	ConversationID pgtype.UUID        `json:"conversation_id"`
 	UserID         pgtype.UUID        `json:"user_id"`
 	Role           string             `json:"role"`
 	Content        string             `json:"content"`
@@ -34,7 +34,7 @@ type CreateChatMessageParams struct {
 func (q *Queries) CreateChatMessage(ctx context.Context, arg CreateChatMessageParams) (ChatSchemaMessage, error) {
 	row := q.db.QueryRow(ctx, createChatMessage,
 		arg.ID,
-		arg.SessionID,
+		arg.ConversationID,
 		arg.UserID,
 		arg.Role,
 		arg.Content,
@@ -45,7 +45,7 @@ func (q *Queries) CreateChatMessage(ctx context.Context, arg CreateChatMessagePa
 	var i ChatSchemaMessage
 	err := row.Scan(
 		&i.ID,
-		&i.SessionID,
+		&i.ConversationID,
 		&i.UserID,
 		&i.Role,
 		&i.Content,
@@ -57,21 +57,21 @@ func (q *Queries) CreateChatMessage(ctx context.Context, arg CreateChatMessagePa
 }
 
 const getChatMessageByIdempotencyKey = `-- name: GetChatMessageByIdempotencyKey :one
-SELECT id, session_id, user_id, role, content, token_count, idempotency_key, created_at FROM chat_schema.messages
-WHERE session_id = $1 AND idempotency_key = $2
+SELECT id, conversation_id, user_id, role, content, token_count, idempotency_key, created_at FROM chat_schema.messages
+WHERE conversation_id = $1 AND idempotency_key = $2
 `
 
 type GetChatMessageByIdempotencyKeyParams struct {
-	SessionID      pgtype.UUID `json:"session_id"`
+	ConversationID pgtype.UUID `json:"conversation_id"`
 	IdempotencyKey pgtype.UUID `json:"idempotency_key"`
 }
 
 func (q *Queries) GetChatMessageByIdempotencyKey(ctx context.Context, arg GetChatMessageByIdempotencyKeyParams) (ChatSchemaMessage, error) {
-	row := q.db.QueryRow(ctx, getChatMessageByIdempotencyKey, arg.SessionID, arg.IdempotencyKey)
+	row := q.db.QueryRow(ctx, getChatMessageByIdempotencyKey, arg.ConversationID, arg.IdempotencyKey)
 	var i ChatSchemaMessage
 	err := row.Scan(
 		&i.ID,
-		&i.SessionID,
+		&i.ConversationID,
 		&i.UserID,
 		&i.Role,
 		&i.Content,
@@ -82,20 +82,20 @@ func (q *Queries) GetChatMessageByIdempotencyKey(ctx context.Context, arg GetCha
 	return i, err
 }
 
-const listChatMessagesBySession = `-- name: ListChatMessagesBySession :many
-SELECT id, session_id, user_id, role, content, token_count, idempotency_key, created_at FROM chat_schema.messages
-WHERE session_id = $1
+const listChatMessagesByConversation = `-- name: ListChatMessagesByConversation :many
+SELECT id, conversation_id, user_id, role, content, token_count, idempotency_key, created_at FROM chat_schema.messages
+WHERE conversation_id = $1
 ORDER BY created_at ASC
 LIMIT $2
 `
 
-type ListChatMessagesBySessionParams struct {
-	SessionID pgtype.UUID `json:"session_id"`
-	Limit     int32       `json:"limit"`
+type ListChatMessagesByConversationParams struct {
+	ConversationID pgtype.UUID `json:"conversation_id"`
+	Limit          int32       `json:"limit"`
 }
 
-func (q *Queries) ListChatMessagesBySession(ctx context.Context, arg ListChatMessagesBySessionParams) ([]ChatSchemaMessage, error) {
-	rows, err := q.db.Query(ctx, listChatMessagesBySession, arg.SessionID, arg.Limit)
+func (q *Queries) ListChatMessagesByConversation(ctx context.Context, arg ListChatMessagesByConversationParams) ([]ChatSchemaMessage, error) {
+	rows, err := q.db.Query(ctx, listChatMessagesByConversation, arg.ConversationID, arg.Limit)
 	if err != nil {
 		return nil, err
 	}
@@ -105,7 +105,7 @@ func (q *Queries) ListChatMessagesBySession(ctx context.Context, arg ListChatMes
 		var i ChatSchemaMessage
 		if err := rows.Scan(
 			&i.ID,
-			&i.SessionID,
+			&i.ConversationID,
 			&i.UserID,
 			&i.Role,
 			&i.Content,

@@ -463,7 +463,7 @@ func TestRegisterPersistsToMemory(t *testing.T) {
 		t.Fatalf("Register: %v", err)
 	}
 
-	records, err := mem.ReadAllByType(registry.DataTypeAgentState)
+	records, err := mem.ReadAllByType(registry.DataTypeAgentState, "")
 	if err != nil {
 		t.Fatalf("ReadAllByType: %v", err)
 	}

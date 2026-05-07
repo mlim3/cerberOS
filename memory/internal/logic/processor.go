@@ -3,7 +3,7 @@ package logic
 import (
 	"context"
 	"encoding/json"
-	"math/rand"
+	"fmt"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -15,30 +15,33 @@ import (
 // Embedder represents a service that can generate vector embeddings
 type Embedder interface {
 	Embed(ctx context.Context, text string) (pgvector.Vector, error)
+	ModelVersion() string
 }
 
-// MockEmbedder implements a fake Embedder returning random 1536-dim vectors
-type MockEmbedder struct{}
+type PromptFormatter func(string, string) string
+type QueryFormatter func(string) string
 
-func (m *MockEmbedder) Embed(ctx context.Context, text string) (pgvector.Vector, error) {
-	v := make([]float32, 1536)
-	for i := range v {
-		v[i] = rand.Float32()
-	}
-	return pgvector.NewVector(v), nil
-}
+type ProcessorOption func(*Processor)
 
 // Processor coordinates the logic for personal info storage and retrieval
 type Processor struct {
-	repo     storage.Repository
-	embedder Embedder
+	repo              storage.Repository
+	embedder          Embedder
+	documentFormatter PromptFormatter
+	queryFormatter    QueryFormatter
 }
 
-func NewProcessor(repo storage.Repository, embedder Embedder) *Processor {
-	return &Processor{
-		repo:     repo,
-		embedder: embedder,
+func NewProcessor(repo storage.Repository, embedder Embedder, opts ...ProcessorOption) *Processor {
+	p := &Processor{
+		repo:              repo,
+		embedder:          embedder,
+		documentFormatter: embeddingGemmaDocumentText,
+		queryFormatter:    embeddingGemmaQueryText,
 	}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
 }
 
 // simpleChunker splits text into chunks of roughly 500 chars with 50 char overlap
@@ -85,6 +88,52 @@ type SaveResponse struct {
 	SourceReferenceIDs []string
 }
 
+func embeddingGemmaDocumentText(title, content string) string {
+	if title == "" {
+		title = "none"
+	}
+	return fmt.Sprintf("title: %s | text: %s", title, content)
+}
+
+func embeddingGemmaQueryText(query string) string {
+	return fmt.Sprintf("task: search result | query: %s", query)
+}
+
+func harrierDocumentText(_ string, content string) string {
+	return content
+}
+
+func harrierQueryText(query string) string {
+	return "Instruct: Retrieve semantically similar text\nQuery: " + query
+}
+
+func plainDocumentText(_ string, content string) string {
+	return content
+}
+
+func plainQueryText(query string) string {
+	return query
+}
+
+func WithPromptStyle(style string) ProcessorOption {
+	return func(p *Processor) {
+		switch style {
+		case "", "embeddinggemma":
+			p.documentFormatter = embeddingGemmaDocumentText
+			p.queryFormatter = embeddingGemmaQueryText
+		case "harrier":
+			p.documentFormatter = harrierDocumentText
+			p.queryFormatter = harrierQueryText
+		case "plain":
+			p.documentFormatter = plainDocumentText
+			p.queryFormatter = plainQueryText
+		default:
+			p.documentFormatter = embeddingGemmaDocumentText
+			p.queryFormatter = embeddingGemmaQueryText
+		}
+	}
+}
+
 // SavePersonalInfo processes and saves new information
 func (p *Processor) SavePersonalInfo(ctx context.Context, req SaveRequest) (*SaveResponse, error) {
 	var userUUID, sourceUUID pgtype.UUID
@@ -105,7 +154,8 @@ func (p *Processor) SavePersonalInfo(ctx context.Context, req SaveRequest) (*Sav
 	err := p.repo.WithTx(ctx, func(q *storage.Queries) error {
 		// 1. Process Chunks
 		for _, text := range chunks {
-			embedding, err := p.embedder.Embed(ctx, text)
+			embedText := p.documentFormatter(req.SourceType, text)
+			embedding, err := p.embedder.Embed(ctx, embedText)
 			if err != nil {
 				return err
 			}
@@ -119,7 +169,7 @@ func (p *Processor) SavePersonalInfo(ctx context.Context, req SaveRequest) (*Sav
 				UserID:       userUUID,
 				RawText:      text,
 				Embedding:    embedding,
-				ModelVersion: "mock-model-v1",
+				ModelVersion: p.embedder.ModelVersion(),
 			})
 			if err != nil {
 				return err
@@ -217,17 +267,13 @@ func (p *Processor) SemanticQuery(ctx context.Context, userID, query string, top
 	}
 
 	// 1. Embed Query
-	embedding, err := p.embedder.Embed(ctx, query)
+	embedding, err := p.embedder.Embed(ctx, p.queryFormatter(query))
 	if err != nil {
 		return nil, err
 	}
 
-	// 2. Search
-	chunks, err := p.repo.Querier().QueryChunks(ctx, storage.QueryChunksParams{
-		UserID:    userUUID,
-		Embedding: embedding,
-		Limit:     int32(topK),
-	})
+	// 2. Search (ordered by distance ASC, then created_at DESC)
+	chunks, err := p.repo.QueryChunksBySimilarity(ctx, userUUID, embedding, int32(topK))
 	if err != nil {
 		return nil, err
 	}
@@ -235,21 +281,25 @@ func (p *Processor) SemanticQuery(ctx context.Context, userID, query string, top
 	// 3. Populate Results
 	var results []QueryResult
 	for _, c := range chunks {
-		// Calculate similarity (mocked as random since distance from <=> isn't returned by pgx natively without extra select fields)
-		// Real impl would select the distance and convert to similarity: 1 - distance
-		sim := rand.Float64()
+		sim := 1.0 - c.Distance
+		if sim < 0 {
+			sim = 0
+		}
+		if sim > 1 {
+			sim = 1
+		}
 
 		refs, err := p.repo.Querier().GetSourceReferencesByTarget(ctx, storage.GetSourceReferencesByTargetParams{
 			UserID:   userUUID,
-			TargetID: c.ID,
+			TargetID: c.Chunk.ID,
 		})
 		if err != nil {
 			return nil, err
 		}
 
 		results = append(results, QueryResult{
-			ChunkID:          formatUUID(c.ID),
-			Text:             c.RawText,
+			ChunkID:          formatUUID(c.Chunk.ID),
+			Text:             c.Chunk.RawText,
 			SimilarityScore:  sim,
 			SourceReferences: refs,
 		})

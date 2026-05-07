@@ -1,0 +1,11 @@
+# Optional Prometheus scrape config when `aegis-databus` runs as a container on `aegis-net`.
+# Compose:
+#   docker compose -f docker-compose.yml -f docker-compose.apps.yml -f docker-compose.prometheus-apps.yml --profile apps up -d --build
+#
+# Do not merge this file if DataBus runs on the host only (use default config/prometheus.yml + host.docker.internal:9091).
+
+services:
+  prometheus:
+    volumes:
+      - ./config/prometheus.docker.yml:/etc/prometheus/prometheus.yml:ro
+      - ./config/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro

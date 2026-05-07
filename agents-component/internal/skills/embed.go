@@ -1,82 +1,190 @@
-// Package skills — embed.go implements a lightweight feature-hash embedder for
-// the semantic search index (EDD §13.5). No external ML dependencies are required:
-// tokens are hashed into a fixed-dimension float vector and L2-normalised so that
-// cosine similarity reduces to a dot product.
+// Package skills — embed.go provides the Embedder interface and a deterministic
+// local fallback used by the in-memory skill search manager (EDD §13.5).
+//
+// The default hashEmbedder maps text to a fixed-dimension float64 vector using
+// FNV-1a feature hashing on unigrams and bigrams. It requires no API calls,
+// no training data, and no corpus statistics — making it safe to use inside
+// internal/ packages that are prohibited from making network connections.
+//
+// Production callers inject the shared embedding-api client via WithEmbedder.
+// That client lives outside internal/ where network calls are permitted.
 package skills
 
 import (
-	"hash/fnv"
 	"math"
 	"strings"
+	"unicode"
 )
 
 const (
-	embDim            = 128 // feature-hash vector dimension
-	defaultSearchTopK = 3   // default topK for Manager.Search
+	// defaultHashDim is the vector dimension used by the deterministic local embedder.
+	// 512 gives a good balance of precision and memory for small skill corpora.
+	defaultHashDim = 512
 )
 
-// commandEntry is one indexed record in the in-memory embedding search index.
-type commandEntry struct {
-	domain      string
-	name        string
-	description string
-	vector      []float64
+// Embedder converts a text string into a float64 embedding vector.
+// Implementations must be safe for concurrent use.
+// The returned vector should be L2-normalised so cosine similarity is
+// equivalent to a dot product — the Manager assumes this property.
+type Embedder interface {
+	Embed(text string) ([]float64, error)
 }
 
-// hashEmbed computes a feature-hash embedding for text.
-// Tokens are space-separated words and character bigrams from the lowercased input.
-// Each token is hashed with FNV64a into a bucket; a second hash determines the sign
-// (sign-randomisation reduces variance). The resulting vector is L2-normalised so
-// cosineSimilarity can be computed as a plain dot product.
-func hashEmbed(text string) []float64 {
-	vec := make([]float64, embDim)
-	lower := strings.ToLower(text)
-
-	for _, word := range strings.Fields(lower) {
-		addToVec(vec, word)
-	}
-
-	runes := []rune(lower)
-	for i := 0; i+1 < len(runes); i++ {
-		addToVec(vec, string(runes[i:i+2]))
-	}
-
-	l2Normalise(vec)
-	return vec
+// hashEmbedder is the default Embedder. It uses FNV-1a feature hashing on
+// unigrams and bigrams extracted from the input text. The result is L2-normalised.
+//
+// Properties:
+//   - Fixed output dimension (no vocabulary needed).
+//   - Deterministic and stateless — identical inputs always produce identical vectors.
+//   - O(tokens) time, O(dim) space.
+//   - No network calls, no external dependencies.
+type hashEmbedder struct {
+	dim int
 }
 
-func addToVec(vec []float64, token string) {
-	h1 := fnv.New64a()
-	h1.Write([]byte(token))
-	bucket := h1.Sum64() % uint64(len(vec))
-
-	h2 := fnv.New64a()
-	h2.Write([]byte("~" + token))
-	if h2.Sum64()%2 == 0 {
-		vec[bucket] += 1.0
-	} else {
-		vec[bucket] -= 1.0
-	}
+// newHashEmbedder returns a hashEmbedder with the given vector dimension.
+func newHashEmbedder(dim int) *hashEmbedder {
+	return &hashEmbedder{dim: dim}
 }
 
-func l2Normalise(vec []float64) {
-	var norm float64
+// Embed converts text to a normalised float64 vector via feature hashing.
+func (h *hashEmbedder) Embed(text string) ([]float64, error) {
+	tokens := tokenizeText(text)
+	vec := make([]float64, h.dim)
+	for _, tok := range tokens {
+		idx := int(fnv1aHash(tok)) % h.dim
+		if idx < 0 {
+			idx = -idx
+		}
+		vec[idx]++
+	}
+	l2Normalize(vec)
+	return vec, nil
+}
+
+// tokenizeText lowercases text, splits on non-alphanumeric/underscore boundaries,
+// drops tokens shorter than 2 characters and common English stopwords, then
+// appends adjacent bigrams. Bigrams improve precision for technical phrase matching
+// (e.g. "web_fetch" stays linked to "web" and "fetch").
+func tokenizeText(text string) []string {
+	text = strings.ToLower(text)
+	var unigrams []string
+	var cur strings.Builder
+
+	flush := func() {
+		if cur.Len() >= 2 {
+			tok := cur.String()
+			if !isStopword(tok) {
+				unigrams = append(unigrams, tok)
+			}
+		}
+		cur.Reset()
+	}
+
+	for _, r := range text {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' {
+			cur.WriteRune(r)
+		} else {
+			flush()
+		}
+	}
+	flush()
+
+	tokens := make([]string, 0, len(unigrams)*2)
+	tokens = append(tokens, unigrams...)
+	for i := 0; i < len(unigrams)-1; i++ {
+		tokens = append(tokens, unigrams[i]+"_"+unigrams[i+1])
+	}
+	return tokens
+}
+
+// isStopword returns true for common English words that carry little semantic
+// signal in technical tool descriptions.
+func isStopword(w string) bool {
+	switch w {
+	case "the", "an", "is", "are", "be", "to", "for", "of", "in", "on",
+		"and", "or", "not", "do", "use", "this", "that", "it", "its",
+		"with", "from", "by", "at", "as", "if", "only", "when", "any",
+		"all", "no", "so", "but", "also", "via", "per", "can":
+		return true
+	}
+	return false
+}
+
+// fnv1aHash computes a 32-bit FNV-1a hash of s.
+func fnv1aHash(s string) uint32 {
+	const (
+		offset32 uint32 = 2166136261
+		prime32  uint32 = 16777619
+	)
+	h := offset32
+	for i := 0; i < len(s); i++ {
+		h ^= uint32(s[i])
+		h *= prime32
+	}
+	return h
+}
+
+// l2Normalize divides each element of vec by the L2 norm in-place.
+// No-ops on zero vectors to avoid division by zero.
+func l2Normalize(vec []float64) {
+	sum := 0.0
 	for _, v := range vec {
-		norm += v * v
+		sum += v * v
 	}
-	if norm == 0 {
+	if sum == 0 {
 		return
 	}
-	norm = math.Sqrt(norm)
+	norm := math.Sqrt(sum)
 	for i := range vec {
 		vec[i] /= norm
 	}
 }
 
-// cosineSimilarity returns the cosine similarity of two L2-normalised vectors.
-// Because both inputs are unit vectors this is equivalent to their dot product.
+// BatchEmbedder is an optional extension of Embedder that enables efficient
+// multi-text embedding in a single API call (e.g. a shared embedding-api
+// request). Implementations must be safe for concurrent use.
+//
+// Callers detect support via type assertion:
+//
+//	if be, ok := embedder.(skills.BatchEmbedder); ok { ... }
+type BatchEmbedder interface {
+	Embedder
+	EmbedBatch(texts []string) ([][]float64, error)
+}
+
+// embedTexts embeds all texts in a single call when the configured embedder
+// implements BatchEmbedder, and falls back to sequential Embed calls otherwise.
+// The returned slice is always the same length as texts; entries where
+// embedding failed are nil (non-fatal — those commands are excluded from search
+// results but structural queries still work).
+func (m *hierarchyManager) embedTexts(texts []string) [][]float64 {
+	if len(texts) == 0 {
+		return nil
+	}
+	if be, ok := m.embedder.(BatchEmbedder); ok {
+		vecs, err := be.EmbedBatch(texts)
+		if err == nil && len(vecs) == len(texts) {
+			return vecs
+		}
+		// Fall through to one-at-a-time on error or unexpected length.
+	}
+	result := make([][]float64, len(texts))
+	for i, t := range texts {
+		if vec, err := m.embedder.Embed(t); err == nil {
+			result[i] = vec
+		}
+	}
+	return result
+}
+
+// cosineSimilarity computes the dot product of two L2-normalised vectors.
+// Returns 0 when the vectors have different lengths.
 func cosineSimilarity(a, b []float64) float64 {
-	var dot float64
+	if len(a) != len(b) {
+		return 0
+	}
+	dot := 0.0
 	for i := range a {
 		dot += a[i] * b[i]
 	}

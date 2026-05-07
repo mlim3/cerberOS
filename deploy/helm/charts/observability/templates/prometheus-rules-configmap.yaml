@@ -1,0 +1,58 @@
+{{- if .Values.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-alert-rules
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "observability.labels" . | nindent 4 }}
+data:
+  alerts.yml: |
+    groups:
+      - name: aegis-databus
+        rules:
+          - alert: AegisDataBusDegraded
+            expr: aegis_databus_degraded == 1
+            for: 10m
+            labels:
+              severity: warning
+            annotations:
+              summary: "DataBus in DEGRADED-HOLD (storage unavailable)"
+              description: "Memory/Orchestrator ping failed. Check AEGIS_ORCHESTRATOR_URL / AEGIS_MEMORY_URL."
+
+          - alert: AegisPublishErrors
+            expr: rate(aegis_databus_publish_errors_total[5m]) > 0.5
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Elevated JetStream publish errors"
+              description: "Rate of publish_errors > 0.5/s for 5m. Check NATS cluster and stream health."
+
+          - alert: AegisValidationErrors
+            expr: rate(aegis_databus_validation_errors_total[5m]) > 0.1
+            for: 5m
+            labels:
+              severity: info
+            annotations:
+              summary: "CloudEvents validation failures"
+              description: "Clients may be sending invalid envelopes."
+
+          - alert: AegisDLQDepth
+            expr: aegis_databus_jetstream_stream_messages{stream="AEGIS_DLQ"} > 100
+            for: 15m
+            labels:
+              severity: warning
+            annotations:
+              summary: "DLQ stream has many messages"
+              description: "Review DLQ consumers and replay policy."
+
+          - alert: AegisStreamPending
+            expr: aegis_databus_jetstream_stream_pending > 1000
+            for: 15m
+            labels:
+              severity: warning
+            annotations:
+              summary: "High pending message count on a JetStream stream"
+              description: "Consumers may be stuck or overloaded."
+{{- end }}

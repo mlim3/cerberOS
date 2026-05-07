@@ -1,0 +1,29 @@
+image:
+  repository: ghcr.io/huggingface/text-embeddings-inference
+  tag: cpu-1.8.1
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+service:
+  port: 80
+
+model:
+  id: microsoft/harrier-oss-v1-270m
+  dtype: float32
+  dimensions: 640
+  maxConcurrentRequests: 64
+
+runtime:
+  args: []
+
+auth:
+  hfToken: ""
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 1Gi
+  limits:
+    cpu: 2000m
+    memory: 4Gi

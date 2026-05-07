@@ -1,0 +1,21 @@
+image:
+  # Same image as aegis-agents; entrypoint is overridden to /app/simulator
+  repository: ghcr.io/mlim3/cerberos-aegis-agents
+  tag: latest
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+natsUrl: "nats://nats:4222"
+
+observability:
+  otlpEndpoint: "http://tempo:4318"
+  serviceName: "aegis-simulator"
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi

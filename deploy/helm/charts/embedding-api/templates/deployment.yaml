@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "embedding-api.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "embedding-api.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "embedding-api.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "embedding-api.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: embedding-api
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if gt (len .Values.runtime.args) 0 }}
+          args:
+            {{- toYaml .Values.runtime.args | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: 80
+          env:
+            - name: MODEL_ID
+              value: {{ default .Values.model.id .Values.global.embedding.model | quote }}
+            - name: EMBEDDING_DTYPE
+              value: {{ .Values.model.dtype | quote }}
+            - name: EMBEDDING_DIM
+              value: {{ default .Values.model.dimensions .Values.global.embedding.dimensions | quote }}
+            - name: MAX_CONCURRENT_REQUESTS
+              value: {{ .Values.model.maxConcurrentRequests | quote }}
+            {{- if or .Values.auth.hfToken .Values.global.embedding.hfToken }}
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: embedding-api-secrets
+                  key: HF_TOKEN
+            {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}

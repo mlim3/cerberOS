@@ -12,6 +12,7 @@ package simulator_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -37,6 +38,8 @@ func newSim(t *testing.T) *simulator.Simulator {
 	if err != nil {
 		t.Skipf("NATS unavailable (%v) — set AEGIS_NATS_URL or run: docker run --rm -p 4222:4222 nats:latest -js", err)
 	}
+	// Unique suffix per test to avoid durable consumer collisions.
+	sim.WithConsumerSuffix(fmt.Sprintf("%d", time.Now().UnixNano()))
 	if err := sim.Start(); err != nil {
 		sim.Stop() //nolint:errcheck
 		t.Fatalf("simulator.Start: %v", err)

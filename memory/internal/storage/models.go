@@ -22,7 +22,7 @@ type AgentLogsSchemaTaskExecution struct {
 
 type ChatSchemaMessage struct {
 	ID             pgtype.UUID        `json:"id"`
-	SessionID      pgtype.UUID        `json:"session_id"`
+	ConversationID pgtype.UUID        `json:"conversation_id"`
 	UserID         pgtype.UUID        `json:"user_id"`
 	Role           string             `json:"role"`
 	Content        string             `json:"content"`

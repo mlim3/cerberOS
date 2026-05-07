@@ -1,0 +1,21 @@
+{
+  "name": "@cerberos/surfaces-cli",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "cerberos": "./src/cli.ts"
+  },
+  "scripts": {
+    "dev": "bun run --watch src/cli.ts",
+    "start": "bun run src/cli.ts",
+    "build": "bun build src/cli.ts --outdir ./dist --target bun",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@cerberos/io-core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.0.0",
+    "@types/node": "^20.0.0"
+  }
+}

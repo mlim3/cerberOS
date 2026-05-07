@@ -1,0 +1,411 @@
+# =============================================================================
+# cerberOS — Root Docker Compose
+# =============================================================================
+#
+# Start the full stack:   docker compose up --build
+#
+# Port map (host → container):
+#   3000 → Grafana
+#   3001 → io API/UI
+#   4222 → NATS client
+#   7777 → NATS exporter
+#   8000 → vault engine API
+#   8080 → orchestrator health
+#   8081 → memory API
+#   8200 → OpenBao
+#   8222 → NATS monitoring
+#   3100 → Loki
+#   3200 → Tempo (trace query)
+#   4317 → Tempo (OTLP gRPC ingest)
+#   9090 → Prometheus
+#   9091 → DataBus health/metrics
+#   9190 → agents metrics
+#
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# 1. MESSAGING — single-node NATS JetStream
+#    Named "nats-1" so aegis-databus default env (nats://nats-1:4222) works.
+#    Alias "nats" keeps NATS_URL=nats://nats:4222 working for everything else.
+# ---------------------------------------------------------------------------
+services:
+  nats-1:
+    image: nats:2.10-alpine
+    command: [ "--jetstream", "--store_dir=/data", "-m", "8222" ]
+    volumes:
+      - nats1-data:/data
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    healthcheck:
+      test: [ "CMD", "wget", "-qO-", "http://localhost:8222/healthz" ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      cerberos:
+        aliases:
+          - nats
+
+  # ---------------------------------------------------------------------------
+  # 2. CONTROL PLANE
+  # ---------------------------------------------------------------------------
+  orchestrator:
+    build:
+      context: ./orchestrator
+    depends_on:
+      nats-1:
+        condition: service_healthy
+    environment:
+      NATS_URL: nats://nats:4222
+      NATS_CREDS_PATH: ""
+      VAULT_ADDR: http://openbao:8200
+      MEMORY_ENDPOINT: http://memory-api:8081
+      VAULT_ENGINE_URL: http://vault:8000 #for keys test
+      IO_API_BASE: http://io:3001
+      # Planner task timeout. The FIRST planner task on a fresh aegis-agents
+      # process pays full cold start (Vault pre-authorize + process fork +
+      # agent-process init + cold TLS handshake to Anthropic ≈ 30–90s) and
+      # needs 120s of headroom. Subsequent planner tasks reuse the warm
+      # agent-process via lifecycle.Deliver (see aegis-agents comments) and
+      # typically complete in 2–10s; the high ceiling is harmless on those.
+      DECOMPOSITION_TIMEOUT_SECONDS: "120"
+      # Observability: gRPC OTLP ingest into Tempo, structured JSON logs scraped by Promtail → Loki.
+      OTEL_EXPORTER_OTLP_ENDPOINT: tempo:4317
+      LOG_LEVEL: info
+      LOG_FORMAT: json
+      LOKI_URL: http://loki:3100
+      # POST /v1/cron/wake (optional). Set on the host, e.g.:
+      #   export CRON_WAKE_SECRET=$(openssl rand -hex 16) && docker compose up -d orchestrator
+      CRON_WAKE_SECRET: ${CRON_WAKE_SECRET:-}
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    networks:
+      - cerberos
+
+  # ---------------------------------------------------------------------------
+  # 3. USER / IO
+  # ---------------------------------------------------------------------------
+  io:
+    build:
+      context: ./io
+      args:
+        ENABLE_VOICE: "false"
+    ports:
+      - "3001:3001"
+    depends_on:
+      nats-1:
+        condition: service_healthy
+      orchestrator:
+        condition: service_started
+    environment:
+      NODE_ENV: production
+      DEMO_MODE: "false"
+      NATS_URL: nats://nats:4222
+      LOG_LEVEL: debug
+      STT_PROVIDER: disabled
+      MEMORY_API_BASE: http://memory-api:8081
+      INTERNAL_VAULT_API_KEY: ${INTERNAL_VAULT_API_KEY:?Set INTERNAL_VAULT_API_KEY in .env}
+      MEMORY_API_KEY: ${INTERNAL_VAULT_API_KEY:?Set INTERNAL_VAULT_API_KEY in .env}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
+      OTEL_SERVICE_NAME: io
+    restart: unless-stopped
+    networks:
+      - cerberos
+
+  # ---------------------------------------------------------------------------
+  # 4. MEMORY
+  # ---------------------------------------------------------------------------
+  memory-db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRES_DB: ${POSTGRES_DB:-memory_db}
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./memory/scripts/init-db.sql:/docker-entrypoint-initdb.d/01-init-db.sql:ro
+      - ./scripts/init-openbao-db.sql:/docker-entrypoint-initdb.d/02-init-openbao-db.sql:ro
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-user} -d ${POSTGRES_DB:-memory_db}" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      cerberos:
+        # Alias "db" so vault/openbao.hcl connection_url (postgres://...@db:5432/...)
+        # resolves without a custom HCL override.
+        aliases:
+          - db
+
+  memory-api:
+    build:
+      context: ./memory
+    depends_on:
+      memory-db:
+        condition: service_healthy
+      nats-1:
+        condition: service_healthy
+    environment:
+      DB_HOST: memory-db
+      DB_PORT: "5432"
+      DB_USER: ${POSTGRES_USER:-user}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      DB_NAME: ${POSTGRES_DB:-memory_db}
+      PORT: "8081"
+      VAULT_MASTER_KEY: ${VAULT_MASTER_KEY:?Set VAULT_MASTER_KEY in .env (exactly 32 ASCII chars)}
+      INTERNAL_VAULT_API_KEY: ${INTERNAL_VAULT_API_KEY:?Set INTERNAL_VAULT_API_KEY in .env}
+      # Heartbeat emitter publishes to aegis.heartbeat.service.memory.
+      NATS_URL: nats://nats:4222
+      # Observability: OTLP HTTP trace export to Tempo (same pattern as io-api).
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
+      OTEL_SERVICE_NAME: memory
+    ports:
+      - "8081:8081"
+    restart: unless-stopped
+    networks:
+      - cerberos
+
+  # ---------------------------------------------------------------------------
+  # 5. CREDENTIAL VAULT
+  # ---------------------------------------------------------------------------
+  openbao:
+    image: openbao/openbao:latest
+    command: server -config=/openbao/local/openbao.hcl
+    ports:
+      - "8200:8200"
+    environment:
+      BAO_ADDR: http://127.0.0.1:8200
+    volumes:
+      - ./vault/openbao.hcl:/openbao/local/openbao.hcl:ro
+    cap_add:
+      - IPC_LOCK
+    depends_on:
+      memory-db:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - cerberos
+
+  vault:
+    build:
+      context: ./vault/engine
+    ports:
+      - "8000:8000"
+    environment:
+      BAO_ADDR: http://openbao:8200
+      BAO_TOKEN: ${BAO_TOKEN:-}
+      # Heartbeat emitter publishes to aegis.heartbeat.service.vault.
+      NATS_URL: nats://nats:4222
+    depends_on:
+      - openbao
+      - nats-1
+    restart: "no"
+    networks:
+      - cerberos
+
+  # ---------------------------------------------------------------------------
+  # 6. DATABUS
+  # ---------------------------------------------------------------------------
+  aegis-databus:
+    build:
+      context: ./aegis-databus
+      target: aegis-databus
+    depends_on:
+      nats-1:
+        condition: service_healthy
+      orchestrator:
+        condition: service_started
+    environment:
+      AEGIS_NATS_URL: nats://nats-1:4222
+      AEGIS_NATS_HTTP_URL: http://nats-1:8222
+      AEGIS_NATS_REPLICAS: "1"
+      AEGIS_ORCHESTRATOR_URL: http://orchestrator:8080
+      AEGIS_MEMORY_URL: http://memory-api:8081/v1/memory
+      # Observability: OTLP HTTP export (databus uses otlptracehttp in pkg/telemetry).
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
+      OTEL_SERVICE_NAME: databus
+    ports:
+      - "9091:9091"
+    healthcheck:
+      test: [ "CMD", "wget", "-q", "--spider", "http://127.0.0.1:9091/healthz" ]
+      interval: 5s
+      timeout: 3s
+      retries: 36
+      start_period: 600s
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    user: "65532:65532"
+    networks:
+      - cerberos
+
+  # ---------------------------------------------------------------------------
+  # 7. OBSERVABILITY (always on — Grafana, Prometheus, Loki, Promtail, NATS exporter)
+  # ---------------------------------------------------------------------------
+  nats-exporter:
+    image: natsio/prometheus-nats-exporter:latest
+    command:
+      - "-varz"
+      - "-connz"
+      - "-connz_detailed"
+      - "-subz"
+      - "-routez"
+      - "http://nats-1:8222"
+    ports:
+      - "7777:7777"
+    depends_on:
+      - nats-1
+    networks:
+      - cerberos
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./aegis-databus/config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./aegis-databus/config/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+    ports:
+      - "9090:9090"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    depends_on:
+      - nats-exporter
+    networks:
+      - cerberos
+
+  grafana:
+    image: grafana/grafana:latest
+    volumes:
+      - ./aegis-databus/config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./orchestrator/observability/grafana/dashboards:/etc/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_INSTALL_PLUGINS: grafana-piechart-panel
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+    networks:
+      - cerberos
+
+  tempo:
+    image: grafana/tempo:2.4.1
+    command: -config.file=/etc/tempo/config.yaml
+    volumes:
+      - ./orchestrator/observability/tempo/config.yaml:/etc/tempo/config.yaml:ro
+    ports:
+      - "3200:3200" # Tempo HTTP (query)
+      - "4317:4317" # OTLP gRPC (trace ingest)
+    networks:
+      - cerberos
+
+  loki:
+    image: grafana/loki:3.4.2
+    command: -config.file=/etc/loki/local-config.yaml
+    ports:
+      - "3100:3100"
+    networks:
+      - cerberos
+
+  promtail:
+    image: grafana/promtail:3.4.2
+    command: -config.file=/etc/promtail/config.yml
+    volumes:
+      - ./orchestrator/observability/promtail/config.yml:/etc/promtail/config.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - promtail-positions:/tmp
+    depends_on:
+      - loki
+    networks:
+      - cerberos
+
+  # ---------------------------------------------------------------------------
+  # 8. AGENTS
+  # ---------------------------------------------------------------------------
+  simulator:
+    build:
+      context: ./agents-component
+    entrypoint: [ "/app/simulator" ]
+    depends_on:
+      nats-1:
+        condition: service_healthy
+    environment:
+      AEGIS_NATS_URL: nats://nats:4222
+      # Disable mock vault responses so the real orchestrator handles vault
+      # execute requests end-to-end (set to "true" when running without orchestrator).
+      SIMULATE_VAULT_EXECUTE: "false"
+      # Observability: OTLP HTTP trace export (safe no-op if not using tracing here).
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
+      OTEL_SERVICE_NAME: agents
+    restart: unless-stopped
+    networks:
+      - cerberos
+
+  aegis-agents:
+    build:
+      context: ./agents-component
+    depends_on:
+      nats-1:
+        condition: service_healthy
+      simulator:
+        condition: service_started
+    environment:
+      AEGIS_NATS_URL: nats://nats:4222
+      AEGIS_AGENT_PROCESS_PATH: /app/agent-process
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://api.anthropic.com}
+      # Concurrency cap for inbound task dispatch. Without parallel workers,
+      # JetStream delivers task.inbound serially and each HandleTaskSpec
+      # (Firecracker provision) blocks subsequent tasks — two back-to-back
+      # user tasks then hit the overall timeout.
+      AEGIS_AGENTS_MAX_CONCURRENT_TASKS: "8"
+      # Live-process reuse (cold-start-tax elimination). The factory's
+      # CompleteTask leaves the agent-process alive and the registry entry in
+      # IDLE when this timeout is > 0; the next matching task enters the warm
+      # Priority 1 path in HandleTaskSpec and calls lifecycle.Deliver to hand
+      # the running process a fresh SpawnContext — skipping Vault
+      # pre-authorize + process fork + agent-process boot. A live process that
+      # stays idle past AEGIS_IDLE_SUSPEND_TIMEOUT is SUSPENDED by the idle
+      # sweep (OQ-03): the process is torn down and the registry entry is
+      # parked so the next task pays only a warm-VM respawn, not a full
+      # provision. Safe only because the process-manager lifecycle's
+      # Manager.Deliver is implemented; Firecracker still reports
+      # SupportsReuse=false and the factory auto-falls-back to Spawn.
+      AEGIS_IDLE_SUSPEND_TIMEOUT: "10m"
+      # Observability: OTLP HTTP export continues the trace from Orchestrator
+      # via TaskSpec.TraceID. Disabled automatically when endpoint is unset.
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
+      OTEL_SERVICE_NAME: agents
+    ports:
+      - "9190:9090"
+    restart: unless-stopped
+    networks:
+      - cerberos
+
+# =============================================================================
+# NETWORKS
+# =============================================================================
+networks:
+  # No explicit `name:` — Compose uses `{project}_{network}` so we never clash with a
+  # manually created or legacy Docker network also called `cerberos`.
+  cerberos:
+
+# =============================================================================
+# VOLUMES
+# =============================================================================
+volumes:
+  nats1-data:
+  postgres-data:
+  promtail-positions:
+    # Reserved for future mTLS (see CA_PLAN.md):
+    # certs:

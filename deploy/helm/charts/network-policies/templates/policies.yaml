@@ -1,0 +1,220 @@
+{{- if .Values.enabled }}
+# ---------------------------------------------------------------------------
+# DEFAULT DENY — drop all ingress/egress not explicitly allowed below
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "network-policies.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# ---------------------------------------------------------------------------
+# Allow all pods → NATS (pub/sub backbone)
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-all-to-nats
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "network-policies.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: nats
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+      ports:
+        - port: 4222
+        - port: 8222
+---
+# ---------------------------------------------------------------------------
+# Allow all pods → DNS (required for service discovery)
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "network-policies.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+---
+# ---------------------------------------------------------------------------
+# io — accepts ingress from outside (NodePort / Ingress controller)
+#      accepts ingress from orchestrator (health polling)
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-io-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "network-policies.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: io
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - port: 3001
+---
+# ---------------------------------------------------------------------------
+# memory-api — only orchestrator, io, aegis-databus, aegis-agents may connect
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-memory-api-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "network-policies.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: memory-api
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: orchestrator
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: io
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: aegis-databus
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: aegis-agents
+      ports:
+        - port: 8081
+---
+# ---------------------------------------------------------------------------
+# openbao — only orchestrator and vault-engine may connect
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-openbao-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "network-policies.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: openbao
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: orchestrator
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: vault
+      ports:
+        - port: 8200
+---
+# ---------------------------------------------------------------------------
+# postgres — only memory-api and openbao may connect
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-postgres-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "network-policies.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: memory-db
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: memory-api
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: openbao
+      ports:
+        - port: 5432
+---
+# ---------------------------------------------------------------------------
+# orchestrator — accepts ingress from io and aegis-databus
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-orchestrator-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "network-policies.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: orchestrator
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: io
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: aegis-databus
+      ports:
+        - port: 8080
+---
+# ---------------------------------------------------------------------------
+# Observability — Prometheus scrapes all app pods; allow intra-obs traffic
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-scrape
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "network-policies.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: cerberos
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+{{- end }}

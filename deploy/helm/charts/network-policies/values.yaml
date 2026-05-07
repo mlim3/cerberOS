@@ -1,0 +1,8 @@
+# ---------------------------------------------------------------------------
+# Extension hook: NetworkPolicies (off by default)
+# Set enabled: true in values-prod.yaml to enforce traffic rules.
+# Requires a CNI plugin that honours NetworkPolicy (Calico, Cilium, Weave).
+# kind ships with kindnet which does NOT enforce NetworkPolicy — install
+# Calico on kind first: https://projectcalico.docs.tigera.io/getting-started/kubernetes/kind
+# ---------------------------------------------------------------------------
+enabled: false

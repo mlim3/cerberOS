@@ -1,0 +1,32 @@
+# Git / IDE
+.git
+.gitignore
+.cursor
+**/*.md
+
+# Build artifacts & caches
+bin/
+databus
+*.exe
+**/.gomodcache/
+**/vendor/
+
+# Tests (not needed for image build)
+**/testdata/
+**/*_test.go
+
+# Local env & secrets (never bake into images)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+!config/certs/.gitkeep
+
+# Docs & presentations (runtime not required)
+docs/
+*.pptx
+*.pdf
+
+# Misc
+.DS_Store

@@ -39,14 +39,97 @@ type Config struct {
 	// instead of being respawned.
 	// Env: AEGIS_MAX_AGENT_RETRIES (positive integer). Default: 3.
 	MaxAgentRetries int
+
+	// MetricsPort is the TCP port on which the /metrics HTTP endpoint is served.
+	// Env: AEGIS_METRICS_PORT (positive integer). Default: 9090.
+	MetricsPort int
+
+	// CredAuthMaxAttempts is the number of credential.request publish+await cycles
+	// before PreAuthorize gives up and returns VAULT_UNREACHABLE, triggering task.failed.
+	// Env: AEGIS_CRED_AUTH_MAX_ATTEMPTS (positive integer). Default: 3.
+	CredAuthMaxAttempts int
+
+	// CredAuthTimeout is the per-attempt deadline for receiving credential.response.
+	// Env: AEGIS_CRED_AUTH_TIMEOUT (Go duration string, e.g. "5s"). Default: 5s.
+	CredAuthTimeout time.Duration
+
+	// CredAuthBaseBackoff is the initial sleep between credential authorize retries.
+	// Each subsequent retry doubles the backoff (1s → 2s → 4s, …).
+	// Env: AEGIS_CRED_AUTH_BASE_BACKOFF (Go duration string). Default: 1s.
+	CredAuthBaseBackoff time.Duration
+
+	// CommsMaxDeliver is the redelivery budget applied to every durable JetStream
+	// consumer. After this many delivery attempts the message is dead-lettered:
+	// the full original envelope is published to aegis.orchestrator.error with
+	// MessageType "dead.letter" so the Orchestrator can detect stalled tasks.
+	// Env: AEGIS_COMMS_MAX_DELIVER (positive integer). Default: 5.
+	CommsMaxDeliver int
+
+	// IdleSuspendTimeout is how long an agent may remain in the IDLE state before
+	// the idle sweep transitions it to SUSPENDED, freeing VM resources while
+	// preserving the agent's registry entry for future reuse (OQ-03).
+	//
+	// When a task arrives for a SUSPENDED agent the factory issues a fresh
+	// credential.authorize and spawns a new microVM (see SuspendWakeLatencyTarget).
+	//
+	// Set to 0 (default) to disable auto-suspension: all agents are TERMINATED
+	// immediately after task completion (current behaviour).
+	//
+	// Env: AEGIS_IDLE_SUSPEND_TIMEOUT (Go duration, e.g. "5m"). Default: 0 (disabled).
+	IdleSuspendTimeout time.Duration
+
+	// SkillsConfigPath is the path to a YAML or JSON skill definitions file.
+	// When set, it replaces the embedded default_skills.yaml for both M4
+	// registration (cmd/aegis-agents) and tool dispatch (cmd/agent-process).
+	// The file must follow the schema defined in internal/skillsconfig.
+	// Env: AEGIS_SKILLS_CONFIG_PATH (file path). Default: "" (use embedded default).
+	SkillsConfigPath string
+
+	// EmbeddingAPIURL is the shared embeddings service endpoint used for
+	// semantic skill-search embeddings.
+	// Env: AEGIS_EMBEDDING_API_URL.
+	EmbeddingAPIURL string
+
+	// EmbeddingModel is the embedding model id served by the shared embeddings
+	// service for semantic skill-search embeddings.
+	// Env: AEGIS_EMBEDDING_MODEL.
+	EmbeddingModel string
+
+	// EmbeddingDimensions is the expected output vector size for EmbeddingModel.
+	// Env: AEGIS_EMBEDDING_DIM.
+	EmbeddingDimensions int
+
+	// EmbeddingPromptStyle controls query/document formatting for the embedding
+	// client. Supported values: plain, embeddinggemma, harrier.
+	// Env: AEGIS_EMBEDDING_PROMPT_STYLE. Default: plain.
+	EmbeddingPromptStyle string
+
+	// SuspendWakeLatencyTarget is the expected latency budget for waking a SUSPENDED
+	// agent — from task.inbound receipt to the agent process being ACTIVE (OQ-06).
+	// This budget covers credential.authorize round-trip + VM spawn + process startup.
+	//
+	// This value is informational: it is logged at startup so the Platform team can
+	// verify that the measured wake latency stays within the agreed SLA. It does NOT
+	// gate or throttle any runtime behaviour; the Orchestrator is responsible for
+	// routing latency-sensitive tasks away from SUSPENDED agents when needed.
+	//
+	// Baseline (M2 process manager, no Firecracker): ~2 s.
+	// Target with Firecracker snapshot restore (M3): < 500 ms.
+	//
+	// Env: AEGIS_SUSPEND_WAKE_LATENCY_TARGET (Go duration, e.g. "2s"). Default: 2s.
+	SuspendWakeLatencyTarget time.Duration
 }
 
 // Load reads configuration from environment variables and returns a validated Config.
 func Load() (*Config, error) {
 	c := &Config{
-		NATSURL:          os.Getenv("AEGIS_NATS_URL"),
-		ComponentID:      os.Getenv("AEGIS_COMPONENT_ID"),
-		AgentProcessPath: os.Getenv("AEGIS_AGENT_PROCESS_PATH"),
+		NATSURL:              os.Getenv("AEGIS_NATS_URL"),
+		ComponentID:          os.Getenv("AEGIS_COMPONENT_ID"),
+		AgentProcessPath:     os.Getenv("AEGIS_AGENT_PROCESS_PATH"),
+		SkillsConfigPath:     os.Getenv("AEGIS_SKILLS_CONFIG_PATH"),
+		EmbeddingAPIURL:      os.Getenv("AEGIS_EMBEDDING_API_URL"),
+		EmbeddingModel:       os.Getenv("AEGIS_EMBEDDING_MODEL"),
+		EmbeddingPromptStyle: os.Getenv("AEGIS_EMBEDDING_PROMPT_STYLE"),
 	}
 
 	if c.NATSURL == "" {
@@ -54,6 +137,15 @@ func Load() (*Config, error) {
 	}
 	if c.ComponentID == "" {
 		c.ComponentID = "aegis-agents"
+	}
+	if c.EmbeddingAPIURL == "" {
+		return nil, fmt.Errorf("config: AEGIS_EMBEDDING_API_URL is required")
+	}
+	if c.EmbeddingModel == "" {
+		return nil, fmt.Errorf("config: AEGIS_EMBEDDING_MODEL is required")
+	}
+	if c.EmbeddingPromptStyle == "" {
+		c.EmbeddingPromptStyle = "plain"
 	}
 
 	var err error
@@ -64,6 +156,34 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if c.MaxAgentRetries, err = parseInt("AEGIS_MAX_AGENT_RETRIES", 3, 1); err != nil {
+		return nil, err
+	}
+	if c.MetricsPort, err = parseInt("AEGIS_METRICS_PORT", 9090, 1); err != nil {
+		return nil, err
+	}
+	if c.CredAuthMaxAttempts, err = parseInt("AEGIS_CRED_AUTH_MAX_ATTEMPTS", 3, 1); err != nil {
+		return nil, err
+	}
+	if c.CredAuthTimeout, err = parseDuration("AEGIS_CRED_AUTH_TIMEOUT", 5*time.Second); err != nil {
+		return nil, err
+	}
+	if c.CredAuthBaseBackoff, err = parseDuration("AEGIS_CRED_AUTH_BASE_BACKOFF", time.Second); err != nil {
+		return nil, err
+	}
+	if c.CommsMaxDeliver, err = parseInt("AEGIS_COMMS_MAX_DELIVER", 5, 1); err != nil {
+		return nil, err
+	}
+	// IdleSuspendTimeout: 0 means disabled (no auto-suspension); valid positive
+	// durations enable OQ-03. parseDuration returns 0 for unset/empty.
+	if raw := os.Getenv("AEGIS_IDLE_SUSPEND_TIMEOUT"); raw != "" {
+		if c.IdleSuspendTimeout, err = parseDuration("AEGIS_IDLE_SUSPEND_TIMEOUT", 0); err != nil {
+			return nil, err
+		}
+	}
+	if c.SuspendWakeLatencyTarget, err = parseDuration("AEGIS_SUSPEND_WAKE_LATENCY_TARGET", 2*time.Second); err != nil {
+		return nil, err
+	}
+	if c.EmbeddingDimensions, err = parseInt("AEGIS_EMBEDDING_DIM", 0, 1); err != nil {
 		return nil, err
 	}
 

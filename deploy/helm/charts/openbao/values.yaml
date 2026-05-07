@@ -1,0 +1,37 @@
+image:
+  repository: openbao/openbao
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  port: 8200
+
+storage:
+  size: 1Gi
+  storageClass: ""
+
+# Postgres connection details (must match postgres chart's auth values)
+postgres:
+  host: db
+  port: 5432
+  user: user
+  password: password
+  database: openbao
+
+# BAO_TOKEN is set by an external operator/admin after unseal.
+# Leave empty here; provide via --set openbao.baoToken=<token> or a sealed-secret.
+baoToken: ""
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+# ---------------------------------------------------------------------------
+# Dev mode: auto-init and auto-unseal in a single-node dev cluster.
+# NEVER use in production — all data is in-memory only.
+# ---------------------------------------------------------------------------
+devMode: false

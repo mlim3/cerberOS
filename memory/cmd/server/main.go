@@ -1,3 +1,15 @@
+//go:generate go run github.com/swaggo/swag/cmd/swag@v1.16.6 init -g main.go -d .,../../internal/api -o ../../docs --parseInternal
+
+// Package main runs the memory service API.
+//
+// @title Memory Service API
+// @version v1
+// @description REST API for CerberOS memory, chat, personal info, system event, vault, and agent execution services.
+// @BasePath /
+// @schemes http
+// @securityDefinitions.apikey ApiKeyAuth
+// @in header
+// @name X-Internal-API-Key
 package main
 
 import (
@@ -8,20 +20,62 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/joho/godotenv"
+	docs "github.com/mlim3/cerberOS/memory/docs"
 	"github.com/mlim3/cerberOS/memory/internal/api"
+	"github.com/mlim3/cerberOS/memory/internal/heartbeat"
 	"github.com/mlim3/cerberOS/memory/internal/logic"
 	"github.com/mlim3/cerberOS/memory/internal/storage"
+	"github.com/mlim3/cerberOS/memory/internal/telemetry"
+	"github.com/mlim3/cerberOS/memory/internal/usercron"
+	"github.com/nats-io/nats.go"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	httpSwagger "github.com/swaggo/http-swagger"
 )
 
+// newHealthzHandler reports process and database health.
+// @Summary Health check
+// @Description Returns service health and database connectivity status
+// @Tags system
+// @Produce json
+// @Success 200 {object} map[string]interface{} "Healthy"
+// @Failure 503 {object} map[string]interface{} "Degraded"
+// @Router /api/v1/healthz [get]
+func newHealthzHandler(db *storage.PostgresDB, logger *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		status := "healthy"
+		dbStatus := "connected"
+
+		if err := db.Ping(r.Context()); err != nil {
+			logger.Error("database ping failed", "error", err)
+			status = "degraded"
+			dbStatus = "disconnected"
+		}
+
+		resp := map[string]any{
+			"status":    status,
+			"database":  dbStatus,
+			"timestamp": time.Now().UTC().Format(time.RFC3339),
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if status == "degraded" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		} else {
+			w.WriteHeader(http.StatusOK)
+		}
+		json.NewEncoder(w).Encode(api.SuccessResponse(resp))
+	}
+}
+
 func main() {
 	// Initialize structured logging
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).
+		With("component", "memory", "module", "server")
 	slog.SetDefault(logger)
 
 	// Load .env file if it exists
@@ -42,6 +96,19 @@ func main() {
 	// 1. Initialize Database root context that listens for signals
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+
+	// OTLP tracing — no-op when OTEL_EXPORTER_OTLP_ENDPOINT is unset.
+	traceShutdown, err := telemetry.Init(ctx)
+	if err != nil {
+		logger.Warn("telemetry init failed — continuing without traces", "error", err)
+	} else if telemetry.Enabled() {
+		logger.Info("telemetry initialized", "endpoint", os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+	}
+	defer func() {
+		if traceShutdown != nil {
+			_ = traceShutdown(context.Background())
+		}
+	}()
 
 	// 1. Initialize the Postgres connection pool
 	// In a real application, these would be loaded from environment variables
@@ -66,9 +133,19 @@ func main() {
 	// 2. Initialize the Repositories
 	pool := db.GetPool()
 	chatRepo := storage.NewChatRepository(pool)
+	if err := chatRepo.EnsureSchema(ctx); err != nil {
+		logger.Error("failed to ensure chat schema", "error", err)
+		os.Exit(1)
+	}
+	orchestratorRepo := storage.NewOrchestratorRepository(pool)
+	if err := orchestratorRepo.EnsureSchema(ctx); err != nil {
+		logger.Error("failed to ensure orchestrator schema", "error", err)
+		os.Exit(1)
+	}
 	logRepo := storage.NewLogRepository(pool)
 	vaultRepo := storage.NewVaultRepository(pool)
 	agentLogsRepo := storage.NewAgentLogsRepository(pool)
+	scheduledJobsRepo := storage.NewScheduledJobsRepository(pool)
 
 	// Initialize Vault Manager
 	vaultManager, err := logic.NewVaultManager()
@@ -79,58 +156,107 @@ func main() {
 
 	// Note: We'll implement a proper repository wrapper for Personal Info
 	piRepo := &storage.BaseRepository{Pool: pool}
-	mockEmbedder := &logic.MockEmbedder{}
-	piProcessor := logic.NewProcessor(piRepo, mockEmbedder)
+
+	embeddingAPIURL := os.Getenv("EMBEDDING_API_URL")
+	embeddingModel := os.Getenv("EMBEDDING_MODEL")
+	embeddingPromptStyle := getEnvOrDefault("EMBEDDING_PROMPT_STYLE", "embeddinggemma")
+	embeddingDim, err := strconv.Atoi(getEnvOrDefault("EMBEDDING_DIM", "768"))
+	if err != nil {
+		logger.Error("invalid EMBEDDING_DIM", "value", os.Getenv("EMBEDDING_DIM"), "error", err)
+		os.Exit(1)
+	}
+	embedder, err := logic.NewTEIEmbedder(embeddingAPIURL, embeddingModel, embeddingDim)
+	if err != nil {
+		logger.Error("failed to initialize embedding client", "error", err)
+		os.Exit(1)
+	}
+	logger.Info("using embedding API", "url", embeddingAPIURL, "model", embeddingModel, "dimensions", embeddingDim, "prompt_style", embeddingPromptStyle)
+	piProcessor := logic.NewProcessor(piRepo, embedder, logic.WithPromptStyle(embeddingPromptStyle))
+
+	// NATS: single connection for heartbeat + user_cron → orchestrator (JetStream).
+	var userDispatch storage.UserCronDispatch
+	if natsURL := os.Getenv("NATS_URL"); natsURL != "" {
+		nc, nerr := nats.Connect(natsURL,
+			nats.Name("memory-nats"),
+			nats.RetryOnFailedConnect(true),
+			nats.MaxReconnects(-1),
+			nats.ReconnectWait(500*time.Millisecond),
+		)
+		if nerr != nil {
+			logger.Warn("NATS connect failed — heartbeat and user_cron dispatch disabled", "error", nerr)
+		} else {
+			defer nc.Close()
+			emitter := heartbeat.New(nc, "memory", logger)
+			go emitter.Start(ctx)
+			js, jerr := nc.JetStream()
+			if jerr != nil {
+				logger.Warn("JetStream unavailable for user_cron", "error", jerr)
+			} else {
+				p := &usercron.NatsDispatcher{JS: js}
+				userDispatch = p.DispatchUserCron
+			}
+		}
+	} else {
+		logger.Info("NATS_URL unset — heartbeat and user_cron dispatch disabled")
+	}
 
 	// 3. Initialize the Handlers
 	chatHandler := api.NewChatHandler(chatRepo)
+	orchestratorHandler := api.NewOrchestratorHandler(orchestratorRepo)
 	logHandler := api.NewSystemLogHandler(logRepo)
 	piHandler := api.NewPersonalInfoHandler(piProcessor, piRepo)
 	vaultHandler := api.NewVaultHandler(vaultRepo, vaultManager, logRepo)
 	agentHandler := api.NewAgentHandler(agentLogsRepo)
+	scheduledJobsHandler := api.NewScheduledJobsHandler(scheduledJobsRepo, userDispatch)
 
 	// Set up the router using Go 1.22's enhanced mux
 	mux := http.NewServeMux()
 
+	docs.SwaggerInfo.Title = "Memory Service API"
+	docs.SwaggerInfo.Description = "REST API for CerberOS memory, chat, personal info, system event, vault, and agent execution services."
+	docs.SwaggerInfo.Version = "v1"
+	docs.SwaggerInfo.BasePath = "/"
+	docs.SwaggerInfo.Schemes = []string{"http"}
+
 	// Healthz endpoint
-	mux.HandleFunc("GET /api/v1/healthz", func(w http.ResponseWriter, r *http.Request) {
-		status := "healthy"
-		dbStatus := "connected"
-
-		if err := db.Ping(r.Context()); err != nil {
-			logger.Error("database ping failed", "error", err)
-			status = "degraded"
-			dbStatus = "disconnected"
-		}
-
-		resp := map[string]any{
-			"status":    status,
-			"database":  dbStatus,
-			"timestamp": time.Now().UTC().Format(time.RFC3339),
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		if status == "degraded" {
-			w.WriteHeader(http.StatusServiceUnavailable)
-		} else {
-			w.WriteHeader(http.StatusOK)
-		}
-		json.NewEncoder(w).Encode(api.SuccessResponse(resp))
-	})
+	mux.HandleFunc("GET /api/v1/healthz", newHealthzHandler(db, logger))
 
 	// Chat endpoints
-	mux.HandleFunc("POST /api/v1/chat/{sessionId}/messages", chatHandler.HandleCreateMessage)
-	mux.HandleFunc("GET /api/v1/chat/{sessionId}/messages", chatHandler.HandleListMessages)
+	mux.HandleFunc("GET /api/v1/conversations", chatHandler.HandleListConversations)
+	mux.HandleFunc("POST /api/v1/conversations", chatHandler.HandleCreateConversation)
+	mux.HandleFunc("POST /api/v1/tasks", chatHandler.HandleCreateTask)
+	mux.HandleFunc("GET /api/v1/tasks/{taskId}", chatHandler.HandleGetTask)
+	mux.HandleFunc("POST /api/v1/chat/{conversationId}/messages", chatHandler.HandleCreateMessage)
+	mux.HandleFunc("GET /api/v1/chat/{conversationId}/messages", chatHandler.HandleListMessages)
+	mux.HandleFunc("GET /api/v1/chat/{conversationId}/history", chatHandler.HandleGetSessionHistory)
+
+	// Orchestrator persistence endpoints (Internal Only)
+	orchestratorMux := http.NewServeMux()
+	orchestratorMux.HandleFunc("POST /api/v1/orchestrator/records", orchestratorHandler.HandleWriteRecord)
+	orchestratorMux.HandleFunc("GET /api/v1/orchestrator/records", orchestratorHandler.HandleQueryRecords)
+	orchestratorMux.HandleFunc("GET /api/v1/orchestrator/records/latest", orchestratorHandler.HandleReadLatest)
+	mux.Handle("/api/v1/orchestrator/", http.StripPrefix("", api.RequireVaultKey(orchestratorMux)))
 
 	// Personal Info endpoints
 	mux.HandleFunc("POST /api/v1/personal_info/{userId}/save", piHandler.Save)
 	mux.HandleFunc("POST /api/v1/personal_info/{userId}/query", piHandler.Query)
 	mux.HandleFunc("GET /api/v1/personal_info/{userId}/all", piHandler.GetAll)
 	mux.HandleFunc("PUT /api/v1/personal_info/{userId}/facts/{factId}", piHandler.UpdateFact)
+	mux.HandleFunc("DELETE /api/v1/personal_info/{userId}/facts/{factId}", piHandler.DeleteFact)
+	mux.HandleFunc("POST /api/v1/personal_info/{userId}/facts/{factId}/archive", piHandler.ArchiveFact)
+	mux.HandleFunc("POST /api/v1/personal_info/{userId}/facts/{factId}/supersede", piHandler.SupersedeFact)
 
 	// System Log endpoints
 	mux.HandleFunc("POST /api/v1/system/events", logHandler.HandleCreateSystemEvent)
 	mux.HandleFunc("GET /api/v1/system/events", logHandler.HandleListSystemEvents)
+
+	// Scheduled jobs (protected — use same internal API key as vault)
+	mux.Handle("POST /api/v1/scheduled_jobs", api.RequireVaultKey(http.HandlerFunc(scheduledJobsHandler.HandleCreateScheduledJob)))
+	mux.Handle("POST /api/v1/scheduled_jobs/run_due", api.RequireVaultKey(http.HandlerFunc(scheduledJobsHandler.HandleRunDueJobs)))
+	mux.Handle("GET /api/v1/scheduled_jobs/{jobId}/runs", api.RequireVaultKey(http.HandlerFunc(scheduledJobsHandler.HandleListScheduledJobRuns)))
+	mux.Handle("GET /api/v1/user_crons", api.RequireVaultKey(http.HandlerFunc(scheduledJobsHandler.HandleListUserCrons)))
+	mux.Handle("DELETE /api/v1/scheduled_jobs/{jobId}", api.RequireVaultKey(http.HandlerFunc(scheduledJobsHandler.HandleDeleteUserCron)))
+	mux.Handle("POST /api/v1/system/maintenance/run", api.RequireVaultKey(http.HandlerFunc(scheduledJobsHandler.HandleRunSystemMaintenance)))
 
 	// Vault endpoints (Internal Only)
 	vaultMux := http.NewServeMux()
@@ -141,6 +267,9 @@ func main() {
 	mux.Handle("/api/v1/vault/", http.StripPrefix("", api.RequireVaultKey(vaultMux)))
 
 	// Agent Log endpoints
+	mux.HandleFunc("POST /api/v1/agent/{taskId}/executions", agentHandler.HandleCreateTaskExecution)
+	mux.HandleFunc("GET /api/v1/agent/{taskId}/executions", agentHandler.HandleGetExecutions)
+	// Legacy routes retained temporarily for backward compatibility.
 	mux.HandleFunc("POST /api/v1/agents/tasks/{taskId}/executions", agentHandler.HandleCreateTaskExecution)
 	mux.HandleFunc("GET /api/v1/agents/tasks/{taskId}/executions", agentHandler.HandleGetExecutions)
 
@@ -151,16 +280,15 @@ func main() {
 	mux.Handle("/swagger/", httpSwagger.Handler(
 		httpSwagger.URL("/swagger/doc.json"), //The url pointing to API definition
 	))
-	// Serve static files for swagger docs
-	mux.Handle("/swagger/doc.json", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "./docs/swagger.json")
-	}))
 
-	// 4. Start the HTTP server
+	// 4. Start the HTTP server. otelhttp.NewHandler is the outermost wrapper
+	// so server spans start before the trace-id middleware runs; the middleware
+	// then reconciles the span's trace_id with the incoming `traceparent`.
 	port := getEnvOrDefault("PORT", "8080")
+	handler := api.TraceIDMiddleware(logger, logRepo, loggingMiddleware(logger, api.MetricsMiddleware(mux)))
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%s", port),
-		Handler: api.TraceIDMiddleware(logger, logRepo, loggingMiddleware(logger, api.MetricsMiddleware(mux))),
+		Handler: telemetry.WrapHandler(handler, "memory-api"),
 	}
 
 	// Start server in a goroutine
@@ -169,6 +297,22 @@ func main() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Error("server failed", "error", err)
 			os.Exit(1)
+		}
+	}()
+
+	// Due-job runner (user_cron dispatch + internal schedulers) — 1m tick
+	go func() {
+		t := time.NewTicker(1 * time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if err := scheduledJobsHandler.RunDue(ctx); err != nil {
+					logger.Error("scheduled_jobs run_due failed", "error", err)
+				}
+			}
 		}
 	}()
 
@@ -181,11 +325,11 @@ func main() {
 	defer shutdownCancel()
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		logger.Error("server shutdown failed", "error", err)
+		logger.Error("memory server shutdown failed; some in-flight requests may have been dropped", "error", err)
 		os.Exit(1)
 	}
 
-	logger.Info("server stopped")
+	logger.Info("memory server stopped cleanly")
 }
 
 func getEnvOrDefault(key, defaultValue string) string {
@@ -195,8 +339,12 @@ func getEnvOrDefault(key, defaultValue string) string {
 	return defaultValue
 }
 
-// loggingMiddleware adds basic request logging
+// loggingMiddleware adds basic request logging. Each request line carries
+// component=memory module=http and a human-readable msg describing the
+// request outcome at INFO; 5xx errors are logged at WARN to make them stand
+// out in dashboards.
 func loggingMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
+	httpLogger := logger.With("module", "http")
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 
@@ -206,11 +354,18 @@ func loggingMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 		next.ServeHTTP(rw, r)
 
 		duration := time.Since(start)
-		logger.Info("http request",
-			"method", r.Method,
-			"path", r.URL.Path,
-			"status", rw.statusCode,
-			"duration", duration,
+		level := slog.LevelInfo
+		if rw.statusCode >= 500 {
+			level = slog.LevelWarn
+		} else if rw.statusCode >= 400 {
+			level = slog.LevelInfo
+		}
+		httpLogger.LogAttrs(r.Context(), level,
+			"memory http request handled",
+			slog.String("method", r.Method),
+			slog.String("path", r.URL.Path),
+			slog.Int("status", rw.statusCode),
+			slog.Duration("duration", duration),
 		)
 	})
 }

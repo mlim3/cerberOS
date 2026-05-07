@@ -1,0 +1,7 @@
+/bin/
+databus
+.gomodcache/
+.env
+.env.nkeys
+*.exe
+config/certs/

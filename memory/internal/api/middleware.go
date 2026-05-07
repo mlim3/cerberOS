@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -36,6 +37,11 @@ var (
 
 type TraceIDKey struct{}
 
+const (
+	traceIDHeader     = "X-Trace-ID"
+	traceparentHeader = "traceparent"
+)
+
 // MetricsMiddleware records HTTP request metrics
 func MetricsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -55,13 +61,21 @@ func MetricsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// TraceIDMiddleware generates a TraceID for every request and adds it to the context.
-// It also logs an 'ACCESS_GRANTED' event to the system_events table if the request is for the Vault.
+// TraceIDMiddleware resolves a TraceID for every request and adds it to the
+// context. When the request carries a W3C `traceparent` header (from IO,
+// Orchestrator, or Agents via otelhttp) its 32-char trace_id is reused so
+// Memory spans nest under the upstream trace. When no `traceparent` is
+// present a fresh UUID is generated for backward compatibility with legacy
+// callers and direct curl requests.
+//
+// It also logs an 'ACCESS_GRANTED' event to the system_events table if the
+// request is for the Vault.
 func TraceIDMiddleware(logger *slog.Logger, logRepo *storage.LogRepository, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		traceID := uuid.New().String()
-		ctx := context.WithValue(r.Context(), TraceIDKey{}, traceID)
+		traceID := resolveRequestTraceID(r)
+		ctx := context.WithValue(r.Context(), TraceIDKey{}, traceID.String())
 		r = r.WithContext(ctx)
+		w.Header().Set(traceIDHeader, traceID.String())
 
 		// Create a custom response writer to capture status code
 		rw := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
@@ -69,8 +83,71 @@ func TraceIDMiddleware(logger *slog.Logger, logRepo *storage.LogRepository, next
 	})
 }
 
-// RequireVaultKey is a middleware that checks for the X-API-KEY header
-// and validates it against the INTERNAL_VAULT_API_KEY environment variable.
+func resolveRequestTraceID(r *http.Request) uuid.UUID {
+	if fromTraceID, ok := normalizeTraceID(r.Header.Get(traceIDHeader)); ok {
+		return fromTraceID
+	}
+	if fromTraceparent, ok := traceIDFromTraceparent(r.Header.Get(traceparentHeader)); ok {
+		return fromTraceparent
+	}
+	return uuid.New()
+}
+
+func traceIDFromContext(ctx context.Context) (uuid.UUID, bool) {
+	traceIDStr, ok := ctx.Value(TraceIDKey{}).(string)
+	if !ok {
+		return uuid.UUID{}, false
+	}
+	return normalizeTraceID(traceIDStr)
+}
+
+func normalizeTraceID(raw string) (uuid.UUID, bool) {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return uuid.UUID{}, false
+	}
+	id, err := uuid.Parse(v)
+	if err != nil {
+		return uuid.UUID{}, false
+	}
+	return id, true
+}
+
+// extractTraceparentID returns the raw 32-char hex trace_id from a W3C
+// traceparent header, or "" if the header is absent or malformed.
+func extractTraceparentID(header string) string {
+	parts := strings.Split(strings.TrimSpace(header), "-")
+	if len(parts) != 4 {
+		return ""
+	}
+	if len(parts[0]) != 2 || len(parts[1]) != 32 || len(parts[2]) != 16 || len(parts[3]) != 2 {
+		return ""
+	}
+	if parts[1] == "00000000000000000000000000000000" {
+		return ""
+	}
+	return parts[1]
+}
+
+// traceparent format: version-traceid-parentid-flags (W3C); rejects malformed
+// and all-zero trace_id per spec.
+func traceIDFromTraceparent(header string) (uuid.UUID, bool) {
+	parts := strings.Split(strings.TrimSpace(header), "-")
+	if len(parts) != 4 {
+		return uuid.UUID{}, false
+	}
+	if len(parts[0]) != 2 || len(parts[1]) != 32 || len(parts[2]) != 16 || len(parts[3]) != 2 {
+		return uuid.UUID{}, false
+	}
+	if parts[1] == "00000000000000000000000000000000" {
+		return uuid.UUID{}, false
+	}
+	return normalizeTraceID(parts[1])
+}
+
+// RequireVaultKey is a middleware that checks for the X-Internal-API-Key
+// header and validates it against the INTERNAL_VAULT_API_KEY environment
+// variable.
 func RequireVaultKey(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		expectedKey := os.Getenv("INTERNAL_VAULT_API_KEY")
@@ -78,15 +155,15 @@ func RequireVaultKey(next http.Handler) http.Handler {
 			// If not set, deny everything to be safe
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(ErrorResponse("INTERNAL_ERROR", "Internal server configuration error", nil))
+			json.NewEncoder(w).Encode(ErrorResponse("internal", "Internal server configuration error", nil))
 			return
 		}
 
-		apiKey := r.Header.Get("X-API-KEY")
+		apiKey := r.Header.Get("X-Internal-API-Key")
 		if apiKey != expectedKey {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
-			json.NewEncoder(w).Encode(ErrorResponse("UNAUTHORIZED", "Invalid or missing API Key", nil))
+			json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "Invalid or missing API Key", nil))
 			return
 		}
 

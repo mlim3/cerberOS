@@ -1,0 +1,23 @@
+{
+  "name": "@cerberos/surfaces-web",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "bun ./node_modules/vite/bin/vite.js",
+    "build": "tsc && bun ./node_modules/vite/bin/vite.js build",
+    "preview": "bun ./node_modules/vite/bin/vite.js preview"
+  },
+  "dependencies": {
+    "@cerberos/io-core": "workspace:*",
+    "marked": "^18.0.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.4",
+    "typescript": "~5.9.3",
+    "vite": "^7.3.1"
+  }
+}

@@ -1,0 +1,30 @@
+# ---------------------------------------------------------------------------
+# cerberOS NATS chart values — self-contained (no upstream dependency)
+# ---------------------------------------------------------------------------
+
+image:
+  repository: nats
+  tag: "2.10-alpine"
+  pullPolicy: IfNotPresent
+
+# Single-node by default; override in values-prod.yaml for JetStream HA cluster.
+replicaCount: 1
+
+service:
+  # NodePort so kind's extraPortMappings (30222 → 4222) work
+  type: NodePort
+  clientPort: 4222
+  monitorPort: 8222
+  clientNodePort: 30222
+
+storage:
+  jetstreamSize: 80Gi
+  storageClass: ""
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi

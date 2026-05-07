@@ -1,0 +1,21 @@
+image:
+  repository: ghcr.io/mlim3/cerberos-vault-engine
+  tag: latest
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+service:
+  port: 8000
+
+# baoToken is provided at runtime after openbao is unsealed.
+# Supply via --set vaultEngine.baoToken=<token> or a sealed-secret.
+baoToken: ""
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi

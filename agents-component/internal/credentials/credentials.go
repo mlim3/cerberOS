@@ -27,7 +27,7 @@ type Broker interface {
 	// skillDomains are the required skill domains passed to the Vault for scope
 	// resolution (e.g. ["web", "data"]). The Vault registers a scoped policy and
 	// returns an opaque permission_token — never a raw credential value.
-	PreAuthorize(agentID, taskID string, skillDomains []string) (permissionToken string, err error)
+	PreAuthorize(agentID, taskID, traceID string, skillDomains []string) (permissionToken string, err error)
 
 	// GetCredential delivers a single credential value to an agent. It validates
 	// that the requested key is within the pre-authorized permission set before
@@ -67,7 +67,7 @@ func New(stubSecrets map[string]string) Broker {
 	}
 }
 
-func (b *stubBroker) PreAuthorize(agentID, taskID string, skillDomains []string) (string, error) {
+func (b *stubBroker) PreAuthorize(agentID, taskID, _ string, skillDomains []string) (string, error) {
 	if agentID == "" {
 		return "", fmt.Errorf("credentials: agentID must not be empty")
 	}
@@ -128,11 +128,63 @@ type credResult struct {
 }
 
 const (
+	// Default values — used when BrokerConfig fields are zero.
 	credAuthMaxAttempts = 3
 	credAuthTimeout     = 5 * time.Second
 	credAuthBaseBackoff = time.Second
 	credAuthDefaultTTL  = 3600
 )
+
+// BrokerConfig holds the retry and timeout parameters for the NATS credential
+// broker. Zero values fall back to the package defaults (3 attempts, 5s timeout,
+// 1s base backoff).
+type BrokerConfig struct {
+	// MaxAttempts is the total number of publish+await cycles before PreAuthorize
+	// returns VAULT_UNREACHABLE. Must be >= 1; zero falls back to 3.
+	MaxAttempts int
+
+	// Timeout is the per-attempt deadline for receiving credential.response.
+	// Zero falls back to 5s.
+	Timeout time.Duration
+
+	// BaseBackoff is the initial sleep between retries (doubles on each attempt).
+	// Zero falls back to 1s.
+	BaseBackoff time.Duration
+}
+
+func (c BrokerConfig) withDefaults() BrokerConfig {
+	if c.MaxAttempts <= 0 {
+		c.MaxAttempts = credAuthMaxAttempts
+	}
+	if c.Timeout <= 0 {
+		c.Timeout = credAuthTimeout
+	}
+	if c.BaseBackoff <= 0 {
+		c.BaseBackoff = credAuthBaseBackoff
+	}
+	return c
+}
+
+// BrokerOption configures a natsBroker at construction time.
+type BrokerOption func(*natsBroker)
+
+// WithBrokerConfig overrides the default retry and timeout parameters.
+// Call once; subsequent calls overwrite earlier ones.
+func WithBrokerConfig(cfg BrokerConfig) BrokerOption {
+	return func(b *natsBroker) {
+		b.cfg = cfg.withDefaults()
+	}
+}
+
+// WithConsumerName overrides the durable JetStream consumer name used when
+// subscribing to aegis.agents.credential.response. Use in tests to give each
+// test run a unique consumer name and avoid "already bound" errors when
+// multiple broker instances share the same NATS server.
+func WithConsumerName(name string) BrokerOption {
+	return func(b *natsBroker) {
+		b.consumerName = name
+	}
+}
 
 // natsBroker is the production implementation. It performs the full round-trip:
 // publishes credential.request (operation: authorize) to the Orchestrator via
@@ -142,7 +194,9 @@ const (
 // It never calls OpenBao directly. All communication routes through the
 // Orchestrator via the comms.Client interface.
 type natsBroker struct {
-	comms comms.Client
+	comms        comms.Client
+	consumerName string       // durable consumer name; defaults to comms.ConsumerCredentialResponse
+	cfg          BrokerConfig // retry/timeout parameters, populated with defaults at construction
 
 	mu     sync.RWMutex
 	agents map[string]*agentAuth // agentID → stored permission token reference
@@ -156,15 +210,24 @@ type natsBroker struct {
 // aegis.agents.credential.response with a durable consumer at construction time
 // so responses are never missed, then routes each response to the waiting
 // PreAuthorize goroutine by request_id.
-func NewNATSBroker(c comms.Client) (Broker, error) {
+//
+// Pass WithBrokerConfig to override the default retry/timeout parameters.
+func NewNATSBroker(c comms.Client, opts ...BrokerOption) (Broker, error) {
 	b := &natsBroker{
 		comms:   c,
+		cfg:     BrokerConfig{}.withDefaults(),
 		agents:  make(map[string]*agentAuth),
 		pending: make(map[string]chan credResult),
 	}
+	for _, o := range opts {
+		o(b)
+	}
+	if b.consumerName == "" {
+		b.consumerName = comms.ConsumerCredentialResponse
+	}
 	if err := c.SubscribeDurable(
 		comms.SubjectCredentialResponse,
-		comms.ConsumerCredentialResponse,
+		b.consumerName,
 		b.handleResponse,
 	); err != nil {
 		return nil, fmt.Errorf("credentials: subscribe %q: %w", comms.SubjectCredentialResponse, err)
@@ -179,7 +242,7 @@ func NewNATSBroker(c comms.Client) (Broker, error) {
 // Retry policy: up to credAuthMaxAttempts attempts, each with a credAuthTimeout
 // deadline and exponential backoff (1s, 2s, 4s, …) between attempts.
 // Returns VAULT_UNREACHABLE after all attempts fail.
-func (b *natsBroker) PreAuthorize(agentID, taskID string, skillDomains []string) (string, error) {
+func (b *natsBroker) PreAuthorize(agentID, taskID, traceID string, skillDomains []string) (string, error) {
 	if agentID == "" {
 		return "", fmt.Errorf("credentials: agentID must not be empty")
 	}
@@ -199,6 +262,7 @@ func (b *natsBroker) PreAuthorize(agentID, taskID string, skillDomains []string)
 		Operation:    "authorize",
 		SkillDomains: skillDomains,
 		TTLSeconds:   credAuthDefaultTTL,
+		TraceID:      traceID,
 	}
 
 	// Register the result channel BEFORE the first publish so a fast response
@@ -214,10 +278,10 @@ func (b *natsBroker) PreAuthorize(agentID, taskID string, skillDomains []string)
 	}()
 
 	var lastErr error
-	for attempt := 0; attempt < credAuthMaxAttempts; attempt++ {
+	for attempt := 0; attempt < b.cfg.MaxAttempts; attempt++ {
 		if attempt > 0 {
-			// Exponential backoff: 1s, 2s, 4s, … between retries.
-			backoff := credAuthBaseBackoff * time.Duration(1<<uint(attempt-1))
+			// Exponential backoff: BaseBackoff, 2×, 4×, … between retries.
+			backoff := b.cfg.BaseBackoff * time.Duration(1<<uint(attempt-1))
 			time.Sleep(backoff)
 		}
 
@@ -226,15 +290,16 @@ func (b *natsBroker) PreAuthorize(agentID, taskID string, skillDomains []string)
 			comms.PublishOptions{
 				MessageType:   comms.MsgTypeCredentialRequest,
 				CorrelationID: requestID,
+				TraceID:       traceID,
 			},
 			req,
 		); err != nil {
 			lastErr = fmt.Errorf("credentials: publish credential.request (attempt %d/%d): %w",
-				attempt+1, credAuthMaxAttempts, err)
+				attempt+1, b.cfg.MaxAttempts, err)
 			continue
 		}
 
-		timer := time.NewTimer(credAuthTimeout)
+		timer := time.NewTimer(b.cfg.Timeout)
 		select {
 		case result := <-resultCh:
 			timer.Stop()
@@ -253,12 +318,12 @@ func (b *natsBroker) PreAuthorize(agentID, taskID string, skillDomains []string)
 
 		case <-timer.C:
 			lastErr = fmt.Errorf("credentials: credential.response timeout (attempt %d/%d)",
-				attempt+1, credAuthMaxAttempts)
+				attempt+1, b.cfg.MaxAttempts)
 		}
 	}
 
 	return "", fmt.Errorf("credentials: VAULT_UNREACHABLE after %d attempts: %w",
-		credAuthMaxAttempts, lastErr)
+		b.cfg.MaxAttempts, lastErr)
 }
 
 // GetCredential is not supported in the NATS broker. Credential access is

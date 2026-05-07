@@ -108,11 +108,14 @@ type vaultExecuteResult struct {
 // Simulator subscribes to all aegis.orchestrator.* topics and publishes
 // synthetic responses to the corresponding aegis.agents.* topics.
 type Simulator struct {
-	nc   *nats.Conn
-	js   nats.JetStreamContext
-	log  *slog.Logger
-	mu   sync.Mutex
-	subs []*nats.Subscription
+	nc             *nats.Conn
+	js             nats.JetStreamContext
+	log            *slog.Logger
+	mu             sync.Mutex
+	subs           []*nats.Subscription
+	credMu         sync.RWMutex
+	credTokens     map[string]string // agentID → permission_token granted
+	consumerSuffix string            // appended to all durable consumer names when non-empty
 }
 
 // New connects to NATS at natsURL and returns a Simulator ready to be started.
@@ -132,15 +135,25 @@ func New(natsURL string) (*Simulator, error) {
 	}
 
 	return &Simulator{
-		nc:  nc,
-		js:  js,
-		log: slog.Default(),
+		nc:         nc,
+		js:         js,
+		log:        slog.Default(),
+		credTokens: make(map[string]string),
 	}, nil
 }
 
 // WithLogger replaces the default logger.
 func (s *Simulator) WithLogger(l *slog.Logger) *Simulator {
 	s.log = l
+	return s
+}
+
+// WithConsumerSuffix appends suffix to every durable consumer name used by
+// Start. Use in tests to give each simulator instance a unique set of
+// consumers and avoid "consumer is already bound" errors when multiple
+// simulator instances share the same NATS server.
+func (s *Simulator) WithConsumerSuffix(suffix string) *Simulator {
+	s.consumerSuffix = suffix
 	return s
 }
 
@@ -219,15 +232,19 @@ func (s *Simulator) Start() error {
 	}
 
 	for _, sub := range subscriptions {
+		consumer := sub.durable
+		if s.consumerSuffix != "" {
+			consumer = sub.durable + "-" + s.consumerSuffix
+		}
 		natsSub, err := s.js.Subscribe(
 			sub.subject,
 			sub.handler,
-			nats.Durable(sub.durable),
+			nats.Durable(consumer),
 			nats.DeliverNew(),
 			nats.AckExplicit(),
 		)
 		if err != nil {
-			return fmt.Errorf("simulator: subscribe %q (consumer %q): %w", sub.subject, sub.durable, err)
+			return fmt.Errorf("simulator: subscribe %q (consumer %q): %w", sub.subject, consumer, err)
 		}
 		s.mu.Lock()
 		s.subs = append(s.subs, natsSub)
@@ -261,6 +278,19 @@ func (s *Simulator) PublishTaskInbound(spec types.TaskSpec) error {
 	return nil
 }
 
+// CredentialTokens returns a snapshot of the permission tokens issued by the
+// simulator, keyed by agent_id. Use in load tests to verify that each agent
+// received a distinct token (credential scope bleed check).
+func (s *Simulator) CredentialTokens() map[string]string {
+	s.credMu.RLock()
+	defer s.credMu.RUnlock()
+	out := make(map[string]string, len(s.credTokens))
+	for k, v := range s.credTokens {
+		out[k] = v
+	}
+	return out
+}
+
 // — Handlers ——————————————————————————————————————————————————————————————
 
 func (s *Simulator) handleCredentialRequest(msg *nats.Msg) {
@@ -277,11 +307,16 @@ func (s *Simulator) handleCredentialRequest(msg *nats.Msg) {
 		return
 	}
 
+	token := "sim-token-" + req.AgentID
 	resp := types.CredentialResponse{
 		RequestID:       req.RequestID,
 		Status:          "granted",
-		PermissionToken: "sim-token-" + req.AgentID,
+		PermissionToken: token,
 	}
+	s.credMu.Lock()
+	s.credTokens[req.AgentID] = token
+	s.credMu.Unlock()
+
 	// CorrelationID MUST be set to req.RequestID so the natsBroker can route the
 	// response to the waiting PreAuthorize goroutine via msg.CorrelationID.
 	if err := s.publish("aegis.agents.credential.response", "credential.response", req.RequestID, resp); err != nil {
@@ -393,7 +428,9 @@ func (s *Simulator) handleStateReadRequest(msg *nats.Msg) {
 		Records: []types.MemoryWrite{},
 		TraceID: req.TraceID,
 	}
-	if err := s.publish("aegis.agents.state.read.response", "state.read.response", req.AgentID, resp); err != nil {
+	// correlation_id must match the inbound state.read request (TraceID) so the
+	// agents memory client can route the response to the waiting Read() call.
+	if err := s.publish("aegis.agents.state.read.response", "state.read.response", req.TraceID, resp); err != nil {
 		s.log.Error("simulator: publish state.read.response", "err", err, "agent_id", req.AgentID)
 		_ = msg.Nak()
 		return

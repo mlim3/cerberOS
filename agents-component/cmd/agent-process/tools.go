@@ -20,9 +20,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"sync"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/cerberOS/agents-component/internal/logfields"
+	"github.com/cerberOS/agents-component/internal/skillsconfig"
 	"github.com/cerberOS/agents-component/pkg/types"
 )
 
@@ -41,9 +45,10 @@ const (
 // split from EDD §13.2: Content enters the LLM context; Details are for monitoring
 // only and are never injected into agent context.
 type ToolResult struct {
-	Content string                 // what the LLM sees; max 16KB
-	IsError bool                   // signals the LLM that execution failed
-	Details map[string]interface{} // monitoring only — logged to stderr, never to LLM
+	Content        string                 // what the LLM sees; max 16KB
+	IsError        bool                   // signals the LLM that execution failed
+	Details        map[string]interface{} // monitoring only — logged to stderr, never to LLM
+	SessionEntryID string                 // entry_id of the tool_call session entry; set by vault tools only
 }
 
 // SkillTool is the runtime representation of the full Tool Contract (EDD §13.2).
@@ -61,20 +66,110 @@ type SkillTool struct {
 	Execute func(ctx context.Context, input json.RawMessage) ToolResult
 }
 
-// toolsForDomain returns the skill tools available for the given domain.
-// ve may be nil (vault execution unavailable) — credentialed tools are omitted.
-// In M3 this will query the Skill Hierarchy Manager via the Orchestrator.
-func toolsForDomain(domain string, ve *VaultExecutor) []SkillTool {
-	base := []SkillTool{taskCompleteTool(), skillsSearchTool(getSkillsManager())}
-	switch domain {
-	case "web":
-		tools := []SkillTool{webFetchTool()}
-		if ve != nil {
-			tools = append(tools, vaultWebFetchTool(ve))
+// skillsCfgOnce guards one-time loading of the skills configuration.
+// The config is loaded from AEGIS_SKILLS_CONFIG_PATH, falling back to the
+// embedded default when that variable is unset or empty.
+var (
+	skillsCfgOnce sync.Once
+	skillsCfg     *skillsconfig.Config
+)
+
+// loadSkillsConfig returns the cached skills config, loading it on first call.
+// Returns nil if loading fails — callers treat nil as "no domain commands".
+func loadSkillsConfig() *skillsconfig.Config {
+	skillsCfgOnce.Do(func() {
+		path := os.Getenv("AEGIS_SKILLS_CONFIG_PATH")
+		cfg, err := skillsconfig.Load(path)
+		if err == nil {
+			skillsCfg = cfg
 		}
-		return append(tools, base...)
-	default:
+	})
+	return skillsCfg
+}
+
+// toolsForDomain returns the skill tools available for the given domain.
+//
+// The tool list is assembled from the skills configuration (loaded once from
+// AEGIS_SKILLS_CONFIG_PATH or the embedded default). Each command is resolved
+// against builtinRegistry to obtain its SkillTool.
+//
+// ve may be nil (vault execution unavailable) — credentialed tools are omitted.
+// as may be nil (agent spawning unavailable) — spawn_agent tool is omitted.
+// task_complete and skills_search are always included.
+func toolsForDomain(domain string, ve *VaultExecutor, as *AgentSpawner) []SkillTool {
+	base := []SkillTool{taskCompleteTool(), skillsSearchTool(getSkillsManager())}
+	if as != nil {
+		base = append(base, spawnAgentTool(as))
+	}
+
+	cfg := loadSkillsConfig()
+	if cfg == nil {
 		return base
+	}
+
+	for _, d := range cfg.Domains {
+		if d.Name != domain {
+			continue
+		}
+		var domainTools []SkillTool
+		for _, cmd := range d.Commands {
+			// Skip vault tools when vault execution is unavailable.
+			if len(cmd.RequiredCredentialTypes) > 0 && ve == nil {
+				continue
+			}
+			factory, ok := builtinRegistry[cmd.Implementation]
+			if !ok {
+				continue // Unknown implementation — skip silently.
+			}
+			domainTools = append(domainTools, factory(ve))
+		}
+		return append(domainTools, base...)
+	}
+
+	// Domain not in config — return base tools only (task_complete + spawn_agent).
+	return base
+}
+
+// spawnAgentTool implements the agent-as-tool pattern (issue #67, EDD §13.6).
+// It is included in the tool registry when an AgentSpawner is available (NATS env
+// vars set). The LLM uses this tool to delegate a sub-task to a child agent.
+func spawnAgentTool(as *AgentSpawner) SkillTool {
+	return SkillTool{
+		Label:                   "Spawn Agent",
+		RequiredCredentialTypes: nil, // no vault credential needed — Orchestrator authorises the child
+		TimeoutSeconds:          310, // local deadline = 300s task timeout + 10s routing buffer
+		Definition: anthropic.ToolParam{
+			Name: "spawn_agent",
+			Description: anthropic.String(
+				"Spawn a child agent to handle a self-contained sub-task. " +
+					"The child runs independently and returns its result when done. " +
+					"Use this when the sub-task requires a different skill domain or can run in parallel. " +
+					"Do NOT use for simple operations already available via other tools. " +
+					"Do NOT pass credential values or secrets in instructions."),
+			InputSchema: anthropic.ToolInputSchemaParam{
+				Properties: map[string]interface{}{
+					"instructions": map[string]interface{}{
+						"type":        "string",
+						"description": "Complete, self-contained task description for the child agent. Must include all context needed — the child has no access to this agent's history.",
+					},
+					"required_skills": map[string]interface{}{
+						"type": "array",
+						"items": map[string]interface{}{
+							"type": "string",
+						},
+						"description": "Skill domain names the child agent needs (e.g. [\"web\", \"data\"]). At least one domain is required.",
+					},
+					"timeout_seconds": map[string]interface{}{
+						"type":        "integer",
+						"description": "Maximum seconds to wait for the child agent to complete (default 300, max 300). Omit to use the default.",
+					},
+				},
+				Required: []string{"instructions", "required_skills"},
+			},
+		},
+		Execute: func(ctx context.Context, raw json.RawMessage) ToolResult {
+			return as.Spawn(ctx, raw)
+		},
 	}
 }
 
@@ -252,7 +347,7 @@ func vaultWebFetchTool(ve *VaultExecutor) SkillTool {
 			},
 		},
 		Execute: func(ctx context.Context, raw json.RawMessage) ToolResult {
-			return executeVaultWebFetch(ve, raw)
+			return executeVaultWebFetch(ctx, ve, raw)
 		},
 	}
 }
@@ -260,7 +355,7 @@ func vaultWebFetchTool(ve *VaultExecutor) SkillTool {
 // executeVaultWebFetch builds a VaultOperationRequest and delegates execution to
 // the VaultExecutor. The Vault performs the HTTP call using its stored credential
 // and returns only the response body — never the credential itself (NFR-08).
-func executeVaultWebFetch(ve *VaultExecutor, raw json.RawMessage) ToolResult {
+func executeVaultWebFetch(ctx context.Context, ve *VaultExecutor, raw json.RawMessage) ToolResult {
 	var params struct {
 		URL    string `json:"url"`
 		Method string `json:"method"`
@@ -289,16 +384,135 @@ func executeVaultWebFetch(ve *VaultExecutor, raw json.RawMessage) ToolResult {
 	// onUpdate logs progress events to monitoring (stderr via slog). Progress events
 	// must not enter LLM context — they are forwarded here for observability only.
 	onUpdate := func(p types.VaultOperationProgress) {
-		ve.log.Info("vault execute: progress",
+		ve.log.Info("vault forwarded a progress update for in-flight credentialed operation",
 			"request_id", p.RequestID,
 			"progress_type", p.ProgressType,
-			"message", p.Message,
+			"message_preview", logfields.PreviewWords(p.Message, 20, 140),
 			"elapsed_ms", p.ElapsedMS,
 		)
 	}
 
 	// vault TimeoutSeconds = 30; local deadline = 30 + 5 = 35s (matches TimeoutSeconds above).
-	return ve.Execute("web_fetch", "web_api_key", opParams, 30, onUpdate)
+	return ve.Execute(ctx, "web_fetch", "web_api_key", opParams, 30, onUpdate)
+}
+
+// vaultGoogleSearchTool searches the web using Google Custom Search API via the Vault.
+func vaultGoogleSearchTool(ve *VaultExecutor) SkillTool {
+	return SkillTool{
+		Label:                   "Vault Google Search",
+		RequiredCredentialTypes: []string{"serper_api_key"},
+		TimeoutSeconds:          40,
+		Definition: anthropic.ToolParam{
+			Name: "vault_google_search",
+			Description: anthropic.String(
+				"Search the web using Google Custom Search API via the Vault. " +
+					"Returns titles, URLs, and snippets for the top results. " +
+					"Use for current information, research, and fact-finding. " +
+					"Do NOT use for private or internal data — use vault_data_read for that. " +
+					"Do NOT include credential values in any parameter."),
+			InputSchema: anthropic.ToolInputSchemaParam{
+				Properties: map[string]interface{}{
+					"query": map[string]interface{}{
+						"type":        "string",
+						"description": "The search query string. Be specific and concise.",
+					},
+					"num_results": map[string]interface{}{
+						"type":        "integer",
+						"description": "Number of results to return. Defaults to 5 when omitted; maximum 10.",
+					},
+				},
+				Required: []string{"query"},
+			},
+		},
+		Execute: func(ctx context.Context, raw json.RawMessage) ToolResult {
+			return executeVaultGoogleSearch(ctx, ve, raw)
+		},
+	}
+}
+
+func executeVaultGoogleSearch(ctx context.Context, ve *VaultExecutor, raw json.RawMessage) ToolResult {
+	var params struct {
+		Query      string `json:"query"`
+		NumResults int    `json:"num_results"`
+	}
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return ToolResult{Content: fmt.Sprintf("invalid parameters: %v", err), IsError: true}
+	}
+	if params.NumResults == 0 {
+		params.NumResults = 5
+	}
+	opParams, err := json.Marshal(params)
+	if err != nil {
+		return ToolResult{Content: fmt.Sprintf("failed to encode params: %v", err), IsError: true}
+	}
+	onUpdate := func(p types.VaultOperationProgress) {
+		ve.log.Info("vault google_search progress update from vault engine",
+			"request_id", p.RequestID,
+			"message_preview", logfields.PreviewWords(p.Message, 20, 140))
+	}
+	return ve.Execute(ctx, "vault_google_search", "serper_api_key", opParams, 35, onUpdate)
+}
+
+// vaultGitHubRequestTool makes an authenticated request to the GitHub REST API via the Vault.
+func vaultGitHubRequestTool(ve *VaultExecutor) SkillTool {
+	return SkillTool{
+		Label:                   "Vault GitHub Request",
+		RequiredCredentialTypes: []string{"github_token"},
+		TimeoutSeconds:          40,
+		Definition: anthropic.ToolParam{
+			Name: "vault_github_request",
+			Description: anthropic.String(
+				"Make an authenticated request to the GitHub REST API via the Vault. " +
+					"Use for reading repos, issues, pull requests, code, and user data. " +
+					"Do NOT use for public unauthenticated GitHub data — use web_fetch instead. " +
+					"Do NOT include credential values in any parameter."),
+			InputSchema: anthropic.ToolInputSchemaParam{
+				Properties: map[string]interface{}{
+					"path": map[string]interface{}{
+						"type":        "string",
+						"description": "GitHub API path (e.g. \"/repos/owner/repo/issues\"). Must start with \"/\".",
+					},
+					"method": map[string]interface{}{
+						"type":        "string",
+						"description": "HTTP method. Allowed: GET, POST, PATCH, DELETE. Defaults to GET when omitted.",
+						"enum":        []string{"GET", "POST", "PATCH", "DELETE"},
+					},
+					"body": map[string]interface{}{
+						"type":        "string",
+						"description": "Request body as a JSON-encoded string. Only used for POST and PATCH.",
+					},
+				},
+				Required: []string{"path"},
+			},
+		},
+		Execute: func(ctx context.Context, raw json.RawMessage) ToolResult {
+			return executeVaultGitHubRequest(ctx, ve, raw)
+		},
+	}
+}
+
+func executeVaultGitHubRequest(ctx context.Context, ve *VaultExecutor, raw json.RawMessage) ToolResult {
+	var params struct {
+		Path   string `json:"path"`
+		Method string `json:"method"`
+		Body   string `json:"body,omitempty"`
+	}
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return ToolResult{Content: fmt.Sprintf("invalid parameters: %v", err), IsError: true}
+	}
+	if params.Method == "" {
+		params.Method = "GET"
+	}
+	opParams, err := json.Marshal(params)
+	if err != nil {
+		return ToolResult{Content: fmt.Sprintf("failed to encode params: %v", err), IsError: true}
+	}
+	onUpdate := func(p types.VaultOperationProgress) {
+		ve.log.Info("vault github_request progress update from vault engine",
+			"request_id", p.RequestID,
+			"message_preview", logfields.PreviewWords(p.Message, 20, 140))
+	}
+	return ve.Execute(ctx, "vault_github_request", "github_token", opParams, 35, onUpdate)
 }
 
 // taskCompleteTool is the agent's explicit terminal signal. When the agent calls

@@ -1,0 +1,27 @@
+# Version control / IDE
+.git
+.gitignore
+.cursor
+
+# Documentation (not needed at runtime — except docs/ which has generated swagger Go code)
+*.md
+*.pdf
+*.pptx
+
+# Local env & secrets (never bake into images)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Test artifacts
+**/testdata/
+**/*_test.go
+test/
+
+# Init SQL is mounted at runtime via docker-compose volume
+scripts/
+
+# OS junk
+.DS_Store
