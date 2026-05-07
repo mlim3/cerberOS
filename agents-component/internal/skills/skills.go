@@ -10,6 +10,7 @@ package skills
 
 import (
 	"fmt"
+	"sort"
 	"sync"
 
 	"github.com/cerberOS/agents-component/pkg/types"
@@ -40,12 +41,20 @@ type Manager interface {
 
 	// ListDomains returns the names of all registered domains.
 	ListDomains() []string
+
+	// Search performs semantic similarity search across all registered command
+	// descriptions (EDD §13.5). Returns the top topK commands ordered by
+	// descending similarity score. Results contain only domain, name, and
+	// description — parameter specs are withheld (progressive disclosure).
+	// If topK is zero or negative the default (3) is used.
+	Search(query string, topK int) ([]types.SkillSearchResult, error)
 }
 
 // hierarchyManager is the default in-memory implementation.
 type hierarchyManager struct {
-	mu      sync.RWMutex
-	domains map[string]*types.SkillNode
+	mu         sync.RWMutex
+	domains    map[string]*types.SkillNode
+	embeddings []commandEntry // rebuilt incrementally as domains are registered
 }
 
 // New returns a ready-to-use Skill Hierarchy Manager.
@@ -82,6 +91,19 @@ func (m *hierarchyManager) RegisterDomain(node *types.SkillNode) error {
 		return fmt.Errorf("skills: domain %q already registered", node.Name)
 	}
 	m.domains[node.Name] = node
+
+	// Pre-compute embeddings for all command-level children and add them to the
+	// search index. Computed inside the write lock — hashEmbed is fast (no I/O).
+	for _, child := range node.Children {
+		if child.Level == "command" {
+			m.embeddings = append(m.embeddings, commandEntry{
+				domain:      node.Name,
+				name:        child.Name,
+				description: child.Description,
+				vector:      hashEmbed(child.Name + " " + child.Description),
+			})
+		}
+	}
 	return nil
 }
 
@@ -156,6 +178,54 @@ func (m *hierarchyManager) ListDomains() []string {
 		names = append(names, n)
 	}
 	return names
+}
+
+// Search finds the topK most semantically relevant commands across all registered
+// domains, ordered by descending cosine similarity score. The query is embedded
+// with the same feature-hash scheme used at registration time so no external
+// model or network call is required.
+func (m *hierarchyManager) Search(query string, topK int) ([]types.SkillSearchResult, error) {
+	if query == "" {
+		return nil, fmt.Errorf("skills: search query must not be empty")
+	}
+	if topK <= 0 {
+		topK = defaultSearchTopK
+	}
+
+	queryVec := hashEmbed(query)
+
+	m.mu.RLock()
+	entries := m.embeddings // read slice header under lock; entries are immutable
+	m.mu.RUnlock()
+
+	if len(entries) == 0 {
+		return []types.SkillSearchResult{}, nil
+	}
+
+	type scored struct {
+		idx   int
+		score float64
+	}
+	scores := make([]scored, len(entries))
+	for i, e := range entries {
+		scores[i] = scored{i, cosineSimilarity(queryVec, e.vector)}
+	}
+	sort.Slice(scores, func(i, j int) bool { return scores[i].score > scores[j].score })
+
+	if topK > len(scores) {
+		topK = len(scores)
+	}
+	results := make([]types.SkillSearchResult, topK)
+	for i := 0; i < topK; i++ {
+		e := entries[scores[i].idx]
+		results[i] = types.SkillSearchResult{
+			Domain:      e.domain,
+			Name:        e.name,
+			Description: e.description,
+			Score:       scores[i].score,
+		}
+	}
+	return results, nil
 }
 
 // validateCommandContract enforces the Tool Contract from EDD §13.2 for a single

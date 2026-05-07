@@ -65,7 +65,7 @@ type SkillTool struct {
 // ve may be nil (vault execution unavailable) — credentialed tools are omitted.
 // In M3 this will query the Skill Hierarchy Manager via the Orchestrator.
 func toolsForDomain(domain string, ve *VaultExecutor) []SkillTool {
-	base := []SkillTool{taskCompleteTool()}
+	base := []SkillTool{taskCompleteTool(), skillsSearchTool(getSkillsManager())}
 	switch domain {
 	case "web":
 		tools := []SkillTool{webFetchTool()}

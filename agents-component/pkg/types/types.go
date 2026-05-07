@@ -303,6 +303,16 @@ type VaultOperationProgress struct {
 	ElapsedMS    int    `json:"elapsed_ms"`
 }
 
+// SkillSearchResult is one entry returned by Manager.Search.
+// Contains only domain, name, and description — parameter specs are withheld per
+// the progressive disclosure contract (EDD §13.2). Call GetSpec for the full schema.
+type SkillSearchResult struct {
+	Domain      string  `json:"domain"`
+	Name        string  `json:"name"`
+	Description string  `json:"description"`
+	Score       float64 `json:"score"`
+}
+
 // VaultCancelRequest is published to aegis.orchestrator.vault.execute.cancel when
 // the local deadline fires before a vault.execute.result arrives (EDD §13.1 Phase 2).
 // The Orchestrator forwards this to the Vault so it can abort the in-flight operation.
