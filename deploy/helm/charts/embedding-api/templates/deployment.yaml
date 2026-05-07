@@ -62,5 +62,14 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 15
             failureThreshold: 3
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            # The Python app loads the embedding model during FastAPI startup,
+            # so the HTTP socket is not bound until model initialization
+            # completes. Give startup enough time before liveness begins.
+            periodSeconds: 10
+            failureThreshold: 60
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
