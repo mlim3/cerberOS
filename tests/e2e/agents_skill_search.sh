@@ -231,6 +231,7 @@ EVENT_STREAM_PID=$!
 
 curl -N -sS --max-time "${CHAT_TIMEOUT_SECONDS}" \
   -H "Content-Type: application/json" \
+  -H "X-Active-User: ${TEST_USER_ID}" \
   -H "X-Surface-Key: cli" \
   -X POST "${base_url}/api/chat" \
   -d "${chat_payload}" >"${stream_file}" &
@@ -250,7 +251,7 @@ for _ in $(seq 1 "${CHAT_TIMEOUT_SECONDS}"); do
           --arg orchestratorTaskRef "${orchestrator_task_ref}" \
           '{taskId:$taskId, orchestratorTaskRef:$orchestratorTaskRef, approved:true}'
       )"
-      approve_resp="$(curl -fsS -H "Content-Type: application/json" -H "X-Surface-Key: cli" -X POST "${base_url}/api/orchestrator/plan-decision" -d "${approve_payload}")"
+      approve_resp="$(curl -fsS -H "Content-Type: application/json" -H "X-Active-User: ${TEST_USER_ID}" -H "X-Surface-Key: cli" -X POST "${base_url}/api/orchestrator/plan-decision" -d "${approve_payload}")"
       echo "plan approval response:"
       echo "${approve_resp}" | jq .
       plan_auto_approved="true"
@@ -299,7 +300,9 @@ echo "${filtered_logs}" | sed 's/^/  /'
 assert_contains "${agent_logs}" '"tool":"skills_search"' "skills_search tool result log missing"
 assert_contains "${agent_logs}" "${TEST_URL}" "expected delegated query/URL not present in recent agent logs"
 assert_contains "${agent_logs}" '"tool":"spawn_agent"' "spawn_agent tool dispatch/result log missing"
-assert_contains "${agent_logs}" '"tool":"web_fetch"' "web_fetch tool result log missing after delegation"
+if [[ "${agent_logs}" != *'"tool":"web_fetch"'* && "${agent_logs}" != *'"tool":"web_extract"'* ]]; then
+  fail "expected delegated web tool execution log (web_fetch or web_extract)"
+fi
 
 section "Summary"
 echo "  model:         ${agents_embedding_model}"

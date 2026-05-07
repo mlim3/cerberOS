@@ -39,7 +39,10 @@ pass_line() { printf "${GREEN}  PASS${RESET}  %s  ${YELLOW}(%ds)${RESET}\n" "$1"
 fail_line() { printf "${RED}  FAIL${RESET}  %s  ${YELLOW}(%ds)${RESET}\n" "$1" "$2"; }
 
 # ── discover tests ─────────────────────────────────────────────────────────────
-mapfile -t TESTS < <(
+TESTS=()
+while IFS= read -r test_script; do
+  TESTS+=("$test_script")
+done < <(
   find "$SCRIPT_DIR" -maxdepth 1 -name '*.sh' ! -name "$(basename "$0")" | sort
 )
 
@@ -109,7 +112,9 @@ if $SERIAL; then
   done
 else
   # Launch all tests concurrently; collect results in order.
-  declare -A pids log_bases names
+  pids=()
+  log_bases=()
+  names=()
 
   for t in "${TESTS[@]}"; do
     name="$(basename "$t" .sh)"
@@ -126,15 +131,16 @@ else
       ( bash "$t" >"$out_file" 2>&1; echo "$?" > "$exit_file" ) &
     fi
 
-    pids["$name"]=$!
-    log_bases["$name"]="$log_base"
-    names["$name"]="$t"
+    pids+=("$!")
+    log_bases+=("$log_base")
+    names+=("$name")
   done
 
-  for name in "${!pids[@]}"; do
-    wait "${pids[$name]}" 2>/dev/null || true
+  for i in "${!pids[@]}"; do
+    wait "${pids[$i]}" 2>/dev/null || true
 
-    log_base="${log_bases[$name]}"
+    name="${names[$i]}"
+    log_base="${log_bases[$i]}"
     out_file="${log_base}.out"
     exit_file="${log_base}.exit"
     start_file="${log_base}.start"

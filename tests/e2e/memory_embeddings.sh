@@ -225,10 +225,10 @@ top_score="$(echo "${query_resp}" | jq -r '.data.results[0].similarityScore // e
 result_count="$(echo "${query_resp}" | jq -r '.data.results | length')"
 second_text="$(echo "${query_resp}" | jq -r '.data.results[1].text // empty')"
 postgres_rank="$(echo "${query_resp}" | jq -r '
-  (.data.results | to_entries[] | select(.value.text | contains("PostgreSQL with pgvector")) | .key + 1) // 0
+  ([.data.results | to_entries[] | select(.value.text | contains("PostgreSQL with pgvector")) | (.key + 1)][0]) // 0
 ')"
 grafana_rank="$(echo "${query_resp}" | jq -r '
-  (.data.results | to_entries[] | select(.value.text | contains("Grafana to inspect cerberOS dashboards")) | .key + 1) // 0
+  ([.data.results | to_entries[] | select(.value.text | contains("Grafana to inspect cerberOS dashboards")) | (.key + 1)][0]) // 0
 ')"
 
 [[ "${result_count}" -ge 1 ]] || fail "semantic query returned no results"
