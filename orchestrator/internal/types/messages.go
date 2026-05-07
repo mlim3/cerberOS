@@ -79,6 +79,32 @@ type TaskSpec struct {
 	TraceID string `json:"trace_id,omitempty"`
 }
 
+// ─── Agent Spawn Request / Response ──────────────────────────────────────────
+// Internal orchestrator view of the agent-as-tool delegation flow.
+// The Gateway adapts these structs to the agents-component wire schema.
+
+type AgentSpawnRequest struct {
+	RequestID      string   `json:"request_id"`
+	ParentAgentID  string   `json:"parent_agent_id"`
+	ParentTaskID   string   `json:"parent_task_id"`
+	RequiredSkills []string `json:"required_skills"`
+	Instructions   string   `json:"instructions"`
+	TimeoutSeconds int      `json:"timeout_seconds,omitempty"`
+	TraceID        string   `json:"trace_id,omitempty"`
+	UserContextID  string   `json:"user_context_id,omitempty"`
+}
+
+type AgentSpawnResponse struct {
+	RequestID     string `json:"request_id"`
+	ParentAgentID string `json:"parent_agent_id"`
+	ChildAgentID  string `json:"child_agent_id,omitempty"`
+	Status        string `json:"status"`
+	Result        string `json:"result,omitempty"`
+	ErrorCode     string `json:"error_code,omitempty"`
+	ErrorMessage  string `json:"error_message,omitempty"`
+	TraceID       string `json:"trace_id,omitempty"`
+}
+
 // ─── Task Accepted / Result ───────────────────────────────────────────────────
 // Internal orchestrator view of inbound terminal agent events.
 // The Gateway maps the agents-component payloads/envelope correlation IDs into

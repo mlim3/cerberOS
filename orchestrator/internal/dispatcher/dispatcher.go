@@ -72,6 +72,8 @@ type Gateway interface {
 	PublishError(ctx context.Context, callbackTopic string, resp types.ErrorResponse) error
 	PublishTaskResult(ctx context.Context, callbackTopic string, result types.TaskResult) error
 	PublishTaskSpec(ctx context.Context, spec types.TaskSpec) error
+	PublishCapabilityQuery(ctx context.Context, query types.CapabilityQuery) (*types.CapabilityResponse, error)
+	PublishAgentSpawnResponse(ctx context.Context, resp types.AgentSpawnResponse) error
 	PublishStatusUpdate(ctx context.Context, userContextID string, status types.StatusResponse) error
 }
 
@@ -125,6 +127,10 @@ type Dispatcher struct {
 	// pendingApprovals tracks plans waiting on an explicit user decision
 	// (approve/reject). key = top-level orchestrator_task_ref → *pendingApproval.
 	pendingApprovals sync.Map
+
+	// pendingAgentSpawns tracks child-agent requests waiting for a terminal child result.
+	// key = child orchestrator_task_ref → *pendingAgentSpawn.
+	pendingAgentSpawns sync.Map
 
 	// Metrics — use atomic operations to avoid a global lock.
 	tasksReceived       int64
@@ -402,6 +408,12 @@ func (d *Dispatcher) HandleInboundTask(ctx context.Context, task types.UserTask)
 // as subtask results.
 // ctx is built by the inbound handler from the message envelope's trace_id.
 func (d *Dispatcher) HandleTaskResult(ctx context.Context, result types.TaskResult) error {
+	if pendingVal, ok := d.pendingAgentSpawns.Load(result.OrchestratorTaskRef); ok {
+		d.pendingAgentSpawns.Delete(result.OrchestratorTaskRef)
+		pending := pendingVal.(*pendingAgentSpawn)
+		return d.handleAgentSpawnResult(ctx, pending, result)
+	}
+
 	if _, ok := d.pendingDecompositions.Load(result.OrchestratorTaskRef); ok {
 		d.pendingDecompositions.Delete(result.OrchestratorTaskRef)
 		if !result.Success {
@@ -446,6 +458,164 @@ func (d *Dispatcher) HandleTaskResult(ctx context.Context, result types.TaskResu
 	}
 
 	return d.executor.HandleSubtaskResult(ctx, result)
+}
+
+// HandleAgentSpawnRequest receives a child-agent delegation request from a running agent,
+// resolves the parent task context, and dispatches the child through the normal
+// capability-query + task.inbound flow.
+func (d *Dispatcher) HandleAgentSpawnRequest(ctx context.Context, req types.AgentSpawnRequest) error {
+	ctx = observability.WithModule(ctx, "task_dispatcher")
+	log := observability.LogFromContext(ctx)
+
+	log.Info("received agent.spawn.request from parent agent",
+		"request_id", req.RequestID,
+		"parent_agent_id", req.ParentAgentID,
+		"parent_task_id", req.ParentTaskID,
+		"required_skills", req.RequiredSkills,
+		"timeout_seconds", req.TimeoutSeconds,
+		"instructions_preview", observability.PreviewHeadTail(req.Instructions, 18, 10))
+
+	var ts *types.TaskState
+	if direct := d.activeTaskByOrchRef(req.ParentTaskID); direct != nil {
+		ts = direct
+	} else if resolved, ok := d.executor.TaskStateForSubtask(req.ParentTaskID); ok {
+		ts = resolved
+	}
+	if ts == nil {
+		log.Warn("dropping agent.spawn.request: parent task context could not be resolved",
+			"request_id", req.RequestID,
+			"parent_task_id", req.ParentTaskID)
+		return d.gateway.PublishAgentSpawnResponse(ctx, types.AgentSpawnResponse{
+			RequestID:     req.RequestID,
+			ParentAgentID: req.ParentAgentID,
+			Status:        "failed",
+			ErrorCode:     types.ErrCodeInvalidTaskSpec,
+			ErrorMessage:  "parent task context not found",
+			TraceID:       firstNonEmptyString(req.TraceID),
+		})
+	}
+
+	if req.TimeoutSeconds <= 0 {
+		req.TimeoutSeconds = 300
+	}
+
+	childOrchRef := newUUID()
+	childCtx := observability.WithTaskID(ctx, ts.TaskID)
+	childCtx = observability.WithConversationID(childCtx, ts.ConversationID)
+
+	log.Info("agent spawn: dispatching child task through standard agent routing",
+		"request_id", req.RequestID,
+		"child_orchestrator_task_ref", childOrchRef,
+		"user_id", ts.UserID,
+		"required_skills", req.RequiredSkills)
+
+	capResp, err := d.gateway.PublishCapabilityQuery(childCtx, types.CapabilityQuery{
+		OrchestratorTaskRef:  childOrchRef,
+		RequiredSkillDomains: req.RequiredSkills,
+		TraceID:              firstNonEmptyString(req.TraceID, ts.TraceID),
+	})
+	if err != nil {
+		log.Error("agent spawn: capability query failed",
+			"request_id", req.RequestID,
+			"child_orchestrator_task_ref", childOrchRef,
+			"error", err)
+		return d.gateway.PublishAgentSpawnResponse(childCtx, types.AgentSpawnResponse{
+			RequestID:     req.RequestID,
+			ParentAgentID: req.ParentAgentID,
+			Status:        "failed",
+			ErrorCode:     types.ErrCodeAgentsUnavailable,
+			ErrorMessage:  "no agent was available for the requested skills",
+			TraceID:       firstNonEmptyString(req.TraceID, ts.TraceID),
+		})
+	}
+
+	spec := types.TaskSpec{
+		OrchestratorTaskRef:  childOrchRef,
+		TaskID:               childOrchRef,
+		UserID:               ts.UserID,
+		RequiredSkillDomains: req.RequiredSkills,
+		PolicyScope:          ts.PolicyScope,
+		TimeoutSeconds:       req.TimeoutSeconds,
+		Instructions:         req.Instructions,
+		Metadata: map[string]string{
+			"task_kind":        "agent_spawn_child",
+			"parent_task_id":   ts.TaskID,
+			"parent_agent_id":  req.ParentAgentID,
+			"spawn_request_id": req.RequestID,
+		},
+		CallbackTopic:  ts.CallbackTopic,
+		UserContextID:  firstNonEmptyString(req.UserContextID, ts.UserContextID),
+		ConversationID: ts.ConversationID,
+		TraceID:        firstNonEmptyString(req.TraceID, ts.TraceID),
+	}
+
+	if err := d.gateway.PublishTaskSpec(childCtx, spec); err != nil {
+		log.Error("agent spawn: child task dispatch failed",
+			"request_id", req.RequestID,
+			"child_orchestrator_task_ref", childOrchRef,
+			"error", err)
+		return d.gateway.PublishAgentSpawnResponse(childCtx, types.AgentSpawnResponse{
+			RequestID:     req.RequestID,
+			ParentAgentID: req.ParentAgentID,
+			Status:        "failed",
+			ErrorCode:     types.ErrCodeAgentsUnavailable,
+			ErrorMessage:  "child task could not be dispatched",
+			TraceID:       firstNonEmptyString(req.TraceID, ts.TraceID),
+		})
+	}
+
+	d.pendingAgentSpawns.Store(childOrchRef, &pendingAgentSpawn{
+		RequestID:     req.RequestID,
+		ParentAgentID: req.ParentAgentID,
+		ParentTaskID:  req.ParentTaskID,
+		ChildOrchRef:  childOrchRef,
+		TraceID:       firstNonEmptyString(req.TraceID, ts.TraceID),
+	})
+
+	log.Info("agent spawn: child task dispatched; awaiting terminal child result",
+		"request_id", req.RequestID,
+		"child_orchestrator_task_ref", childOrchRef,
+		"child_agent_id", capResp.AgentID)
+	return nil
+}
+
+func (d *Dispatcher) handleAgentSpawnResult(ctx context.Context, pending *pendingAgentSpawn, result types.TaskResult) error {
+	ctx = observability.WithModule(ctx, "task_dispatcher")
+	log := observability.LogFromContext(ctx)
+
+	if err := d.policy.RevokeCredentials(ctx, result.OrchestratorTaskRef); err != nil {
+		log.Error("agent spawn: failed to revoke child credentials after terminal child result",
+			"request_id", pending.RequestID,
+			"child_orchestrator_task_ref", result.OrchestratorTaskRef,
+			"error", err)
+	}
+
+	resp := types.AgentSpawnResponse{
+		RequestID:     pending.RequestID,
+		ParentAgentID: pending.ParentAgentID,
+		ChildAgentID:  result.AgentID,
+		TraceID:       pending.TraceID,
+	}
+	if result.Success {
+		resp.Status = "success"
+		resp.Result = renderSpawnResult(result.Result)
+		log.Info("agent spawn: child task completed successfully; returning response to parent agent",
+			"request_id", pending.RequestID,
+			"child_orchestrator_task_ref", result.OrchestratorTaskRef,
+			"child_agent_id", result.AgentID,
+			"result_preview", observability.PreviewHeadTail(resp.Result, 15, 10))
+	} else {
+		resp.Status = "failed"
+		resp.ErrorCode = result.ErrorCode
+		resp.ErrorMessage = humanReadableError(result.ErrorCode)
+		log.Warn("agent spawn: child task failed; returning failure to parent agent",
+			"request_id", pending.RequestID,
+			"child_orchestrator_task_ref", result.OrchestratorTaskRef,
+			"child_agent_id", result.AgentID,
+			"error_code", result.ErrorCode)
+	}
+
+	return d.gateway.PublishAgentSpawnResponse(ctx, resp)
 }
 
 // HandleDecompositionResponse processes a task_decomposition_response from the Planner Agent.
@@ -648,6 +818,14 @@ type pendingApproval struct {
 	cancel context.CancelFunc
 }
 
+type pendingAgentSpawn struct {
+	RequestID     string
+	ParentAgentID string
+	ParentTaskID  string
+	ChildOrchRef  string
+	TraceID       string
+}
+
 // HandlePlanDecision processes an approve/reject decision from User I/O.
 // Registered with the Gateway via RegisterPlanDecisionHandler in main.
 func (d *Dispatcher) HandlePlanDecision(ctx context.Context, decision types.PlanDecision) error {
@@ -690,7 +868,8 @@ func (d *Dispatcher) HandlePlanDecision(ctx context.Context, decision types.Plan
 		"plan_id", pending.plan.PlanID,
 		"subtask_count", len(pending.plan.Subtasks))
 	now := time.Now().UTC()
-	return d.startPlanExecution(ctx, ts, pending.plan, now)
+	planCtx := ctxFromTaskState(ts, "task_dispatcher")
+	return d.startPlanExecution(planCtx, ts, pending.plan, now)
 }
 
 // HandleVaultExecuteRequest is registered with the Gateway to handle vault.execute.request messages.
@@ -980,6 +1159,23 @@ func (d *Dispatcher) watchDecompositionTimeout(ctx context.Context, ts *types.Ta
 		"timeout_seconds", timeout.Seconds())
 	d.failTask(ctx, current, types.ErrCodeDecompositionTimeout,
 		fmt.Sprintf("Planner Agent did not respond within %d seconds.", d.cfg.DecompositionTimeoutSeconds))
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func renderSpawnResult(raw json.RawMessage) string {
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	return string(raw)
 }
 
 // failTask transitions a task to a terminal failure state, publishes error, and cleans up.

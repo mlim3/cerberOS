@@ -55,8 +55,8 @@ func newGateway(t *testing.T) (*gateway.Gateway, *mocks.NATSMock) {
 func TestGatewayStart_SubscribesToInboundTopics(t *testing.T) {
 	_, nats := newGateway(t)
 
-	if nats.SubscribeCallCount != 11 {
-		t.Fatalf("SubscribeCallCount = %d, want 11 (tasks.inbound, agent.status, capability.response, task.accepted, task.result, task.failed, credential.request, plan.decision, state.write, state.read.request, vault.execute.request)", nats.SubscribeCallCount)
+	if nats.SubscribeCallCount != 12 {
+		t.Fatalf("SubscribeCallCount = %d, want 12 (tasks.inbound, agent.status, capability.response, task.accepted, task.result, task.failed, credential.request, plan.decision, state.write, state.read.request, vault.execute.request, agent.spawn.request)", nats.SubscribeCallCount)
 	}
 }
 
@@ -116,6 +116,60 @@ func TestHandleTaskResult_UsesPayloadTraceIDWhenEnvelopeTraceIDEmpty(t *testing.
 	}
 	if gotTrace != wantTrace {
 		t.Fatalf("TraceIDFrom(handler ctx) = %q, want %q", gotTrace, wantTrace)
+	}
+}
+
+func TestHandleAgentSpawnRequest_RoutesToRegisteredHandler(t *testing.T) {
+	nats := mocks.NewNATSMock()
+	gw := gateway.New(nats, "test-node")
+
+	var got types.AgentSpawnRequest
+	gw.RegisterAgentSpawnRequestHandler(func(_ context.Context, req types.AgentSpawnRequest) error {
+		got = req
+		return nil
+	})
+	if err := gw.Start(); err != nil {
+		t.Fatalf("gateway.Start() error = %v", err)
+	}
+
+	req := types.AgentSpawnRequest{
+		RequestID:      "spawn-req-1",
+		ParentAgentID:  "agent-parent",
+		ParentTaskID:   "parent-task",
+		RequiredSkills: []string{"web"},
+		Instructions:   "Fetch a page",
+		TraceID:        "trace-123",
+	}
+	data := newEnvelopedMessage(t, "agent.spawn.request", req.RequestID, req)
+	if err := nats.Deliver(gateway.TopicAgentSpawnRequest, data); err != nil {
+		t.Fatalf("Deliver(agent.spawn.request) error = %v", err)
+	}
+
+	if got.RequestID != req.RequestID {
+		t.Fatalf("handler request_id = %q, want %q", got.RequestID, req.RequestID)
+	}
+	if len(got.RequiredSkills) != 1 || got.RequiredSkills[0] != "web" {
+		t.Fatalf("handler required_skills = %v, want [web]", got.RequiredSkills)
+	}
+}
+
+func TestPublishAgentSpawnResponse_PublishesToAgentsTopic(t *testing.T) {
+	gw, nats := newGateway(t)
+
+	resp := types.AgentSpawnResponse{
+		RequestID:     "spawn-req-1",
+		ParentAgentID: "agent-parent",
+		ChildAgentID:  "agent-child",
+		Status:        "success",
+		Result:        `"Example Domain"`,
+	}
+	if err := gw.PublishAgentSpawnResponse(context.Background(), resp); err != nil {
+		t.Fatalf("PublishAgentSpawnResponse() error = %v", err)
+	}
+
+	msgs := nats.Published[gateway.TopicAgentSpawnResponse]
+	if len(msgs) != 1 {
+		t.Fatalf("published messages to agent spawn response topic = %d, want 1", len(msgs))
 	}
 }
 
@@ -417,6 +471,38 @@ func TestPublishTaskSpec_WirePrefersW3CTraceID(t *testing.T) {
 	}
 }
 
+func TestPublishTaskSpec_PrefersSpecTraceIDOverContextTraceID(t *testing.T) {
+	gw, nats := newGateway(t)
+
+	spec := types.TaskSpec{
+		OrchestratorTaskRef:  "orch-internal",
+		TaskID:               "task-1",
+		UserID:               "user-1",
+		RequiredSkillDomains: []string{"web"},
+		PolicyScope:          types.PolicyScope{Domains: []string{"web"}, TokenRef: "tok-1"},
+		TimeoutSeconds:       60,
+		CallbackTopic:        "aegis.user-io.results.task-1",
+		TraceID:              "0123456789abcdef0123456789abcdef",
+	}
+
+	specCtx := observability.WithTraceID(context.Background(), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	if err := gw.PublishTaskSpec(specCtx, spec); err != nil {
+		t.Fatalf("PublishTaskSpec() error = %v", err)
+	}
+
+	msgs := nats.Published[gateway.TopicAgentTasksInbound]
+	if len(msgs) != 1 {
+		t.Fatalf("published = %d, want 1", len(msgs))
+	}
+	var envelope types.MessageEnvelope
+	if err := json.Unmarshal(msgs[0], &envelope); err != nil {
+		t.Fatalf("invalid envelope: %v", err)
+	}
+	if envelope.TraceID != spec.TraceID {
+		t.Fatalf("envelope.TraceID = %q, want spec.TraceID %q", envelope.TraceID, spec.TraceID)
+	}
+}
+
 func TestPublishCapabilityQuery_MessageEnvelopeTraceID(t *testing.T) {
 	gw, nats := newGateway(t)
 	traceID := "0123456789abcdef0123456789abcdef"
@@ -610,8 +696,8 @@ func TestGatewayDemoFlow(t *testing.T) {
 	if err := gw.Start(); err != nil {
 		t.Fatalf("step 1: Start() error = %v", err)
 	}
-	if nats.SubscribeCallCount != 11 {
-		t.Fatalf("step 1: SubscribeCallCount = %d, want 11", nats.SubscribeCallCount)
+	if nats.SubscribeCallCount != 12 {
+		t.Fatalf("step 1: SubscribeCallCount = %d, want 12", nats.SubscribeCallCount)
 	}
 	if !gw.IsConnected() {
 		t.Fatal("step 1: IsConnected() = false, want true")

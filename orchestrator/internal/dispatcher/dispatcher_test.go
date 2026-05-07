@@ -42,7 +42,9 @@ import (
 // gatewayMock records every outbound call the Dispatcher makes to M1 (v3.0 interface).
 type gatewayMock struct {
 	AcceptedCalls     []types.TaskAccepted
+	CapabilityCalls   []types.CapabilityQuery
 	ErrorCalls        []types.ErrorResponse
+	SpawnRespCalls    []types.AgentSpawnResponse
 	TaskSpecCalls     []types.TaskSpec
 	TaskResultCalls   []types.TaskResult
 	StatusUpdateCalls []types.StatusResponse
@@ -65,6 +67,20 @@ func (g *gatewayMock) PublishError(_ context.Context, _ string, e types.ErrorRes
 func (g *gatewayMock) PublishTaskResult(_ context.Context, _ string, r types.TaskResult) error {
 	g.TaskResultCalls = append(g.TaskResultCalls, r)
 	return g.PublishResultError
+}
+
+func (g *gatewayMock) PublishCapabilityQuery(_ context.Context, q types.CapabilityQuery) (*types.CapabilityResponse, error) {
+	g.CapabilityCalls = append(g.CapabilityCalls, q)
+	return &types.CapabilityResponse{
+		OrchestratorTaskRef: q.OrchestratorTaskRef,
+		Match:               types.CapabilityMatch_Match,
+		AgentID:             "child-agent-1",
+	}, nil
+}
+
+func (g *gatewayMock) PublishAgentSpawnResponse(_ context.Context, resp types.AgentSpawnResponse) error {
+	g.SpawnRespCalls = append(g.SpawnRespCalls, resp)
+	return nil
 }
 
 func (g *gatewayMock) PublishTaskSpec(_ context.Context, spec types.TaskSpec) error {
@@ -331,6 +347,95 @@ func TestHandleInboundTask_HappyPath_Decomposing(t *testing.T) {
 		t.Fatalf("unexpected errors published: %+v", gw.ErrorCalls)
 	}
 	_ = exec
+}
+
+func TestHandleAgentSpawnRequest_DispatchesChildTaskAndPublishesResponseOnSuccess(t *testing.T) {
+	d, gw, _, _, _, _ := newDispatcher(t)
+
+	task := validTask("11111111-1111-1111-1111-111111111111")
+	if err := d.HandleInboundTask(context.Background(), task); err != nil {
+		t.Fatalf("HandleInboundTask() error = %v", err)
+	}
+	parentOrchRef := orchRefFromPlannerTask(t, gw)
+	initialTaskSpecCount := len(gw.TaskSpecCalls)
+
+	req := types.AgentSpawnRequest{
+		RequestID:      "spawn-req-1",
+		ParentAgentID:  "parent-agent-1",
+		ParentTaskID:   parentOrchRef,
+		RequiredSkills: []string{"web"},
+		Instructions:   "Fetch https://example.com and return the page title.",
+		TimeoutSeconds: 45,
+		TraceID:        "trace-123",
+	}
+	if err := d.HandleAgentSpawnRequest(context.Background(), req); err != nil {
+		t.Fatalf("HandleAgentSpawnRequest() error = %v", err)
+	}
+
+	if len(gw.CapabilityCalls) != 1 {
+		t.Fatalf("capability queries = %d, want 1", len(gw.CapabilityCalls))
+	}
+	if len(gw.TaskSpecCalls) != initialTaskSpecCount+1 {
+		t.Fatalf("task spec publishes = %d, want %d", len(gw.TaskSpecCalls), initialTaskSpecCount+1)
+	}
+	childSpec := gw.TaskSpecCalls[len(gw.TaskSpecCalls)-1]
+	if got := childSpec.RequiredSkillDomains; len(got) != 1 || got[0] != "web" {
+		t.Fatalf("child required skills = %v, want [web]", got)
+	}
+	if childSpec.Metadata["task_kind"] != "agent_spawn_child" {
+		t.Fatalf("child task_kind = %q, want agent_spawn_child", childSpec.Metadata["task_kind"])
+	}
+
+	result := types.TaskResult{
+		OrchestratorTaskRef: childSpec.OrchestratorTaskRef,
+		AgentID:             "child-agent-1",
+		Success:             true,
+		Result:              json.RawMessage(`"Example Domain"`),
+		CompletedAt:         time.Now().UTC(),
+	}
+	if err := d.HandleTaskResult(context.Background(), result); err != nil {
+		t.Fatalf("HandleTaskResult(child success) error = %v", err)
+	}
+
+	if len(gw.SpawnRespCalls) != 1 {
+		t.Fatalf("spawn responses = %d, want 1", len(gw.SpawnRespCalls))
+	}
+	resp := gw.SpawnRespCalls[0]
+	if resp.Status != "success" {
+		t.Fatalf("spawn response status = %q, want success", resp.Status)
+	}
+	if resp.ChildAgentID != "child-agent-1" {
+		t.Fatalf("spawn response child_agent_id = %q, want child-agent-1", resp.ChildAgentID)
+	}
+	if resp.Result != "Example Domain" {
+		t.Fatalf("spawn response result = %q, want %q", resp.Result, "Example Domain")
+	}
+}
+
+func TestHandleAgentSpawnRequest_PublishesFailureWhenParentContextMissing(t *testing.T) {
+	d, gw, _, _, _, _ := newDispatcher(t)
+
+	req := types.AgentSpawnRequest{
+		RequestID:      "spawn-req-missing",
+		ParentAgentID:  "parent-agent-1",
+		ParentTaskID:   "missing-parent-ref",
+		RequiredSkills: []string{"web"},
+		Instructions:   "Fetch https://example.com",
+	}
+	if err := d.HandleAgentSpawnRequest(context.Background(), req); err != nil {
+		t.Fatalf("HandleAgentSpawnRequest() error = %v", err)
+	}
+
+	if len(gw.SpawnRespCalls) != 1 {
+		t.Fatalf("spawn responses = %d, want 1", len(gw.SpawnRespCalls))
+	}
+	resp := gw.SpawnRespCalls[0]
+	if resp.Status != "failed" {
+		t.Fatalf("spawn response status = %q, want failed", resp.Status)
+	}
+	if resp.ErrorCode != types.ErrCodeInvalidTaskSpec {
+		t.Fatalf("spawn response error_code = %q, want %q", resp.ErrorCode, types.ErrCodeInvalidTaskSpec)
+	}
 }
 
 func TestHandleInboundTask_MaintenancePayload_SystemPromptAndMetadata(t *testing.T) {

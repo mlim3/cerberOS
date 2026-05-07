@@ -215,6 +215,7 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 	gw.RegisterTaskResultHandler(taskDispatcher.HandleTaskResult)
 	gw.RegisterPlanDecisionHandler(taskDispatcher.HandlePlanDecision)
 	gw.RegisterVaultExecuteHandler(taskDispatcher.HandleVaultExecuteRequest)
+	gw.RegisterAgentSpawnRequestHandler(taskDispatcher.HandleAgentSpawnRequest)
 
 	// Forward agent user_input credential requests to the IO Component.
 	// HandleCredentialRequest resolves the top-level task_id from the subtask ref
