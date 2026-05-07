@@ -28,14 +28,14 @@ spec:
               containerPort: 80
           env:
             - name: MODEL_ID
-              value: {{ default .Values.model.id .Values.global.embedding.model | quote }}
+              value: {{ default .Values.model.id ((.Values.global).embedding).model | quote }}
             - name: EMBEDDING_DTYPE
               value: {{ .Values.model.dtype | quote }}
             - name: EMBEDDING_DIM
-              value: {{ default .Values.model.dimensions .Values.global.embedding.dimensions | quote }}
+              value: {{ default .Values.model.dimensions ((.Values.global).embedding).dimensions | quote }}
             - name: MAX_CONCURRENT_REQUESTS
               value: {{ .Values.model.maxConcurrentRequests | quote }}
-            {{- if or .Values.auth.hfToken .Values.global.embedding.hfToken }}
+            {{- if or .Values.auth.hfToken ((.Values.global).embedding).hfToken }}
             - name: HF_TOKEN
               valueFrom:
                 secretKeyRef:
