@@ -29,8 +29,10 @@ func TestVaultSecurity(t *testing.T) {
 		if errResp["error"] == nil {
 			t.Errorf("Expected error envelope in response")
 		} else {
-			errData := errResp["error"].(map[string]interface{})
-			if errData["code"] != "invalid_argument" {
+			errData, ok := errResp["error"].(map[string]interface{})
+			if !ok {
+				t.Errorf("Expected error object, got: %v", errResp["error"])
+			} else if errData["code"] != "invalid_argument" {
 				t.Errorf("Expected error code invalid_argument, got %v", errData["code"])
 			}
 		}
@@ -66,12 +68,21 @@ func TestVaultSecurity(t *testing.T) {
 		var result map[string]interface{}
 		parseResponse(t, eventsResp, &result)
 
-		data := result["data"].(map[string]interface{})
-		events := data["events"].([]interface{})
+		data, ok := result["data"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("Expected data object in response, got: %v", result)
+		}
+		events, ok := data["events"].([]interface{})
+		if !ok {
+			t.Fatalf("Expected events array in response, got: %v", data)
+		}
 
 		found := false
 		for _, e := range events {
-			event := e.(map[string]interface{})
+			event, ok := e.(map[string]interface{})
+			if !ok {
+				continue
+			}
 			if event["message"] == "VAULT_ACCESS" {
 				if meta, ok := event["metadata"].(map[string]interface{}); ok {
 					if meta["status"] == "granted" && meta["userId"] == userID {
