@@ -34,11 +34,24 @@ type teiEmbeddingResponse struct {
 	} `json:"data"`
 }
 
+// noopEmbedder is used when no embedding API is configured. Semantic search
+// will not return meaningful results, but the service starts and all other
+// endpoints function normally.
+type noopEmbedder struct{ dim int }
+
+func (n *noopEmbedder) ModelVersion() string { return "noop" }
+func (n *noopEmbedder) Embed(_ context.Context, _ string) (pgvector.Vector, error) {
+	return pgvector.NewVector(make([]float32, n.dim)), nil
+}
+
 func NewTEIEmbedder(apiURL, model string, dimensions int) (Embedder, error) {
 	apiURL = strings.TrimSpace(apiURL)
 	model = strings.TrimSpace(model)
 	if apiURL == "" {
-		return nil, fmt.Errorf("embedding API URL is required")
+		if dimensions <= 0 {
+			dimensions = 768
+		}
+		return &noopEmbedder{dim: dimensions}, nil
 	}
 	if model == "" {
 		return nil, fmt.Errorf("embedding model is required")

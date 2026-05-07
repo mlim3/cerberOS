@@ -130,23 +130,27 @@ func main() {
 	reg := registry.New(registry.WithStateChangeHook(rec.ObserveStateChange))
 
 	skillOpts := []skills.Option{skills.WithGetSpecHook(rec.ObserveSkillInvocation)}
-	embedder, err := newEmbeddingAPIEmbedder(
-		cfg.EmbeddingAPIURL,
-		cfg.EmbeddingModel,
-		cfg.EmbeddingDimensions,
-		cfg.EmbeddingPromptStyle,
-	)
-	if err != nil {
-		log.Error("embedding client init failed", "error", err)
-		os.Exit(1)
+	if cfg.EmbeddingAPIURL != "" {
+		embedder, err := newEmbeddingAPIEmbedder(
+			cfg.EmbeddingAPIURL,
+			cfg.EmbeddingModel,
+			cfg.EmbeddingDimensions,
+			cfg.EmbeddingPromptStyle,
+		)
+		if err != nil {
+			log.Error("embedding client init failed", "error", err)
+			os.Exit(1)
+		}
+		log.Info("embedding: using shared embedding API",
+			"url", cfg.EmbeddingAPIURL,
+			"model", cfg.EmbeddingModel,
+			"dimensions", cfg.EmbeddingDimensions,
+			"prompt_style", cfg.EmbeddingPromptStyle,
+		)
+		skillOpts = append(skillOpts, skills.WithEmbedder(embedder))
+	} else {
+		log.Info("embedding: AEGIS_EMBEDDING_API_URL not set — using local hash embedder")
 	}
-	log.Info("embedding: using shared embedding API",
-		"url", cfg.EmbeddingAPIURL,
-		"model", cfg.EmbeddingModel,
-		"dimensions", cfg.EmbeddingDimensions,
-		"prompt_style", cfg.EmbeddingPromptStyle,
-	)
-	skillOpts = append(skillOpts, skills.WithEmbedder(embedder))
 	skillMgr := skills.New(skillOpts...)
 	credBroker, err := credentials.NewNATSBroker(commsClient,
 		credentials.WithBrokerConfig(credentials.BrokerConfig{

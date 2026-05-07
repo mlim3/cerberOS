@@ -138,12 +138,7 @@ func Load() (*Config, error) {
 	if c.ComponentID == "" {
 		c.ComponentID = "aegis-agents"
 	}
-	if c.EmbeddingAPIURL == "" {
-		return nil, fmt.Errorf("config: AEGIS_EMBEDDING_API_URL is required")
-	}
-	if c.EmbeddingModel == "" {
-		return nil, fmt.Errorf("config: AEGIS_EMBEDDING_MODEL is required")
-	}
+	// EmbeddingAPIURL is optional — when absent the local hashEmbedder is used.
 	if c.EmbeddingPromptStyle == "" {
 		c.EmbeddingPromptStyle = "plain"
 	}

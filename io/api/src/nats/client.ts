@@ -10,7 +10,7 @@
  * (agents-component/internal/comms/comms.go outboundEnvelope).
  */
 
-import { connect, type NatsConnection, type Subscription } from 'nats'
+import { connect, type JetStreamClient, type NatsConnection, type Subscription } from 'nats'
 import { ioLog } from '../logger'
 
 // ── NATS subjects (aligned with agents-component/internal/comms/subjects.go) ──
@@ -131,6 +131,7 @@ export function createNatsClient(config: NatsConfig): IONatsClient | null {
   }
 
   let nc: NatsConnection | null = null
+  let js: JetStreamClient | null = null
   const subscriptions: Subscription[] = []
   let isConnected = false
 
@@ -194,6 +195,7 @@ export function createNatsClient(config: NatsConfig): IONatsClient | null {
         ioLog('info', 'nats', 'Created AEGIS_ORCHESTRATOR stream', {})
       }
 
+      js = nc.jetstream()
       isConnected = true
       ioLog('info', 'nats', 'Connected to NATS', { url: config.url })
       flushPendingSubscriptions()
