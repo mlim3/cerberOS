@@ -80,6 +80,11 @@ func TestMain(m *testing.M) {
 	defer db.Close()
 	dbPool = db.GetPool()
 
+	if _, err := dbPool.Exec(ctx, identitySchemaDDL); err != nil {
+		logger.Error("failed to ensure identity_schema (for integration tests against older DB volumes)", "error", err)
+		os.Exit(1)
+	}
+
 	if _, err := dbPool.Exec(ctx, schedulingSchemaDDL); err != nil {
 		logger.Error("failed to ensure scheduling_schema (for integration tests against older DB volumes)", "error", err)
 		os.Exit(1)
@@ -217,6 +222,17 @@ func parseResponse(t *testing.T, resp *http.Response, target interface{}) {
 		t.Fatalf("Failed to decode response: %v", err)
 	}
 }
+
+// identitySchemaDDL matches memory/scripts/init-db.sql so tests pass if Postgres was created before identity_schema landed.
+const identitySchemaDDL = `
+CREATE SCHEMA IF NOT EXISTS identity_schema;
+
+CREATE TABLE IF NOT EXISTS identity_schema.users (
+    id UUID PRIMARY KEY,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+`
 
 // schedulingSchemaDDL matches memory/scripts/init-db.sql so tests pass if Postgres was created before scheduling landed.
 const schedulingSchemaDDL = `
