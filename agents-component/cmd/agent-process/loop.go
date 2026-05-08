@@ -654,6 +654,22 @@ func contextWindowAction(totalTokens int64) contextAction {
 // non-empty. They are excluded from the spawn context token budget because they
 // are system overhead, not task payload.
 func buildSystemPrompt(skillDomain, manifest, agentMemory, userProfile string) string {
+	// Prepend today's date so the LLM resolves relative phrases ("tomorrow",
+	// "next Monday", "this weekend") against the host's wall-clock instead of
+	// its own training-cutoff prior. Without this, models silently default to
+	// dates near their cutoff (e.g. early 2025) when the user actually means
+	// something in 2026 — most visibly in calendar invites and scheduling.
+	now := time.Now()
+	header := fmt.Sprintf(
+		"Today's date is %s (%s). The current local time is %s. "+
+			"Resolve any relative date or time references in the user's request "+
+			"(\"tomorrow\", \"next week\", \"in two hours\") against this clock — "+
+			"never against your training cutoff.\n\n",
+		now.Format("Monday, January 2, 2006"),
+		now.Format("2006-01-02"),
+		now.Format("15:04 MST"),
+	)
+
 	var base string
 	if skillDomain == "general" {
 		base = `You are an Aegis OS general-purpose reasoning agent. ` +
@@ -678,5 +694,5 @@ func buildSystemPrompt(skillDomain, manifest, agentMemory, userProfile string) s
 	if userProfile != "" {
 		base += "\n\n## User context\n" + userProfile
 	}
-	return base
+	return header + base
 }
