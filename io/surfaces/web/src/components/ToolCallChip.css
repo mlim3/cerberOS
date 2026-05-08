@@ -1,0 +1,73 @@
+.tool-call-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--text-muted);
+  white-space: nowrap;
+  user-select: none;
+}
+
+.tool-call-chip--running {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.tool-call-chip--completed {
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 30%, transparent);
+}
+
+.tool-call-chip--error {
+  color: var(--warning);
+  border-color: color-mix(in srgb, var(--warning) 30%, transparent);
+}
+
+.tool-call-chip__glyph {
+  display: inline-flex;
+  align-items: center;
+  font-size: 9px;
+  flex-shrink: 0;
+}
+
+.tool-call-chip__name {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tool-call-chip__duration {
+  opacity: 0.6;
+  font-size: 9px;
+}
+
+/* Animated spinner for running state */
+.tool-call-chip__spinner {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  animation: tool-chip-spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes tool-chip-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Chip cluster container in message header */
+.tool-call-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}

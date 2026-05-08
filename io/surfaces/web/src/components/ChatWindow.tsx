@@ -4,7 +4,7 @@ import type { Task, CredentialRequest, CredentialRequestStatus } from '@cerberos
 import type { UISettings } from './SettingsPanel'
 import CredentialRequestCard from './CredentialRequestCard'
 import ProgressIndicator from './ProgressIndicator'
-import ToolCallBlock from './ToolCallBlock'
+import ToolCallChip from './ToolCallChip'
 import { VoiceRecorder } from './VoiceRecorder'
 import './ChatWindow.css'
 import './VoiceRecorder.css'
@@ -128,18 +128,18 @@ function ChatWindow({
                 {message.isRedacted && (
                   <span className="redacted-badge">Secure</span>
                 )}
+                {message.toolCalls && message.toolCalls.length > 0 && (
+                  <span className="tool-call-chips">
+                    {message.toolCalls.map((tool) => (
+                      <ToolCallChip key={tool.toolUseId} tool={tool} />
+                    ))}
+                  </span>
+                )}
               </div>
               {message.role === 'agent'
                 ? <MarkdownContent content={message.content} />
                 : <div className="message-text">{message.content}</div>
               }
-              {message.toolCalls && message.toolCalls.length > 0 && (
-                <div className="tool-call-group">
-                  {message.toolCalls.map((tool, idx) => (
-                    <ToolCallBlock key={`${message.id}-tool-${idx}`} tool={tool} />
-                  ))}
-                </div>
-              )}
             </div>
           </div>
         ))}

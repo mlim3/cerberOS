@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect, useRef } from 'react'
 import type {
   Task,
   ChatMessage,
+  ToolCallInfo,
   CredentialRequest,
   CredentialRequestStatus,
   OrchestratorStreamEvent,
@@ -236,6 +237,10 @@ function App() {
 
   const selectedTaskIdRef = useRef(selectedTaskId)
   selectedTaskIdRef.current = selectedTaskId
+
+  /** Buffer for tool_call_started events that arrive before the assistant message exists.
+   *  Keyed by taskId (the orchestrator task id, i.e. currentTaskId). */
+  const toolCallBufferRef = useRef<Record<string, ToolCallInfo[]>>({})
 
   const consumeRecurringUserTurnRef = useRef<(cid: string, text: string) => Promise<boolean>>(async () => false)
 
@@ -548,6 +553,52 @@ function App() {
           ...prev.slice(-9), // keep at most 10 toasts
           { id: nextId(), activity: ev.payload, createdAt: Date.now() },
         ])
+      } else if (ev.type === 'tool_call_started') {
+        const { taskId, messageId, toolUseId, toolName } = ev.payload
+        const newChip: ToolCallInfo = { toolUseId, toolName, status: 'running' }
+        setTasks(prev => {
+          const taskIdx = prev.findIndex(t => t.currentTaskId === taskId)
+          if (taskIdx === -1) return prev
+          const task = prev[taskIdx]
+          const msgIdx = task.messages.findIndex(m => m.id === messageId)
+          if (msgIdx === -1) {
+            // Message doesn't exist yet — buffer the chip
+            const buf = toolCallBufferRef.current
+            buf[taskId] = [...(buf[taskId] ?? []), newChip]
+            return prev
+          }
+          const msg = task.messages[msgIdx]
+          const updatedMsg: ChatMessage = {
+            ...msg,
+            toolCalls: [...(msg.toolCalls ?? []), newChip],
+          }
+          const updatedMessages = [...task.messages]
+          updatedMessages[msgIdx] = updatedMsg
+          const updatedTasks = [...prev]
+          updatedTasks[taskIdx] = { ...task, messages: updatedMessages }
+          return updatedTasks
+        })
+      } else if (ev.type === 'tool_call_completed') {
+        const { taskId, toolUseId, status, durationMs } = ev.payload
+        setTasks(prev => {
+          const taskIdx = prev.findIndex(t => t.currentTaskId === taskId)
+          if (taskIdx === -1) return prev
+          const task = prev[taskIdx]
+          let found = false
+          const updatedMessages = task.messages.map(msg => {
+            if (!msg.toolCalls) return msg
+            const tcIdx = msg.toolCalls.findIndex(tc => tc.toolUseId === toolUseId)
+            if (tcIdx === -1) return msg
+            found = true
+            const updatedToolCalls = [...msg.toolCalls]
+            updatedToolCalls[tcIdx] = { ...updatedToolCalls[tcIdx], status, durationMs }
+            return { ...msg, toolCalls: updatedToolCalls }
+          })
+          if (!found) return prev
+          const updatedTasks = [...prev]
+          updatedTasks[taskIdx] = { ...task, messages: updatedMessages }
+          return updatedTasks
+        })
       }
     }
 
@@ -672,11 +723,19 @@ function App() {
         setStreamingForTaskId(null)
         setStreamingContent('')
         if (full) {
+          // Drain any buffered tool-call chips that arrived before this message existed
+          const bufferedToolCalls = activeTaskId
+            ? (toolCallBufferRef.current[activeTaskId] ?? [])
+            : []
+          if (activeTaskId && bufferedToolCalls.length > 0) {
+            delete toolCallBufferRef.current[activeTaskId]
+          }
           const agentMsg: ChatMessage = {
             id: nextId(),
             role: 'agent',
             content: full,
             timestamp: timeLabel(),
+            toolCalls: bufferedToolCalls.length > 0 ? bufferedToolCalls : undefined,
           }
           setTasks(prev =>
             prev.map(t =>
@@ -1454,11 +1513,19 @@ function App() {
         setStreamingForTaskId(null)
         setStreamingContent('')
         if (full) {
+          // Drain any buffered tool-call chips that arrived before this message existed
+          const bufferedToolCalls2 = activeTaskId
+            ? (toolCallBufferRef.current[activeTaskId] ?? [])
+            : []
+          if (activeTaskId && bufferedToolCalls2.length > 0) {
+            delete toolCallBufferRef.current[activeTaskId]
+          }
           const agentMsg: ChatMessage = {
             id: nextId(),
             role: 'agent',
             content: full,
             timestamp: timeLabel(),
+            toolCalls: bufferedToolCalls2.length > 0 ? bufferedToolCalls2 : undefined,
           }
           setTasks(prev =>
             prev.map(t =>

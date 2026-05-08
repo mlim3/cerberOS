@@ -24,9 +24,8 @@ export type MessageRole = 'user' | 'assistant' | 'orchestrator';
 
 /** Tool call information for display in the chat */
 export interface ToolCallInfo {
+  toolUseId: string;
   toolName: string;
-  inputs: Record<string, unknown>;
-  output?: string;
   status: 'running' | 'completed' | 'error';
   durationMs?: number;
 }
@@ -169,13 +168,34 @@ export interface SkillActivity {
   timestamp: number; // Unix ms
 }
 
+/** Orchestrator → IO: a tool call has started executing. */
+export interface ToolCallStartedEvent {
+  taskId: string;
+  messageId: string;
+  toolUseId: string;
+  toolName: string;
+  timestamp: number; // Unix ms
+}
+
+/** Orchestrator → IO: a tool call has finished executing. */
+export interface ToolCallCompletedEvent {
+  taskId: string;
+  messageId: string;
+  toolUseId: string;
+  status: 'completed' | 'error';
+  durationMs: number;
+  timestamp: number; // Unix ms
+}
+
 /** One frame on the orchestrator→IO push channel (per task stream). */
 export type OrchestratorStreamEvent =
   | { type: 'status'; payload: StatusUpdate }
   | { type: 'credential_request'; payload: CredentialRequest }
   | { type: 'chat_response'; payload: ChatResponsePayload }
   | { type: 'plan_preview'; payload: PlanPreview }
-  | { type: 'skill_activity'; payload: SkillActivity };
+  | { type: 'skill_activity'; payload: SkillActivity }
+  | { type: 'tool_call_started'; payload: ToolCallStartedEvent }
+  | { type: 'tool_call_completed'; payload: ToolCallCompletedEvent };
 
 function isRecord(x: unknown): x is Record<string, unknown> {
   return typeof x === 'object' && x !== null;
@@ -280,6 +300,51 @@ export function parseOrchestratorStreamEvent(raw: unknown): OrchestratorStreamEv
           vaultDelegated: p.vaultDelegated === true,
           synthesized: p.synthesized === true,
           outcome: typeof p.outcome === 'string' ? p.outcome : '',
+          timestamp: typeof p.timestamp === 'number' ? p.timestamp : Date.now(),
+        },
+      };
+    }
+    return null;
+  }
+
+  if (raw.type === 'tool_call_started' && isRecord(raw.payload)) {
+    const p = raw.payload;
+    if (
+      typeof p.taskId === 'string' &&
+      typeof p.messageId === 'string' &&
+      typeof p.toolUseId === 'string' &&
+      typeof p.toolName === 'string'
+    ) {
+      return {
+        type: 'tool_call_started',
+        payload: {
+          taskId: p.taskId as string,
+          messageId: p.messageId as string,
+          toolUseId: p.toolUseId as string,
+          toolName: p.toolName as string,
+          timestamp: typeof p.timestamp === 'number' ? p.timestamp : Date.now(),
+        },
+      };
+    }
+    return null;
+  }
+
+  if (raw.type === 'tool_call_completed' && isRecord(raw.payload)) {
+    const p = raw.payload;
+    if (
+      typeof p.taskId === 'string' &&
+      typeof p.messageId === 'string' &&
+      typeof p.toolUseId === 'string' &&
+      (p.status === 'completed' || p.status === 'error')
+    ) {
+      return {
+        type: 'tool_call_completed',
+        payload: {
+          taskId: p.taskId as string,
+          messageId: p.messageId as string,
+          toolUseId: p.toolUseId as string,
+          status: p.status as 'completed' | 'error',
+          durationMs: typeof p.durationMs === 'number' ? p.durationMs : 0,
           timestamp: typeof p.timestamp === 'number' ? p.timestamp : Date.now(),
         },
       };
