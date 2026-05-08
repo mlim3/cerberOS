@@ -1,0 +1,56 @@
+{{- if .Values.systemCronWake.enabled }}
+{{- if not .Values.cronWake.secretName }}
+{{- fail "systemCronWake.enabled requires cronWake.secretName (Kubernetes Secret containing CRON_WAKE_SECRET)" }}
+{{- end }}
+{{- range .Values.systemCronWake.jobs }}
+{{- $wake := dict "job_name" .jobName "raw_input" .rawInput }}
+{{- $sysprompt := trim (default "" .systemPrompt) }}
+{{- if ne $sysprompt "" }}
+{{- $_ := set $wake "system_prompt" $sysprompt }}
+{{- end }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: orchestrator-wake-{{ .name | trunc 40 | trimSuffix "-" }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "orchestrator.labels" $ | nindent 4 }}
+spec:
+  schedule: {{ .schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  suspend: {{ .suspend | default false }}
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 86400
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            {{- include "orchestrator.selectorLabels" $ | nindent 12 }}
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: cron-wake
+              image: {{ $.Values.systemCronWake.curlImage }}
+              env:
+                - name: CRON_WAKE_SECRET
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $.Values.cronWake.secretName }}
+                      key: {{ $.Values.cronWake.secretKey }}
+                - name: BODY_B64
+                  value: {{ $wake | toJson | b64enc | quote }}
+              command:
+                - /bin/sh
+                - -ec
+                - |
+                  BODY="$(printf '%s' "$BODY_B64" | base64 -d)"
+                  curl -sfS -X POST "http://orchestrator:{{ $.Values.service.port }}/v1/cron/wake" \
+                    -H "Content-Type: application/json" \
+                    -H "X-Aegis-Cron-Secret: ${CRON_WAKE_SECRET}" \
+                    --data-binary "${BODY}"
+{{- end }}
+{{- end }}

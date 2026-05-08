@@ -38,6 +38,9 @@ nats:
 
 memory-api:
   replicaCount: 2
+  # Optional: enable built-in maintenance CronJobs (schedules in charts/memory-api/values.yaml).
+  # systemMaintenanceCron:
+  #   enabled: true
 
 orchestrator:
   replicaCount: 2

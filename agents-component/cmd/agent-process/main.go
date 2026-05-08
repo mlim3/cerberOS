@@ -65,8 +65,10 @@ import (
 	"strconv"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/cerberOS/agents-component/internal/logfields"
 	"github.com/cerberOS/agents-component/internal/skills"
 	"github.com/cerberOS/agents-component/internal/telemetry"
+	"github.com/cerberOS/agents-component/pkg/types"
 )
 
 // mmdsPayload is the envelope written to the Firecracker MMDS by the Lifecycle
@@ -80,18 +82,19 @@ type mmdsPayload struct {
 // SpawnContext is the initial context injected by the Lifecycle Manager at spawn.
 // It is delivered as JSON via stdin.
 type SpawnContext struct {
-	TaskID           string                   `json:"task_id"`
-	SkillDomain      string                   `json:"skill_domain"`
-	PermissionToken  string                   `json:"permission_token"` // opaque credential ref — never a raw credential value
-	Instructions     string                   `json:"instructions"`
-	CommandManifest  string                   `json:"command_manifest,omitempty"`  // "- name: description" list built by factory; injected into system prompt
-	RecoveredContext string                   `json:"recovered_context,omitempty"` // non-empty on respawn
-	AgentMemory      string                   `json:"agent_memory,omitempty"`      // distilled facts from past tasks in this domain; injected into system prompt
-	UserProfile      string                   `json:"user_profile,omitempty"`      // user preference observations; injected into system prompt
-	TraceID          string                   `json:"trace_id"`
-	UserContextID    string                   `json:"user_context_id,omitempty"` // propagated from parent TaskSpec; echoed in all outbound events (issue #67)
-	ConversationID   string                   `json:"conversation_id,omitempty"` // non-empty when this task continues a prior conversation
-	PriorTurns       []anthropic.MessageParam `json:"prior_turns,omitempty"`     // reconstructed history from factory; nil for standalone tasks
+	TaskID            string                         `json:"task_id"`
+	SkillDomain       string                         `json:"skill_domain"`
+	PermissionToken   string                         `json:"permission_token"` // opaque credential ref — never a raw credential value
+	Instructions      string                         `json:"instructions"`
+	CommandManifest   string                         `json:"command_manifest,omitempty"`  // "- name: description" list built by factory; injected into system prompt
+	RecoveredContext  string                         `json:"recovered_context,omitempty"` // non-empty on respawn
+	AgentMemory       string                         `json:"agent_memory,omitempty"`      // distilled facts from past tasks in this domain; injected into system prompt
+	UserProfile       string                         `json:"user_profile,omitempty"`      // user preference observations; injected into system prompt
+	TraceID           string                         `json:"trace_id"`
+	UserContextID     string                         `json:"user_context_id,omitempty"`    // propagated from parent TaskSpec; echoed in all outbound events (issue #67)
+	ConversationID    string                         `json:"conversation_id,omitempty"`    // non-empty when this task continues a prior conversation
+	PriorTurns        []anthropic.MessageParam       `json:"prior_turns,omitempty"`        // reconstructed history from factory; nil for standalone tasks
+	SynthesizedSkills []types.SynthesizedSkillRecord `json:"synthesized_skills,omitempty"` // skills created by prior synthesis; each gets a dynamic SkillTool with LLM-based execution
 }
 
 // TaskOutput is the result written to stdout when the task completes or fails.
@@ -247,7 +250,12 @@ func runOneTask(rootCtx context.Context, rootLog *slog.Logger, spawnCtx *SpawnCo
 		return nil, err
 	}
 
-	log.Info("agent-process task started", "skill_domain", spawnCtx.SkillDomain)
+	log.Info("agent-process started for task; loading skills, vault, steerer, spawner",
+		"skill_domain", spawnCtx.SkillDomain,
+		"prior_turn_count", len(priorTurns),
+		"is_followup", len(priorTurns) > 0,
+		"recovered_from_crash", spawnCtx.RecoveredContext != "",
+		"content_preview", logfields.PreviewHeadTail(spawnCtx.Instructions, 15, 10))
 
 	taskCtx, cancel := context.WithCancel(rootCtx)
 	defer cancel()
@@ -296,13 +304,16 @@ func runOneTask(rootCtx context.Context, rootLog *slog.Logger, spawnCtx *SpawnCo
 		Result:  result,
 	}
 	if err := encoder.Encode(out); err != nil {
-		log.Error("encode output failed", "error", err)
+		log.Error("could not write task output to stdout protocol; aborting agent process so factory respawns",
+			"error", err)
 		// Encode failure means stdout is broken — can't meaningfully continue
 		// the loop because the host can't observe our outputs.
 		os.Exit(1)
 	}
 
-	log.Info("agent-process task completed")
+	log.Info("agent-process finished task (success); returning final result to factory",
+		"result_preview", logfields.PreviewHeadTail(result, 15, 10),
+		"final_turn_count", len(finalHistory))
 	return finalHistory, nil
 }
 

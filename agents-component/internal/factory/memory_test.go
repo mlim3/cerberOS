@@ -584,8 +584,8 @@ func TestFetchPriorTurns_ConversationIsolation(t *testing.T) {
 type errMemoryClient struct{}
 
 func (e *errMemoryClient) Write(_ *types.MemoryWrite) error              { return nil }
-func (e *errMemoryClient) Read(_, _ string) ([]types.MemoryWrite, error) { return nil, nil }
-func (e *errMemoryClient) ReadAllByType(_ string) ([]types.MemoryWrite, error) {
+func (e *errMemoryClient) Read(_, _, _ string) ([]types.MemoryWrite, error) { return nil, nil }
+func (e *errMemoryClient) ReadAllByType(_, _ string) ([]types.MemoryWrite, error) {
 	return nil, errReadFailed
 }
 

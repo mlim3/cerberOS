@@ -5,6 +5,13 @@ image:
 
 replicaCount: 1
 
+# How long the Deployment controller waits for a new revision to become available
+# (must exceed worst-case image pull + startupProbe budget on small kind nodes).
+progressDeadlineSeconds: 900
+
+# HTTP listen address inside the container (required for K8s probes to reach the pod IP).
+listenHost: "0.0.0.0"
+
 service:
   port: 3001
   # NodePort for kind extraPortMappings (30001 → host 3001)
@@ -12,6 +19,9 @@ service:
 
 natsUrl: "nats://nats:4222"
 memoryApiBase: "http://memory-api:8081"
+# Same secret memory-api expects as INTERNAL_VAULT_API_KEY (vault/orchestrator BFF routes).
+# Required for POST/GET /api/user-crons and other Memory proxies in io/api.
+internalVaultApiKey: ""
 logLevel: "info"
 demoMode: "false"
 sttProvider: "disabled"
@@ -23,10 +33,10 @@ observability:
 resources:
   requests:
     cpu: 100m
-    memory: 128Mi
+    memory: 256Mi
   limits:
     cpu: 500m
-    memory: 512Mi
+    memory: 768Mi
 
 # ---------------------------------------------------------------------------
 # Extension hook: Ingress (off by default)

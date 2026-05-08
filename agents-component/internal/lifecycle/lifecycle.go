@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/cerberOS/agents-component/pkg/types"
 )
 
 // State represents the runtime state of a managed agent process.
@@ -31,20 +32,21 @@ const (
 
 // VMConfig carries the parameters needed to launch an agent process.
 type VMConfig struct {
-	AgentID          string
-	VMID             string // allocated VM identity; changes on respawn (same AgentID, new VMID)
-	TaskID           string // task the agent is being spawned to execute
-	SkillDomain      string // entry-point domain injected into the agent at spawn
-	CredentialPtr    string // vault permission token pointer (not the token value)
-	Instructions     string // natural-language task description for the agent
-	CommandManifest  string // pre-built "- name: description" list for the entry domain; injected into system prompt
-	RecoveredContext string // non-empty on respawn: serialised CrashSnapshot for checkpoint resume
-	AgentMemory      string // distilled facts from past tasks in this domain; injected into system prompt
-	UserProfile      string // user preference observations; injected into system prompt
-	TraceID          string
-	UserContextID    string                   // propagated from TaskSpec; echoed in all outbound events (issue #67)
-	ConversationID   string                   // non-empty when this task continues a prior conversation
-	PriorTurns       []anthropic.MessageParam // reconstructed conversation history from prior task; nil for standalone tasks
+	AgentID           string
+	VMID              string // allocated VM identity; changes on respawn (same AgentID, new VMID)
+	TaskID            string // task the agent is being spawned to execute
+	SkillDomain       string // entry-point domain injected into the agent at spawn
+	CredentialPtr     string // vault permission token pointer (not the token value)
+	Instructions      string // natural-language task description for the agent
+	CommandManifest   string // pre-built "- name: description" list for the entry domain; injected into system prompt
+	RecoveredContext  string // non-empty on respawn: serialised CrashSnapshot for checkpoint resume
+	AgentMemory       string // distilled facts from past tasks in this domain; injected into system prompt
+	UserProfile       string // user preference observations; injected into system prompt
+	TraceID           string
+	UserContextID     string                         // propagated from TaskSpec; echoed in all outbound events (issue #67)
+	ConversationID    string                         // non-empty when this task continues a prior conversation
+	PriorTurns        []anthropic.MessageParam       // reconstructed conversation history from prior task; nil for standalone tasks
+	SynthesizedSkills []types.SynthesizedSkillRecord // skills created by prior synthesis; each gets a dynamic SkillTool at spawn
 
 	// OnComplete is called by the process manager when the agent process exits.
 	// output holds the raw TaskOutput JSON written to stdout; exitErr is non-nil
@@ -103,18 +105,19 @@ var ErrReuseUnsupported = fmt.Errorf("lifecycle: live-process reuse not supporte
 // stdin at launch. It mirrors cmd/agent-process.SpawnContext; the struct is
 // defined here to avoid importing a main package.
 type agentSpawnContext struct {
-	TaskID           string            `json:"task_id"`
-	SkillDomain      string            `json:"skill_domain"`
-	PermissionToken  string            `json:"permission_token"` // opaque vault reference — never a raw credential
-	Instructions     string            `json:"instructions"`
-	CommandManifest  string            `json:"command_manifest,omitempty"`  // "- name: description" list; injected into system prompt
-	RecoveredContext string            `json:"recovered_context,omitempty"` // non-empty on respawn; contains crash snapshot for checkpoint resume
-	AgentMemory      string            `json:"agent_memory,omitempty"`      // distilled facts from past tasks in this domain
-	UserProfile      string            `json:"user_profile,omitempty"`      // user preference observations
-	TraceID          string            `json:"trace_id"`
-	UserContextID    string            `json:"user_context_id,omitempty"` // propagated from TaskSpec; echoed in all child agent events (issue #67)
-	ConversationID   string            `json:"conversation_id,omitempty"` // non-empty when this task continues a prior conversation
-	PriorTurns       []json.RawMessage `json:"prior_turns,omitempty"`     // per-element serialised anthropic.MessageParam; stable across SDK versions
+	TaskID            string                         `json:"task_id"`
+	SkillDomain       string                         `json:"skill_domain"`
+	PermissionToken   string                         `json:"permission_token"` // opaque vault reference — never a raw credential
+	Instructions      string                         `json:"instructions"`
+	CommandManifest   string                         `json:"command_manifest,omitempty"`  // "- name: description" list; injected into system prompt
+	RecoveredContext  string                         `json:"recovered_context,omitempty"` // non-empty on respawn; contains crash snapshot for checkpoint resume
+	AgentMemory       string                         `json:"agent_memory,omitempty"`      // distilled facts from past tasks in this domain
+	UserProfile       string                         `json:"user_profile,omitempty"`      // user preference observations
+	TraceID           string                         `json:"trace_id"`
+	UserContextID     string                         `json:"user_context_id,omitempty"`    // propagated from TaskSpec; echoed in all child agent events (issue #67)
+	ConversationID    string                         `json:"conversation_id,omitempty"`    // non-empty when this task continues a prior conversation
+	PriorTurns        []json.RawMessage              `json:"prior_turns,omitempty"`        // per-element serialised anthropic.MessageParam; stable across SDK versions
+	SynthesizedSkills []types.SynthesizedSkillRecord `json:"synthesized_skills,omitempty"` // skills created by prior synthesis; each gets a dynamic SkillTool with LLM-based execution
 }
 
 // processEntry tracks a single running agent-process subprocess. The process
@@ -194,18 +197,19 @@ func encodeSpawnContext(config VMConfig) ([]byte, error) {
 	}
 
 	payload, err := json.Marshal(agentSpawnContext{
-		TaskID:           config.TaskID,
-		SkillDomain:      config.SkillDomain,
-		PermissionToken:  config.CredentialPtr,
-		Instructions:     config.Instructions,
-		CommandManifest:  config.CommandManifest,
-		RecoveredContext: config.RecoveredContext,
-		AgentMemory:      config.AgentMemory,
-		UserProfile:      config.UserProfile,
-		TraceID:          config.TraceID,
-		UserContextID:    config.UserContextID,
-		ConversationID:   config.ConversationID,
-		PriorTurns:       priorTurnsRaw,
+		TaskID:            config.TaskID,
+		SkillDomain:       config.SkillDomain,
+		PermissionToken:   config.CredentialPtr,
+		Instructions:      config.Instructions,
+		CommandManifest:   config.CommandManifest,
+		RecoveredContext:  config.RecoveredContext,
+		AgentMemory:       config.AgentMemory,
+		UserProfile:       config.UserProfile,
+		TraceID:           config.TraceID,
+		UserContextID:     config.UserContextID,
+		ConversationID:    config.ConversationID,
+		PriorTurns:        priorTurnsRaw,
+		SynthesizedSkills: config.SynthesizedSkills,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("lifecycle: marshal spawn context: %w", err)

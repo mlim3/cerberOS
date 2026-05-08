@@ -299,7 +299,7 @@ func TestAttemptSkillSynthesis_NilSessionLog_NoLLMCall(t *testing.T) {
 	spawnCtx := &SpawnContext{SkillDomain: "web"}
 
 	// nil sl → should return immediately without calling the LLM.
-	attemptSkillSynthesis(context.Background(), client, log, spawnCtx, nil, nil, skillSynthesisThreshold+1)
+	attemptSkillSynthesis(context.Background(), client, log, spawnCtx, nil, nil, nil, skillSynthesisThreshold+1)
 
 	if n := callCount.Load(); n != 0 {
 		t.Errorf("nil SessionLog: expected 0 LLM calls, got %d", n)
@@ -321,7 +321,7 @@ func TestAttemptSkillSynthesis_BelowThreshold_NoLLMCall(t *testing.T) {
 	// Non-nil sl but below threshold.
 	sl := &SessionLog{log: log}
 
-	attemptSkillSynthesis(context.Background(), client, log, spawnCtx, sl, nil, skillSynthesisThreshold-1)
+	attemptSkillSynthesis(context.Background(), client, log, spawnCtx, sl, nil, nil, skillSynthesisThreshold-1)
 
 	if n := callCount.Load(); n != 0 {
 		t.Errorf("below threshold: expected 0 LLM calls, got %d", n)
@@ -342,7 +342,7 @@ func TestAttemptSkillSynthesis_GeneralDomain_NoLLMCall(t *testing.T) {
 	spawnCtx := &SpawnContext{SkillDomain: "general"}
 	sl := &SessionLog{log: log}
 
-	attemptSkillSynthesis(context.Background(), client, log, spawnCtx, sl, nil, 100)
+	attemptSkillSynthesis(context.Background(), client, log, spawnCtx, sl, nil, nil, 100)
 
 	if n := callCount.Load(); n != 0 {
 		t.Errorf("general domain: expected 0 LLM calls, got %d", n)
@@ -365,7 +365,7 @@ func TestAttemptSkillSynthesis_LLMFailure_NoTaskFailure(t *testing.T) {
 	sl := &SessionLog{log: log}
 
 	// Must not panic; LLM failure is logged and discarded.
-	attemptSkillSynthesis(context.Background(), client, log, spawnCtx, sl, nil, skillSynthesisThreshold)
+	attemptSkillSynthesis(context.Background(), client, log, spawnCtx, sl, nil, nil, skillSynthesisThreshold)
 
 	if n := callCount.Load(); n == 0 {
 		t.Error("expected at least one LLM call attempt")
@@ -384,7 +384,7 @@ func TestAttemptSkillSynthesis_EmptyNameFromLLM_NoPersist(t *testing.T) {
 
 	// Should call LLM (1 call) but not try to persist (node is nil).
 	// If it tries to persist with nil js it would panic — absence of panic proves the nil guard.
-	attemptSkillSynthesis(context.Background(), client, log, spawnCtx, sl, nil, skillSynthesisThreshold)
+	attemptSkillSynthesis(context.Background(), client, log, spawnCtx, sl, nil, nil, skillSynthesisThreshold)
 
 	if n := callCount.Load(); n != 1 {
 		t.Errorf("expected exactly 1 LLM call, got %d", n)

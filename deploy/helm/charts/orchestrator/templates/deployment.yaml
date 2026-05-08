@@ -53,6 +53,13 @@ spec:
               value: {{ .Values.observability.otlpEndpoint | quote }}
             - name: LOKI_URL
               value: {{ .Values.observability.lokiUrl | quote }}
+          {{- if .Values.cronWake.secretName }}
+            - name: CRON_WAKE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.cronWake.secretName }}
+                  key: {{ .Values.cronWake.secretKey }}
+          {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             seccompProfile:

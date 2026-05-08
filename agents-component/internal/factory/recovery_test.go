@@ -150,7 +150,7 @@ func TestHandleCrashSavesSnapshotToMemory(t *testing.T) {
 		t.Fatalf("HandleCrash: %v", err)
 	}
 
-	records, err := mem.Read("agent-snap", "crash_snapshot")
+	records, err := mem.Read("agent-snap", "crash_snapshot", "")
 	if err != nil {
 		t.Fatalf("memory.Read: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestHandleCrashSnapshotContainsUnknownVaultRequestIDs(t *testing.T) {
 		t.Fatalf("HandleCrash: %v", err)
 	}
 
-	records, err := mem.Read("agent-vault", "crash_snapshot")
+	records, err := mem.Read("agent-vault", "crash_snapshot", "")
 	if err != nil || len(records) == 0 {
 		t.Fatal("expected crash_snapshot in memory")
 	}
@@ -217,7 +217,7 @@ func TestHandleCrashCompleteVaultRequestClearsInflight(t *testing.T) {
 		t.Fatalf("HandleCrash: %v", err)
 	}
 
-	records, err := mem.Read("agent-clr", "crash_snapshot")
+	records, err := mem.Read("agent-clr", "crash_snapshot", "")
 	if err != nil || len(records) == 0 {
 		t.Fatal("expected crash_snapshot in memory")
 	}

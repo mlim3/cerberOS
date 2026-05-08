@@ -73,6 +73,7 @@ type Gateway interface {
 	PublishTaskResult(ctx context.Context, callbackTopic string, result types.TaskResult) error
 	PublishTaskSpec(ctx context.Context, spec types.TaskSpec) error
 	PublishStatusUpdate(ctx context.Context, userContextID string, status types.StatusResponse) error
+	PublishAgentSpawnResponse(ctx context.Context, resp types.AgentSpawnResponse) error
 }
 
 // PolicyEnforcer defines the policy operations the Dispatcher needs from M3.
@@ -91,6 +92,12 @@ type TaskMonitor interface {
 type PlanExecutor interface {
 	Execute(ctx context.Context, plan types.ExecutionPlan, ts *types.TaskState) error
 	HandleSubtaskResult(ctx context.Context, result types.TaskResult) error
+	UserIDForSubtask(orchRef string) (string, bool)
+	TaskStateForSubtask(orchRef string) (*types.TaskState, bool)
+}
+
+type subtaskParentResolver interface {
+	TaskStateForSubtask(orchRef string) (*types.TaskState, bool)
 }
 
 // ── Dispatcher ────────────────────────────────────────────────────────────────
@@ -123,6 +130,15 @@ type Dispatcher struct {
 	// pendingApprovals tracks plans waiting on an explicit user decision
 	// (approve/reject). key = top-level orchestrator_task_ref → *pendingApproval.
 	pendingApprovals sync.Map
+
+	// pendingAgentSpawns tracks child tasks requested by a parent agent via the
+	// spawn_agent tool. key = child orchestrator_task_ref → *pendingAgentSpawn.
+	pendingAgentSpawns sync.Map
+
+	// agentSpawnContexts lets spawned children act as parents for a bounded
+	// next generation without trusting user_id/policy fields from agent input.
+	// key = child orchestrator_task_ref → *agentSpawnContext.
+	agentSpawnContexts sync.Map
 
 	// Metrics — use atomic operations to avoid a global lock.
 	tasksReceived       int64
@@ -183,15 +199,21 @@ func (d *Dispatcher) HandleInboundTask(ctx context.Context, task types.UserTask)
 	log := observability.LogFromContext(ctx)
 
 	atomic.AddInt64(&d.tasksReceived, 1)
-	log.Info("task dispatch pipeline started", "task_id", task.TaskID)
+	log.Info("dispatcher accepted user task; starting validation/dedup/policy pipeline",
+		"task_id", task.TaskID,
+		"user_id", task.UserID,
+		"priority", task.Priority,
+		"content_preview", observability.PreviewHeadTail(extractRawInput(task.Payload), 15, 10))
 
 	// ── Step 1: Schema validation ──────────────────────────────────────────
 	if err := validateSchema(task); err != nil {
-		log.Warn("schema validation failed", "error", err)
+		log.Warn("rejected user task: schema validation failed; returning error_response to io", "error", err)
 		_ = d.gateway.PublishError(ctx, task.CallbackTopic, types.ErrorResponse{
-			TaskID:      task.TaskID,
-			ErrorCode:   types.ErrCodeInvalidTaskSpec,
-			UserMessage: err.Error(),
+			TaskID:         task.TaskID,
+			UserID:         task.UserID,
+			ConversationID: task.ConversationID,
+			ErrorCode:      types.ErrCodeInvalidTaskSpec,
+			UserMessage:    err.Error(),
 		})
 		return err
 	}
@@ -214,16 +236,18 @@ func (d *Dispatcher) HandleInboundTask(ctx context.Context, task types.UserTask)
 		// never really "end". A new orchestrator_task_ref is generated below
 		// so downstream state is isolated from the prior attempt.
 		if existing != nil && !types.IsTerminalState(existing.State) {
-			log.Info("duplicate task rejected", "current_state", existing.State)
+			log.Info("rejected duplicate user task: prior attempt is still in flight", "current_state", existing.State)
 			_ = d.gateway.PublishError(ctx, task.CallbackTopic, types.ErrorResponse{
-				TaskID:      task.TaskID,
-				ErrorCode:   types.ErrCodeDuplicateTask,
-				UserMessage: fmt.Sprintf("task already submitted — current state: %s", existing.State),
+				TaskID:         task.TaskID,
+				UserID:         task.UserID,
+				ConversationID: task.ConversationID,
+				ErrorCode:      types.ErrCodeDuplicateTask,
+				UserMessage:    fmt.Sprintf("task already submitted — current state: %s", existing.State),
 			})
 			return nil
 		}
 		if existing != nil {
-			log.Info("task re-entry from terminal state — treating as follow-up",
+			log.Info("accepted re-entry of completed task as follow-up turn in same conversation",
 				"prior_state", existing.State,
 				"prior_orchestrator_task_ref", existing.OrchestratorTaskRef,
 			)
@@ -246,11 +270,16 @@ func (d *Dispatcher) HandleInboundTask(ctx context.Context, task types.UserTask)
 		policySpan.End()
 		if err != nil {
 			atomic.AddInt64(&d.policyViolations, 1)
-			log.Warn("policy validation denied", "orchestrator_task_ref", orchRef)
+			log.Warn("policy enforcer denied user task: requested skills exceed user permissions",
+				"orchestrator_task_ref", orchRef,
+				"requested_skill_domains", task.RequiredSkillDomains,
+				"reason", err.Error())
 			_ = d.gateway.PublishError(ctx, task.CallbackTopic, types.ErrorResponse{
-				TaskID:      task.TaskID,
-				ErrorCode:   types.ErrCodePolicyViolation,
-				UserMessage: "Task requires resources outside your configured permissions.",
+				TaskID:         task.TaskID,
+				UserID:         task.UserID,
+				ConversationID: task.ConversationID,
+				ErrorCode:      types.ErrCodePolicyViolation,
+				UserMessage:    "Task requires resources outside your configured permissions.",
 			})
 			return fmt.Errorf("policy validation denied: %w", err)
 		}
@@ -282,11 +311,13 @@ func (d *Dispatcher) HandleInboundTask(ctx context.Context, task types.UserTask)
 
 	// ── Step 5: Persist DECOMPOSING BEFORE sending planner dispatch ────────
 	if err := d.persistTaskState(ts, now); err != nil {
-		log.Error("memory write failed before decomposition", "error", err)
+		log.Error("memory rejected task-state write before decomposition; aborting and returning error to io", "error", err)
 		_ = d.gateway.PublishError(ctx, task.CallbackTopic, types.ErrorResponse{
-			TaskID:      task.TaskID,
-			ErrorCode:   types.ErrCodeStorageUnavailable,
-			UserMessage: "Unable to persist task state. Task not dispatched.",
+			TaskID:         task.TaskID,
+			UserID:         task.UserID,
+			ConversationID: task.ConversationID,
+			ErrorCode:      types.ErrCodeStorageUnavailable,
+			UserMessage:    "Unable to persist task state. Task not dispatched.",
 		})
 		return fmt.Errorf("persist decomposing state: %w", err)
 	}
@@ -295,6 +326,10 @@ func (d *Dispatcher) HandleInboundTask(ctx context.Context, task types.UserTask)
 	d.activeTasks.Store(task.TaskID, ts)
 	d.monitor.TrackTask(ts)
 	atomic.AddInt64(&d.queueDepth, 1)
+
+	rawInput := extractRawInput(task.Payload)
+	systemPrompt := extractSystemPrompt(task.Payload)
+	maintenance := isMaintenancePayload(task.Payload)
 
 	// ── Early task_accepted to User I/O ────────────────────────────────────
 	// Fires right after policy + memory persist so the user sees acknowledgement
@@ -305,28 +340,31 @@ func (d *Dispatcher) HandleInboundTask(ctx context.Context, task types.UserTask)
 		EstimatedCompletion: timeoutAt,
 	}
 	if err := d.gateway.PublishTaskAccepted(ctx, task.CallbackTopic, acceptedAt); err != nil {
-		log.Warn("publish task_accepted (early) failed", "error", err)
+		log.Warn("could not publish early task_accepted to io; chat stream will rely on status updates", "error", err)
 		// Non-fatal: the task still proceeds; IO will fall through to status updates.
 	} else {
-		log.Info("task_accepted_sent_early", "orchestrator_task_ref", orchRef)
+		log.Info("sent early task_accepted ack to io so the user sees feedback before planner round-trip",
+			"orchestrator_task_ref", orchRef)
 	}
 
 	// ── Notify IO: task received, planning underway ────────────────────────
-	expectedMins := 2
-	_ = d.io.PushStatus(task.TaskID, ioclient.StatusWorking, "Planning your task...", &expectedMins)
+	if !maintenance {
+		expectedMins := 2
+		_ = d.io.PushStatus(task.TaskID, ioclient.StatusWorking, "Planning your task...", &expectedMins, observability.TraceIDFrom(ctx))
+	}
 
 	// ── Step 6: Publish planner task via standard task.inbound ─────────────
-	rawInput := extractRawInput(task.Payload)
 	// Personalization: fetch user facts from Memory (best-effort). A failure
 	// or empty result is non-fatal — the prompt is emitted without facts.
+	// Cron / maintenance tasks skip personalization to avoid noisy Memory reads.
 	var userFacts []string
-	if d.personalization != nil && task.UserID != "" {
+	if !maintenance && d.personalization != nil && task.UserID != "" {
 		facts, ferr := d.personalization.FetchFacts(ctx, task.UserID, 8)
 		if ferr != nil {
-			log.Warn("personalization fetch failed — continuing without facts", "error", ferr)
+			log.Warn("could not fetch user personalization facts from memory; continuing without them", "error", ferr)
 		} else if len(facts) > 0 {
 			userFacts = facts
-			log.Info("personalization facts attached to planner prompt", "count", len(facts))
+			log.Info("attached user personalization facts to planner prompt", "fact_count", len(facts))
 		}
 	}
 	spec := types.TaskSpec{
@@ -337,9 +375,9 @@ func (d *Dispatcher) HandleInboundTask(ctx context.Context, task types.UserTask)
 		PolicyScope:          scope,
 		TimeoutSeconds:       minInt(task.TimeoutSeconds, d.cfg.DecompositionTimeoutSeconds),
 		Payload:              task.Payload,
-		Instructions:         buildDecompositionInstructionsWithFacts(task.TaskID, rawInput, scope, userFacts),
+		Instructions:         buildDecompositionInstructionsWithFacts(task.TaskID, rawInput, scope, userFacts, systemPrompt),
 		Metadata: map[string]string{
-			"task_kind":      "decomposition",
+			"task_kind":      taskKindForPlannerSpec(maintenance),
 			"parent_task_id": task.TaskID,
 		},
 		CallbackTopic:   task.CallbackTopic,
@@ -356,7 +394,7 @@ func (d *Dispatcher) HandleInboundTask(ctx context.Context, task types.UserTask)
 		observability.SpanRecordError(decompSpan, err)
 		decompSpan.End()
 		if err != nil {
-			log.Error("planner task publish failed", "error", err)
+			log.Error("could not publish planner task on nats; failing user task with agents-unavailable", "error", err)
 			d.failTask(ctx, ts, types.ErrCodeAgentsUnavailable, "Could not reach Planner Agent. Please retry.")
 			return fmt.Errorf("publish planner task: %w", err)
 		}
@@ -366,7 +404,10 @@ func (d *Dispatcher) HandleInboundTask(ctx context.Context, task types.UserTask)
 	// ── Step 7: Start decomposition timeout goroutine ──────────────────────
 	go d.watchDecompositionTimeout(ctx, ts)
 
-	log.Info("task sent to planner agent", "orchestrator_task_ref", orchRef)
+	log.Info("published planner task to agents on nats; awaiting decomposition response",
+		"orchestrator_task_ref", orchRef,
+		"timeout_seconds", spec.TimeoutSeconds,
+		"content_preview", observability.PreviewHeadTail(rawInput, 15, 10))
 	return nil
 }
 
@@ -400,7 +441,7 @@ func (d *Dispatcher) HandleTaskResult(ctx context.Context, result types.TaskResu
 				rawSample = rawSample[:maxSample] + "…[truncated]"
 			}
 			log := observability.LogFromContext(observability.WithModule(ctx, "task_dispatcher"))
-			log.Warn("planner result failed execution-plan parse",
+			log.Warn("planner returned a non-JSON or malformed plan; failing task as invalid_plan (raw_result_sample is bounded for debug)",
 				"orchestrator_task_ref", result.OrchestratorTaskRef,
 				"parse_error", err.Error(),
 				"raw_result_len", len(result.Result),
@@ -418,7 +459,42 @@ func (d *Dispatcher) HandleTaskResult(ctx context.Context, result types.TaskResu
 		})
 	}
 
+	if pendingVal, ok := d.pendingAgentSpawns.LoadAndDelete(result.OrchestratorTaskRef); ok {
+		d.agentSpawnContexts.Delete(result.OrchestratorTaskRef)
+		pending := pendingVal.(*pendingAgentSpawn)
+		return d.handleAgentSpawnChildResult(ctx, pending, result)
+	}
+
 	return d.executor.HandleSubtaskResult(ctx, result)
+}
+
+func (d *Dispatcher) handleAgentSpawnChildResult(ctx context.Context, pending *pendingAgentSpawn, result types.TaskResult) error {
+	ctx = observability.WithModule(ctx, "task_dispatcher")
+	resp := types.AgentSpawnResponse{
+		RequestID:     pending.req.RequestID,
+		ParentAgentID: pending.req.ParentAgentID,
+		ChildAgentID:  result.AgentID,
+		TraceID:       firstNonEmpty(pending.req.TraceID, pending.ctx.TraceID, observability.TraceIDFrom(ctx)),
+	}
+	if result.Success {
+		resp.Status = "success"
+		resp.Result = string(result.Result)
+	} else {
+		resp.Status = "failed"
+		resp.ErrorCode = firstNonEmpty(result.ErrorCode, types.ErrCodeSubtaskFailed)
+		resp.ErrorMessage = humanReadableError(resp.ErrorCode)
+		if resp.ErrorMessage == "" {
+			resp.ErrorMessage = resp.ErrorCode
+		}
+	}
+
+	observability.LogFromContext(ctx).Info("agent_spawn child task completed",
+		"request_id", pending.req.RequestID,
+		"child_ref", pending.childRef,
+		"child_agent_id", result.AgentID,
+		"status", resp.Status,
+	)
+	return d.gateway.PublishAgentSpawnResponse(ctx, resp)
 }
 
 // HandleDecompositionResponse processes a task_decomposition_response from the Planner Agent.
@@ -431,20 +507,20 @@ func (d *Dispatcher) HandleDecompositionResponse(ctx context.Context, resp types
 	tsVal, ok := d.activeTasks.Load(resp.TaskID)
 	if !ok {
 		// Task may have timed out already — ignore stale response.
-		log.Info("decomposition response for unknown/timed-out task")
+		log.Info("dropped decomposition response: parent task is no longer active (timed out or completed)")
 		return nil
 	}
 	ts := tsVal.(*types.TaskState)
 
 	// Guard: only act if task is still DECOMPOSING.
 	if ts.State != types.StateDecomposing {
-		log.Info("decomposition response ignored — task not in DECOMPOSING state", "state", ts.State)
+		log.Info("dropped decomposition response: parent task already moved past DECOMPOSING", "state", ts.State)
 		return nil
 	}
 
 	// ── Validate plan ──────────────────────────────────────────────────────
 	if err := d.validatePlan(resp.Plan, ts); err != nil {
-		log.Warn("plan validation failed", "error", err)
+		log.Warn("rejecting invalid execution plan from planner; failing task", "error", err)
 		errorCode := classifyPlanError(err)
 		d.failTask(ctx, ts, errorCode, fmt.Sprintf("Execution plan is invalid: %s", err.Error()))
 		return fmt.Errorf("plan validation: %w", err)
@@ -455,7 +531,8 @@ func (d *Dispatcher) HandleDecompositionResponse(ctx context.Context, resp types
 	ts.PlanID = resp.Plan.PlanID
 	d.pendingDecompositions.Delete(ts.OrchestratorTaskRef)
 
-	if d.planApprovalRequired(resp.Plan) {
+	// Cron / maintenance runs must not block on human plan approval.
+	if d.planApprovalRequired(resp.Plan) && !isMaintenancePayload(ts.Payload) {
 		return d.enterAwaitingApproval(ctx, ts, resp.Plan, now)
 	}
 
@@ -493,10 +570,10 @@ func (d *Dispatcher) enterAwaitingApproval(ctx context.Context, ts *types.TaskSt
 		NodeID:    d.cfg.NodeID,
 	})
 	if err := d.persistTaskState(ts, now); err != nil {
-		log.Warn("memory write failed on AWAITING_APPROVAL", "error", err)
+		log.Warn("could not persist task transition to AWAITING_APPROVAL in memory; continuing in-process", "error", err)
 	}
 	if err := d.persistPlanState(plan, ts.TaskID, ts.OrchestratorTaskRef, now); err != nil {
-		log.Warn("plan state persist failed", "plan_id", plan.PlanID, "error", err)
+		log.Warn("could not persist execution plan to memory; continuing in-process", "plan_id", plan.PlanID, "error", err)
 	}
 
 	timeoutSec := d.cfg.PlanApprovalTimeoutSeconds
@@ -514,23 +591,25 @@ func (d *Dispatcher) enterAwaitingApproval(ctx context.Context, ts *types.TaskSt
 			Domains:      s.RequiredSkillDomains,
 		})
 	}
-	if err := d.io.PushPlanPreview(ioclient.PlanPreviewPayload{
-		TaskID:              ts.TaskID,
-		OrchestratorTaskRef: ts.OrchestratorTaskRef,
-		PlanID:              plan.PlanID,
-		Subtasks:            previewSubtasks,
-		ExpiresInSeconds:    timeoutSec,
-	}); err != nil {
-		log.Warn("push plan_preview to IO failed — will still await decision", "error", err)
-	}
+	if !isMaintenancePayload(ts.Payload) {
+		if err := d.io.PushPlanPreview(ioclient.PlanPreviewPayload{
+			TaskID:              ts.TaskID,
+			OrchestratorTaskRef: ts.OrchestratorTaskRef,
+			PlanID:              plan.PlanID,
+			Subtasks:            previewSubtasks,
+			ExpiresInSeconds:    timeoutSec,
+		}); err != nil {
+			log.Warn("could not push plan_preview to io; user will still see status updates and the dispatcher still awaits a decision", "error", err)
+		}
 
-	// Also surface a status-line so users without the preview UI see something.
-	minsLeft := int(time.Duration(timeoutSec) * time.Second / time.Minute)
-	if minsLeft < 1 {
-		minsLeft = 1
+		// Also surface a status-line so users without the preview UI see something.
+		minsLeft := int(time.Duration(timeoutSec) * time.Second / time.Minute)
+		if minsLeft < 1 {
+			minsLeft = 1
+		}
+		_ = d.io.PushStatus(ts.TaskID, ioclient.StatusAwaitingFeedback,
+			fmt.Sprintf("Awaiting your approval for a %d-step plan...", len(plan.Subtasks)), &minsLeft, ts.TraceID)
 	}
-	_ = d.io.PushStatus(ts.TaskID, ioclient.StatusAwaitingFeedback,
-		fmt.Sprintf("Awaiting your approval for a %d-step plan...", len(plan.Subtasks)), &minsLeft)
 
 	// Arm the timeout.
 	timerCtx, cancel := context.WithCancel(context.Background())
@@ -549,7 +628,7 @@ func (d *Dispatcher) enterAwaitingApproval(ctx context.Context, ts *types.TaskSt
 			// If still pending, fail the task.
 			if _, ok := d.pendingApprovals.LoadAndDelete(ts.OrchestratorTaskRef); ok {
 				tctx := ctxFromTaskState(ts, "task_dispatcher")
-				observability.LogFromContext(tctx).Warn("plan approval timed out",
+				observability.LogFromContext(tctx).Warn("user did not approve or reject the plan within the timeout; failing task as approval_timeout",
 					"orchestrator_task_ref", ts.OrchestratorTaskRef,
 					"timeout_seconds", timeoutSec,
 				)
@@ -559,7 +638,7 @@ func (d *Dispatcher) enterAwaitingApproval(ctx context.Context, ts *types.TaskSt
 		}
 	}()
 
-	log.Info("plan awaiting user approval",
+	log.Info("plan ready; awaiting user approve/reject decision in io",
 		"plan_id", plan.PlanID,
 		"subtask_count", len(plan.Subtasks),
 		"timeout_seconds", timeoutSec,
@@ -581,28 +660,32 @@ func (d *Dispatcher) startPlanExecution(ctx context.Context, ts *types.TaskState
 	})
 
 	if err := d.persistTaskState(ts, now); err != nil {
-		log.Warn("memory write failed on PLAN_ACTIVE", "error", err)
+		log.Warn("could not persist task transition to PLAN_ACTIVE in memory; continuing in-process", "error", err)
 	}
 	if err := d.persistPlanState(plan, ts.TaskID, ts.OrchestratorTaskRef, now); err != nil {
-		log.Warn("plan state persist failed", "plan_id", plan.PlanID, "error", err)
+		log.Warn("could not persist execution plan to memory on PLAN_ACTIVE; continuing in-process", "plan_id", plan.PlanID, "error", err)
 	}
 
 	subtaskCount := len(plan.Subtasks)
-	expectedMins := subtaskCount / 2
-	if expectedMins < 1 {
-		expectedMins = 1
+	if !isMaintenancePayload(ts.Payload) {
+		expectedMins := subtaskCount / 2
+		if expectedMins < 1 {
+			expectedMins = 1
+		}
+		_ = d.io.PushStatus(ts.TaskID, ioclient.StatusWorking,
+			fmt.Sprintf("Executing %d subtasks...", subtaskCount), &expectedMins, ts.TraceID)
 	}
-	_ = d.io.PushStatus(ts.TaskID, ioclient.StatusWorking,
-		fmt.Sprintf("Executing %d subtasks...", subtaskCount), &expectedMins)
 
 	planCtx := observability.WithPlanID(ctx, plan.PlanID)
 	if err := d.executor.Execute(planCtx, plan, ts); err != nil {
-		log.Error("plan executor failed to start", "error", err)
+		log.Error("plan executor refused to start; failing task as agents-unavailable", "error", err)
 		d.failTask(ctx, ts, types.ErrCodeAgentsUnavailable, "Failed to start plan execution.")
 		return fmt.Errorf("plan executor execute: %w", err)
 	}
 
-	log.Info("plan execution started", "plan_id", plan.PlanID, "subtask_count", subtaskCount)
+	log.Info("handed plan to executor; subtask dispatch underway",
+		"plan_id", plan.PlanID,
+		"subtask_count", subtaskCount)
 	return nil
 }
 
@@ -614,6 +697,184 @@ type pendingApproval struct {
 	cancel context.CancelFunc
 }
 
+type agentSpawnContext struct {
+	UserID         string
+	PolicyScope    types.PolicyScope
+	CallbackTopic  string
+	UserContextID  string
+	ConversationID string
+	TraceID        string
+	Depth          int
+}
+
+type pendingAgentSpawn struct {
+	req      types.AgentSpawnRequest
+	ctx      agentSpawnContext
+	childRef string
+}
+
+const (
+	defaultAgentSpawnTimeoutSeconds = 300
+	maxAgentSpawnTimeoutSeconds     = 900
+	maxAgentSpawnDepth              = 2
+	maxAgentSpawnSkills             = 4
+)
+
+// HandleAgentSpawnRequest turns a parent agent's spawn_agent tool request into a
+// normal child TaskSpec and later correlates the child task result back to the
+// parent via AgentSpawnResponse.
+func (d *Dispatcher) HandleAgentSpawnRequest(ctx context.Context, req types.AgentSpawnRequest) error {
+	ctx = observability.WithModule(ctx, "task_dispatcher")
+	log := observability.LogFromContext(ctx)
+
+	parentCtx, err := d.resolveAgentSpawnContext(req.ParentTaskID)
+	if err != nil {
+		log.Warn("agent_spawn rejected: parent context not found", "request_id", req.RequestID, "parent_task_id", req.ParentTaskID, "error", err)
+		return d.publishAgentSpawnFailure(ctx, req, "UNKNOWN_PARENT_TASK", "parent task context not found")
+	}
+	if err := validateAgentSpawnRequest(req, parentCtx.Depth); err != nil {
+		log.Warn("agent_spawn rejected: invalid request", "request_id", req.RequestID, "error", err)
+		return d.publishAgentSpawnFailure(ctx, req, types.ErrCodeInvalidTaskSpec, err.Error())
+	}
+
+	childRef := newUUID()
+	timeoutSec := req.TimeoutSeconds
+	if timeoutSec <= 0 {
+		timeoutSec = defaultAgentSpawnTimeoutSeconds
+	}
+	if timeoutSec > maxAgentSpawnTimeoutSeconds {
+		timeoutSec = maxAgentSpawnTimeoutSeconds
+	}
+
+	childCtx := parentCtx
+	childCtx.Depth = parentCtx.Depth + 1
+	if strings.TrimSpace(req.TraceID) != "" {
+		childCtx.TraceID = strings.TrimSpace(req.TraceID)
+	}
+	if strings.TrimSpace(req.UserContextID) != "" {
+		childCtx.UserContextID = strings.TrimSpace(req.UserContextID)
+	}
+
+	d.pendingAgentSpawns.Store(childRef, &pendingAgentSpawn{
+		req:      req,
+		ctx:      childCtx,
+		childRef: childRef,
+	})
+	d.agentSpawnContexts.Store(childRef, &childCtx)
+
+	spec := types.TaskSpec{
+		OrchestratorTaskRef:  childRef,
+		TaskID:               childRef,
+		UserID:               childCtx.UserID,
+		RequiredSkillDomains: append([]string(nil), req.RequiredSkills...),
+		PolicyScope:          childCtx.PolicyScope,
+		TimeoutSeconds:       timeoutSec,
+		Payload:              json.RawMessage(`{}`),
+		Instructions:         strings.TrimSpace(req.Instructions),
+		Metadata: map[string]string{
+			"task_kind":              "agent_spawn_child",
+			"parent_task_id":         req.ParentTaskID,
+			"parent_agent_id":        req.ParentAgentID,
+			"agent_spawn_request_id": req.RequestID,
+			"spawn_depth":            fmt.Sprintf("%d", childCtx.Depth),
+		},
+		CallbackTopic:   childCtx.CallbackTopic,
+		UserContextID:   childCtx.UserContextID,
+		ConversationID:  childCtx.ConversationID,
+		ProgressSummary: "Running delegated child agent task",
+		TraceID:         childCtx.TraceID,
+	}
+	if spec.TraceID == "" {
+		spec.TraceID = observability.TraceIDFrom(ctx)
+	}
+
+	if err := d.gateway.PublishTaskSpec(ctx, spec); err != nil {
+		d.pendingAgentSpawns.Delete(childRef)
+		d.agentSpawnContexts.Delete(childRef)
+		log.Error("agent_spawn child task publish failed", "request_id", req.RequestID, "child_ref", childRef, "error", err)
+		return d.publishAgentSpawnFailure(ctx, req, types.ErrCodeAgentsUnavailable, "could not dispatch child agent task")
+	}
+
+	log.Info("agent_spawn child task dispatched",
+		"request_id", req.RequestID,
+		"parent_agent_id", req.ParentAgentID,
+		"child_ref", childRef,
+		"required_skills", req.RequiredSkills,
+		"spawn_depth", childCtx.Depth,
+	)
+	return nil
+}
+
+func validateAgentSpawnRequest(req types.AgentSpawnRequest, parentDepth int) error {
+	if strings.TrimSpace(req.RequestID) == "" {
+		return fmt.Errorf("request_id is required")
+	}
+	if strings.TrimSpace(req.ParentAgentID) == "" {
+		return fmt.Errorf("parent_agent_id is required")
+	}
+	if strings.TrimSpace(req.ParentTaskID) == "" {
+		return fmt.Errorf("parent_task_id is required")
+	}
+	if strings.TrimSpace(req.Instructions) == "" {
+		return fmt.Errorf("instructions are required")
+	}
+	if len(req.RequiredSkills) == 0 {
+		return fmt.Errorf("required_skills must contain at least one skill domain")
+	}
+	if len(req.RequiredSkills) > maxAgentSpawnSkills {
+		return fmt.Errorf("required_skills exceeds maximum of %d domains", maxAgentSpawnSkills)
+	}
+	if parentDepth >= maxAgentSpawnDepth {
+		return fmt.Errorf("agent spawn depth limit exceeded")
+	}
+	for _, s := range req.RequiredSkills {
+		if strings.TrimSpace(s) == "" {
+			return fmt.Errorf("required_skills contains an empty domain")
+		}
+	}
+	return nil
+}
+
+func (d *Dispatcher) resolveAgentSpawnContext(parentTaskID string) (agentSpawnContext, error) {
+	if tsVal, ok := d.activeTasks.Load(parentTaskID); ok {
+		ts := tsVal.(*types.TaskState)
+		return agentSpawnContextFromTaskState(ts, 0), nil
+	}
+	if resolver, ok := d.executor.(subtaskParentResolver); ok {
+		if ts, ok := resolver.TaskStateForSubtask(parentTaskID); ok {
+			return agentSpawnContextFromTaskState(ts, 0), nil
+		}
+	}
+	if v, ok := d.agentSpawnContexts.Load(parentTaskID); ok {
+		return *(v.(*agentSpawnContext)), nil
+	}
+	return agentSpawnContext{}, fmt.Errorf("unknown parent_task_id %q", parentTaskID)
+}
+
+func agentSpawnContextFromTaskState(ts *types.TaskState, depth int) agentSpawnContext {
+	return agentSpawnContext{
+		UserID:         ts.UserID,
+		PolicyScope:    ts.PolicyScope,
+		CallbackTopic:  ts.CallbackTopic,
+		UserContextID:  ts.UserContextID,
+		ConversationID: ts.ConversationID,
+		TraceID:        ts.TraceID,
+		Depth:          depth,
+	}
+}
+
+func (d *Dispatcher) publishAgentSpawnFailure(ctx context.Context, req types.AgentSpawnRequest, code, msg string) error {
+	resp := types.AgentSpawnResponse{
+		RequestID:     req.RequestID,
+		ParentAgentID: req.ParentAgentID,
+		Status:        "failed",
+		ErrorCode:     code,
+		ErrorMessage:  msg,
+		TraceID:       req.TraceID,
+	}
+	return d.gateway.PublishAgentSpawnResponse(ctx, resp)
+}
+
 // HandlePlanDecision processes an approve/reject decision from User I/O.
 // Registered with the Gateway via RegisterPlanDecisionHandler in main.
 func (d *Dispatcher) HandlePlanDecision(ctx context.Context, decision types.PlanDecision) error {
@@ -623,7 +884,7 @@ func (d *Dispatcher) HandlePlanDecision(ctx context.Context, decision types.Plan
 	key := decision.OrchestratorTaskRef
 	val, ok := d.pendingApprovals.LoadAndDelete(key)
 	if !ok {
-		log.Info("plan_decision for unknown/expired approval — ignoring",
+		log.Info("dropped plan decision: no pending approval matches (already approved, rejected, or timed out)",
 			"orchestrator_task_ref", key,
 			"approved", decision.Approved,
 		)
@@ -634,7 +895,7 @@ func (d *Dispatcher) HandlePlanDecision(ctx context.Context, decision types.Plan
 
 	ts := pending.ts
 	if ts.State != types.StateAwaitingApproval {
-		log.Info("plan_decision ignored — task no longer awaiting approval", "state", ts.State)
+		log.Info("dropped plan decision: task already moved past AWAITING_APPROVAL", "state", ts.State)
 		return nil
 	}
 
@@ -643,15 +904,97 @@ func (d *Dispatcher) HandlePlanDecision(ctx context.Context, decision types.Plan
 		if strings.TrimSpace(reason) == "" {
 			reason = "User rejected the proposed plan."
 		}
-		log.Info("plan rejected by user", "orchestrator_task_ref", key, "reason", reason)
+		log.Info("user rejected the proposed plan; failing task with plan_rejected",
+			"orchestrator_task_ref", key,
+			"reason_preview", observability.PreviewWords(reason, 20, 140))
 		tctx := ctxFromTaskState(ts, "task_dispatcher")
 		d.failTaskWithState(tctx, ts, types.StateFailed, types.ErrCodePlanRejected, reason)
 		return nil
 	}
 
-	log.Info("plan approved by user — starting execution", "orchestrator_task_ref", key)
+	log.Info("user approved the proposed plan; transitioning to PLAN_ACTIVE and starting executor",
+		"orchestrator_task_ref", key,
+		"plan_id", pending.plan.PlanID,
+		"subtask_count", len(pending.plan.Subtasks))
 	now := time.Now().UTC()
 	return d.startPlanExecution(ctx, ts, pending.plan, now)
+}
+
+// HandleVaultExecuteRequest is registered with the Gateway to handle vault.execute.request messages.
+// It resolves user_id from in-flight task state (the orchestrator adds it — agents never provide it)
+// and forwards the operation to the Vault engine for execution.
+func (d *Dispatcher) HandleVaultExecuteRequest(ctx context.Context, req types.VaultExecuteRequest) (types.VaultExecuteResult, error) {
+	// Resolve user_id from trusted task state — never from the agent's request.
+	// First try the parent task (req.TaskID == parent task_id), then fall back
+	// to the executor's subtask-orchRef → plan → user_id path (req.TaskID == plan
+	// subtask orchRef), then spawned child-agent context (req.TaskID == child_ref).
+	var userID string
+	if tsVal, ok := d.activeTasks.Load(req.TaskID); ok {
+		userID = tsVal.(*types.TaskState).UserID
+	} else if uid, ok := d.executor.UserIDForSubtask(req.TaskID); ok {
+		userID = uid
+	} else if v, ok := d.agentSpawnContexts.Load(req.TaskID); ok {
+		userID = v.(*agentSpawnContext).UserID
+	} else {
+		return types.VaultExecuteResult{
+			RequestID:    req.RequestID,
+			AgentID:      req.AgentID,
+			Status:       types.VaultExecStatusScopeViolation,
+			ErrorCode:    "UNKNOWN_TASK",
+			ErrorMessage: "task_id not found in active tasks",
+		}, nil
+	}
+
+	log := observability.LogFromContext(ctx)
+	log.Info("forwarding agent vault.execute request to vault engine",
+		"request_id", req.RequestID,
+		"operation_type", req.OperationType,
+		"user_id", userID,
+		"agent_id", req.AgentID)
+	result, err := d.vault.Execute(ctx, userID, req)
+	if err != nil {
+		log.Warn("vault engine returned error for vault.execute; relaying status to agent",
+			"request_id", req.RequestID,
+			"status", result.Status,
+			"elapsed_ms", result.ElapsedMS,
+			"error", err)
+	} else {
+		log.Info("vault engine completed vault.execute; relaying result to agent",
+			"request_id", req.RequestID,
+			"status", result.Status,
+			"elapsed_ms", result.ElapsedMS)
+	}
+	return result, err
+}
+
+// HandleCredentialRequest is registered with the Gateway to handle credential.request
+// (operation: "user_input") messages from agents. It resolves the top-level task_id
+// and user_id from the subtask's orchRef so the IO push reaches the correct SSE stream.
+func (d *Dispatcher) HandleCredentialRequest(agentID, subtaskRef, requestID, keyName, label, traceID string) error {
+	var topTaskID, userID string
+
+	// Try direct active-task lookup first (subtaskRef == top-level task_id in some flows).
+	if tsVal, ok := d.activeTasks.Load(subtaskRef); ok {
+		ts := tsVal.(*types.TaskState)
+		topTaskID = ts.TaskID
+		userID = ts.UserID
+	} else if ts, ok := d.executor.TaskStateForSubtask(subtaskRef); ok {
+		topTaskID = ts.TaskID
+		userID = ts.UserID
+	} else {
+		observability.LogFromContext(observability.WithModule(context.Background(), "task_dispatcher")).
+			Warn("credential.request: could not resolve top-level task_id",
+				"agent_id", agentID, "subtask_ref", subtaskRef, "request_id", requestID)
+		return nil
+	}
+
+	return d.io.PushCredentialRequest(ioclient.CredentialRequestPayload{
+		TaskID:    topTaskID,
+		RequestID: requestID,
+		UserID:    userID,
+		KeyName:   keyName,
+		Label:     label,
+	}, traceID)
 }
 
 // HandlePlanComplete is called by the Plan Executor when all subtasks complete successfully.
@@ -671,13 +1014,17 @@ func (d *Dispatcher) HandlePlanComplete(ts *types.TaskState, aggregatedResults [
 	})
 
 	if err := d.persistTaskState(ts, now); err != nil {
-		log.Error("memory write failed on task completion", "error", err)
+		log.Error("could not persist COMPLETED task state to memory; in-process completion still proceeding", "error", err)
 	}
 
 	// Build and deliver final task result.
 	resultsJSON, _ := json.Marshal(aggregatedResults)
 	result := types.TaskResult{
 		OrchestratorTaskRef: ts.OrchestratorTaskRef,
+		TaskID:              ts.TaskID,
+		UserID:              ts.UserID,
+		ConversationID:      ts.ConversationID,
+		RawInput:            extractRawInput(ts.Payload),
 		Success:             true,
 		Result:              resultsJSON,
 		CompletedAt:         now,
@@ -689,16 +1036,18 @@ func (d *Dispatcher) HandlePlanComplete(ts *types.TaskState, aggregatedResults [
 		observability.SpanRecordError(deliverySpan, err)
 		deliverySpan.End()
 		if err != nil {
-			log.Error("publish task_result failed", "error", err)
+			log.Error("could not publish final task_result envelope to io callback topic", "error", err)
 		}
 	}
 
 	// Notify IO: task complete.
-	zero := 0
-	_ = d.io.PushStatus(ts.TaskID, ioclient.StatusCompleted, "Task complete", &zero)
+	if !isMaintenancePayload(ts.Payload) {
+		zero := 0
+		_ = d.io.PushStatus(ts.TaskID, ioclient.StatusCompleted, "Task complete", &zero, ts.TraceID)
+	}
 
 	if err := d.policy.RevokeCredentials(ctx, ts.OrchestratorTaskRef); err != nil {
-		log.Error("credential revocation failed", "error", err)
+		log.Error("could not revoke vault credentials after task completion; tokens may linger until ttl", "error", err)
 	}
 
 	d.activeTasks.Delete(ts.TaskID)
@@ -706,7 +1055,10 @@ func (d *Dispatcher) HandlePlanComplete(ts *types.TaskState, aggregatedResults [
 	atomic.AddInt64(&d.queueDepth, -1)
 	atomic.AddInt64(&d.tasksCompleted, 1)
 
-	log.Info("task completed", "plan_id", ts.PlanID)
+	log.Info("task completed successfully; aggregated result delivered to io",
+		"plan_id", ts.PlanID,
+		"subtask_count", len(aggregatedResults),
+		"result_preview", observability.PreviewHeadTail(string(resultsJSON), 15, 10))
 }
 
 // HandlePlanFailed is called by the Plan Executor when the plan cannot complete.
@@ -733,13 +1085,17 @@ func (d *Dispatcher) HandlePlanFailed(ts *types.TaskState, errorCode string, par
 	})
 
 	if err := d.persistTaskState(ts, now); err != nil {
-		log.Error("memory write failed on task failure", "error", err)
+		log.Error("could not persist failed task state to memory; in-process failure handling still proceeding", "error", err)
 	}
 
 	if partial && len(partialResults) > 0 {
 		resultsJSON, _ := json.Marshal(partialResults)
 		result := types.TaskResult{
 			OrchestratorTaskRef: ts.OrchestratorTaskRef,
+			TaskID:              ts.TaskID,
+			UserID:              ts.UserID,
+			ConversationID:      ts.ConversationID,
+			RawInput:            extractRawInput(ts.Payload),
 			Success:             false,
 			Result:              resultsJSON,
 			ErrorCode:           errorCode,
@@ -748,22 +1104,26 @@ func (d *Dispatcher) HandlePlanFailed(ts *types.TaskState, errorCode string, par
 		_ = d.gateway.PublishTaskResult(ctx, ts.CallbackTopic, result)
 	} else {
 		_ = d.gateway.PublishError(ctx, ts.CallbackTopic, types.ErrorResponse{
-			TaskID:      ts.TaskID,
-			ErrorCode:   errorCode,
-			UserMessage: humanReadableError(errorCode),
+			TaskID:         ts.TaskID,
+			UserID:         ts.UserID,
+			ConversationID: ts.ConversationID,
+			ErrorCode:      errorCode,
+			UserMessage:    humanReadableError(errorCode),
 		})
 	}
 
 	// Notify IO: task failed (partial or full failure).
-	zero := 0
-	lastUpdate := humanReadableError(errorCode)
-	if partial {
-		lastUpdate = "Partially completed — some subtasks failed"
+	if !isMaintenancePayload(ts.Payload) {
+		zero := 0
+		lastUpdate := humanReadableError(errorCode)
+		if partial {
+			lastUpdate = "Partially completed — some subtasks failed"
+		}
+		_ = d.io.PushStatus(ts.TaskID, ioclient.StatusCompleted, lastUpdate, &zero, ts.TraceID)
 	}
-	_ = d.io.PushStatus(ts.TaskID, ioclient.StatusCompleted, lastUpdate, &zero)
 
 	if err := d.policy.RevokeCredentials(ctx, ts.OrchestratorTaskRef); err != nil {
-		log.Error("credential revocation failed", "error", err)
+		log.Error("could not revoke vault credentials after task failure; tokens may linger until ttl", "error", err)
 	}
 
 	d.activeTasks.Delete(ts.TaskID)
@@ -771,7 +1131,19 @@ func (d *Dispatcher) HandlePlanFailed(ts *types.TaskState, errorCode string, par
 	atomic.AddInt64(&d.queueDepth, -1)
 	atomic.AddInt64(&d.tasksFailed, 1)
 
-	log.Info("task reached terminal state", "final_state", finalState, "plan_id", ts.PlanID, "error_code", errorCode)
+	terminalAttrs := []any{
+		"final_state", finalState,
+		"plan_id", ts.PlanID,
+		"error_code", errorCode,
+		"partial", partial,
+	}
+	if partial && len(partialResults) > 0 {
+		blob, _ := json.Marshal(partialResults)
+		terminalAttrs = append(terminalAttrs,
+			"result_preview", observability.PreviewHeadTail(string(blob), 15, 10),
+			"completed_subtask_count", len(partialResults))
+	}
+	log.Info("task reached terminal state; orchestrator pipeline finished", terminalAttrs...)
 }
 
 // ── Read-only Accessors ───────────────────────────────────────────────────────
@@ -833,7 +1205,9 @@ func (d *Dispatcher) watchDecompositionTimeout(ctx context.Context, ts *types.Ta
 
 	atomic.AddInt64(&d.decompositionFailed, 1)
 	log := observability.LogFromContext(ctx)
-	log.Warn("decomposition timeout", "orchestrator_task_ref", ts.OrchestratorTaskRef, "timeout", timeout)
+	log.Warn("planner agent did not return a plan within the decomposition timeout; failing user task",
+		"orchestrator_task_ref", ts.OrchestratorTaskRef,
+		"timeout_seconds", timeout.Seconds())
 	d.failTask(ctx, current, types.ErrCodeDecompositionTimeout,
 		fmt.Sprintf("Planner Agent did not respond within %d seconds.", d.cfg.DecompositionTimeoutSeconds))
 }
@@ -867,14 +1241,18 @@ func (d *Dispatcher) failTaskWithState(ctx context.Context, ts *types.TaskState,
 	}
 
 	_ = d.gateway.PublishError(ctx, ts.CallbackTopic, types.ErrorResponse{
-		TaskID:      ts.TaskID,
-		ErrorCode:   errorCode,
-		UserMessage: userMessage,
+		TaskID:         ts.TaskID,
+		UserID:         ts.UserID,
+		ConversationID: ts.ConversationID,
+		ErrorCode:      errorCode,
+		UserMessage:    userMessage,
 	})
 
 	// Notify IO: task failed during decomposition.
-	zero := 0
-	_ = d.io.PushStatus(ts.TaskID, ioclient.StatusCompleted, userMessage, &zero)
+	if !isMaintenancePayload(ts.Payload) {
+		zero := 0
+		_ = d.io.PushStatus(ts.TaskID, ioclient.StatusCompleted, userMessage, &zero, ts.TraceID)
+	}
 
 	d.activeTasks.Delete(ts.TaskID)
 	d.monitor.UntrackTask(ts.TaskID)
@@ -1079,23 +1457,56 @@ func extractRawInput(payload []byte) string {
 }
 
 func buildDecompositionInstructions(taskID, rawInput string, scope types.PolicyScope) string {
-	return buildDecompositionInstructionsWithFacts(taskID, rawInput, scope, nil)
+	return buildDecompositionInstructionsWithFacts(taskID, rawInput, scope, nil, "")
 }
+
+func taskKindForPlannerSpec(maintenance bool) string {
+	if maintenance {
+		return "maintenance"
+	}
+	return "decomposition"
+}
+
+// allSkillDomains is the full set of registered skill domains in the agents component.
+// Used as the fallback when the task's policy scope carries no domain restrictions
+// (empty Domains = "any domain permitted"). Must stay in sync with default_skills.yaml.
+var allSkillDomains = []string{"web", "data", "comms", "storage", "logs", "google_search", "github", "general"}
 
 // buildDecompositionInstructionsWithFacts renders the planner prompt with an
 // optional list of user facts (from personal_info via the Memory service).
 // When facts is empty the prompt is byte-identical to the historic output so
 // existing tests keep passing.
-func buildDecompositionInstructionsWithFacts(taskID, rawInput string, scope types.PolicyScope, facts []string) string {
+// systemPrompt is optional; when non-empty it is prepended as scheduled maintenance
+// directives for the planner (cron wake / batch jobs).
+func buildDecompositionInstructionsWithFacts(taskID, rawInput string, scope types.PolicyScope, facts []string, systemPrompt string) string {
 	allowedDomains := scope.Domains
 	if len(allowedDomains) == 0 {
-		allowedDomains = []string{"general"}
+		// Empty scope.Domains means "no restriction" — grant the planner access to
+		// all registered skill domains so it can assign the right domain per subtask.
+		// Previously this fell back to ["general"] which forced every subtask to run
+		// without web/data/comms/storage tools.
+		allowedDomains = allSkillDomains
 	}
 
 	domains := "[]"
 	if len(allowedDomains) > 0 {
 		raw, _ := json.Marshal(allowedDomains)
 		domains = string(raw)
+	}
+
+	systemSection := ""
+	if strings.TrimSpace(systemPrompt) != "" {
+		systemSection = "Scheduled maintenance directives (follow in addition to the rules below):\n" +
+			strings.TrimSpace(systemPrompt) + "\n\n"
+	}
+
+	credSection := ""
+	if len(scope.AvailableCredTypes) > 0 {
+		raw, _ := json.Marshal(scope.AvailableCredTypes)
+		credSection = fmt.Sprintf(
+			"Available credential types (this user has registered these API keys in the Vault — only use credentialed skills for these types):\n%s\n",
+			string(raw),
+		)
 	}
 
 	factsSection := ""
@@ -1110,7 +1521,7 @@ func buildDecompositionInstructionsWithFacts(taskID, rawInput string, scope type
 		factsSection = b.String()
 	}
 
-	return factsSection + fmt.Sprintf(
+	return systemSection + factsSection + credSection + fmt.Sprintf(
 		"Decompose the user's task into a JSON execution plan for downstream agents.\n"+
 			"Return JSON only. Do not wrap the result in markdown fences. Do not include commentary.\n"+
 			"The JSON schema is:\n"+
@@ -1121,9 +1532,13 @@ func buildDecompositionInstructionsWithFacts(taskID, rawInput string, scope type
 			"- Do not invent new skill domain names outside the allowed list\n"+
 			"- Use an empty array for depends_on when a subtask has no dependencies\n"+
 			"- Keep the plan concise and executable\n"+
+			"Skill domain guide: use \"web\" for fetch/parse/extract of known URLs, \"data\" for transforms/reads/writes, \"comms\" for messaging, \"storage\" for file operations, \"logs\" for log queries, \"google_search\" for any Google search or web search query (PREFERRED over web for search tasks), \"github\" for GitHub API calls, \"general\" for reasoning/summarization with no external tools.\n"+
+			"- Prefer \"google_search\" over \"web\" whenever the task is a search query — the system will prompt the user for an API key if it is not yet configured.\n"+
+			"- Only avoid \"google_search\" if the user has explicitly said they do not want to use Google search.\n"+
+			"- The \"web\" domain (web.fetch, web.parse, web.extract) does NOT require credentials — use it for fetching specific known URLs, not for general search.\n"+
 			"Ambiguity handling (CRITICAL):\n"+
 			"- You MUST return a valid execution plan JSON object. NEVER reply with a clarifying question, free-form text, an apology, or anything that is not JSON matching the schema above.\n"+
-			"- If the user's message is ambiguous, conversational, a greeting, or a follow-up that depends on prior context, produce a SINGLE-subtask plan where one %s-domain agent composes a direct natural-language answer using the conversation context provided.\n"+
+			"- If the user's message is ambiguous, conversational, a greeting, or a follow-up that depends on prior context, produce a SINGLE-subtask plan where one general-domain agent composes a direct natural-language answer using the conversation context provided.\n"+
 			"- Treat \"Conversation so far:\" content in the user task as authoritative context for resolving pronouns and references in \"Current message:\".\n"+
 			"Parallelism guidance:\n"+
 			"- Independent subtasks MUST have empty depends_on so the executor can dispatch them in parallel.\n"+
@@ -1133,7 +1548,6 @@ func buildDecompositionInstructionsWithFacts(taskID, rawInput string, scope type
 		taskID,
 		taskID,
 		domains,
-		allowedDomains[0],
 		rawInput,
 	)
 }
@@ -1246,6 +1660,15 @@ func humanReadableError(code string) string {
 	default:
 		return "Task failed. Please retry or contact support."
 	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // isValidUUID returns true if s matches the general UUID string format.

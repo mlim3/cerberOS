@@ -137,6 +137,36 @@ definitions:
       sourceType:
         type: string
     type: object
+  api.SessionHistoryResponse:
+    properties:
+      conversationId:
+        type: string
+      maxTurns:
+        type: integer
+      tokenBudget:
+        type: integer
+      totalTokens:
+        type: integer
+      truncated:
+        type: boolean
+      turns:
+        items:
+          $ref: '#/definitions/api.SessionHistoryTurn'
+        type: array
+    type: object
+  api.SessionHistoryTurn:
+    properties:
+      content:
+        type: string
+      createdAt:
+        type: string
+      messageId:
+        type: string
+      role:
+        type: string
+      tokenCount:
+        type: integer
+    type: object
   api.SupersedeFactRequest:
     properties:
       category:
@@ -354,6 +384,61 @@ paths:
       summary: Create task execution log
       tags:
       - agents
+  /api/v1/chat/{conversationId}/history:
+    get:
+      description: Returns recent turns in chronological order, trimmed to a token
+        budget. Intended for Orchestrator/Agents to inject session context into LLM
+        prompts.
+      parameters:
+      - description: Conversation ID
+        in: path
+        name: conversationId
+        required: true
+        type: string
+      - description: User ID (ownership check)
+        in: query
+        name: userId
+        required: true
+        type: string
+      - description: Hard cap on the number of recent turns to consider (default 40,
+          max 500)
+        in: query
+        name: max_turns
+        type: integer
+      - description: Drop oldest turns until sum(tokenCount) <= budget. 0 disables
+          trimming. Default 4000.
+        in: query
+        name: token_budget
+        type: integer
+      - description: Comma-separated roles to include. Default 'user,assistant'.
+        in: query
+        name: include_roles
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/api.SessionHistoryResponse'
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Get conversation session history
+      tags:
+      - chat
   /api/v1/chat/{conversationId}/messages:
     get:
       description: Retrieves a list of messages for a specific chat session

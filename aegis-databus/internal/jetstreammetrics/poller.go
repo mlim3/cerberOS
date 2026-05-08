@@ -29,7 +29,8 @@ func Start(ctx context.Context, nc *nats.Conn, interval time.Duration, logger *s
 	}
 	js, err := nc.JetStream()
 	if err != nil {
-		logger.Error("jetstream context failed", "error", err)
+		logger.Error("could not obtain a jetstream context from nats; jetstream gauges will not be refreshed",
+			"error", err)
 		return
 	}
 
@@ -37,11 +38,15 @@ func Start(ctx context.Context, nc *nats.Conn, interval time.Duration, logger *s
 	defer tick.Stop()
 
 	do := func() {
-		for _, name := range bus.AegisStreamNames() {
+		streamNames := bus.AegisStreamNames()
+		failures := 0
+		for _, name := range streamNames {
 			info, err := js.StreamInfo(name)
 			if err != nil {
 				metrics.JetStreamPollErrors.Inc()
-				logger.Warn("stream info failed", "stream", name, "error", err)
+				failures++
+				logger.Warn("could not load stream info from jetstream; gauge will be stale until next poll",
+					"stream", name, "error", err)
 				continue
 			}
 			if info == nil {
@@ -59,6 +64,9 @@ func Start(ctx context.Context, nc *nats.Conn, interval time.Duration, logger *s
 			}
 			metrics.JetStreamStreamPending.WithLabelValues(name).Set(float64(pendingSum))
 		}
+		logger.Debug("refreshed jetstream gauges from stream info",
+			"stream_count", len(streamNames),
+			"failure_count", failures)
 	}
 
 	do()

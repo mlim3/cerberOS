@@ -195,6 +195,81 @@
                 }
             }
         },
+        "/api/v1/chat/{conversationId}/history": {
+            "get": {
+                "description": "Returns recent turns in chronological order, trimmed to a token budget. Intended for Orchestrator/Agents to inject session context into LLM prompts.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "chat"
+                ],
+                "summary": "Get conversation session history",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Conversation ID",
+                        "name": "conversationId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "User ID (ownership check)",
+                        "name": "userId",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Hard cap on the number of recent turns to consider (default 40, max 500)",
+                        "name": "max_turns",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Drop oldest turns until sum(tokenCount) <= budget. 0 disables trimming. Default 4000.",
+                        "name": "token_budget",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Comma-separated roles to include. Default 'user,assistant'.",
+                        "name": "include_roles",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/api.SessionHistoryResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
         "/api/v1/chat/{conversationId}/messages": {
             "get": {
                 "description": "Retrieves a list of messages for a specific chat session",
@@ -1840,6 +1915,52 @@
                 },
                 "sourceType": {
                     "type": "string"
+                }
+            }
+        },
+        "api.SessionHistoryResponse": {
+            "type": "object",
+            "properties": {
+                "conversationId": {
+                    "type": "string"
+                },
+                "maxTurns": {
+                    "type": "integer"
+                },
+                "tokenBudget": {
+                    "type": "integer"
+                },
+                "totalTokens": {
+                    "type": "integer"
+                },
+                "truncated": {
+                    "type": "boolean"
+                },
+                "turns": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/api.SessionHistoryTurn"
+                    }
+                }
+            }
+        },
+        "api.SessionHistoryTurn": {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string"
+                },
+                "createdAt": {
+                    "type": "string"
+                },
+                "messageId": {
+                    "type": "string"
+                },
+                "role": {
+                    "type": "string"
+                },
+                "tokenCount": {
+                    "type": "integer"
                 }
             }
         },

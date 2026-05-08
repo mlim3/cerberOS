@@ -49,7 +49,82 @@ Every log line uses this field order:
 
 Additional key-value pairs append after the canonical fields. They must be safe
 metadata, never raw payloads, raw user input, credentials, permission tokens, or
-operation results.
+operation results. The one allowed exception is the bounded `content_preview`
+described in the next section.
+
+### Writing meaningful `msg` values
+
+`msg` is the line a human reads first when scanning logs. Treat it like a tiny
+sentence in plain English describing what just happened, not the route that was
+hit or an internal enum token. The structured fields under it carry the IDs and
+metadata; `msg` carries the story.
+
+Good:
+
+- `received chat message from user`
+- `forwarded chat message to orchestrator`
+- `subtask completed by agent`
+- `dropped planner response for already-completed task`
+- `agent-process finished task (success)`
+
+Avoid:
+
+- `POST /api/chat` — that's the route, not the action
+- `task_accepted_sent_early` — enum token; use `sent early task acknowledgment to io`
+- `received task result from agents` — say *which* agent and whether it succeeded
+- `subtask completed` — say *who* completed and add `subtask_id` as a structured
+  field on the same line
+
+When an outcome is binary (success/failure, accepted/rejected), put it in the
+`msg` so humans don't have to scan attributes to find it. Add the same
+information as a structured boolean too (e.g. `success: false`) for LogQL
+filters.
+
+### Allowed previews vs. forbidden raw content
+
+User text and model output carry value for debugging conversations, but the raw
+payload is sensitive. The split is:
+
+**Forbidden — never log:**
+
+- `payload.raw_input` (the full user message field carried into the agent)
+- credential values, permission tokens, OAuth/API keys
+- full task result payloads or streamed model output
+- full planner output
+
+**Allowed — bounded previews only:**
+
+| Field | Source | Cap | Helper |
+|-------|--------|-----|--------|
+| `content_preview` | user-typed chat message | head + tail: first 15 words, last 10 words; middle replaced by `[..N chars..]` indicating omitted character count | `previewHeadTail` (TS), `PreviewHeadTail` (Go) |
+| `result_preview` | agent final result string (or relayed agent text) | head + tail (same as above) | `previewHeadTail` / `PreviewHeadTail` |
+| `error_message_preview` | agent / system failure message text | head + tail (same as above) | `previewHeadTail` / `PreviewHeadTail` |
+| `detail_preview` | orchestrator `error_response` user_message | head + tail (same as above) | `previewHeadTail` / `PreviewHeadTail` |
+| `label_preview`, `description_preview` | credential prompt label / description shown to the user | first 20 words or 140 characters; suffixed with `…` when truncated | `previewWords` / `PreviewWords` |
+| `title_preview`, `reason_preview`, `transcript_preview`, `message_preview` | short metadata strings (conversation title, plan rejection reason, voice transcript, vault progress message) | first 20 words or 140 characters; suffixed with `…` | `previewWords` / `PreviewWords` |
+| `raw_result_sample` | planner output that *failed to parse* (debug aid for malformed plans) | first 1024 bytes; suffixed with `…[truncated]`; emitted only when plan-parse failed | inline cap |
+
+Two preview shapes:
+
+1. **Word truncation** (`previewWords` / `PreviewWords`) — caps at *N* words OR
+   *M* characters and appends `…` when truncated. Use for short metadata strings
+   where the whole point is the start of the value (titles, reasons, error
+   codes, progress messages).
+
+2. **Head + tail** (`previewHeadTail` / `PreviewHeadTail`) — keeps the first
+   ~15 words and the last ~10 words and replaces the middle with
+   `[..1234 chars..]`, where the integer is the count of characters omitted.
+   Use for **conversation messages**: long chat messages and long agent
+   replies. The motivation is debugger UX — when a user pastes a 500-word
+   document and asks a question at the end, the question matters as much as
+   the start, and a beginning-only preview hides it. Head + tail also makes
+   the same message recognisable in IO, orchestrator, and agent logs at a
+   glance.
+
+The cap is the safety mechanism. The same field without a cap is a raw-input
+log and is forbidden. Use the shared helpers — never roll your own slice.
+Never include any preview field in error messages returned to clients; they
+are log-only.
 
 ### task_id vs conversation_id
 
@@ -239,5 +314,6 @@ logFromContext(c, 'info', 'nats', 'message published', { subject })
 {"time":"2026-04-17T10:00:02.456Z","level":"WARN","msg":"compaction failed, continuing","component":"agents","module":"agent-process","task_id":"abc","trace_id":"def","error":"context deadline exceeded"}
 {"time":"2026-04-17T10:00:03.789Z","level":"ERROR","msg":"database ping failed","component":"memory","module":"server","error":"connection refused"}
 {"time":"2026-04-17T10:00:04.000Z","level":"INFO","msg":"task dispatched","component":"orchestrator","module":"dispatcher","trace_id":"xyz","task_id":"123","conversation_id":"conv-abc"}
+{"time":"2026-04-17T10:00:04.500Z","level":"INFO","msg":"received chat message from user; queuing for orchestrator","component":"io","module":"http","trace_id":"xyz","task_id":"123","conversation_id":"conv-abc","content_preview":"can you summarise the latest design doc for me and tell me which sections have changed [..2147 chars..] thanks — keep it under 500 words please"}
 {"time":"2026-04-17T10:00:05.111Z","level":"ERROR","msg":"config load failed","component":"io","module":"server","exit_code":1,"error":"missing NATS_URL"}
 ```

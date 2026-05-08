@@ -3,6 +3,7 @@ package tests
 import (
 	"encoding/json"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -10,7 +11,15 @@ import (
 	"github.com/google/uuid"
 )
 
-func TestScheduledJobsContract_FutureBlackBox(t *testing.T) {
+func internalAPIKeyHeaders() map[string]string {
+	k := os.Getenv("INTERNAL_VAULT_API_KEY")
+	if k == "" {
+		k = "test-vault-key"
+	}
+	return map[string]string{"X-Internal-API-Key": k}
+}
+
+func TestScheduledJobsContract_BlackBox(t *testing.T) {
 	baseURL := strings.TrimRight(blackboxBaseURL(), "/")
 	jobName := "fact-decay-scan"
 	nextRunAt := time.Now().Add(-1 * time.Minute).UTC().Format(time.RFC3339)
@@ -33,7 +42,7 @@ func TestScheduledJobsContract_FutureBlackBox(t *testing.T) {
 				"batchSize": 100,
 			},
 			"nextRunAt": nextRunAt,
-		}, nil)
+		}, internalAPIKeyHeaders())
 
 		if status != http.StatusCreated {
 			t.Fatalf("status = %d, want %d", status, http.StatusCreated)
@@ -59,7 +68,7 @@ func TestScheduledJobsContract_FutureBlackBox(t *testing.T) {
 				"taskId":    uuid.NewString(),
 			},
 			"nextRunAt": nextRunAt,
-		}, nil)
+		}, internalAPIKeyHeaders())
 
 		if status != http.StatusCreated {
 			t.Fatalf("status = %d, want %d", status, http.StatusCreated)
@@ -80,7 +89,7 @@ func TestScheduledJobsContract_FutureBlackBox(t *testing.T) {
 			"scheduleKind":  "interval",
 			"name":          "bad-timestamp",
 			"nextRunAt":     "not-a-timestamp",
-		}, nil)
+		}, internalAPIKeyHeaders())
 
 		if status != http.StatusBadRequest {
 			t.Fatalf("status = %d, want %d", status, http.StatusBadRequest)
@@ -95,7 +104,7 @@ func TestScheduledJobsContract_FutureBlackBox(t *testing.T) {
 			"status":     "active",
 			"name":       "missing-target-service",
 			"nextRunAt":  nextRunAt,
-		}, nil)
+		}, internalAPIKeyHeaders())
 
 		if status != http.StatusBadRequest {
 			t.Fatalf("status = %d, want %d", status, http.StatusBadRequest)
@@ -114,7 +123,7 @@ func TestScheduledJobsContract_FutureBlackBox(t *testing.T) {
 			"name":            "future-job",
 			"payload":         map[string]any{},
 			"nextRunAt":       futureRunAt,
-		}, nil)
+		}, internalAPIKeyHeaders())
 
 		if status != http.StatusCreated {
 			t.Fatalf("status = %d, want %d", status, http.StatusCreated)
@@ -124,7 +133,7 @@ func TestScheduledJobsContract_FutureBlackBox(t *testing.T) {
 	})
 
 	t.Run("run_due_executes_jobs_and_returns_run_history", func(t *testing.T) {
-		status, env := apiJSONRequest(t, http.MethodPost, baseURL+"/api/v1/scheduled_jobs/run_due", map[string]any{}, nil)
+		status, env := apiJSONRequest(t, http.MethodPost, baseURL+"/api/v1/scheduled_jobs/run_due", map[string]any{}, internalAPIKeyHeaders())
 
 		if status != http.StatusOK {
 			t.Fatalf("status = %d, want %d", status, http.StatusOK)
@@ -134,7 +143,7 @@ func TestScheduledJobsContract_FutureBlackBox(t *testing.T) {
 	})
 
 	t.Run("internal_job_run_history_is_queryable", func(t *testing.T) {
-		status, env := apiJSONRequest(t, http.MethodGet, baseURL+"/api/v1/scheduled_jobs/"+internalJobID+"/runs", nil, nil)
+		status, env := apiJSONRequest(t, http.MethodGet, baseURL+"/api/v1/scheduled_jobs/"+internalJobID+"/runs", nil, internalAPIKeyHeaders())
 
 		if status != http.StatusOK {
 			t.Fatalf("status = %d, want %d", status, http.StatusOK)
@@ -144,7 +153,7 @@ func TestScheduledJobsContract_FutureBlackBox(t *testing.T) {
 	})
 
 	t.Run("external_job_run_records_dispatch_result", func(t *testing.T) {
-		status, env := apiJSONRequest(t, http.MethodGet, baseURL+"/api/v1/scheduled_jobs/"+externalJobID+"/runs", nil, nil)
+		status, env := apiJSONRequest(t, http.MethodGet, baseURL+"/api/v1/scheduled_jobs/"+externalJobID+"/runs", nil, internalAPIKeyHeaders())
 
 		if status != http.StatusOK {
 			t.Fatalf("status = %d, want %d", status, http.StatusOK)
@@ -172,7 +181,7 @@ func TestScheduledJobsContract_FutureBlackBox(t *testing.T) {
 	})
 
 	t.Run("future_job_run_history_is_empty_before_due", func(t *testing.T) {
-		status, env := apiJSONRequest(t, http.MethodGet, baseURL+"/api/v1/scheduled_jobs/"+futureJobID+"/runs", nil, nil)
+		status, env := apiJSONRequest(t, http.MethodGet, baseURL+"/api/v1/scheduled_jobs/"+futureJobID+"/runs", nil, internalAPIKeyHeaders())
 
 		if status != http.StatusOK {
 			t.Fatalf("status = %d, want %d", status, http.StatusOK)
@@ -193,7 +202,7 @@ func TestScheduledJobsContract_FutureBlackBox(t *testing.T) {
 	})
 
 	t.Run("invalid_job_id_returns_bad_request", func(t *testing.T) {
-		status, env := apiJSONRequest(t, http.MethodGet, baseURL+"/api/v1/scheduled_jobs/not-a-uuid/runs", nil, nil)
+		status, env := apiJSONRequest(t, http.MethodGet, baseURL+"/api/v1/scheduled_jobs/not-a-uuid/runs", nil, internalAPIKeyHeaders())
 
 		if status != http.StatusBadRequest {
 			t.Fatalf("status = %d, want %d", status, http.StatusBadRequest)

@@ -32,13 +32,17 @@ func PublishValidated(js nats.JetStreamContext, subject string, payload []byte, 
 }
 
 func publishJetStream(js nats.JetStreamContext, subject string, payload []byte, msgID string, v ...validation.Validator) (*nats.PubAck, error) {
-	ctx, span := telemetry.Tracer().Start(context.Background(), "PublishValidated",
+	// Continue the upstream trace when the CloudEvents envelope carries a traceid.
+	base := context.Background()
+	if _, _, tid := envelope.ParseMetadata(payload); tid != "" {
+		base = telemetry.ContextFromTraceID(base, tid)
+	}
+	_, span := telemetry.Tracer().Start(base, "PublishValidated",
 		trace.WithAttributes(
 			attribute.String("messaging.system", "nats"),
 			attribute.String("messaging.destination", subject),
 		))
 	defer span.End()
-	_ = ctx
 
 	val := validatorOrDefault(v)
 	if err := val.ValidatePayload(payload); err != nil {

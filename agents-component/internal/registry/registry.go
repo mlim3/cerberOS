@@ -147,7 +147,7 @@ func NewPersistent(mem memory.Client, opts ...Option) (Registry, error) {
 // restored — they have no work to resume. An empty result set is handled as a
 // normal first-boot condition and produces no error.
 func (r *inMemoryRegistry) recoverFromMemory() error {
-	records, err := r.mem.ReadAllByType(DataTypeAgentState)
+	records, err := r.mem.ReadAllByType(DataTypeAgentState, "")
 	if err != nil {
 		return fmt.Errorf("read %q records: %w", DataTypeAgentState, err)
 	}
@@ -379,10 +379,11 @@ func (r *inMemoryRegistry) persistAgent(agent *types.AgentRecord) {
 		return
 	}
 	if err := r.mem.Write(&types.MemoryWrite{
-		AgentID:  agent.AgentID,
-		DataType: DataTypeAgentState,
-		Payload:  agent,
-		Tags:     map[string]string{"context": DataTypeAgentState},
+		AgentID:     agent.AgentID,
+		DataType:    DataTypeAgentState,
+		Payload:     agent,
+		WireTraceID: agent.TraceID,
+		Tags:        map[string]string{"context": DataTypeAgentState},
 	}); err != nil {
 		slog.Warn("registry: failed to persist agent state",
 			"agent_id", agent.AgentID,

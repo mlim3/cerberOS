@@ -80,6 +80,16 @@ type VaultExecutor struct {
 	mu                sync.Mutex
 	pending           map[string]chan types.VaultOperationResult    // requestID → result channel
 	progressCallbacks map[string]func(types.VaultOperationProgress) // requestID → onUpdate; at-most-once
+
+	pendingAudits sync.WaitGroup // tracks in-flight emitAudit goroutines; drained before Close
+
+	// credMu guards credPending. When N parallel tool calls all hit
+	// MISSING_CREDENTIAL for the same credentialType, only the first goroutine
+	// publishes a credential.request and shows the IO modal. The rest wait on
+	// the shared done channel. When the credential is stored the done channel is
+	// closed, broadcasting to all waiters simultaneously.
+	credMu      sync.Mutex
+	credPending map[string]chan struct{} // credentialType → done channel
 }
 
 // agentEnvelope is the outbound wire format required by the Orchestrator (mirrors
@@ -145,6 +155,7 @@ func NewVaultExecutor(log *slog.Logger, taskID, permissionToken, traceID string)
 		log:               log,
 		pending:           make(map[string]chan types.VaultOperationResult),
 		progressCallbacks: make(map[string]func(types.VaultOperationProgress)),
+		credPending:       make(map[string]chan struct{}),
 	}
 
 	// Durable consumer name is stable per agent_id: survives crash/respawn so
@@ -277,9 +288,22 @@ func (ve *VaultExecutor) routeResult(data []byte) {
 // EmitSkillInvocation publishes a skill_invocation audit event for the given
 // tool call outcome. It is nil-safe — when ve == nil (NATS absent) it is a
 // no-op so telemetry never affects the ReAct loop.
-func (ve *VaultExecutor) EmitSkillInvocation(domain, command, depth string, elapsedMS int64, outcome string) {
+//
+// vaultDelegated is true when the tool required vault execution (non-empty
+// RequiredCredentialTypes). synthesized is true when the tool was dynamically
+// created by post-task synthesis in a prior session. The orchestrator uses
+// these flags to apply the notability filter for UI skill-activity toasts.
+func (ve *VaultExecutor) EmitSkillInvocation(domain, command, depth string, elapsedMS int64, outcome string, vaultDelegated, synthesized bool) {
 	if ve == nil {
 		return
+	}
+	vaultDelegatedStr := "false"
+	if vaultDelegated {
+		vaultDelegatedStr = "true"
+	}
+	synthesizedStr := "false"
+	if synthesized {
+		synthesizedStr = "true"
 	}
 	ve.emitAudit(types.AuditEventSkillInvocation, map[string]string{
 		"domain":           domain,
@@ -287,12 +311,34 @@ func (ve *VaultExecutor) EmitSkillInvocation(domain, command, depth string, elap
 		"drill_down_depth": depth,
 		"elapsed_ms":       fmt.Sprintf("%d", elapsedMS),
 		"outcome":          outcome,
+		"vault_delegated":  vaultDelegatedStr,
+		"synthesized":      synthesizedStr,
+	})
+}
+
+// EmitSkillSynthesized publishes a skill_synthesized audit event when a new
+// skill has been successfully created by post-task synthesis and persisted to
+// the Memory Component. The orchestrator routes this to the IO Component so
+// the UI can surface a "new skill created" toast.
+//
+// EmitSkillSynthesized is nil-safe — a no-op when ve is nil (NATS absent).
+func (ve *VaultExecutor) EmitSkillSynthesized(domain, skillName string) {
+	if ve == nil {
+		return
+	}
+	ve.emitAudit(types.AuditEventSkillSynthesized, map[string]string{
+		"domain":     domain,
+		"skill_name": skillName,
 	})
 }
 
 // emitAudit publishes an audit event to aegis.orchestrator.audit.event in a
 // background goroutine. Failures are logged and never propagated — audit
 // emission must not affect the vault execute flow.
+//
+// pendingAudits tracks these goroutines so Close() can drain them before tearing
+// down the NATS connection; without the WaitGroup, fast tasks exit before the
+// goroutine schedules and the publish silently fails with "connection closed".
 func (ve *VaultExecutor) emitAudit(eventType string, details map[string]string) {
 	event := types.AuditEvent{
 		EventID:   newUUID(),
@@ -303,7 +349,9 @@ func (ve *VaultExecutor) emitAudit(eventType string, details map[string]string) 
 		Timestamp: time.Now().UTC(),
 		Details:   details,
 	}
+	ve.pendingAudits.Add(1)
 	go func() {
+		defer ve.pendingAudits.Done()
 		env := agentEnvelope{
 			MessageID:       newUUID(),
 			MessageType:     comms.MsgTypeAuditEvent,
@@ -321,6 +369,8 @@ func (ve *VaultExecutor) emitAudit(eventType string, details map[string]string) 
 		}
 		if _, err := ve.js.Publish(comms.SubjectAuditEvent, data); err != nil {
 			ve.log.Error("audit.event publish failed", "event_type", eventType, "error", err)
+		} else {
+			ve.log.Info("audit.event publish ok", "event_type", eventType, "subject", comms.SubjectAuditEvent)
 		}
 	}()
 }
@@ -451,6 +501,14 @@ func (ve *VaultExecutor) Execute(ctx context.Context, operationType, credentialT
 				"operation_type": req.OperationType,
 				"error_code":     vaultResult.ErrorCode,
 			})
+			// When the vault reports a missing credential, ask the user to supply
+			// it via IO and then poll until it appears.
+			// Skip if we're already inside a credential-retry loop (prevents recursion).
+			if vaultResult.ErrorCode == "MISSING_CREDENTIAL" && !isCredentialRetryCtx(ctx) {
+				if retried := ve.requestCredentialAndRetry(ctx, req.OperationType, credentialType, operationParams, timeoutSeconds, onUpdate, toolCallEntryID); retried != nil {
+					return *retried
+				}
+			}
 		}
 		result := vaultResultToToolResult(vaultResult)
 		result.SessionEntryID = toolCallEntryID
@@ -518,6 +576,194 @@ func (ve *VaultExecutor) Execute(ctx context.Context, operationType, credentialT
 				"deadline_seconds": req.TimeoutSeconds + 5,
 			},
 		}
+	}
+}
+
+// credentialRequestTimeout is how long requestCredentialAndRetry polls for the
+// user to enter a missing API key via the IO credential modal before giving up.
+const (
+	credentialRequestTimeout = 5 * time.Minute
+	credentialPollInterval   = 8 * time.Second
+)
+
+// credentialRetryKey is the context key that marks a vault execute call as
+// originating from inside requestCredentialAndRetry. Execute() skips the
+// MISSING_CREDENTIAL retry path when this key is present, preventing infinite
+// recursion when the credential is still missing during a poll attempt.
+type credentialRetryKey struct{}
+
+func withCredentialRetryCtx(ctx context.Context) context.Context {
+	return context.WithValue(ctx, credentialRetryKey{}, true)
+}
+
+func isCredentialRetryCtx(ctx context.Context) bool {
+	return ctx.Value(credentialRetryKey{}) != nil
+}
+
+// credentialUserInputRequest is the wire payload for a user_input credential
+// request sent to aegis.orchestrator.credential.request. The gateway forwards
+// this to IO which surfaces the CredentialModal to the user.
+type credentialUserInputRequest struct {
+	RequestID   string `json:"request_id"`
+	AgentID     string `json:"agent_id"`
+	TaskID      string `json:"task_id"`
+	Operation   string `json:"operation"` // always "user_input"
+	KeyName     string `json:"key_name"`
+	Label       string `json:"label"`
+	Description string `json:"description"`
+}
+
+// requestCredentialAndRetry is called when vault execute returns MISSING_CREDENTIAL.
+//
+// Deduplication: when N parallel tool calls all hit MISSING_CREDENTIAL for the same
+// credentialType, only the FIRST goroutine publishes the credential.request and shows
+// the IO modal. All others wait on the shared doneCh and retry once it closes.
+//
+// The retry loop polls vault_google_search every credentialPollInterval using a
+// retry context (so Execute() does not re-enter this function). This avoids relying
+// on a NATS credential.response subscription, which was unreliable due to stale
+// spawn-time authorize messages being replayed on the same NATS subject.
+//
+// Returns nil if the credential flow cannot be started — the caller returns the
+// original MISSING_CREDENTIAL error to the LLM.
+func (ve *VaultExecutor) requestCredentialAndRetry(
+	ctx context.Context,
+	operationType, credentialType string,
+	operationParams json.RawMessage,
+	timeoutSeconds int,
+	onUpdate func(types.VaultOperationProgress),
+	sessionEntryID string,
+) *ToolResult {
+	if ve.nc == nil {
+		return nil
+	}
+
+	// Deduplication: check if another goroutine is already handling this credential.
+	ve.credMu.Lock()
+	doneCh, alreadyPending := ve.credPending[credentialType]
+	if !alreadyPending {
+		doneCh = make(chan struct{})
+		ve.credPending[credentialType] = doneCh
+	}
+	ve.credMu.Unlock()
+
+	if alreadyPending {
+		// Another goroutine owns the modal — wait for it to finish, then retry.
+		ve.log.Info("vault execute: credential request already in progress — waiting",
+			"credential_type", credentialType,
+		)
+		timer := time.NewTimer(credentialRequestTimeout)
+		defer timer.Stop()
+		select {
+		case <-doneCh:
+			retried := ve.Execute(withCredentialRetryCtx(ctx), operationType, credentialType, operationParams, timeoutSeconds, onUpdate)
+			return &retried
+		case <-ctx.Done():
+			return nil
+		case <-timer.C:
+			r := ToolResult{
+				Content:        fmt.Sprintf("No %s was provided within %s. Add your API key in Settings and try again.", credentialType, credentialRequestTimeout),
+				IsError:        true,
+				SessionEntryID: sessionEntryID,
+			}
+			return &r
+		}
+	}
+
+	// This goroutine is the designated requester — broadcast to waiters when done.
+	defer func() {
+		ve.credMu.Lock()
+		delete(ve.credPending, credentialType)
+		ve.credMu.Unlock()
+		close(doneCh)
+	}()
+
+	// Publish credential.request (user_input) — orchestrator routes to IO modal.
+	credReqID := newUUID()
+	label := credentialLabelFor(credentialType)
+	credReq := credentialUserInputRequest{
+		RequestID:   credReqID,
+		AgentID:     ve.agentID,
+		TaskID:      ve.taskID,
+		Operation:   "user_input",
+		KeyName:     credentialType,
+		Label:       label,
+		Description: fmt.Sprintf("%s requires a %s that has not been stored yet. Please enter it to continue.", operationType, credentialType),
+	}
+	env := agentEnvelope{
+		MessageID:       newUUID(),
+		MessageType:     comms.MsgTypeCredentialRequest,
+		SourceComponent: "agents",
+		CorrelationID:   credReqID,
+		TraceID:         ve.traceID,
+		Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
+		SchemaVersion:   "1.0",
+		Payload:         credReq,
+	}
+	data, err := json.Marshal(env)
+	if err != nil {
+		ve.log.Warn("vault execute: missing credential — marshal failed", "error", err)
+		return nil
+	}
+	if _, err := ve.js.Publish(comms.SubjectCredentialRequest, data); err != nil {
+		ve.log.Warn("vault execute: missing credential — publish credential.request failed", "error", err)
+		return nil
+	}
+
+	ve.log.Info("vault execute: missing credential — polling for credential, modal shown to user",
+		"request_id", credReqID,
+		"credential_type", credentialType,
+		"poll_interval", credentialPollInterval,
+		"timeout", credentialRequestTimeout,
+	)
+
+	// Poll vault_google_search with withCredentialRetryCtx so Execute() does not
+	// re-enter this function. The poll succeeds as soon as the user stores the key.
+	deadline := time.Now().Add(credentialRequestTimeout)
+	retryCtx := withCredentialRetryCtx(ctx)
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(credentialPollInterval):
+		}
+
+		retried := ve.Execute(retryCtx, operationType, credentialType, operationParams, timeoutSeconds, onUpdate)
+		if code, _ := retried.Details["error_code"].(string); code != "MISSING_CREDENTIAL" {
+			// Either success or a different error — done.
+			ve.log.Info("vault execute: credential poll result",
+				"credential_type", credentialType,
+				"is_error", retried.IsError,
+			)
+			retried.SessionEntryID = sessionEntryID
+			return &retried
+		}
+		ve.log.Info("vault execute: credential still missing, continuing to poll",
+			"credential_type", credentialType,
+		)
+	}
+
+	r := ToolResult{
+		Content:        fmt.Sprintf("No %s was provided within %s. Add your API key in Settings and try again.", credentialType, credentialRequestTimeout),
+		IsError:        true,
+		SessionEntryID: sessionEntryID,
+	}
+	return &r
+}
+
+// credentialLabelFor returns a human-readable label for the IO credential modal.
+func credentialLabelFor(credentialType string) string {
+	switch credentialType {
+	case "serper_api_key":
+		return "Serper API Key (Google Search)"
+	case "github_token":
+		return "GitHub Personal Access Token"
+	case "web_api_key":
+		return "Web API Key"
+	case "search_api_key":
+		return "Search API Key (Tavily)"
+	default:
+		return credentialType
 	}
 }
 
@@ -663,8 +909,11 @@ func (ve *VaultExecutor) PublishMetricsEvent(eventType, operationType string, el
 	}
 }
 
-// Close drains the NATS connection used by the vault executor.
+// Close waits for all pending audit goroutines to publish, then closes the NATS
+// connection. The WaitGroup drain is bounded by the goroutines' own JetStream
+// publish timeouts (~2s each), so this never hangs indefinitely.
 func (ve *VaultExecutor) Close() {
+	ve.pendingAudits.Wait()
 	if ve.nc != nil {
 		ve.nc.Close()
 	}

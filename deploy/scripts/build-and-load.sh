@@ -4,6 +4,27 @@
 # Usage: ./deploy/scripts/build-and-load.sh [cluster-name]
 set -euo pipefail
 
+for arg in "$@"; do
+  case $arg in
+    -h|--help)
+      echo "Usage: ./deploy/scripts/build-and-load.sh [CLUSTER_NAME]"
+      echo ""
+      echo "Build all service Docker images and load them into a kind cluster."
+      echo ""
+      echo "Arguments:"
+      echo "  CLUSTER_NAME  Name of the kind cluster to load images into (default: cerberos)"
+      echo ""
+      echo "Options:"
+      echo "  -h, --help  Show this help message"
+      echo ""
+      echo "Examples:"
+      echo "  ./deploy/scripts/build-and-load.sh            # load into 'cerberos' cluster"
+      echo "  ./deploy/scripts/build-and-load.sh my-cluster # load into 'my-cluster'"
+      exit 0
+      ;;
+  esac
+done
+
 CLUSTER="${1:-cerberos}"
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 TAG="local"

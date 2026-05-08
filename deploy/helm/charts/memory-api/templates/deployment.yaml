@@ -43,6 +43,8 @@ spec:
               value: {{ .Values.db.name | quote }}
             - name: PORT
               value: "8081"
+            - name: NATS_URL
+              value: {{ .Values.natsUrl | quote }}
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: {{ .Values.observability.otlpEndpoint | quote }}
             - name: OTEL_SERVICE_NAME

@@ -8,6 +8,7 @@ export interface UISettings {
   fontSizeScale: 'normal' | 'large'
   highContrast: boolean
   showActivityLog: boolean
+  showSkillToasts: boolean
 }
 
 export const defaultUISettings: UISettings = {
@@ -18,6 +19,7 @@ export const defaultUISettings: UISettings = {
   fontSizeScale: 'normal',
   highContrast: false,
   showActivityLog: false,
+  showSkillToasts: true,
 }
 
 interface SettingsPanelProps {
@@ -117,6 +119,19 @@ function SettingsPanel({ settings, onSettingsChange, onClose }: SettingsPanelPro
                 />
                 <span className="toggle-switch"></span>
               </label>
+
+              <label className="settings-toggle">
+                <span className="toggle-info">
+                  <span className="toggle-label">Skill activity notifications</span>
+                  <span className="toggle-description">Show toast notifications for web searches, log queries, and other notable skill invocations</span>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={settings.showSkillToasts}
+                  onChange={e => updateSetting('showSkillToasts', e.target.checked)}
+                />
+                <span className="toggle-switch"></span>
+              </label>
             </div>
           </section>
 
@@ -148,6 +163,16 @@ function SettingsPanel({ settings, onSettingsChange, onClose }: SettingsPanelPro
                 <span className="toggle-switch"></span>
               </label>
             </div>
+          </section>
+
+          <section className="settings-section">
+            <h3 className="settings-section-title">Recurring tasks</h3>
+            <p className="settings-muted-paragraph">
+              Repeating runs are configured entirely in chat. From the sidebar <strong>Recurring</strong> tab, choose{' '}
+              <strong>Create recurring task</strong> for a guided thread—or in <strong>any</strong> task chat, wording
+              like &quot;every morning&quot;, &quot;daily&quot;, or &quot;every hour&quot; switches that send into scheduler
+              setup (rhythm → first run → saved user cron).
+            </p>
           </section>
         </div>
 

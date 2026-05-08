@@ -46,6 +46,7 @@ type gatewayMock struct {
 	TaskSpecCalls     []types.TaskSpec
 	TaskResultCalls   []types.TaskResult
 	StatusUpdateCalls []types.StatusResponse
+	SpawnResponses    []types.AgentSpawnResponse
 
 	PublishTaskSpecError error
 	PublishAcceptedError error
@@ -74,6 +75,11 @@ func (g *gatewayMock) PublishTaskSpec(_ context.Context, spec types.TaskSpec) er
 
 func (g *gatewayMock) PublishStatusUpdate(_ context.Context, _ string, s types.StatusResponse) error {
 	g.StatusUpdateCalls = append(g.StatusUpdateCalls, s)
+	return nil
+}
+
+func (g *gatewayMock) PublishAgentSpawnResponse(_ context.Context, r types.AgentSpawnResponse) error {
+	g.SpawnResponses = append(g.SpawnResponses, r)
 	return nil
 }
 
@@ -145,6 +151,16 @@ func (e *executorMock) HandleSubtaskResult(_ context.Context, result types.TaskR
 	return nil
 }
 
+// UserIDForSubtask satisfies the PlanExecutor interface added on main; tests
+// don't exercise per-user credential routing so an empty/false return is fine.
+func (e *executorMock) UserIDForSubtask(_ string) (string, bool) {
+	return "", false
+}
+
+func (e *executorMock) TaskStateForSubtask(_ string) (*types.TaskState, bool) {
+	return nil, false
+}
+
 // ── Test Helpers ─────────────────────────────────────────────────────────────
 
 // newDispatcher builds a fully wired Dispatcher with fresh mocks.
@@ -166,7 +182,7 @@ func newDispatcher(t *testing.T) (*dispatcher.Dispatcher, *gatewayMock, *policyM
 		// its own test below.
 		PlanApprovalMode: "off",
 	}
-	d := dispatcher.New(cfg, mem, nil /* vault unused */, gw, pol, mon, exec, ioclient.New("") /* disabled */)
+	d := dispatcher.New(cfg, mem, &mocks.VaultMock{}, gw, pol, mon, exec, ioclient.New("") /* disabled */)
 	return d, gw, pol, mon, exec, mem
 }
 
@@ -321,6 +337,43 @@ func TestHandleInboundTask_HappyPath_Decomposing(t *testing.T) {
 		t.Fatalf("unexpected errors published: %+v", gw.ErrorCalls)
 	}
 	_ = exec
+}
+
+func TestHandleInboundTask_MaintenancePayload_SystemPromptAndMetadata(t *testing.T) {
+	d, gw, _, _, _, _ := newDispatcher(t)
+	payload := map[string]any{
+		"raw_input":     "kick off decay",
+		"system_prompt": "SYS: extract facts",
+		"maintenance":   true,
+	}
+	pb, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := types.UserTask{
+		TaskID:         "550e8400-e29b-41d4-a716-4466554400aa",
+		UserID:         "system",
+		Priority:       5,
+		TimeoutSeconds: 60,
+		Payload:        pb,
+		CallbackTopic:  "aegis.orchestrator.cron.wake.results",
+	}
+	if err := d.HandleInboundTask(context.Background(), task); err != nil {
+		t.Fatalf("HandleInboundTask() error = %v", err)
+	}
+	if len(gw.TaskSpecCalls) != 1 {
+		t.Fatalf("planner task publishes = %d, want 1", len(gw.TaskSpecCalls))
+	}
+	req := gw.TaskSpecCalls[0]
+	if req.Metadata["task_kind"] != "maintenance" {
+		t.Fatalf("task_kind = %q, want maintenance", req.Metadata["task_kind"])
+	}
+	if !strings.Contains(req.Instructions, "SYS: extract facts") {
+		t.Fatalf("planner instructions missing system prompt: %q", req.Instructions)
+	}
+	if !strings.Contains(req.Instructions, "kick off decay") {
+		t.Fatalf("planner instructions missing raw_input: %q", req.Instructions)
+	}
 }
 
 // ── Happy Path: DecompositionResponse → PLAN_ACTIVE ──────────────────────────
@@ -914,6 +967,119 @@ func TestGetActiveTasks_ReflectsInFlightTasks(t *testing.T) {
 
 	if len(d.GetActiveTasks()) != 1 {
 		t.Fatalf("active tasks = %d, want 1 after first completion", len(d.GetActiveTasks()))
+	}
+}
+
+// ── Agent-as-Tool Child Spawns ────────────────────────────────────────────────
+
+func TestHandleAgentSpawnRequest_DispatchesChildTaskAndReturnsResult(t *testing.T) {
+	d, gw, _, _, exec, _ := newDispatcher(t)
+	parent := validTask("550e8400-e29b-41d4-a716-446655440090")
+	if err := d.HandleInboundTask(context.Background(), parent); err != nil {
+		t.Fatalf("HandleInboundTask() error = %v", err)
+	}
+	before := len(gw.TaskSpecCalls)
+
+	req := types.AgentSpawnRequest{
+		RequestID:      "spawn-req-1",
+		ParentAgentID:  "agent-parent",
+		ParentTaskID:   parent.TaskID,
+		RequiredSkills: []string{"web"},
+		Instructions:   "Fetch and summarize https://example.com",
+		TimeoutSeconds: 45,
+		TraceID:        "trace-spawn",
+		UserContextID:  "ctx-1",
+	}
+	if err := d.HandleAgentSpawnRequest(context.Background(), req); err != nil {
+		t.Fatalf("HandleAgentSpawnRequest() error = %v", err)
+	}
+	if len(gw.TaskSpecCalls) != before+1 {
+		t.Fatalf("TaskSpecCalls = %d, want %d", len(gw.TaskSpecCalls), before+1)
+	}
+	child := gw.TaskSpecCalls[len(gw.TaskSpecCalls)-1]
+	if child.Metadata["task_kind"] != "agent_spawn_child" {
+		t.Fatalf("child task_kind = %q", child.Metadata["task_kind"])
+	}
+	if child.Metadata["agent_spawn_request_id"] != req.RequestID {
+		t.Fatalf("agent_spawn_request_id = %q", child.Metadata["agent_spawn_request_id"])
+	}
+	if child.UserID != parent.UserID {
+		t.Fatalf("child UserID = %q, want %q", child.UserID, parent.UserID)
+	}
+	if child.RequiredSkillDomains[0] != "web" {
+		t.Fatalf("child required skills = %v", child.RequiredSkillDomains)
+	}
+
+	vaultResult, err := d.HandleVaultExecuteRequest(context.Background(), types.VaultExecuteRequest{
+		RequestID:       "vault-child-1",
+		AgentID:         "agent-child",
+		TaskID:          child.OrchestratorTaskRef,
+		PermissionToken: child.PolicyScope.TokenRef,
+		OperationType:   "vault_google_search",
+		CredentialType:  "serper_api_key",
+		OperationParams: json.RawMessage(`{"query":"OpenAI structured outputs API","num_results":3}`),
+		TimeoutSeconds:  35,
+	})
+	if err != nil {
+		t.Fatalf("HandleVaultExecuteRequest(child) error = %v", err)
+	}
+	if vaultResult.Status != types.VaultExecStatusSuccess {
+		t.Fatalf("child vault execute status = %q, want success: %+v", vaultResult.Status, vaultResult)
+	}
+	var opResult map[string]any
+	if err := json.Unmarshal(vaultResult.OperationResult, &opResult); err != nil {
+		t.Fatalf("decode child vault result: %v", err)
+	}
+	if opResult["user_id"] != parent.UserID {
+		t.Fatalf("child vault execute user_id = %v, want %q", opResult["user_id"], parent.UserID)
+	}
+
+	result := types.TaskResult{
+		OrchestratorTaskRef: child.OrchestratorTaskRef,
+		TaskID:              child.TaskID,
+		AgentID:             "agent-child",
+		Success:             true,
+		Result:              json.RawMessage(`"child says done"`),
+		CompletedAt:         time.Now().UTC(),
+	}
+	if err := d.HandleTaskResult(context.Background(), result); err != nil {
+		t.Fatalf("HandleTaskResult(child) error = %v", err)
+	}
+	if len(gw.SpawnResponses) != 1 {
+		t.Fatalf("SpawnResponses = %d, want 1", len(gw.SpawnResponses))
+	}
+	resp := gw.SpawnResponses[0]
+	if resp.RequestID != req.RequestID || resp.ParentAgentID != req.ParentAgentID {
+		t.Fatalf("spawn response correlation mismatch: %+v", resp)
+	}
+	if resp.Status != "success" || resp.ChildAgentID != "agent-child" {
+		t.Fatalf("spawn response = %+v, want success from child", resp)
+	}
+	if len(exec.ResultCalls) != 0 {
+		t.Fatalf("child spawn result must not be routed to plan executor; got %d calls", len(exec.ResultCalls))
+	}
+}
+
+func TestHandleAgentSpawnRequest_UnknownParentFailsFast(t *testing.T) {
+	d, gw, _, _, _, _ := newDispatcher(t)
+	req := types.AgentSpawnRequest{
+		RequestID:      "spawn-req-missing-parent",
+		ParentAgentID:  "agent-parent",
+		ParentTaskID:   "missing-parent-task",
+		RequiredSkills: []string{"web"},
+		Instructions:   "Do work",
+	}
+	if err := d.HandleAgentSpawnRequest(context.Background(), req); err != nil {
+		t.Fatalf("HandleAgentSpawnRequest() error = %v", err)
+	}
+	if len(gw.TaskSpecCalls) != 0 {
+		t.Fatalf("TaskSpecCalls = %d, want 0", len(gw.TaskSpecCalls))
+	}
+	if len(gw.SpawnResponses) != 1 {
+		t.Fatalf("SpawnResponses = %d, want 1", len(gw.SpawnResponses))
+	}
+	if gw.SpawnResponses[0].Status != "failed" || gw.SpawnResponses[0].ErrorCode != "UNKNOWN_PARENT_TASK" {
+		t.Fatalf("spawn failure response = %+v", gw.SpawnResponses[0])
 	}
 }
 

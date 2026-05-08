@@ -452,6 +452,50 @@ func (r *ChatRepository) ListMessagesByConversation(ctx context.Context, convers
 	return messages, nil
 }
 
+// ListRecentMessagesByConversation returns the most recent messages for a
+// conversation in DESCENDING chronological order (newest first), filtered to
+// the allowed roles. The caller (session-history handler) reverses the slice
+// after applying its token budget so the final payload is chronological.
+//
+// When roles is empty the query falls back to user + assistant messages so
+// that agents do not see system-role turns by default.
+func (r *ChatRepository) ListRecentMessagesByConversation(ctx context.Context, conversationID pgtype.UUID, roles []string, limit int32) ([]ChatSchemaMessage, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if len(roles) == 0 {
+		roles = []string{"user", "assistant"}
+	}
+	const q = `
+SELECT id, conversation_id, user_id, role, content, token_count, idempotency_key, created_at
+FROM chat_schema.messages
+WHERE conversation_id = $1 AND role = ANY($2::text[])
+ORDER BY created_at DESC, id DESC
+LIMIT $3`
+
+	rows, err := r.pool.Query(ctx, q, conversationID, roles, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list recent chat messages: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]ChatSchemaMessage, 0)
+	for rows.Next() {
+		var m ChatSchemaMessage
+		if err := rows.Scan(
+			&m.ID, &m.ConversationID, &m.UserID, &m.Role, &m.Content,
+			&m.TokenCount, &m.IdempotencyKey, &m.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan recent chat message: %w", err)
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate recent chat messages: %w", err)
+	}
+	return out, nil
+}
+
 func (r *ChatRepository) ListConversationsByUser(ctx context.Context, userID pgtype.UUID, limit int32) ([]ConversationRecord, error) {
 	if limit <= 0 {
 		limit = 100

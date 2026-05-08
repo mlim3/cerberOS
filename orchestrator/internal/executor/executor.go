@@ -95,6 +95,14 @@ type PlanExecutor struct {
 	// Used in HandleSubtaskResult to find the plan a result belongs to.
 	orchRefToPlan sync.Map
 
+	// orchRefToParentTaskID maps orchestrator_task_ref (subtask) → parent TaskID
+	// (the user-visible task ID). Unlike orchRefToPlan this is NOT deleted when
+	// a subtask completes, so late-arriving skill_invocation audit events (which
+	// are published in a background goroutine and can race subtask completion)
+	// can still resolve the correct SSE broadcast target.
+	// Entries are removed after a 60 s grace period in a background goroutine.
+	orchRefToParentTaskID sync.Map
+
 	onPlanComplete OnPlanCompleteFn
 	onPlanFailed   OnPlanFailedFn
 }
@@ -119,18 +127,78 @@ func New(
 	}
 }
 
+// UserIDForSubtask resolves user_id from a subtask's orchestrator_task_ref.
+// Returns ("", false) when the orchRef is not found in any active plan.
+// Used by the dispatcher to authorize vault.execute.request messages from agents.
+func (e *PlanExecutor) UserIDForSubtask(orchRef string) (string, bool) {
+	planIDVal, ok := e.orchRefToPlan.Load(orchRef)
+	if !ok {
+		return "", false
+	}
+	planID, _ := planIDVal.(string)
+	execVal, ok := e.activePlans.Load(planID)
+	if !ok {
+		return "", false
+	}
+	exec, _ := execVal.(*planExecution)
+	if exec == nil || exec.ts == nil {
+		return "", false
+	}
+	return exec.ts.UserID, true
+}
+
+// TaskStateForSubtask resolves the parent TaskState from a subtask's orchestrator_task_ref.
+// Returns (nil, false) when the orchRef is not found in any active plan.
+// Used by the dispatcher to resolve the top-level task_id and user_id for credential requests.
+func (e *PlanExecutor) TaskStateForSubtask(orchRef string) (*types.TaskState, bool) {
+	planIDVal, ok := e.orchRefToPlan.Load(orchRef)
+	if !ok {
+		return nil, false
+	}
+	planID, _ := planIDVal.(string)
+	execVal, ok := e.activePlans.Load(planID)
+	if !ok {
+		return nil, false
+	}
+	exec, _ := execVal.(*planExecution)
+	if exec == nil || exec.ts == nil {
+		return nil, false
+	}
+	return exec.ts, true
+}
+
 // ── Execute — entry point from Task Dispatcher ────────────────────────────────
 
 // Execute initializes all subtasks as PENDING and dispatches those with no dependencies.
 // Called by Task Dispatcher after plan validation succeeds (§17.3).
 // ctx carries the trace_id, task_id, and plan_id from the dispatcher.
 func (e *PlanExecutor) Execute(ctx context.Context, plan types.ExecutionPlan, ts *types.TaskState) error {
+	// The planner agent (LLM) is not a trusted source of unique IDs. In
+	// practice it routinely hallucinates plan_ids by copying example values
+	// from the prompt (e.g. "550e8400-e29b-41d4-a716-446655440000") or
+	// emitting non-UUID strings ("plan-pong-reply", "plan_001"). Because
+	// activePlans is keyed by plan_id, two concurrent tasks landing on the
+	// same plan_id would have the second Execute call overwrite the first
+	// in activePlans — silently orphaning the first plan's subtask routing
+	// (orchRefIndex) and causing its task_result to be dropped, which
+	// surfaced as a ~50% timeout rate at the io layer under concurrency.
+	// Always re-key the plan with a server-generated UUID; preserve the
+	// LLM-supplied id in logs for traceability.
+	llmPlanID := plan.PlanID
+	plan.PlanID = newUUID()
+
 	ctx = observability.WithModule(ctx, "plan_executor")
 	ctx = observability.WithPlanID(ctx, plan.PlanID)
 	ctx, planSpan := observability.StartSpan(ctx, "plan_execution")
 	observability.SpanSetTaskAttributes(planSpan, ts.TaskID, ts.UserID)
 	defer planSpan.End()
 	log := observability.LogFromContext(ctx)
+	if llmPlanID != "" && llmPlanID != plan.PlanID {
+		log.Info("plan_id re-keyed by orchestrator",
+			"llm_plan_id", llmPlanID,
+			"plan_id", plan.PlanID,
+		)
+	}
 
 	exec := &planExecution{
 		plan:         plan,
@@ -159,7 +227,9 @@ func (e *PlanExecutor) Execute(ctx context.Context, plan types.ExecutionPlan, ts
 
 	e.activePlans.Store(plan.PlanID, exec)
 
-	log.Info("plan execution initialized", "plan_id", plan.PlanID, "subtask_count", len(plan.Subtasks))
+	log.Info("plan execution initialized; dispatching subtasks with no dependencies first",
+		"plan_id", plan.PlanID,
+		"subtask_count", len(plan.Subtasks))
 
 	// Dispatch subtasks that have no dependencies.
 	e.dispatchReadySubtasks(ctx, exec)
@@ -172,10 +242,11 @@ func (e *PlanExecutor) Execute(ctx context.Context, plan types.ExecutionPlan, ts
 // pipes result to dependents, checks plan completion (§17.3).
 // ctx is rebuilt from the envelope's trace_id in the inbound handler.
 func (e *PlanExecutor) HandleSubtaskResult(ctx context.Context, result types.TaskResult) error {
+	log := observability.LogFromContext(observability.WithModule(ctx, "plan_executor"))
 	// Resolve which plan/subtask this result belongs to.
 	planIDVal, ok := e.orchRefToPlan.Load(result.OrchestratorTaskRef)
 	if !ok {
-		observability.LogFromContext(ctx).Debug("task result for unknown orchRef — stale or already completed",
+		log.Debug("dropped subtask result: orchestrator_task_ref is not registered with any plan (stale, duplicate, or already completed)",
 			"orchestrator_task_ref", result.OrchestratorTaskRef)
 		return nil // stale result; ignore
 	}
@@ -183,7 +254,16 @@ func (e *PlanExecutor) HandleSubtaskResult(ctx context.Context, result types.Tas
 
 	execVal, ok := e.activePlans.Load(planID)
 	if !ok {
-		return nil // plan already completed
+		// Plan already terminated (completed/failed/expired). The orchRef→plan
+		// mapping should have been removed at terminal-state cleanup; if we
+		// hit this branch it usually means the cleanup ordering allowed a
+		// late result through. Logged at INFO to make late-arriving results
+		// visible without alarming.
+		log.Info("subtask result arrived after plan already finished; dropping",
+			"orchestrator_task_ref", result.OrchestratorTaskRef,
+			"plan_id", planID,
+		)
+		return nil
 	}
 	exec := execVal.(*planExecution)
 
@@ -193,6 +273,17 @@ func (e *PlanExecutor) HandleSubtaskResult(ctx context.Context, result types.Tas
 	// Find the subtask by orchRef.
 	subtaskID, ok := exec.orchRefIndex[result.OrchestratorTaskRef]
 	if !ok {
+		// Reaching this branch indicates the orchRef→plan mapping pointed at
+		// a plan whose orchRefIndex no longer contains the orchRef. Prior to
+		// the orchestrator-side plan_id re-keying this was the dominant
+		// cause of silent task_result loss under concurrency (a duplicate
+		// hallucinated plan_id from the planner LLM caused a later plan to
+		// overwrite an earlier one in activePlans). Keep this WARN so any
+		// future regression is loud rather than silent.
+		log.Warn("subtask result orchRef is not in plan's index; preventing silent drop (likely planner returned a duplicate plan_id)",
+			"orchestrator_task_ref", result.OrchestratorTaskRef,
+			"plan_id", planID,
+		)
 		return nil
 	}
 	sub := exec.subtasks[subtaskID]
@@ -201,11 +292,28 @@ func (e *PlanExecutor) HandleSubtaskResult(ctx context.Context, result types.Tas
 	subCtx := observability.WithPlanID(ctx, planID)
 	subCtx = observability.WithSubtaskID(subCtx, subtaskID)
 	subCtx = observability.WithModule(subCtx, "plan_executor")
-	log := observability.LogFromContext(subCtx)
+	log = observability.LogFromContext(subCtx)
+
+	// Cross-tenant safety guard: drop the result if it claims to come from a
+	// different agent than the one this subtask was dispatched to. Without this,
+	// a buggy or compromised agent could publish a forged result against another
+	// task's orchestrator_task_ref and have it routed to the wrong user's SSE
+	// stream. The expected agent_id is set at dispatch time (capability response)
+	// and is server-side state, not agent-supplied. (MT-9 / #188)
+	if sub.AgentID != "" && result.AgentID != "" && sub.AgentID != result.AgentID {
+		log.Warn("dropped subtask result: agent_id mismatch (expected vs actual disagree); possible misrouting or forged result",
+			"expected_agent_id", sub.AgentID,
+			"actual_agent_id", result.AgentID,
+			"orchestrator_task_ref", result.OrchestratorTaskRef,
+		)
+		return nil
+	}
 
 	// Revoke credentials for this subtask's agent.
 	if err := e.policy.RevokeCredentials(subCtx, result.OrchestratorTaskRef); err != nil {
-		log.Error("subtask credential revocation failed", "error", err)
+		log.Error("could not revoke credentials for subtask agent; vault tokens may linger until ttl",
+			"agent_id", result.AgentID,
+			"error", err)
 	}
 
 	now := time.Now().UTC()
@@ -215,17 +323,28 @@ func (e *PlanExecutor) HandleSubtaskResult(ctx context.Context, result types.Tas
 		sub.Result = result.Result
 		sub.AgentID = result.AgentID
 		sub.CompletedAt = &now
-		log.Info("subtask completed")
+		log.Info("subtask completed by agent; piping result to dependents and unblocking next subtasks",
+			"agent_id", result.AgentID,
+			"result_preview", observability.PreviewHeadTail(string(result.Result), 15, 10))
 	} else {
 		sub.State = types.SubtaskStateFailed
 		sub.ErrorCode = result.ErrorCode
 		sub.CompletedAt = &now
-		log.Warn("subtask failed", "error_code", result.ErrorCode)
+		log.Warn("subtask failed by agent; blocking dependent subtasks in the plan",
+			"agent_id", result.AgentID,
+			"error_code", result.ErrorCode)
 	}
 	e.persistSubtaskState(sub, exec.ts.OrchestratorTaskRef, now)
 	atomic.AddInt32(&exec.dispatchedCount, -1)
 
 	e.orchRefToPlan.Delete(result.OrchestratorTaskRef)
+	// Keep orchRefToParentTaskID for 60 s so late-arriving skill_invocation
+	// audit events (published in background goroutines by agent-process) can
+	// still resolve the parent task ID for SSE toast routing.
+	go func(orchRef string) {
+		time.Sleep(60 * time.Second)
+		e.orchRefToParentTaskID.Delete(orchRef)
+	}(result.OrchestratorTaskRef)
 
 	if result.Success {
 		// Dispatch any subtasks that are now unblocked.
@@ -292,6 +411,7 @@ func (e *PlanExecutor) dispatchSubtask(ctx context.Context, exec *planExecution,
 	// Register reverse lookup before publishing (prevents lost results on race).
 	exec.orchRefIndex[orchRef] = sub.SubtaskID
 	e.orchRefToPlan.Store(orchRef, exec.plan.PlanID)
+	e.orchRefToParentTaskID.Store(orchRef, exec.ts.TaskID)
 
 	log.Info("dispatching subtask", "depends_on", sub.DependsOn, "orchRef", orchRef)
 
@@ -434,7 +554,10 @@ func (e *PlanExecutor) checkPlanCompletion(exec *planExecution) {
 
 	if !anyFailed && !anyBlocked {
 		// All subtasks completed successfully.
-		log.Info("plan completed", "subtask_count", len(exec.subtasks))
+		aggregatedBlob, _ := json.Marshal(completedResults)
+		log.Info("all subtasks completed successfully; handing aggregated results back to dispatcher",
+			"subtask_count", len(exec.subtasks),
+			"result_preview", observability.PreviewHeadTail(string(aggregatedBlob), 15, 10))
 		if e.onPlanComplete != nil {
 			e.onPlanComplete(exec.ts, completedResults)
 		}
@@ -499,6 +622,35 @@ func (e *PlanExecutor) collectPriorResults(exec *planExecution, deps []string) [
 		}
 	}
 	return results
+}
+
+// ParentTaskIDForOrchRef returns the parent TaskState.TaskID for a given
+// subtask orchRef, or "" if the orchRef is not currently tracked.
+// Used by the skill-activity handler to map the agent's internal orchRef
+// back to the frontend-visible task ID for SSE routing.
+//
+// Checks orchRefToPlan first (authoritative, deleted on subtask completion),
+// then falls back to orchRefToParentTaskID (kept for 60 s after completion)
+// so late-arriving skill_invocation audit events still resolve correctly.
+func (e *PlanExecutor) ParentTaskIDForOrchRef(orchRef string) string {
+	// Fast path: subtask still active.
+	planIDVal, ok := e.orchRefToPlan.Load(orchRef)
+	if ok {
+		planID, _ := planIDVal.(string)
+		execVal, ok := e.activePlans.Load(planID)
+		if ok {
+			if exec, _ := execVal.(*planExecution); exec != nil {
+				return exec.ts.TaskID
+			}
+		}
+	}
+	// Fallback: subtask already completed but grace-period cache still has it.
+	if v, ok := e.orchRefToParentTaskID.Load(orchRef); ok {
+		if taskID, _ := v.(string); taskID != "" {
+			return taskID
+		}
+	}
+	return ""
 }
 
 // ── Memory Persistence ────────────────────────────────────────────────────────

@@ -290,6 +290,7 @@ func (b *natsBroker) PreAuthorize(agentID, taskID, traceID string, skillDomains 
 			comms.PublishOptions{
 				MessageType:   comms.MsgTypeCredentialRequest,
 				CorrelationID: requestID,
+				TraceID:       traceID,
 			},
 			req,
 		); err != nil {

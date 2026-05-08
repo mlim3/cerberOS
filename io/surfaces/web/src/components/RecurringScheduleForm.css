@@ -1,0 +1,63 @@
+.recurring-schedule-form {
+  margin: 0 var(--sp-3) var(--sp-3);
+  padding: var(--sp-3);
+  border-radius: var(--radius-md);
+  border: var(--border);
+  background: var(--bg-secondary);
+  box-shadow: var(--shadow-elevated);
+}
+
+.recurring-schedule-form-header {
+  margin-bottom: var(--sp-3);
+}
+
+.recurring-schedule-form-title {
+  margin: 0 0 var(--sp-1);
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.recurring-schedule-form-sub {
+  margin: 0;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+
+.recurring-schedule-inner {
+  gap: 0.65rem;
+}
+
+.recurring-schedule-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  align-items: center;
+  margin-top: var(--sp-2);
+}
+
+.recurring-schedule-cancel {
+  padding: 0.45rem 0.75rem;
+  font-size: 0.8rem;
+  font-weight: 500;
+  border-radius: var(--radius-sm);
+  border: var(--border-subtle);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.recurring-schedule-cancel:hover:not(:disabled) {
+  color: var(--text-primary);
+  border-color: var(--accent-border);
+}
+
+.recurring-schedule-cancel:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.recurring-schedule-submit {
+  flex: 1;
+  min-width: 140px;
+}

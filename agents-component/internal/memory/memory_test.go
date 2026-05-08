@@ -23,7 +23,7 @@ func TestWriteAndRead(t *testing.T) {
 		t.Fatalf("Write: %v", err)
 	}
 
-	records, err := c.Read("a1", "result")
+	records, err := c.Read("a1", "result", "")
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestReadFiltersByContextTag(t *testing.T) {
 		Tags: map[string]string{"context": "beta"},
 	})
 
-	records, _ := c.Read("a1", "alpha")
+	records, _ := c.Read("a1", "alpha", "")
 	if len(records) != 1 {
 		t.Errorf("expected 1 filtered record, got %d", len(records))
 	}

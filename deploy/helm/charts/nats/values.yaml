@@ -18,7 +18,7 @@ service:
   clientNodePort: 30222
 
 storage:
-  jetstreamSize: 1Gi
+  jetstreamSize: 80Gi
   storageClass: ""
 
 resources:

@@ -16,10 +16,16 @@ type NATSClient interface {
 	// Used by Communications Gateway for all outbound messages.
 	Publish(subject string, data []byte) error
 
-	// Subscribe registers a durable JetStream consumer on the given subject.
-	// handler is called for each message. The implementation ACKs on success,
-	// NAKs on handler error. Dead-letters after max_redelivery (§11.1).
+	// Subscribe registers a core NATS subscription on the given subject.
+	// Delivers messages in real-time only; no historical replay on restart.
 	Subscribe(subject string, handler MessageHandler) error
+
+	// SubscribeDurable subscribes to a subject using a JetStream push consumer
+	// with DeliverAll policy, replaying all historical messages from the stream
+	// on every startup before delivering new ones. This ensures the in-process
+	// agentStore is rebuilt from the full write history after any restart.
+	// Falls back to core NATS subscribe when JetStream is unavailable.
+	SubscribeDurable(subject, consumer string, handler MessageHandler) error
 
 	// IsConnected returns true if the NATS connection is active.
 	// Used by the health check loop (§12.1).

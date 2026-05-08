@@ -303,6 +303,15 @@ func (m *Manager) terminateTask(ctx context.Context, ts *types.TaskState, errorC
 		"error_code", errorCode,
 	)
 
+	// Another path may have already finished the task (e.g. decomposition timeout vs global task timeout).
+	if types.IsTerminalState(ts.State) {
+		logger.Info("terminateTask skipped — task already terminal",
+			"task_id", ts.TaskID,
+			"current_state", ts.State,
+		)
+		return
+	}
+
 	// ── Step 1: Revoke credentials (NON-OPTIONAL, §FR-SH-04, §13.3) ───────
 	if err := m.policy.RevokeCredentials(ctx, ts.OrchestratorTaskRef); err != nil {
 		logger.Error("REVOCATION_FAILED — scheduling retry",
@@ -339,9 +348,11 @@ func (m *Manager) terminateTask(ctx context.Context, ts *types.TaskState, errorC
 	// ── Step 4: Notify User I/O via Gateway ───────────────────────────────
 	userMessage := userMessageForErrorCode(errorCode)
 	if err := m.gateway.PublishError(ctx, ts.CallbackTopic, types.ErrorResponse{
-		TaskID:      ts.TaskID,
-		ErrorCode:   errorCode,
-		UserMessage: userMessage,
+		TaskID:         ts.TaskID,
+		UserID:         ts.UserID,
+		ConversationID: ts.ConversationID,
+		ErrorCode:      errorCode,
+		UserMessage:    userMessage,
 	}); err != nil {
 		logger.Warn("failed to publish error to User I/O",
 			"task_id", ts.TaskID,

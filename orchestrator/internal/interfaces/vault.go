@@ -1,6 +1,10 @@
 package interfaces
 
-import "github.com/mlim3/cerberOS/orchestrator/internal/types"
+import (
+	"context"
+
+	"github.com/mlim3/cerberOS/orchestrator/internal/types"
+)
 
 // VaultClient defines how the Policy Enforcer communicates with OpenBao (§11.3).
 // The real implementation uses the OpenBao HTTP API.
@@ -28,4 +32,9 @@ type VaultClient interface {
 	// HealthCheck probes Vault reachability (GET /v1/sys/health).
 	// Used by the health monitoring loop every 10 seconds (§12.1).
 	HealthCheck() error
+
+	// Execute forwards a vault.execute.request to the Vault engine.
+	// userID is resolved by the Orchestrator from task state — never taken from the agent.
+	// Returns the operation result; the raw credential never leaves the Vault.
+	Execute(ctx context.Context, userID string, req types.VaultExecuteRequest) (types.VaultExecuteResult, error)
 }

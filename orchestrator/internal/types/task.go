@@ -98,11 +98,12 @@ const (
 // Defines the ceiling for all credential requests during task execution (§13.2).
 
 type PolicyScope struct {
-	Domains   []string          `json:"domains"`
-	TokenRef  string            `json:"token_ref"` // Vault token accessor — NOT the token itself
-	IssuedAt  time.Time         `json:"issued_at"`
-	ExpiresAt time.Time         `json:"expires_at"`
-	Metadata  map[string]string `json:"metadata"`
+	Domains             []string          `json:"domains"`
+	TokenRef            string            `json:"token_ref"` // Vault token accessor — NOT the token itself
+	IssuedAt            time.Time         `json:"issued_at"`
+	ExpiresAt           time.Time         `json:"expires_at"`
+	Metadata            map[string]string `json:"metadata"`
+	AvailableCredTypes  []string          `json:"available_cred_types,omitempty"` // credential types this user has registered in the Vault
 }
 
 // ─── StateEvent ───────────────────────────────────────────────────────────────
