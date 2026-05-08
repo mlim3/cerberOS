@@ -462,13 +462,13 @@ app.post('/api/conversations', async (c) => {
   })
   if (!conversation) {
     logFromContext(c, 'error', 'http', 'memory rejected conversation creation; returning 502 to ui', {
-      user_id: effectiveUserId,
+      user_id: userId,
     })
     return c.json({ error: 'Failed to create conversation' }, 502)
   }
   c.set('conversationId', conversation.conversationId)
   logFromContext(c, 'info', 'http', 'created new conversation thread for user', {
-    user_id: effectiveUserId,
+    user_id: userId,
     title_preview: previewWords(conversation.title ?? ''),
   })
   return c.json({
