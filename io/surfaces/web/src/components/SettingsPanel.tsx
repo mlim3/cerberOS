@@ -1,7 +1,6 @@
 import './SettingsPanel.css'
 
 export interface UISettings {
-  demoMode: boolean
   showStreamingProgress: boolean
   highlightAwaitingFeedback: boolean
   showHeartbeatSeconds: boolean
@@ -12,7 +11,6 @@ export interface UISettings {
 }
 
 export const defaultUISettings: UISettings = {
-  demoMode: true,
   showStreamingProgress: true,
   highlightAwaitingFeedback: true,
   showHeartbeatSeconds: true,
@@ -48,21 +46,8 @@ function SettingsPanel({ settings, onSettingsChange, onClose }: SettingsPanelPro
 
         <div className="settings-sections">
           <section className="settings-section">
-            <h3 className="settings-section-title">Demo Behavior</h3>
+            <h3 className="settings-section-title">Streaming</h3>
             <div className="settings-group">
-              <label className="settings-toggle">
-                <span className="toggle-info">
-                  <span className="toggle-label">Demo mode: scripted conversations</span>
-                  <span className="toggle-description">Show suggestion chips for quick demo responses</span>
-                </span>
-                <input
-                  type="checkbox"
-                  checked={settings.demoMode}
-                  onChange={e => updateSetting('demoMode', e.target.checked)}
-                />
-                <span className="toggle-switch"></span>
-              </label>
-
               <label className="settings-toggle">
                 <span className="toggle-info">
                   <span className="toggle-label">Show streaming progress</span>
