@@ -558,6 +558,8 @@ function App() {
         const newChip: ToolCallInfo = { toolUseId, toolName, status: 'running' }
         setTasks(prev => {
           const taskIdx = prev.findIndex(t => t.currentTaskId === taskId)
+          // Temporary diagnostic — remove after #166 verification
+          console.log('[tool_call_started]', { taskId, messageId, toolName, taskIdx, taskCount: prev.length, currentTaskIds: prev.map(t => t.currentTaskId) })
           if (taskIdx === -1) return prev
           const task = prev[taskIdx]
           const msgIdx = task.messages.findIndex(m => m.id === messageId)
@@ -582,6 +584,8 @@ function App() {
         const { taskId, toolUseId, status, durationMs } = ev.payload
         setTasks(prev => {
           const taskIdx = prev.findIndex(t => t.currentTaskId === taskId)
+          // Temporary diagnostic — remove after #166 verification
+          console.log('[tool_call_completed]', { taskId, toolUseId, status, durationMs, taskIdx })
           if (taskIdx === -1) return prev
           const task = prev[taskIdx]
           let found = false
