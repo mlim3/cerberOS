@@ -150,6 +150,7 @@ export async function submitCredential(
       headers: {
         'Content-Type': 'application/json',
         'X-Surface-Key': 'dev',
+        'X-Active-User': params.userId,
       },
       body: JSON.stringify({
         taskId: params.taskId,
@@ -178,23 +179,36 @@ export async function* streamOrchestratorReply(
   userContent: string,
   conversationHistory: OrchestratorMessage[],
 ): AsyncGenerator<string, void, unknown> {
-  const res = await fetch(buildApiUrl('/api/chat'), {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Surface-Key': 'dev',
-    },
-    body: JSON.stringify({
-      taskId,
-      userId,
-      content: userContent,
-      conversationHistory,
-      conversationId,
-    }),
-  })
+  let res: Response
+  try {
+    res = await fetch(buildApiUrl('/api/chat'), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Surface-Key': 'dev',
+        'X-Active-User': userId,
+      },
+      body: JSON.stringify({
+        taskId,
+        userId,
+        content: userContent,
+        conversationHistory,
+        conversationId,
+      }),
+    })
+  } catch (err) {
+    yield `Network error reaching /api/chat: ${String(err)}`
+    return
+  }
 
   if (!res.ok || !res.body) {
-    yield `Error: ${res.status} ${res.statusText}`
+    let detail = ''
+    try {
+      detail = await res.text()
+    } catch {
+      detail = ''
+    }
+    yield `Error: ${res.status} ${res.statusText}${detail ? ` — ${detail.slice(0, 400)}` : ''}`
     return
   }
 

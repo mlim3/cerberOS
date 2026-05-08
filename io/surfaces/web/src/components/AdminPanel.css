@@ -1,0 +1,238 @@
+.admin-panel-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 24px;
+}
+
+.admin-panel-container {
+  width: 100%;
+  max-width: 640px;
+  max-height: 90vh;
+  overflow-y: auto;
+  background: var(--surface, #16181d);
+  border: 1px solid var(--border, #2a2d33);
+  border-radius: 12px;
+  padding: 24px;
+  color: var(--text, #e6e8eb);
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.5);
+}
+
+.admin-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid var(--border, #2a2d33);
+  padding-bottom: 16px;
+  margin-bottom: 16px;
+}
+
+.admin-panel-header h2 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.admin-close-btn {
+  background: transparent;
+  border: none;
+  color: var(--text, #e6e8eb);
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 4px 8px;
+}
+
+.admin-sections {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.admin-section h3 {
+  margin: 0 0 8px 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.admin-help {
+  margin: 0 0 12px 0;
+  font-size: 13px;
+  color: var(--text-secondary, #9ba1a8);
+  line-height: 1.5;
+}
+
+.admin-help code {
+  background: var(--background, #0e0f12);
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 12px;
+}
+
+.admin-help a {
+  color: var(--accent, #6aa9ff);
+  text-decoration: none;
+}
+
+.admin-help a:hover {
+  text-decoration: underline;
+}
+
+.admin-gmail-current {
+  margin-bottom: 12px;
+}
+
+.admin-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.admin-form-create-skill {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px dashed var(--border, #2a2d33);
+}
+
+.admin-row {
+  display: grid;
+  grid-template-columns: 100px 1fr;
+  align-items: center;
+  gap: 12px;
+}
+
+.admin-row label {
+  font-size: 13px;
+  color: var(--text-secondary, #9ba1a8);
+}
+
+.admin-row input,
+.admin-row select {
+  padding: 8px 10px;
+  background: var(--background, #0e0f12);
+  border: 1px solid var(--border, #2a2d33);
+  border-radius: 6px;
+  color: var(--text, #e6e8eb);
+  font-size: 13px;
+}
+
+.admin-row input:focus,
+.admin-row select:focus {
+  outline: none;
+  border-color: var(--accent, #5b8def);
+}
+
+.admin-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-secondary, #9ba1a8);
+  cursor: pointer;
+}
+
+.admin-button-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.admin-submit {
+  padding: 8px 16px;
+  background: var(--accent, #5b8def);
+  color: white;
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  align-self: flex-start;
+}
+
+.admin-secondary {
+  padding: 8px 16px;
+  background: transparent;
+  color: var(--accent, #5b8def);
+  border: 1px solid var(--accent, #5b8def);
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.admin-submit:disabled,
+.admin-secondary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.admin-status-ok {
+  font-size: 12px;
+  color: #4ade80;
+}
+
+.admin-status-pending {
+  font-size: 12px;
+  color: var(--text-secondary, #9ba1a8);
+}
+
+.admin-status-error {
+  font-size: 12px;
+  color: #f87171;
+}
+
+.admin-user-list {
+  list-style: none;
+  margin: 0 0 16px 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.admin-user-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--background, #0e0f12);
+  border: 1px solid var(--border, #2a2d33);
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.admin-role-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.admin-role-root {
+  background: rgba(168, 85, 247, 0.18);
+  color: #c4b5fd;
+}
+
+.admin-role-manager {
+  background: rgba(91, 141, 239, 0.18);
+  color: #93c5fd;
+}
+
+.admin-role-user {
+  background: rgba(148, 163, 184, 0.18);
+  color: #cbd5e1;
+}
+
+.admin-user-email {
+  flex: 1;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 12px;
+}

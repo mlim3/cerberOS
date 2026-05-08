@@ -177,7 +177,7 @@ domains:
 
       - name: vault_comms_send
         label: 'Vault Comms Send'
-        description: 'Send a formatted message to an authenticated channel (email, Slack, webhook) via the Vault. Compose the message first with comms_format. Do NOT use for channels that require no credentials. Do NOT include credential values in any parameter.'
+        description: 'Send a message to a PRE-REGISTERED named channel (Slack, webhook) via the Vault. "channel" is a logical id configured in the Vault (e.g. "ops-alerts"), NOT an email address. To email a specific address use gmail_send. Do NOT include credentials.'
         implementation: vault_comms_send
         required_credential_types: [comms_api_key]
         timeout_seconds: 35
@@ -185,7 +185,7 @@ domains:
           - name: channel
             type: string
             required: true
-            description: 'Logical channel identifier configured in the Vault (e.g. "ops-alerts", "customer-support"). Do NOT pass raw URLs, API keys, or webhook URLs.'
+            description: 'Logical channel identifier configured in the Vault (e.g. "ops-alerts", "customer-support"). Do NOT pass raw URLs, API keys, webhook URLs, or email addresses — for raw email addresses use gmail_send.'
           - name: message
             type: string
             required: true
@@ -194,6 +194,63 @@ domains:
             type: string
             required: false
             description: 'Subject line for channels that support it (e.g. email). Omit for channels that do not use subjects (e.g. Slack).'
+
+      # FP-Stefan: Gmail send via SMTP + App Password (no OAuth). Manager
+      # configures one shared demo Gmail account in the Admin UI; the credential
+      # is stored in OpenBao under `gmail_app_password` as a JSON
+      # {email, app_password} blob. Lives in the `comms` domain so the planner
+      # routes "email X to <address>" tasks here naturally.
+      - name: gmail_send
+        label: 'Gmail Send'
+        description: 'Send a plain-text email via SMTP through the manager-configured Gmail account. Use whenever the user provides a raw email address (e.g. alice@example.com). Prefer this over vault_comms_send for direct-to-recipient email. Do NOT include the app password — it lives in the Vault.'
+        implementation: vault_gmail_send
+        required_credential_types: [gmail_app_password]
+        timeout_seconds: 40
+        parameters:
+          - name: to
+            type: string
+            required: true
+            description: 'Recipient email address (one address only).'
+          - name: subject
+            type: string
+            required: true
+            description: 'Subject line. Will be sanitized of newline characters.'
+          - name: body
+            type: string
+            required: true
+            description: 'Plain-text body content (UTF-8).'
+
+      - name: calendar_create_event
+        label: 'Calendar Invite (Gmail)'
+        description: "Create a calendar event by sending a Gmail invite (iCalendar attachment). Recipient gets a one-click 'Add to Calendar' button in Gmail. If 'to' is omitted, the invite goes to the configured demo account. Do NOT use for non-event emails — use gmail_send."
+        implementation: vault_gmail_calendar_invite
+        required_credential_types: [gmail_app_password]
+        timeout_seconds: 40
+        parameters:
+          - name: title
+            type: string
+            required: true
+            description: 'Event title / summary line.'
+          - name: start
+            type: string
+            required: true
+            description: "ISO 8601 start datetime (e.g. '2026-06-01T10:00:00-07:00' or '2026-06-01T17:00:00Z')."
+          - name: end
+            type: string
+            required: true
+            description: "ISO 8601 end datetime, in the same format as 'start'."
+          - name: description
+            type: string
+            required: false
+            description: 'Optional event body / agenda text.'
+          - name: location
+            type: string
+            required: false
+            description: "Optional location string (e.g. address or 'Zoom')."
+          - name: to
+            type: string
+            required: false
+            description: 'Optional recipient email address. If omitted, invite is sent to the configured demo Gmail account.'
 
   - name: storage
     commands:
@@ -384,6 +441,41 @@ domains:
             type: string
             required: false
             description: 'Request body as a JSON-encoded string. Only used for POST and PATCH. Omit for GET and DELETE.'
+
+  - name: local_files
+    commands:
+      - name: local_file_write
+        label: 'Local File Write'
+        description: "Write text to a file in the user's local data directory (e.g. ~/notes.txt). Use mode='append' or 'overwrite'. Do NOT use for binary data. Do NOT use to write outside the user's data directory — paths are sandboxed."
+        implementation: local_file_write
+        required_credential_types: []
+        timeout_seconds: 15
+        parameters:
+          - name: path
+            type: string
+            required: true
+            description: "Relative path within the user's data directory (e.g. 'notes.txt'). The prefix '~/' is treated as the user's home dir. Absolute paths outside the sandbox are rejected."
+          - name: content
+            type: string
+            required: true
+            description: 'Text content to write. Will be UTF-8 encoded.'
+          - name: mode
+            type: string
+            required: false
+            description: "Write mode: 'append' (default — adds to file end with newline if absent) or 'overwrite' (replaces file contents)."
+            enum: [append, overwrite]
+
+      - name: local_file_read
+        label: 'Local File Read'
+        description: "Read text from a file in the user's local data directory. Returns up to 256KB; longer files are truncated. Do NOT use for binary data. Do NOT use to read outside the user's data directory — paths are sandboxed."
+        implementation: local_file_read
+        required_credential_types: []
+        timeout_seconds: 10
+        parameters:
+          - name: path
+            type: string
+            required: true
+            description: "Relative path within the user's data directory. The prefix '~/' is treated as the user's home dir."
 
   - name: general
     commands: []

@@ -212,7 +212,10 @@ func attemptSkillSynthesis(
 		return // LLM found nothing worth capturing
 	}
 
-	if err := sl.PersistSkill(spawnCtx.SkillDomain, node); err != nil {
+	// Tag synthesized skills with the owning user so future hydration can
+	// scope them per-user. Default scope is "user"; explicit global imports
+	// (Superpowers via the importer) carry scope="global" instead.
+	if err := sl.PersistSkillWithScope(spawnCtx.SkillDomain, node, spawnCtx.UserContextID, "user"); err != nil {
 		log.Warn("skill synthesis: persist failed",
 			"skill_name", node.Name, "domain", spawnCtx.SkillDomain, "error", err)
 		return

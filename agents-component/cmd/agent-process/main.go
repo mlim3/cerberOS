@@ -95,6 +95,21 @@ type SpawnContext struct {
 	ConversationID    string                         `json:"conversation_id,omitempty"`    // non-empty when this task continues a prior conversation
 	PriorTurns        []anthropic.MessageParam       `json:"prior_turns,omitempty"`        // reconstructed history from factory; nil for standalone tasks
 	SynthesizedSkills []types.SynthesizedSkillRecord `json:"synthesized_skills,omitempty"` // skills created by prior synthesis; each gets a dynamic SkillTool with LLM-based execution
+
+	// OriginalUserMessage is the user's literal input as typed in the chat surface.
+	// The orchestrator carries it through plan/subtask metadata so the user-facing
+	// composer agent can persist a CLEAN conversation_snapshot pair
+	// [user: original_text, assistant: final_visible_reply] instead of the polluted
+	// "Execute this subtask. Action: ..." scaffolding the orchestrator generates
+	// per-subtask. Empty for non-conversational task flows.
+	OriginalUserMessage string `json:"original_user_message,omitempty"`
+
+	// UserFacing is true ONLY for the agent that produces the final user-visible
+	// reply for this conversation turn (typically the planner-designated leaf or
+	// composer subtask). Only this agent calls WriteConversationSnapshot, so
+	// non-user-facing helpers (planner, intermediate executors) cannot poison the
+	// conversation history with their orchestrator-generated user instructions.
+	UserFacing bool `json:"user_facing,omitempty"`
 }
 
 // TaskOutput is the result written to stdout when the task completes or fails.

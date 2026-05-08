@@ -14,6 +14,8 @@ import CredentialModal from './components/CredentialModal'
 import PlanPreviewCard from './components/PlanPreviewCard'
 import SettingsButton from './components/SettingsButton'
 import UserSwitcher from './components/UserSwitcher'
+import FirstRunSetup from './components/FirstRunSetup'
+import AdminPanel from './components/AdminPanel'
 import { getActiveUserId } from './lib/active-user'
 import SettingsPanel, { defaultUISettings } from './components/SettingsPanel'
 import type { UISettings } from './components/SettingsPanel'
@@ -348,12 +350,58 @@ function deriveConversationTitle(task: Pick<UITask, 'title' | 'messages'>, userC
   return task.title
 }
 
+type BootstrapState = 'checking' | 'needs-root' | 'ready'
+
 function App() {
+  // First-run gate: ask the API whether a root exists. Until we know, render
+  // a quiet loading shell so we don't kick off SSE / chat fetches against a
+  // stale identity. Once a root exists we pass through to the normal app;
+  // otherwise FirstRunSetup is rendered exclusively until signup completes.
+  const [bootstrapState, setBootstrapState] = useState<BootstrapState>(
+    DEMO_MODE ? 'ready' : 'checking',
+  )
+  useEffect(() => {
+    if (DEMO_MODE) return
+    let cancelled = false
+    fetch(buildApiUrl('/api/users'))
+      .then((r) => (r.ok ? r.json() : { root_count: 0 }))
+      .then((data: { root_count?: number }) => {
+        if (cancelled) return
+        setBootstrapState((data.root_count ?? 0) > 0 ? 'ready' : 'needs-root')
+      })
+      .catch(() => {
+        if (!cancelled) setBootstrapState('needs-root')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   const [tasks, setTasks] = useState<UITask[]>(DEMO_MODE ? mockTasks : [])
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(
     DEMO_MODE ? mockTasks[0].id : null
   )
   const [showSettings, setShowSettings] = useState(false)
+  const [showAdmin, setShowAdmin] = useState(false)
+  // Active user's role, loaded once at mount. Used to gate the Admin button.
+  const [activeRole, setActiveRole] = useState<'root' | 'manager' | 'user' | null>(null)
+  useEffect(() => {
+    if (DEMO_MODE) return
+    let cancelled = false
+    fetch(buildApiUrl('/api/users'))
+      .then((r) => (r.ok ? r.json() : { users: [] }))
+      .then((data: { users?: Array<{ id: string; role?: 'root' | 'manager' | 'user' }> }) => {
+        if (cancelled) return
+        const me = data.users?.find((u) => u.id === UI_USER_ID)
+        setActiveRole(me?.role ?? null)
+      })
+      .catch(() => {
+        if (!cancelled) setActiveRole(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
   const [sidebarPrimaryTab, setSidebarPrimaryTab] = useState<SidebarPrimaryTab>('tasks')
   const [userCronJobs, setUserCronJobs] = useState<UserCronJob[]>([])
   const [userCronListError, setUserCronListError] = useState<string | null>(null)
@@ -786,6 +834,7 @@ function App() {
 
       const conversationTitle = deriveConversationTitle(task, userContent)
       let activeTaskId = task.currentTaskId
+      let activeConversationId = conversationId
       try {
         const res = await fetch(buildApiUrl('/api/tasks'), {
           method: 'POST',
@@ -798,12 +847,22 @@ function App() {
           }),
         })
         if (res.ok) {
-          const data = await res.json() as { taskId?: string }
-          if (data.taskId) {
-            activeTaskId = data.taskId
+          const data = await res.json() as { taskId?: string; conversationId?: string }
+          const newTaskId = data.taskId
+          const newCid = typeof data.conversationId === 'string' ? data.conversationId : undefined
+          if (newTaskId) activeTaskId = newTaskId
+          if (newCid) activeConversationId = newCid
+          if (newTaskId || newCid) {
             setTasks(prev =>
-              prev.map(t => (t.id === conversationId ? { ...t, currentTaskId: activeTaskId } : t)),
+              prev.map(t =>
+                t.id === conversationId
+                  ? { ...t, id: newCid ?? t.id, currentTaskId: newTaskId ?? t.currentTaskId }
+                  : t,
+              ),
             )
+            if (newCid && newCid !== conversationId) {
+              setSelectedTaskId(prev => (prev === conversationId ? newCid : prev))
+            }
           }
         }
       } catch {
@@ -817,7 +876,7 @@ function App() {
       }
       setTasks(prev =>
         prev.map(t =>
-          t.id === conversationId
+          t.id === activeConversationId
             ? { ...t, title: conversationTitle, messages: [...t.messages, userMsg] }
             : t
         )
@@ -827,13 +886,13 @@ function App() {
       if (settings.showActivityLog) {
         addLogEntryRef.current?.({
           type: 'user_message',
-          taskId: activeTaskId ?? conversationId,
+          taskId: activeTaskId ?? activeConversationId,
           taskTitle: task.title.slice(0, 20),
           message: `User: "${userContent.slice(0, 50)}${userContent.length > 50 ? '…' : ''}"`,
         })
       }
 
-      setStreamingForTaskId(conversationId)
+      setStreamingForTaskId(activeConversationId)
       setStreamingContent('')
       const history = task.messages.map(m => ({
         role: m.role as 'user' | 'assistant',
@@ -844,7 +903,7 @@ function App() {
         if (!activeTaskId) return
         for await (const chunk of streamOrchestratorReply(
           activeTaskId,
-          conversationId,
+          activeConversationId,
           UI_USER_ID,
           userContent,
           [...history, { role: 'user', content: userContent }]
@@ -864,14 +923,14 @@ function App() {
           }
           setTasks(prev =>
             prev.map(t =>
-              t.id === conversationId ? { ...t, messages: [...t.messages, agentMsg] } : t
+              t.id === activeConversationId ? { ...t, messages: [...t.messages, agentMsg] } : t
             )
           )
 
           if (settings.showActivityLog) {
             addLogEntryRef.current?.({
               type: 'agent_response',
-              taskId: activeTaskId ?? conversationId,
+              taskId: activeTaskId ?? activeConversationId,
               taskTitle: task.title.slice(0, 20),
               message: `Agent replied (${full.length} chars)`,
             })
@@ -1573,6 +1632,7 @@ function App() {
 
       const conversationTitle = deriveConversationTitle(task, userContent)
       let activeTaskId = task.currentTaskId
+      let activeConversationId = conversationId
       try {
         const res = await fetch(buildApiUrl('/api/tasks'), {
           method: 'POST',
@@ -1585,12 +1645,22 @@ function App() {
           }),
         })
         if (res.ok) {
-          const data = await res.json() as { taskId?: string }
-          if (data.taskId) {
-            activeTaskId = data.taskId
+          const data = await res.json() as { taskId?: string; conversationId?: string }
+          const newTaskId = data.taskId
+          const newCid = typeof data.conversationId === 'string' ? data.conversationId : undefined
+          if (newTaskId) activeTaskId = newTaskId
+          if (newCid) activeConversationId = newCid
+          if (newTaskId || newCid) {
             setTasks(prev =>
-              prev.map(t => (t.id === conversationId ? { ...t, currentTaskId: activeTaskId } : t)),
+              prev.map(t =>
+                t.id === conversationId
+                  ? { ...t, id: newCid ?? t.id, currentTaskId: newTaskId ?? t.currentTaskId }
+                  : t,
+              ),
             )
+            if (newCid && newCid !== conversationId) {
+              setSelectedTaskId(prev => (prev === conversationId ? newCid : prev))
+            }
           }
         }
       } catch {
@@ -1604,7 +1674,7 @@ function App() {
       }
       setTasks(prev =>
         prev.map(t =>
-          t.id === conversationId
+          t.id === activeConversationId
             ? { ...t, title: conversationTitle, messages: [...t.messages, userMsg] }
             : t
         )
@@ -1613,13 +1683,13 @@ function App() {
       if (uiSettings.showActivityLog) {
         addLogEntry({
           type: 'user_message',
-          taskId: activeTaskId ?? conversationId,
+          taskId: activeTaskId ?? activeConversationId,
           taskTitle: task.title.slice(0, 20),
           message: `User: "${userContent.slice(0, 50)}${userContent.length > 50 ? '…' : ''}"`,
         })
       }
 
-      setStreamingForTaskId(conversationId)
+      setStreamingForTaskId(activeConversationId)
       setStreamingContent('')
       const history = task.messages.map(m => ({
         role: m.role as 'user' | 'assistant',
@@ -1630,7 +1700,7 @@ function App() {
         if (!activeTaskId) return
         for await (const chunk of streamOrchestratorReply(
           activeTaskId,
-          conversationId,
+          activeConversationId,
           UI_USER_ID,
           userContent,
           [...history, { role: 'user', content: userContent }]
@@ -1650,14 +1720,14 @@ function App() {
           }
           setTasks(prev =>
             prev.map(t =>
-              t.id === conversationId ? { ...t, messages: [...t.messages, agentMsg] } : t
+              t.id === activeConversationId ? { ...t, messages: [...t.messages, agentMsg] } : t
             )
           )
 
           if (uiSettings.showActivityLog) {
             addLogEntry({
               type: 'agent_response',
-              taskId: activeTaskId ?? conversationId,
+              taskId: activeTaskId ?? activeConversationId,
               taskTitle: task.title.slice(0, 20),
               message: `Agent replied (${full.length} chars)`,
             })
@@ -1839,6 +1909,13 @@ function App() {
     setSelectedTaskId(cid)
   }, [])
 
+  if (bootstrapState === 'checking') {
+    return <div className="app-bootstrap-checking" />
+  }
+  if (bootstrapState === 'needs-root') {
+    return <FirstRunSetup onComplete={() => window.location.reload()} />
+  }
+
   return (
     <div className="app">
       <TaskSidebar
@@ -1895,11 +1972,23 @@ function App() {
             )}
           </div>
           <UserSwitcher />
+          {(activeRole === 'manager' || activeRole === 'root') && (
+            <button
+              type="button"
+              className="admin-trigger-btn"
+              onClick={() => setShowAdmin(true)}
+              title="Admin (manager/root only)"
+              aria-label="Open admin panel"
+            >
+              Admin
+            </button>
+          )}
           <SettingsButton
             isOpen={showSettings}
             onToggle={toggleSettings}
           />
         </header>
+        {showAdmin && <AdminPanel onClose={() => setShowAdmin(false)} />}
         {selectedTask ? (
           <>
             {selectedPlanPreview && (

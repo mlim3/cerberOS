@@ -18,6 +18,11 @@ type Repository interface {
 	WithTx(ctx context.Context, fn func(q *Queries) error) error
 	UserExists(ctx context.Context, userID pgtype.UUID) (bool, error)
 	ListUsers(ctx context.Context) ([]UserRecord, error)
+	CreateUser(ctx context.Context, id pgtype.UUID, email, role string) (UserRecord, error)
+	GetUserByEmail(ctx context.Context, email string) (UserRecord, bool, error)
+	GetUser(ctx context.Context, userID pgtype.UUID) (UserRecord, bool, error)
+	UpdateUserRole(ctx context.Context, userID pgtype.UUID, role string) error
+	CountRoots(ctx context.Context) (int, error)
 	QueryChunksBySimilarity(ctx context.Context, userID pgtype.UUID, embedding pgvector.Vector, limit int32) ([]PersonalInfoChunkMatch, error)
 	ListFacts(ctx context.Context, userID pgtype.UUID, includeArchived bool) ([]FactRecord, error)
 	ArchiveFact(ctx context.Context, userID, factID pgtype.UUID, reason string) error
@@ -29,6 +34,7 @@ type Repository interface {
 type UserRecord struct {
 	ID    pgtype.UUID
 	Email string
+	Role  string
 }
 
 type PersonalInfoChunkMatch struct {
@@ -83,7 +89,7 @@ func (r *BaseRepository) UserExists(ctx context.Context, userID pgtype.UUID) (bo
 }
 
 func (r *BaseRepository) ListUsers(ctx context.Context) ([]UserRecord, error) {
-	const q = `SELECT id, email FROM identity_schema.users ORDER BY created_at ASC`
+	const q = `SELECT id, email, COALESCE(role, 'user') FROM identity_schema.users ORDER BY created_at ASC`
 	rows, err := r.Pool.Query(ctx, q)
 	if err != nil {
 		return nil, fmt.Errorf("query users: %w", err)
@@ -92,7 +98,7 @@ func (r *BaseRepository) ListUsers(ctx context.Context) ([]UserRecord, error) {
 	users := make([]UserRecord, 0)
 	for rows.Next() {
 		var u UserRecord
-		if err := rows.Scan(&u.ID, &u.Email); err != nil {
+		if err := rows.Scan(&u.ID, &u.Email, &u.Role); err != nil {
 			return nil, fmt.Errorf("scan user: %w", err)
 		}
 		users = append(users, u)
@@ -101,6 +107,89 @@ func (r *BaseRepository) ListUsers(ctx context.Context) ([]UserRecord, error) {
 		return nil, fmt.Errorf("iterate users: %w", err)
 	}
 	return users, nil
+}
+
+// CreateUser inserts a user row idempotently on email. On conflict the existing
+// row is returned unchanged (callers that need a stricter contract should
+// check the returned record's ID before assuming a fresh insert).
+func (r *BaseRepository) CreateUser(ctx context.Context, id pgtype.UUID, email, role string) (UserRecord, error) {
+	if role == "" {
+		role = "user"
+	}
+	switch role {
+	case "root", "manager", "user":
+	default:
+		return UserRecord{}, fmt.Errorf("invalid role %q (allowed: root, manager, user)", role)
+	}
+
+	// ON CONFLICT (id) — not (email) — so the seed dev-default UUID
+	// (00000000-0000-0000-0000-000000000001) can be claimed by the real first
+	// user during first-run setup. Conflict on (email) is impossible here
+	// because callers that don't supply an id resolve to the existing row's id
+	// via GetUserByEmail before this INSERT runs.
+	const q = `
+INSERT INTO identity_schema.users (id, email, role)
+VALUES ($1, $2, $3)
+ON CONFLICT (id) DO UPDATE
+    SET email = EXCLUDED.email,
+        role  = EXCLUDED.role
+RETURNING id, email, COALESCE(role, 'user')`
+
+	var u UserRecord
+	err := r.Pool.QueryRow(ctx, q, id, email, role).Scan(&u.ID, &u.Email, &u.Role)
+	if err != nil {
+		return UserRecord{}, fmt.Errorf("create user: %w", err)
+	}
+	return u, nil
+}
+
+func (r *BaseRepository) GetUserByEmail(ctx context.Context, email string) (UserRecord, bool, error) {
+	const q = `SELECT id, email, COALESCE(role, 'user') FROM identity_schema.users WHERE email = $1`
+	var u UserRecord
+	err := r.Pool.QueryRow(ctx, q, email).Scan(&u.ID, &u.Email, &u.Role)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return UserRecord{}, false, nil
+		}
+		return UserRecord{}, false, fmt.Errorf("get user by email: %w", err)
+	}
+	return u, true, nil
+}
+
+func (r *BaseRepository) GetUser(ctx context.Context, userID pgtype.UUID) (UserRecord, bool, error) {
+	const q = `SELECT id, email, COALESCE(role, 'user') FROM identity_schema.users WHERE id = $1`
+	var u UserRecord
+	err := r.Pool.QueryRow(ctx, q, userID).Scan(&u.ID, &u.Email, &u.Role)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return UserRecord{}, false, nil
+		}
+		return UserRecord{}, false, fmt.Errorf("get user: %w", err)
+	}
+	return u, true, nil
+}
+
+func (r *BaseRepository) UpdateUserRole(ctx context.Context, userID pgtype.UUID, role string) error {
+	switch role {
+	case "root", "manager", "user":
+	default:
+		return fmt.Errorf("invalid role %q", role)
+	}
+	const q = `UPDATE identity_schema.users SET role = $2 WHERE id = $1`
+	_, err := r.Pool.Exec(ctx, q, userID, role)
+	if err != nil {
+		return fmt.Errorf("update role: %w", err)
+	}
+	return nil
+}
+
+func (r *BaseRepository) CountRoots(ctx context.Context) (int, error) {
+	const q = `SELECT COUNT(*) FROM identity_schema.users WHERE role = 'root'`
+	var n int
+	if err := r.Pool.QueryRow(ctx, q).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count roots: %w", err)
+	}
+	return n, nil
 }
 
 func (r *BaseRepository) QueryChunksBySimilarity(ctx context.Context, userID pgtype.UUID, embedding pgvector.Vector, limit int32) ([]PersonalInfoChunkMatch, error) {

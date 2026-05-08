@@ -26,18 +26,32 @@ Autonomous AI operating system with NATS-based messaging, memory, credential vau
 
 ## Prerequisites
 
-- Docker Desktop (or Docker Engine + Compose v2)
-- Copy `.env.example` to `.env` and fill in required values:
-  ```bash
-  cp .env.example .env
-  # Generate secrets:
-  openssl rand -base64 24 | head -c 32  # → VAULT_MASTER_KEY
-  openssl rand -hex 32                  # → INTERNAL_VAULT_API_KEY
-  ```
-- **`ANTHROPIC_API_KEY`** — required for agent task execution. Set in `.env` before starting the stack.
-- **`TAVILY_API_KEY`** — required for the `web_search` skill. Obtain a key from [tavily.com](https://tavily.com), add it to `.env`, then run `./bootstrap.sh` so it is seeded into OpenBao. Without it, any agent task that invokes web search will fail with a scope/credential error. Free-tier keys work.
+- Docker Desktop (or Docker Engine + Compose v2).
+- An Anthropic API key (`ANTHROPIC_API_KEY`). All other secrets are auto-generated.
+- *(Recommended)* `TAVILY_API_KEY` for the `web_search` skill (free tier from [tavily.com](https://tavily.com)). Without it, web-search tasks fail with a scope/credential error.
+- *(Optional)* `OPENAI_API_KEY` for memory embeddings; `GITHUB_TOKEN` for GitHub-skill quality.
 
-## Quick start
+## Quick start (FP-Stefan)
+
+The fast path — works on a clean clone with no manual `.env` editing required (it falls back to a template):
+
+```bash
+git clone <this-repo> cerberos
+cd cerberos
+./install.sh        # wraps bootstrap.sh + prints first-run cheat-sheet
+```
+
+Then open `http://localhost:5173`. The web UI shows a **Create your account** screen on first boot — enter an email, and that user becomes the system root. From there an **Admin** button appears in the header where you can:
+
+- Set / rotate the LLM provider key (writes to OpenBao).
+- Add additional users (manager / user roles).
+- Install Superpowers for all users (one-click GitHub import).
+- Import any other GitHub repo as a skill.
+- Create a skill from a natural-language description.
+
+See [`context/fp-stefan-demo-script.md`](context/fp-stefan-demo-script.md) for the full demo walk-through covering scenarios E2 (Superpowers code-review), E3 (`quick_note` → `~/notes.txt`), and E4 (SF activities + weather + attire).
+
+### Alternative: docker compose directly
 
 ```bash
 # Full stack (core services)
@@ -80,13 +94,18 @@ Full guide including extension recipes (HA NATS, Ingress+TLS, NetworkPolicies, F
 
 ## Bootstrap (first run)
 
-A single script handles prerequisites, secrets generation, stack startup, and OpenBao init + unseal:
+`./install.sh` is a thin wrapper around `./bootstrap.sh`. They are interchangeable; `install.sh` adds:
+
+- Auto-creates `.env` from `.env.example` if it is missing.
+- Prints the first-run cheat-sheet (signup URL, admin actions, scenario prompts) once the stack is up.
+
+`./bootstrap.sh` itself handles prerequisites, secrets generation, stack startup, and OpenBao init + unseal:
 
 ```bash
 ./bootstrap.sh
 ```
 
-This creates `.env` (if missing), generates `VAULT_MASTER_KEY` and `INTERNAL_VAULT_API_KEY`, starts all services, initializes and unseals OpenBao, and writes `BAO_TOKEN` to `.env`.
+This creates `.env` (if missing), generates `VAULT_MASTER_KEY` and `INTERNAL_VAULT_API_KEY`, starts all services, initializes and unseals OpenBao, writes `BAO_TOKEN` to `.env`, and seeds `TAVILY_API_KEY`, `ANTHROPIC_API_KEY`, and `OPENAI_API_KEY` into OpenBao (when those values are present in `.env`).
 
 To tear down:
 

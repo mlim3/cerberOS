@@ -215,8 +215,9 @@ func main() {
 	// Healthz endpoint
 	mux.HandleFunc("GET /api/v1/healthz", newHealthzHandler(db, logger))
 
-	// Users endpoint (demo-mode user switcher roster)
+	// Users endpoint (demo-mode user switcher roster + first-run create)
 	mux.HandleFunc("GET /api/v1/users", usersHandler.HandleListUsers)
+	mux.HandleFunc("POST /api/v1/users", usersHandler.HandleCreateUser)
 
 	// Chat endpoints
 	mux.HandleFunc("GET /api/v1/conversations", chatHandler.HandleListConversations)
