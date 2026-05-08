@@ -305,6 +305,24 @@ func main() {
 		log.Warn("synthesized skill load failed — skills from prior sessions unavailable", "error", err)
 	}
 
+	// FP-Stefan: subscribe to skill-reload triggers so newly created or imported
+	// skills (written to memory by IO) join the live tree without a restart.
+	// Best-effort: failures are logged but do not abort startup, because the
+	// startup-time LoadSynthesizedSkills above already covers persisted skills.
+	if err := commsClient.Subscribe(
+		comms.SubjectSkillReload,
+		func(_ *comms.Message) {
+			log.Info("skill reload signal received; re-hydrating synthesized skills",
+				"topic", comms.SubjectSkillReload,
+			)
+			if err := f.LoadSynthesizedSkills(ctx); err != nil {
+				log.Warn("skill reload failed", "error", err)
+			}
+		},
+	); err != nil {
+		log.Warn("skill reload subscription failed; live registration disabled", "error", err)
+	}
+
 	// Bounded-concurrency worker pool for inbound task dispatch. Without this,
 	// the JetStream durable subscriber runs HandleTaskSpec (which includes
 	// Firecracker provisioning — several seconds) inline before Ack'ing,

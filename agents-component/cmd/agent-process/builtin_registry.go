@@ -52,4 +52,14 @@ var builtinRegistry = map[string]ToolFactory{
 
 	// github domain
 	"vault_github_request": func(ve *VaultExecutor) SkillTool { return vaultGitHubRequestTool(ve) },
+
+	// local_files domain (FP-Stefan E3) — per-user filesystem under
+	// /data/users/<AEGIS_USER_CONTEXT_ID> on the agent container.
+	"local_file_read":  func(_ *VaultExecutor) SkillTool { return localFileReadTool() },
+	"local_file_write": func(_ *VaultExecutor) SkillTool { return localFileWriteTool() },
+
+	// google_workspace domain (FP-Stefan) — Gmail SMTP via App Password
+	// (no OAuth, no Cloud Console). Calendar uses .ics email invites.
+	"vault_gmail_send":            func(ve *VaultExecutor) SkillTool { return vaultGmailSendTool(ve) },
+	"vault_gmail_calendar_invite": func(ve *VaultExecutor) SkillTool { return vaultGmailCalendarInviteTool(ve) },
 }

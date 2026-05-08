@@ -487,24 +487,27 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 	agentMemory := f.fetchAgentMemory(entryDomain, spec.TraceID)
 	userProfile := f.fetchUserProfile(spec.UserContextID, spec.TraceID)
 	priorTurns, _ := f.fetchPriorTurns(spec.ConversationID, spec.TraceID)
+	originalUserMessage, userFacing := extractConversationMetadata(spec)
 
 	// Step 6: Spawn agent process.
 	vmCfg := lifecycle.VMConfig{
-		AgentID:           agentID,
-		VMID:              vmID,
-		TaskID:            spec.TaskID,
-		SkillDomain:       entryDomain,
-		CredentialPtr:     token,
-		Instructions:      spec.Instructions,
-		CommandManifest:   manifest,
-		AgentMemory:       agentMemory,
-		UserProfile:       userProfile,
-		TraceID:           spec.TraceID,
-		UserContextID:     spec.UserContextID,
-		ConversationID:    spec.ConversationID,
-		PriorTurns:        priorTurns,
-		SynthesizedSkills: f.synthesizedSkillsForDomain(entryDomain),
-		OnComplete:        f.processCompletionHandler(agentID),
+		AgentID:             agentID,
+		VMID:                vmID,
+		TaskID:              spec.TaskID,
+		SkillDomain:         entryDomain,
+		CredentialPtr:       token,
+		Instructions:        spec.Instructions,
+		CommandManifest:     manifest,
+		AgentMemory:         agentMemory,
+		UserProfile:         userProfile,
+		TraceID:             spec.TraceID,
+		UserContextID:       spec.UserContextID,
+		ConversationID:      spec.ConversationID,
+		PriorTurns:          priorTurns,
+		SynthesizedSkills:   f.synthesizedSkillsForDomain(entryDomain),
+		OriginalUserMessage: originalUserMessage,
+		UserFacing:          userFacing,
+		OnComplete:          f.processCompletionHandler(agentID),
 	}
 	if err := f.lifecycle.Spawn(vmCfg); err != nil {
 		return fmt.Errorf("factory: lifecycle.Spawn: %w", err)
@@ -606,22 +609,25 @@ func (f *Factory) assignTask(agentID string, spec *types.TaskSpec) error {
 	agentMemory := f.fetchAgentMemory(entryDomain, spec.TraceID)
 	userProfile := f.fetchUserProfile(spec.UserContextID, spec.TraceID)
 	priorTurns, _ := f.fetchPriorTurns(spec.ConversationID, spec.TraceID)
+	originalUserMessage, userFacing := extractConversationMetadata(spec)
 
 	vmCfg := lifecycle.VMConfig{
-		AgentID:           agentID,
-		TaskID:            spec.TaskID,
-		SkillDomain:       entryDomain,
-		CredentialPtr:     token,
-		Instructions:      spec.Instructions,
-		CommandManifest:   manifest,
-		AgentMemory:       agentMemory,
-		UserProfile:       userProfile,
-		TraceID:           spec.TraceID,
-		UserContextID:     spec.UserContextID,
-		ConversationID:    spec.ConversationID,
-		PriorTurns:        priorTurns,
-		SynthesizedSkills: f.synthesizedSkillsForDomain(entryDomain),
-		OnComplete:        f.processCompletionHandler(agentID),
+		AgentID:             agentID,
+		TaskID:              spec.TaskID,
+		SkillDomain:         entryDomain,
+		CredentialPtr:       token,
+		Instructions:        spec.Instructions,
+		CommandManifest:     manifest,
+		AgentMemory:         agentMemory,
+		UserProfile:         userProfile,
+		TraceID:             spec.TraceID,
+		UserContextID:       spec.UserContextID,
+		ConversationID:      spec.ConversationID,
+		PriorTurns:          priorTurns,
+		SynthesizedSkills:   f.synthesizedSkillsForDomain(entryDomain),
+		OriginalUserMessage: originalUserMessage,
+		UserFacing:          userFacing,
+		OnComplete:          f.processCompletionHandler(agentID),
 	}
 
 	if err := f.lifecycle.Deliver(agentID, vmCfg); err != nil {
@@ -1400,6 +1406,21 @@ func (f *Factory) fetchUserProfile(userContextID, traceID string) string {
 	return joinMemoryPayloads(records, 2000)
 }
 
+// extractConversationMetadata pulls the orchestrator-provided
+// `original_user_message` and `user_facing` flags out of the TaskSpec metadata
+// map. The orchestrator sets these on every task.inbound for a chat-driven
+// conversation; only the user-facing agent (the planner-designated composer
+// subtask) gets `user_facing="true"` and is therefore allowed to write a clean
+// conversation_snapshot pair on completion.
+func extractConversationMetadata(spec *types.TaskSpec) (string, bool) {
+	if spec == nil || spec.Metadata == nil {
+		return "", false
+	}
+	original := spec.Metadata["original_user_message"]
+	userFacing := spec.Metadata["user_facing"] == "true"
+	return original, userFacing
+}
+
 // fetchPriorTurns retrieves the latest ConversationSnapshot for conversationID
 // from the Memory Component and returns the prior turns and their recorded token
 // count. Returns nil, 0 when conversationID is empty, no snapshot exists, or the
@@ -1753,22 +1774,25 @@ func (f *Factory) wakeAgent(agentID string, spec *types.TaskSpec) error {
 	agentMemory := f.fetchAgentMemory(entryDomain, spec.TraceID)
 	userProfile := f.fetchUserProfile(spec.UserContextID, spec.TraceID)
 	priorTurns, _ := f.fetchPriorTurns(spec.ConversationID, spec.TraceID)
+	originalUserMessage, userFacing := extractConversationMetadata(spec)
 	vmCfg := lifecycle.VMConfig{
-		AgentID:           agentID,
-		VMID:              newVMID,
-		TaskID:            spec.TaskID,
-		SkillDomain:       entryDomain,
-		CredentialPtr:     token,
-		Instructions:      spec.Instructions,
-		CommandManifest:   manifest,
-		AgentMemory:       agentMemory,
-		UserProfile:       userProfile,
-		TraceID:           spec.TraceID,
-		UserContextID:     spec.UserContextID,
-		ConversationID:    spec.ConversationID,
-		PriorTurns:        priorTurns,
-		SynthesizedSkills: f.synthesizedSkillsForDomain(entryDomain),
-		OnComplete:        f.processCompletionHandler(agentID),
+		AgentID:             agentID,
+		VMID:                newVMID,
+		TaskID:              spec.TaskID,
+		SkillDomain:         entryDomain,
+		CredentialPtr:       token,
+		Instructions:        spec.Instructions,
+		CommandManifest:     manifest,
+		AgentMemory:         agentMemory,
+		UserProfile:         userProfile,
+		TraceID:             spec.TraceID,
+		UserContextID:       spec.UserContextID,
+		ConversationID:      spec.ConversationID,
+		PriorTurns:          priorTurns,
+		SynthesizedSkills:   f.synthesizedSkillsForDomain(entryDomain),
+		OriginalUserMessage: originalUserMessage,
+		UserFacing:          userFacing,
+		OnComplete:          f.processCompletionHandler(agentID),
 	}
 	if err := f.lifecycle.Spawn(vmCfg); err != nil {
 		return fmt.Errorf("factory: wakeAgent: lifecycle.Spawn: %w", err)

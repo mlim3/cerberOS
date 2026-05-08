@@ -31,6 +31,10 @@ func dispatchOperation(ctx context.Context, operationType, credential string, pa
 		return execWebFetch(ctx, credential, params)
 	case "web_search":
 		return execWebSearch(ctx, credential, params, searcher)
+	case "vault_gmail_send":
+		return execGmailSend(ctx, credential, params)
+	case "vault_gmail_calendar_invite":
+		return execGmailCalendarInvite(ctx, credential, params)
 	case "vault_data_read":
 		return opResult{err: fmt.Errorf("vault_data_read not yet implemented"), code: ErrCodeUnsupportedOp}
 	case "vault_data_write":

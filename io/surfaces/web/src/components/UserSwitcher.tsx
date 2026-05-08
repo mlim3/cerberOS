@@ -6,6 +6,7 @@ import './UserSwitcher.css'
 interface UserSummary {
   id: string
   email: string
+  role?: 'root' | 'manager' | 'user'
 }
 
 /**
@@ -45,6 +46,12 @@ function UserSwitcher() {
     ? users
     : [{ id: current, email: `${current.slice(0, 8)}…` }]
 
+  function roleBadge(role?: 'root' | 'manager' | 'user'): string {
+    if (role === 'root') return ' (root)'
+    if (role === 'manager') return ' (mgr)'
+    return ''
+  }
+
   return (
     <select
       className="user-switcher"
@@ -55,7 +62,7 @@ function UserSwitcher() {
     >
       {options.map(u => (
         <option key={u.id} value={u.id}>
-          {u.email}
+          {u.email}{roleBadge((u as UserSummary).role)}
         </option>
       ))}
     </select>

@@ -77,6 +77,80 @@ type planExecution struct {
 
 	// dispatchedCount tracks how many subtasks are currently in DISPATCHED/RUNNING.
 	dispatchedCount int32
+
+	// userFacingSubtaskID is the subtask whose result will be the final
+	// user-visible reply for this conversation turn. Computed once at plan
+	// init: the last leaf (no dependents) in plan.Subtasks order. Only this
+	// subtask's spawn carries Metadata["user_facing"]="true", so only this
+	// agent persists a conversation_snapshot. Empty when plan has no subtasks.
+	userFacingSubtaskID string
+
+	// originalUserMessage is the user's literal chat input, captured once at
+	// plan init from ts.Payload.raw_input. Threaded through every subtask
+	// spec so the user-facing agent can snapshot it without round-tripping
+	// the dispatcher. Empty for non-conversational task flows.
+	originalUserMessage string
+}
+
+// userFacingMetadataValue maps a bool to the canonical "true"/"false" string
+// used in TaskSpec.Metadata so the agents-component side can decode it with
+// a simple equality check (Metadata["user_facing"] == "true").
+func userFacingMetadataValue(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
+}
+
+// extractRawInputBytes extracts the user's literal chat text from a
+// task_payload encoded as {"raw_input":"…"}. Returns the raw payload string
+// when the JSON is malformed or has no raw_input field. Mirrors the helper
+// in dispatcher; duplicated to avoid an import cycle and keep both packages
+// self-contained.
+func extractRawInputBytes(payload []byte) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &m); err != nil {
+		return string(payload)
+	}
+	if raw, ok := m["raw_input"]; ok {
+		var s string
+		if err := json.Unmarshal(raw, &s); err == nil {
+			return s
+		}
+	}
+	return string(payload)
+}
+
+// pickUserFacingSubtask returns the subtask_id that produces the final
+// user-visible reply. Heuristic: the LAST leaf in plan.Subtasks order, where
+// a leaf is a subtask no other subtask depends on. The planner contract
+// (buildDecompositionInstructions) places the composer subtask last in plan
+// order, so this matches the expected execution shape for chat-driven plans.
+func pickUserFacingSubtask(plan types.ExecutionPlan) string {
+	if len(plan.Subtasks) == 0 {
+		return ""
+	}
+	dependedOn := make(map[string]bool, len(plan.Subtasks))
+	for _, st := range plan.Subtasks {
+		for _, dep := range st.DependsOn {
+			dependedOn[dep] = true
+		}
+	}
+	var lastLeaf string
+	for _, st := range plan.Subtasks {
+		if !dependedOn[st.SubtaskID] {
+			lastLeaf = st.SubtaskID
+		}
+	}
+	if lastLeaf == "" {
+		// Defensive: a cyclic/self-referential plan would leave no leaves.
+		// Fall back to the final subtask in plan order so we still snapshot.
+		lastLeaf = plan.Subtasks[len(plan.Subtasks)-1].SubtaskID
+	}
+	return lastLeaf
 }
 
 // ── PlanExecutor ─────────────────────────────────────────────────────────────
@@ -201,10 +275,12 @@ func (e *PlanExecutor) Execute(ctx context.Context, plan types.ExecutionPlan, ts
 	}
 
 	exec := &planExecution{
-		plan:         plan,
-		ts:           ts,
-		subtasks:     make(map[string]*types.SubtaskState, len(plan.Subtasks)),
-		orchRefIndex: make(map[string]string),
+		plan:                plan,
+		ts:                  ts,
+		subtasks:            make(map[string]*types.SubtaskState, len(plan.Subtasks)),
+		orchRefIndex:        make(map[string]string),
+		userFacingSubtaskID: pickUserFacingSubtask(plan),
+		originalUserMessage: extractRawInputBytes(ts.Payload),
 	}
 
 	now := time.Now().UTC()
@@ -448,11 +524,17 @@ func (e *PlanExecutor) dispatchSubtask(ctx context.Context, exec *planExecution,
 		Payload:              priorResultsJSON,
 		Instructions:         instructions,
 		Metadata: map[string]string{
-			"task_kind":      "subtask",
-			"parent_task_id": exec.ts.TaskID,
-			"plan_id":        exec.plan.PlanID,
-			"subtask_id":     sub.SubtaskID,
-			"action":         st.Action,
+			"task_kind":             "subtask",
+			"parent_task_id":        exec.ts.TaskID,
+			"plan_id":               exec.plan.PlanID,
+			// original_user_message + user_facing thread the user's literal
+			// input through every subtask so the user-facing composer agent
+			// can persist a clean conversation_snapshot pair on completion.
+			// Only the leaf composer subtask gets user_facing="true".
+			"original_user_message": exec.originalUserMessage,
+			"user_facing":           userFacingMetadataValue(st.SubtaskID == exec.userFacingSubtaskID),
+			"subtask_id":            sub.SubtaskID,
+			"action":                st.Action,
 		},
 		CallbackTopic:  exec.ts.CallbackTopic,
 		UserContextID:  exec.ts.UserContextID,

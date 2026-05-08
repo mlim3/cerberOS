@@ -229,6 +229,15 @@ cmd_up() {
       || die "failed to re-apply memory/scripts/init-db.sql"
   fi
 
+  # Ensure vault/.openbao-init.json exists as a file (even if empty) before
+  # `docker compose up`. The openbao-unseal sidecar bind-mounts this path; if
+  # it doesn't exist, Docker creates it as a *directory* on Linux and the
+  # script can't read it. The unseal script tolerates an empty file and waits
+  # for `bao operator init` to populate it later in this same bootstrap run.
+  if [[ ! -f "$ROOT/vault/.openbao-init.json" ]]; then
+    touch "$ROOT/vault/.openbao-init.json"
+  fi
+
   log "Starting remaining Docker services..."
   docker compose up --build --detach
 
@@ -333,7 +342,9 @@ cmd_up() {
   # TAVILY_API_KEY powers the web_search skill. If present in .env, write it
   # now so vault engine can resolve it at runtime without manual intervention.
   if [[ -z "${TAVILY_API_KEY:-}" ]] && [[ -f "$ROOT/.env" ]]; then
-    _tavily_val=$(grep -E "^TAVILY_API_KEY=" "$ROOT/.env" 2>/dev/null | head -1 | cut -d'=' -f2-)
+    # `|| true` is required because grep returns 1 when the key is absent and
+    # `set -euo pipefail` would otherwise terminate the script silently.
+    _tavily_val=$(grep -E "^TAVILY_API_KEY=" "$ROOT/.env" 2>/dev/null | head -1 | cut -d'=' -f2- || true)
     [[ -n "$_tavily_val" ]] && TAVILY_API_KEY="$_tavily_val"
     unset _tavily_val
   fi
@@ -350,6 +361,99 @@ cmd_up() {
   else
     log "  TAVILY_API_KEY not set in .env — web_search skill will be unavailable."
     log "  Add TAVILY_API_KEY=<key> to .env and re-run bootstrap.sh to enable it."
+  fi
+
+  # ANTHROPIC_API_KEY drives the agent LLM. Seed into OpenBao if set in .env so
+  # the manager can later rotate it through the UI/CLI without bootstrap edits.
+  # The aegis-agents container still receives the .env value as a fallback;
+  # vault-resolved keys take precedence at agent spawn time.
+  if [[ -z "${ANTHROPIC_API_KEY:-}" ]] && [[ -f "$ROOT/.env" ]]; then
+    _anthropic_val=$(grep -E "^ANTHROPIC_API_KEY=" "$ROOT/.env" 2>/dev/null | head -1 | cut -d'=' -f2- || true)
+    [[ -n "$_anthropic_val" ]] && ANTHROPIC_API_KEY="$_anthropic_val"
+    unset _anthropic_val
+  fi
+  if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+    log "Seeding ANTHROPIC_API_KEY into OpenBao..."
+    SEED_RESP=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BAO_ADDR/v1/kv/data/ANTHROPIC_API_KEY" \
+      -H "X-Vault-Token: $ROOT_TOKEN" \
+      -d "{\"data\":{\"ANTHROPIC_API_KEY\":\"$ANTHROPIC_API_KEY\"}}")
+    if [[ "$SEED_RESP" == "200" ]] || [[ "$SEED_RESP" == "204" ]]; then
+      log "  ANTHROPIC_API_KEY stored."
+    else
+      log "  warning: ANTHROPIC_API_KEY seed returned HTTP $SEED_RESP"
+    fi
+  else
+    log "  ANTHROPIC_API_KEY not set in .env — manager can configure it later via the web UI / CLI."
+  fi
+
+  # OPENAI_API_KEY powers the memory embedder (and optional GPT-based skills).
+  # Seeding mirrors the Anthropic path so a manager can configure either
+  # provider at runtime via /api/admin/llm-keys.
+  if [[ -z "${OPENAI_API_KEY:-}" ]] && [[ -f "$ROOT/.env" ]]; then
+    _openai_val=$(grep -E "^OPENAI_API_KEY=" "$ROOT/.env" 2>/dev/null | head -1 | cut -d'=' -f2- || true)
+    [[ -n "$_openai_val" ]] && OPENAI_API_KEY="$_openai_val"
+    unset _openai_val
+  fi
+  if [[ -n "${OPENAI_API_KEY:-}" ]]; then
+    log "Seeding OPENAI_API_KEY into OpenBao..."
+    SEED_RESP=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BAO_ADDR/v1/kv/data/OPENAI_API_KEY" \
+      -H "X-Vault-Token: $ROOT_TOKEN" \
+      -d "{\"data\":{\"OPENAI_API_KEY\":\"$OPENAI_API_KEY\"}}")
+    if [[ "$SEED_RESP" == "200" ]] || [[ "$SEED_RESP" == "204" ]]; then
+      log "  OPENAI_API_KEY stored."
+    else
+      log "  warning: OPENAI_API_KEY seed returned HTTP $SEED_RESP"
+    fi
+  else
+    log "  OPENAI_API_KEY not set in .env — manager can configure it later via the web UI / CLI."
+  fi
+
+  # GMAIL_DEMO_{EMAIL,APP_PASSWORD} powers the google_workspace skill domain
+  # (gmail_send + calendar_create_event). Stored as a single JSON blob under
+  # the OpenBao key `gmail_app_password` so the vault engine resolves both
+  # halves in one lookup. Manager can also configure this later via the web
+  # UI's "Gmail Demo Account" section or `cerberos admin set-gmail`.
+  if [[ -z "${GMAIL_DEMO_EMAIL:-}" ]] && [[ -f "$ROOT/.env" ]]; then
+    _gmail_email_val=$(grep -E "^GMAIL_DEMO_EMAIL=" "$ROOT/.env" 2>/dev/null | head -1 | cut -d'=' -f2- || true)
+    # Strip surrounding quotes (.env may quote values containing spaces).
+    _gmail_email_val="${_gmail_email_val%\"}"
+    _gmail_email_val="${_gmail_email_val#\"}"
+    [[ -n "$_gmail_email_val" ]] && GMAIL_DEMO_EMAIL="$_gmail_email_val"
+    unset _gmail_email_val
+  fi
+  if [[ -z "${GMAIL_DEMO_APP_PASSWORD:-}" ]] && [[ -f "$ROOT/.env" ]]; then
+    _gmail_pw_val=$(grep -E "^GMAIL_DEMO_APP_PASSWORD=" "$ROOT/.env" 2>/dev/null | head -1 | cut -d'=' -f2- || true)
+    # Strip surrounding quotes — the .env value is "xxxx xxxx xxxx xxxx".
+    _gmail_pw_val="${_gmail_pw_val%\"}"
+    _gmail_pw_val="${_gmail_pw_val#\"}"
+    [[ -n "$_gmail_pw_val" ]] && GMAIL_DEMO_APP_PASSWORD="$_gmail_pw_val"
+    unset _gmail_pw_val
+  fi
+  if [[ -n "${GMAIL_DEMO_EMAIL:-}" ]] && [[ -n "${GMAIL_DEMO_APP_PASSWORD:-}" ]]; then
+    # Strip spaces from app password (Google displays as "xxxx xxxx xxxx xxxx")
+    _gmail_pw_clean="${GMAIL_DEMO_APP_PASSWORD// /}"
+    if [[ ${#_gmail_pw_clean} -ne 16 ]]; then
+      log "  warning: GMAIL_DEMO_APP_PASSWORD is ${#_gmail_pw_clean} chars (expected 16). Skipping seed — fix in .env or set via UI."
+    else
+      log "Seeding GMAIL_DEMO_EMAIL + GMAIL_DEMO_APP_PASSWORD into OpenBao (key: gmail_app_password)..."
+      _gmail_blob="{\"email\":\"$GMAIL_DEMO_EMAIL\",\"app_password\":\"$_gmail_pw_clean\"}"
+      # The vault engine reads this single key; the JSON blob carries both halves.
+      # Escape the inner JSON for embedding in the OpenBao KV-v2 envelope.
+      _gmail_blob_esc=$(printf '%s' "$_gmail_blob" | sed 's/"/\\"/g')
+      SEED_RESP=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BAO_ADDR/v1/kv/data/gmail_app_password" \
+        -H "X-Vault-Token: $ROOT_TOKEN" \
+        -d "{\"data\":{\"gmail_app_password\":\"$_gmail_blob_esc\"}}")
+      if [[ "$SEED_RESP" == "200" ]] || [[ "$SEED_RESP" == "204" ]]; then
+        log "  Gmail demo account stored ($GMAIL_DEMO_EMAIL)."
+      else
+        log "  warning: gmail_app_password seed returned HTTP $SEED_RESP"
+      fi
+    fi
+    unset _gmail_pw_clean _gmail_blob _gmail_blob_esc
+  else
+    log "  GMAIL_DEMO_EMAIL/GMAIL_DEMO_APP_PASSWORD not set in .env — google_workspace skills will be unavailable until configured."
+    log "  To enable: add both to .env, or use the Admin UI's 'Gmail Demo Account' section."
+    log "  Get an App Password at https://myaccount.google.com/apppasswords (requires 2FA)."
   fi
 
   log "Recreating vault service with updated BAO_TOKEN..."

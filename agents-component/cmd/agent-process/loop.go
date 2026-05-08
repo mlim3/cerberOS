@@ -59,6 +59,46 @@ const (
 	maxOutputTokens = 16_384
 )
 
+// persistConversationSnapshot is a thin wrapper over SessionLog.WriteConversationSnapshot
+// that enforces the user-facing snapshot contract: only the agent flagged as
+// user-facing by the orchestrator persists a conversation_snapshot, and the
+// snapshot is a CLEAN [user: original_text, assistant: final_text] pair —
+// never the orchestrator's "Execute this subtask…" scaffolding nor any
+// tool_use turns. This prevents the multi-agent fan-out from polluting the
+// user's conversation history with internal orchestrator instructions.
+//
+// finalAssistantText is the final visible reply text returned to the user.
+// The function is a no-op when sl is nil, the spawn is not user-facing, the
+// task is not part of a conversation, or the original user message is empty.
+func persistConversationSnapshot(sl *SessionLog, log *slog.Logger, spawnCtx *SpawnContext, finalAssistantText string, totalTokens int64) {
+	if sl == nil || spawnCtx == nil {
+		return
+	}
+	if !spawnCtx.UserFacing {
+		log.Debug("skipping conversation snapshot — agent is not user-facing",
+			"task_id", spawnCtx.TaskID,
+			"conversation_id", spawnCtx.ConversationID,
+		)
+		return
+	}
+	if spawnCtx.ConversationID == "" || spawnCtx.OriginalUserMessage == "" {
+		return
+	}
+	// Build the snapshot from PriorTurns + a clean [user, assistant] pair.
+	// We deliberately drop the in-flight `history` slice — it contains the
+	// orchestrator-generated subtask instructions ("Execute this subtask…")
+	// and any tool_use/tool_result turns. The factory only needs prior
+	// user-visible exchanges to reconstruct context for the next turn.
+	clean := make([]anthropic.MessageParam, 0, len(spawnCtx.PriorTurns)+2)
+	clean = append(clean, spawnCtx.PriorTurns...)
+	clean = append(clean, anthropic.NewUserMessage(anthropic.NewTextBlock(spawnCtx.OriginalUserMessage)))
+	clean = append(clean, anthropic.NewAssistantMessage(anthropic.NewTextBlock(finalAssistantText)))
+	if err := sl.WriteConversationSnapshot(spawnCtx.ConversationID, spawnCtx.TaskID, clean, totalTokens); err != nil {
+		log.Warn("could not persist conversation snapshot; next follow-up turn will lack this exchange",
+			"error", err)
+	}
+}
+
 // pendingToolCall is one tool_use block extracted from an assistant response,
 // ready for parallel dispatch in Phase 2.
 type pendingToolCall struct {
@@ -264,13 +304,8 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 			for _, block := range resp.Content {
 				if block.Type == "text" && block.Text != "" {
 					attemptSkillSynthesis(ctx, client, log, spawnCtx, sl, ve, history, toolCallCount)
-					// Append the final assistant turn to history before snapshotting
-					// so the next task in this conversation includes the full exchange.
 					history = append(history, resp.ToParam())
-					if err := sl.WriteConversationSnapshot(spawnCtx.ConversationID, spawnCtx.TaskID, history, totalTokens); err != nil {
-						log.Warn("could not persist conversation snapshot to memory; next follow-up turn will lack this exchange",
-							"error", err)
-					}
+					persistConversationSnapshot(sl, log, spawnCtx, block.Text, totalTokens)
 					log.Info("model returned end_turn with text reply; finishing task",
 						"result_preview", logfields.PreviewHeadTail(block.Text, 15, 10),
 						"tool_call_count", toolCallCount)
@@ -297,11 +332,8 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 					)
 					attemptSkillSynthesis(ctx, client, log, spawnCtx, sl, ve, history, toolCallCount)
 					history = append(history, resp.ToParam())
-					if err := sl.WriteConversationSnapshot(spawnCtx.ConversationID, spawnCtx.TaskID, history, totalTokens); err != nil {
-						log.Warn("could not persist conversation snapshot to memory after max_tokens stop; next follow-up turn will lack this exchange",
-							"error", err)
-					}
 					const truncationNotice = "\n\n_[Response truncated — output token limit reached. Send a follow-up message to continue.]_"
+					persistConversationSnapshot(sl, log, spawnCtx, block.Text+truncationNotice, totalTokens)
 					return block.Text + truncationNotice, history, nil
 				}
 			}
@@ -506,10 +538,7 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 				history = append(history, anthropic.NewUserMessage(toolResults...))
 			}
 
-			if err := sl.WriteConversationSnapshot(spawnCtx.ConversationID, spawnCtx.TaskID, history, totalTokens); err != nil {
-				log.Warn("could not persist conversation snapshot to memory after task_complete; next follow-up turn will lack this exchange",
-					"error", err)
-			}
+			persistConversationSnapshot(sl, log, spawnCtx, finalResult, totalTokens)
 			return finalResult, history, nil
 		}
 

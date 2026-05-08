@@ -144,6 +144,24 @@ func (h *Handler) Execute(w http.ResponseWriter, r *http.Request) {
 	})
 
 	secrets, err := h.Manager.GetSecrets([]string{credKey})
+	// System-shared credential fallback: a small set of credential types
+	// (currently only the demo Gmail App Password) are configured once by the
+	// manager via the Admin UI and apply to every user. They are stored at the
+	// bare credentialType key (e.g. "gmail_app_password") rather than under
+	// users/<id>/credentials/<type>. Try that path when the per-user lookup
+	// fails so per-user execute calls transparently see the shared secret.
+	if (err != nil || secrets[credKey] == "") && isSystemSharedCredential(req.CredentialType) {
+		fallbackKey := req.CredentialType
+		if fbSecrets, fbErr := h.Manager.GetSecrets([]string{fallbackKey}); fbErr == nil {
+			if v, ok := fbSecrets[fallbackKey]; ok && v != "" {
+				logger.Info("resolved credential via system-shared fallback path",
+					"fallback_key", fallbackKey)
+				credKey = fallbackKey
+				secrets = fbSecrets
+				err = nil
+			}
+		}
+	}
 	if err != nil {
 		elapsed := time.Since(start).Milliseconds()
 		logger.Warn("denied credential execute: credential could not be resolved or access is denied",
@@ -236,6 +254,19 @@ func defaultCredentialType(operationType, credentialType string) string {
 	return credentialType
 }
 
+// isSystemSharedCredential reports whether the given credential type is a
+// single shared secret configured once by the manager (rather than per user).
+// The only such credential today is the demo Gmail App Password used by the
+// google_workspace skills (gmail_send, calendar_create_event), which all
+// users send through the same demo Gmail account.
+func isSystemSharedCredential(credentialType string) bool {
+	switch credentialType {
+	case "gmail_app_password":
+		return true
+	}
+	return false
+}
+
 func credentialSecretKey(userID, credentialType string) string {
 	if userID != "" {
 		return fmt.Sprintf("users/%s/credentials/%s", userID, credentialType)
@@ -257,7 +288,9 @@ func isSupportedOperation(operationType string) bool {
 		"vault_comms_send",
 		"vault_storage_read",
 		"vault_storage_write",
-		"vault_storage_list":
+		"vault_storage_list",
+		"vault_gmail_send",
+		"vault_gmail_calendar_invite":
 		return true
 	default:
 		return false

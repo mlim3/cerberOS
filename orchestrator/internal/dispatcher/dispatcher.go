@@ -379,6 +379,12 @@ func (d *Dispatcher) HandleInboundTask(ctx context.Context, task types.UserTask)
 		Metadata: map[string]string{
 			"task_kind":      taskKindForPlannerSpec(maintenance),
 			"parent_task_id": task.TaskID,
+			// Planner is internal: it never produces the user-visible reply, so
+			// it MUST NOT persist a conversation_snapshot. The original user
+			// message is still threaded through so downstream subtasks can
+			// reuse it for snapshotting without round-tripping the dispatcher.
+			"original_user_message": rawInput,
+			"user_facing":           "false",
 		},
 		CallbackTopic:   task.CallbackTopic,
 		UserContextID:   task.UserContextID,
@@ -1532,10 +1538,12 @@ func buildDecompositionInstructionsWithFacts(taskID, rawInput string, scope type
 			"- Do not invent new skill domain names outside the allowed list\n"+
 			"- Use an empty array for depends_on when a subtask has no dependencies\n"+
 			"- Keep the plan concise and executable\n"+
-			"Skill domain guide: use \"web\" for fetch/parse/extract of known URLs, \"data\" for transforms/reads/writes, \"comms\" for messaging, \"storage\" for file operations, \"logs\" for log queries, \"google_search\" for any Google search or web search query (PREFERRED over web for search tasks), \"github\" for GitHub API calls, \"general\" for reasoning/summarization with no external tools.\n"+
-			"- Prefer \"google_search\" over \"web\" whenever the task is a search query — the system will prompt the user for an API key if it is not yet configured.\n"+
-			"- Only avoid \"google_search\" if the user has explicitly said they do not want to use Google search.\n"+
-			"- The \"web\" domain (web.fetch, web.parse, web.extract) does NOT require credentials — use it for fetching specific known URLs, not for general search.\n"+
+			"Skill domain guide: use \"web\" for fetch/parse/extract of known URLs AND for AI web search (web.web_search via Tavily, no Google account needed), \"data\" for transforms/reads/writes, \"comms\" for messaging, \"storage\" for file operations, \"logs\" for log queries, \"google_search\" for explicitly Google-API-backed search, \"github\" for GitHub API calls, \"local_files\" for reading/writing files in the user's home (notes, journal, etc. — paths starting with ~/ map to per-user storage), \"general\" for reasoning/summarization with no external tools.\n"+
+			"- For ANY task that requires real-world or current information (events this weekend, weather, news, prices, hours, addresses, etc.), include AT LEAST one subtask in the \"web\" domain — web.web_search composes well across topics.\n"+
+			"- Multi-fact tasks (e.g. \"events this weekend AND weather AND what to wear\") MUST be decomposed into one web.web_search subtask per fact dimension followed by a final \"general\" subtask that composes the answer. Independent search subtasks have empty depends_on so they run in parallel; only the composer subtask depends on them.\n"+
+			"- Prefer \"google_search\" over \"web\" only when the user explicitly asks for Google or when the system has Google search configured AND web.web_search is unavailable; otherwise default to \"web\" because Tavily is bootstrap-seeded and works out of the box.\n"+
+			"- The \"web\" domain (web.fetch, web.parse, web.extract, web.web_search) covers BOTH known-URL fetching AND open-web search. Use web.web_search for the search step, not google_search, unless the user demands Google specifically.\n"+
+			"- For \"create a skill that …\" or \"save / write to ~/<file>\" requests, choose the \"local_files\" domain — local_file_write covers ~/notes.txt-style persistence without requiring credentials.\n"+
 			"Ambiguity handling (CRITICAL):\n"+
 			"- You MUST return a valid execution plan JSON object. NEVER reply with a clarifying question, free-form text, an apology, or anything that is not JSON matching the schema above.\n"+
 			"- If the user's message is ambiguous, conversational, a greeting, or a follow-up that depends on prior context, produce a SINGLE-subtask plan where one general-domain agent composes a direct natural-language answer using the conversation context provided.\n"+
