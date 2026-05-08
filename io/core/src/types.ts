@@ -404,7 +404,6 @@ export const WEB_DASHBOARD_CAPABILITIES: SurfaceCapabilities = {
 // ============================================
 
 export interface IOSettings {
-  demoMode: boolean;
   showStreamingIndicator: boolean;
   showActivityLog: boolean;
   taskListSortBy: 'urgency' | 'recent' | 'status';
@@ -414,7 +413,6 @@ export interface IOSettings {
 }
 
 export const DEFAULT_SETTINGS: IOSettings = {
-  demoMode: true,
   showStreamingIndicator: true,
   showActivityLog: true,
   taskListSortBy: 'urgency',

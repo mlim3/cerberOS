@@ -34,14 +34,6 @@ interface ChatWindowProps {
   pulseMessageKey?: string
 }
 
-const SUGGESTION_CHIPS = [
-  'Approve this plan',
-  'Request a summary',
-  'Ask for alternatives',
-  'Show me the risks',
-  'Proceed with changes',
-]
-
 function ChatWindow({
   task,
   onSendMessage,
@@ -75,12 +67,6 @@ function ChatWindow({
     const text = inputValue.trim()
     setInputValue('')
     onSendMessage(task.id, text)
-  }
-
-  const handleChipClick = (text: string) => {
-    if (isStreaming || composerDisabled) return
-    setInputValue(text)
-    inputRef.current?.focus()
   }
 
   return (
@@ -192,20 +178,6 @@ function ChatWindow({
       {belowMessages}
 
       <div className="chat-input-area">
-        {settings.demoMode && !isStreaming && !composerDisabled && !(task.title === 'New Task' && task.messages.length === 0) && (
-          <div className="suggestion-chips">
-            {SUGGESTION_CHIPS.map(chip => (
-              <button
-                key={chip}
-                type="button"
-                className="suggestion-chip"
-                onClick={() => handleChipClick(chip)}
-              >
-                {chip}
-              </button>
-            ))}
-          </div>
-        )}
         {composerDisabledHint && composerDisabled && (
           <p className="composer-locked-hint" role="status">
             {composerDisabledHint}

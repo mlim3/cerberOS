@@ -43,8 +43,6 @@ spec:
           env:
             - name: NODE_ENV
               value: production
-            - name: DEMO_MODE
-              value: {{ .Values.demoMode | quote }}
             - name: NATS_URL
               value: {{ .Values.natsUrl | quote }}
             - name: LOG_LEVEL

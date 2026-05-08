@@ -8,7 +8,6 @@ import {
   type LogEntry,
   type SendMessageRequest,
   type OrchestratorStreamEvent,
-  type CredentialRequest,
   type SkillActivity,
 } from '@cerberos/io-core';
 import {
@@ -98,8 +97,6 @@ function buildRawInputWithHistory(
 // =============================================================================
 // Configuration
 // =============================================================================
-
-const DEMO_MODE = process.env.DEMO_MODE === 'true'
 
 // =============================================================================
 // NATS client (stub)
@@ -251,7 +248,7 @@ if (natsClient) {
           task_id: taskId,
           result_preview: previewHeadTail(content),
         })
-        if (!streamed && !DEMO_MODE && mirrorMemoryConfigured()) {
+        if (!streamed && mirrorMemoryConfigured()) {
           const uid =
             typeof payload.user_id === 'string' && payload.user_id.trim()
               ? payload.user_id.trim()
@@ -297,7 +294,7 @@ if (natsClient) {
             subject,
             detail_preview: previewHeadTail(userMsg),
           })
-          if (!DEMO_MODE && mirrorMemoryConfigured()) {
+          if (mirrorMemoryConfigured()) {
             const uid =
               typeof payload.user_id === 'string' && payload.user_id.trim()
                 ? payload.user_id.trim()
@@ -377,43 +374,6 @@ function persistAndBroadcastStatus(status: StatusUpdate): void {
   broadcastStatus(status.taskId, status);
 }
 
-// =============================================================================
-// Demo mode only: mock response generator and demo credential
-// =============================================================================
-
-/** Demo credential for local dev when Orchestrator is not wired (task 13 in mock UI). */
-const DEMO_TASK_13_CREDENTIAL: CredentialRequest = {
-  taskId: '13',
-  requestId: 'cred-13-dbpwd',
-  userId: '00000000-0000-0000-0000-000000000001',
-  keyName: 'prod_db_admin_password',
-  label: 'Production database admin password',
-  description: 'Required to execute the migration on the production cluster.',
-}
-
-// Mock response generator for demo (only active in DEMO_MODE)
-async function* generateMockResponse(content: string): AsyncGenerator<string> {
-  const responses = [
-    "I'm analyzing your request",
-    'Processing the information',
-    'Looking up relevant data',
-    'Formulating a response',
-  ];
-
-  for (const response of responses) {
-    yield response + '...\n\n';
-    await new Promise(r => setTimeout(r, 500));
-  }
-
-  yield `Based on your message "${content}", here's what I found:\n\n`;
-  await new Promise(r => setTimeout(r, 300));
-
-  yield '• This is a demo response from the IO API server\n';
-  yield '• The streaming is working correctly\n';
-  yield '• Your message was logged to memory\n';
-  yield '\nFeel free to ask more questions!';
-}
-
 type AppEnv = {
   Variables: {
     traceId: string
@@ -460,7 +420,6 @@ app.get('/api/status', (c) => {
   const stt = (process.env.STT_PROVIDER ?? 'local').toLowerCase()
   return c.json({
     io_api: 'ok',
-    demo_mode: DEMO_MODE,
     orchestrator: natsClient?.connected ? 'connected' : 'disconnected',
     memory: (process.env.MEMORY_API_BASE ?? '').trim() ? 'configured' : 'disconnected',
     nats: natsClient ? 'configured' : 'disconnected',
@@ -743,9 +702,8 @@ app.post('/api/chat', async (c) => {
   const encoder = new TextEncoder();
 
   // When NATS is connected, forward the message and wait for the real orchestrator response.
-  // When not connected (and not demo), show a clear fallback.
-  // Demo mode always uses the local mock generator.
-  const useRealOrchestrator = !DEMO_MODE && natsClient?.connected
+  // When not connected, show a clear fallback.
+  const useRealOrchestrator = natsClient?.connected
 
   /** True only after JetStream publish succeeds — drives SSE branch (avoids stale `connected` vs stream start race). */
   let awaitingOrchestratorChat = false
@@ -817,8 +775,8 @@ app.post('/api/chat', async (c) => {
         return
       }
 
-      // Not connected, not demo → clear fallback
-      if (!DEMO_MODE && !natsClient?.connected) {
+      // Not connected → clear fallback
+      if (!natsClient?.connected) {
         const fallbackMsg = '[IO] Orchestrator is not connected. The message was logged but cannot be processed.\n\n' +
              'To connect the orchestrator, configure NATS_URL or start the orchestrator service.\n'
         logFromContext(c, 'warn', 'http', 'orchestrator nats connection is down; replying to chat stream with fallback message')
@@ -950,23 +908,6 @@ app.post('/api/chat', async (c) => {
         })
         return
       }
-
-      // Demo mode: use mock generator
-      ;(async () => {
-        let accumulated = '';
-        for await (const chunk of generateMockResponse(content)) {
-          accumulated += chunk;
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ chunk: accumulated })}\n\n`));
-        }
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true })}\n\n`));
-        controller.close();
-        await appendLogEntry({ conversationId, userId: effectiveUserId, role: 'assistant', content: accumulated, taskId, traceId })
-        const doneStatus: StatusUpdate = {
-          taskId, status: 'awaiting_feedback', lastUpdate: 'Response complete',
-          expectedNextInputMinutes: 0, timestamp: Date.now(),
-        }
-        persistAndBroadcastStatus(doneStatus)
-      })()
     },
     cancel() {
       cleanupChatStream?.()
@@ -1343,16 +1284,6 @@ app.get('/api/events/:taskId', (c) => {
       const stored = tasks.get(taskId);
       if (stored) {
         push(text.encode(`data: ${JSON.stringify({ type: 'status', payload: stored })}\n\n`));
-      }
-
-      // Demo mode: push a sample credential request for the demo task
-      if (DEMO_MODE && taskId === '13') {
-        setTimeout(() => {
-          broadcastStreamEvent('13', {
-            type: 'credential_request',
-            payload: DEMO_TASK_13_CREDENTIAL,
-          });
-        }, 900);
       }
 
       const interval = setInterval(() => {

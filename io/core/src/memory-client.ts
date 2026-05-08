@@ -10,7 +10,7 @@ function memoryApiKey(): string {
   return (process.env.MEMORY_API_KEY ?? process.env.INTERNAL_VAULT_API_KEY ?? '').trim()
 }
 
-function demoMode(): boolean {
+function memoryUnconfigured(): boolean {
   return !memoryApiBase()
 }
 
@@ -141,7 +141,7 @@ function touchDemoConversation(conversationId: string, update: Partial<MemoryCon
 }
 
 export async function createConversation(params: CreateConversationParams): Promise<MemoryConversation | null> {
-  if (demoMode()) {
+  if (memoryUnconfigured()) {
     return ensureDemoConversation(params)
   }
 
@@ -165,7 +165,7 @@ export async function createConversation(params: CreateConversationParams): Prom
 }
 
 export async function createTask(params: CreateTaskParams): Promise<MemoryTask | null> {
-  if (demoMode()) {
+  if (memoryUnconfigured()) {
     const conversation = ensureDemoConversation({
       userId: params.userId,
       conversationId: params.conversationId,
@@ -213,7 +213,7 @@ export async function createTask(params: CreateTaskParams): Promise<MemoryTask |
 }
 
 export async function getTask(taskId: string, userId: string): Promise<MemoryTask | null> {
-  if (demoMode()) {
+  if (memoryUnconfigured()) {
     const task = demoTasks.get(taskId)
     if (!task || task.userId !== userId) return null
     return task
@@ -238,7 +238,7 @@ export async function getTask(taskId: string, userId: string): Promise<MemoryTas
 }
 
 export async function appendLogEntry(params: AppendLogParams): Promise<MemoryLogEntry | null> {
-  if (demoMode()) {
+  if (memoryUnconfigured()) {
     const conversation = ensureDemoConversation({
       userId: params.userId,
       conversationId: params.conversationId,
@@ -318,7 +318,7 @@ export async function getConversationLogs(
   conversationId: string,
   options?: { userId?: string; taskId?: string; limit?: number; traceId?: string }
 ): Promise<MemoryLogEntry[]> {
-  if (demoMode()) {
+  if (memoryUnconfigured()) {
     let entries = demoLogs.filter(m => m.conversationId === conversationId)
     if (options?.userId) {
       entries = entries.filter(m => m.userId === options.userId)
@@ -367,7 +367,7 @@ export async function getConversationLogs(
 }
 
 export async function deleteConversation(conversationId: string, userId: string): Promise<boolean> {
-  if (demoMode()) {
+  if (memoryUnconfigured()) {
     demoConversations.delete(conversationId)
     return true
   }
@@ -387,7 +387,7 @@ export async function deleteConversation(conversationId: string, userId: string)
 }
 
 export async function renameConversation(conversationId: string, userId: string, title: string): Promise<boolean> {
-  if (demoMode()) {
+  if (memoryUnconfigured()) {
     touchDemoConversation(conversationId, { title })
     return true
   }
@@ -417,7 +417,7 @@ const DEMO_USERS: MemoryUser[] = [
 ]
 
 export async function listUsers(): Promise<MemoryUser[]> {
-  if (demoMode()) {
+  if (memoryUnconfigured()) {
     return DEMO_USERS
   }
   try {
@@ -440,7 +440,7 @@ export async function listConversations(
   userId: string,
   options?: { limit?: number }
 ): Promise<MemoryConversation[]> {
-  if (demoMode()) {
+  if (memoryUnconfigured()) {
     const conversations = Array.from(demoConversations.values())
       .filter(c => c.userId === userId)
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
