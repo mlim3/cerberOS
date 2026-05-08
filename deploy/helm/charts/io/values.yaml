@@ -23,7 +23,6 @@ memoryApiBase: "http://memory-api:8081"
 # Required for POST/GET /api/user-crons and other Memory proxies in io/api.
 internalVaultApiKey: ""
 logLevel: "info"
-demoMode: "false"
 sttProvider: "disabled"
 
 observability:

@@ -30,18 +30,13 @@ cd io/api && bun run dev
 http://localhost:3001
 ```
 
-The IO web app is served by the API server at the same port. The default deployment runs with `VITE_DEMO_MODE=true`, which provides a fully functional standalone experience with mock task data and simulated responses.
+The IO web app is served by the API server at the same port.
 
 ### Connect to the real orchestrator
 
+The IO web app connects to the orchestrator by default. Ensure the orchestrator and Memory services are running, then restart the stack:
+
 ```bash
-# Disable demo mode to use live orchestrator data
-export VITE_DEMO_MODE=false
-
-# Rebuild the web app
-cd io/surfaces/web && bun run build
-
-# Restart the stack
 docker compose up --build
 ```
 
@@ -369,20 +364,6 @@ cd io/api
 bun run dev
 ```
 
-### 6.2 IO web app standalone (DEMO_MODE=true)
-
-The web app defaults to `VITE_DEMO_MODE=true` (see `.env.production`). When demo mode is active:
-
-- `mockTasks` array provides 13 pre-populated tasks with realistic conversation history.
-- The UI starts with mock task data already loaded — no orchestrator or Memory service needed.
-- Mock heartbeat intervals generate simulated "working" activity in the activity log.
-- The credential modal for task 13 still appears when that task is selected.
-- Users can create new tasks via the sidebar and chat normally (responses come from the mock generator in the BFF).
-
-```bash
-cd io/surfaces/web
-bun run dev       # uses .env defaults (VITE_DEMO_MODE=true)
-```
 
 ### 6.3 What the integration test covers
 
@@ -395,12 +376,11 @@ The integration test suite (if present) validates the full event pipeline:
 
 ### 6.4 Environment matrix
 
-| Mode | VITE_DEMO_MODE | MEMORY_API_BASE | Orchestrator |
-|------|---------------|-----------------|-------------|
-| Full demo | `true` | _(unset)_ | _(not needed)_ |
-| API standalone | `false` | _(unset)_ | _(not needed)_ |
-| API + Memory | `false` | `http://localhost:8080` | _(not needed)_ |
-| Full stack | `false` | `http://localhost:8080` | _(connected)_ |
+| Mode | MEMORY_API_BASE | Orchestrator |
+|------|-----------------|-------------|
+| API standalone | _(unset)_ | _(not needed)_ |
+| API + Memory | `http://localhost:8080` | _(not needed)_ |
+| Full stack | `http://localhost:8080` | _(connected)_ |
 
 ---
 
@@ -410,8 +390,7 @@ The integration test suite (if present) validates the full event pipeline:
 
 | Variable | Default | Description |
 |---------|---------|-------------|
-| `VITE_DEMO_MODE` | `false` | When `true`, uses `mockTasks` array for initial task list and mock heartbeat intervals. Set `true` in `.env.production` for the default demo build. |
-| `VITE_ORCHESTRATOR_SSE` | `true` | When `false`, disables real-time SSE subscription and uses local mock heartbeats. |
+| `VITE_ORCHESTRATOR_SSE` | `true` | When `false`, disables real-time SSE subscription. |
 | `VITE_IO_API_BASE` | _(empty)_ | Override the IO API base URL. Empty uses the Vite dev proxy (`/api` → `http://localhost:3001`). |
 
 ### API Server (`io/api`)
@@ -668,31 +647,16 @@ The IO web client (`subscribeOrchestratorTaskStream()` in `io/surfaces/web/src/a
 | `io/api/src/index.ts` | IO API server (Bun/Hono BFF) |
 | `io/core/src/types.ts` | Shared TypeScript types and `parseOrchestratorStreamEvent()` |
 | `io/core/src/memory-client.ts` | Memory service client with in-memory fallback |
-| `io/surfaces/web/vite.config.ts` | Vite config with `VITE_DEMO_MODE` build-time define |
-| `io/surfaces/web/.env` | Default env (demo mode off) |
-| `io/surfaces/web/.env.production` | Production env (demo mode on) |
+| `io/surfaces/web/vite.config.ts` | Vite config |
 | `io/io-interfaces.md` | Full interface specification |
 
 ---
 
 ## Appendix B: Docker Configuration
 
-The IO web app is built in Docker with `VITE_DEMO_MODE` passed as a build argument:
+Build and run the IO web app:
 
-```dockerfile
-# Example Dockerfile snippet
-FROM oven/bun:1-alpine AS builder
-WORKDIR /app
-COPY package.json bun.lockb ./
-RUN bun install --frozen-lockfile
-COPY . .
-ARG VITE_DEMO_MODE=false
-ENV VITE_DEMO_MODE=${VITE_DEMO_MODE}
-RUN bun run build
-```
-
-Build and run:
 ```bash
-docker build --build-arg VITE_DEMO_MODE=false -t cerberos-io .
+docker build -t cerberos-io .
 docker run -p 3001:3001 cerberos-io
 ```
