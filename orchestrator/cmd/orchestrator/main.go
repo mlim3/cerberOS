@@ -256,6 +256,45 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 		}
 	})
 
+	// Forward tool_call_started events to the IO Component so the web dashboard
+	// can display real-time tool call indicators.
+	gw.RegisterToolCallStartedHandler(func(taskID, messageID, toolUseID, toolName string) {
+		// taskID here is the subtask's orchRef. Resolve to the frontend-visible
+		// parent task ID (same pattern as skill_activity above).
+		parentTaskID := planExecutor.ParentTaskIDForOrchRef(taskID)
+		if parentTaskID == "" {
+			parentTaskID = taskID
+		}
+		if err := ioClient.PushToolCallStarted(ioclient.ToolCallStartedPayload{
+			TaskID:    parentTaskID,
+			MessageID: messageID,
+			ToolUseID: toolUseID,
+			ToolName:  toolName,
+			Timestamp: time.Now().UnixMilli(),
+		}); err != nil {
+			observability.LogFromContext(context.Background()).Warn("tool_call_started push to IO failed", "error", err)
+		}
+	})
+
+	// Forward tool_call_completed events to the IO Component so the web dashboard
+	// can update the tool call indicator with the final status and duration.
+	gw.RegisterToolCallCompletedHandler(func(taskID, messageID, toolUseID, status string, elapsedMS int64) {
+		parentTaskID := planExecutor.ParentTaskIDForOrchRef(taskID)
+		if parentTaskID == "" {
+			parentTaskID = taskID
+		}
+		if err := ioClient.PushToolCallCompleted(ioclient.ToolCallCompletedPayload{
+			TaskID:     parentTaskID,
+			MessageID:  messageID,
+			ToolUseID:  toolUseID,
+			Status:     status,
+			DurationMS: elapsedMS,
+			Timestamp:  time.Now().UnixMilli(),
+		}); err != nil {
+			observability.LogFromContext(context.Background()).Warn("tool_call_completed push to IO failed", "error", err)
+		}
+	})
+
 	healthHandler := health.New(vaultClient, memClient, natsClient, taskMonitor, cfg.NodeID)
 
 	// Heartbeat: own emitter + cross-service sweeper ("cron" loop).

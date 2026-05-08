@@ -128,6 +128,16 @@ type AgentSpawnHandler func(ctx context.Context, req types.AgentSpawnRequest) er
 // or when the event itself is a skill_synthesized creation event (outcome == "synthesized").
 type SkillActivityHandler func(agentID, taskID, domain, command, outcome string, elapsedMS int64, vaultDelegated, synthesized bool)
 
+// ToolCallStartedHandler is called for tool_call_started audit events published
+// by agent processes. It is invoked for every tool call — no notability filter.
+// Implementations must be non-blocking (called on the NATS subscription goroutine).
+type ToolCallStartedHandler func(taskID, messageID, toolUseID, toolName string)
+
+// ToolCallCompletedHandler is called for tool_call_completed audit events
+// published by agent processes. It is invoked for every tool call.
+// Implementations must be non-blocking (called on the NATS subscription goroutine).
+type ToolCallCompletedHandler func(taskID, messageID, toolUseID, status string, elapsedMS int64)
+
 // VaultExecuteHandler is called when an agent publishes a vault.execute.request.
 // The handler resolves user_id from task state and forwards to the vault engine.
 // Returns the VaultExecuteResult to publish back to the agent.
@@ -147,6 +157,8 @@ type Gateway struct {
 	planDecisionHandler      PlanDecisionHandler
 	agentSpawnHandler        AgentSpawnHandler
 	skillActivityHandler     SkillActivityHandler
+	toolCallStartedHandler   ToolCallStartedHandler
+	toolCallCompletedHandler ToolCallCompletedHandler
 	vaultExecuteHandler      VaultExecuteHandler
 
 	// pendingCapabilityQueries tracks in-flight capability query requests.
@@ -254,6 +266,20 @@ func (g *Gateway) RegisterAgentSpawnHandler(h AgentSpawnHandler) {
 // The notability filter is applied before invoking the handler.
 func (g *Gateway) RegisterSkillActivityHandler(h SkillActivityHandler) {
 	g.skillActivityHandler = h
+}
+
+// RegisterToolCallStartedHandler registers the callback for tool_call_started
+// audit events published by agent processes. Optional — if unset, these events
+// are silently dropped.
+func (g *Gateway) RegisterToolCallStartedHandler(h ToolCallStartedHandler) {
+	g.toolCallStartedHandler = h
+}
+
+// RegisterToolCallCompletedHandler registers the callback for tool_call_completed
+// audit events published by agent processes. Optional — if unset, these events
+// are silently dropped.
+func (g *Gateway) RegisterToolCallCompletedHandler(h ToolCallCompletedHandler) {
+	g.toolCallCompletedHandler = h
 }
 
 // RegisterVaultExecuteHandler registers the callback for vault.execute.request messages.
@@ -1362,6 +1388,23 @@ func (g *Gateway) handleRawAgentAuditEvent(subject string, data []byte) error {
 			}
 		}
 		h(event.AgentID, event.TaskID, domain, command, outcome, elapsedMS, vaultDelegated, synthesized)
+		return nil
+
+	case "tool_call_started":
+		sh := g.toolCallStartedHandler
+		if sh == nil {
+			return nil
+		}
+		sh(event.TaskID, event.Details["message_id"], event.Details["tool_use_id"], event.Details["tool_name"])
+		return nil
+
+	case "tool_call_completed":
+		ch := g.toolCallCompletedHandler
+		if ch == nil {
+			return nil
+		}
+		elapsedMS := parseDetailsInt64(event.Details, "elapsed_ms")
+		ch(event.TaskID, event.Details["message_id"], event.Details["tool_use_id"], event.Details["status"], elapsedMS)
 		return nil
 
 	default:

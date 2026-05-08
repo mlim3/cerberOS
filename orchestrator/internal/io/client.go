@@ -193,6 +193,63 @@ func (c *Client) PushSkillActivity(payload SkillActivityPayload) error {
 	return c.post(skillActivityEvent{Type: "skill_activity", Payload: payload}, "")
 }
 
+// ToolCallStartedPayload carries the data for a tool_call_started SSE event
+// pushed to the IO Component. Matches the ToolCallStartedEvent type in
+// io/core/src/types.ts.
+type ToolCallStartedPayload struct {
+	TaskID    string `json:"taskId"`
+	MessageID string `json:"messageId"`
+	ToolUseID string `json:"toolUseId"`
+	ToolName  string `json:"toolName"`
+	Timestamp int64  `json:"timestamp"` // Unix ms
+}
+
+// ToolCallCompletedPayload carries the data for a tool_call_completed SSE event
+// pushed to the IO Component. Matches the ToolCallCompletedEvent type in
+// io/core/src/types.ts.
+type ToolCallCompletedPayload struct {
+	TaskID     string `json:"taskId"`
+	MessageID  string `json:"messageId"`
+	ToolUseID  string `json:"toolUseId"`
+	Status     string `json:"status"`     // "completed" | "error"
+	DurationMS int64  `json:"durationMs"`
+	Timestamp  int64  `json:"timestamp"` // Unix ms
+}
+
+// toolCallStartedEvent is the envelope for a tool_call_started event pushed to IO.
+// Matches: { type: 'tool_call_started', payload: ToolCallStartedEvent } in io/core/src/types.ts
+type toolCallStartedEvent struct {
+	Type    string                 `json:"type"`
+	Payload ToolCallStartedPayload `json:"payload"`
+}
+
+// toolCallCompletedEvent is the envelope for a tool_call_completed event pushed to IO.
+// Matches: { type: 'tool_call_completed', payload: ToolCallCompletedEvent } in io/core/src/types.ts
+type toolCallCompletedEvent struct {
+	Type    string                   `json:"type"`
+	Payload ToolCallCompletedPayload `json:"payload"`
+}
+
+// PushToolCallStarted notifies the IO Component that a Claude tool call has
+// started executing so the UI can render an in-progress indicator. No-op when
+// IO is disabled.
+func (c *Client) PushToolCallStarted(payload ToolCallStartedPayload) error {
+	if c.Disabled() {
+		return nil
+	}
+	return c.post(toolCallStartedEvent{Type: "tool_call_started", Payload: payload}, "")
+}
+
+// PushToolCallCompleted notifies the IO Component that a Claude tool call has
+// finished executing so the UI can update the indicator with the final status.
+// No-op when IO is disabled.
+func (c *Client) PushToolCallCompleted(payload ToolCallCompletedPayload) error {
+	if c.Disabled() {
+		return nil
+	}
+	return c.post(toolCallCompletedEvent{Type: "tool_call_completed", Payload: payload}, "")
+}
+
 // post marshals body as JSON and POSTs it to the IO stream-events endpoint.
 func (c *Client) post(body any, traceID string) error {
 	data, err := json.Marshal(body)

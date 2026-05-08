@@ -332,6 +332,46 @@ func (ve *VaultExecutor) EmitSkillSynthesized(domain, skillName string) {
 	})
 }
 
+// EmitToolCallStarted publishes a tool_call_started audit event immediately
+// before a Claude tool_use block is dispatched. The orchestrator forwards this
+// to the IO Component so the UI can render an in-progress tool call indicator.
+//
+// messageID is the Anthropic API message ID (resp.ID) for the assistant turn
+// that produced this tool_use block. toolUseID is Claude's tool_use.id (the
+// merge key that pairs started/completed events on the frontend).
+//
+// EmitToolCallStarted is nil-safe — a no-op when ve is nil (NATS absent).
+func (ve *VaultExecutor) EmitToolCallStarted(messageID, toolUseID, toolName string) {
+	if ve == nil {
+		return
+	}
+	ve.emitAudit(types.AuditEventToolCallStarted, map[string]string{
+		"message_id":  messageID,
+		"tool_use_id": toolUseID,
+		"tool_name":   toolName,
+	})
+}
+
+// EmitToolCallCompleted publishes a tool_call_completed audit event after a
+// tool dispatch finishes. The orchestrator forwards this to the IO Component
+// so the UI can update the tool call indicator with the final status.
+//
+// status must be "completed" or "error". elapsedMS is the wall-clock dispatch
+// duration in milliseconds (toolOutcome.elapsedMS).
+//
+// EmitToolCallCompleted is nil-safe — a no-op when ve is nil (NATS absent).
+func (ve *VaultExecutor) EmitToolCallCompleted(messageID, toolUseID, status string, elapsedMS int64) {
+	if ve == nil {
+		return
+	}
+	ve.emitAudit(types.AuditEventToolCallCompleted, map[string]string{
+		"message_id":  messageID,
+		"tool_use_id": toolUseID,
+		"status":      status,
+		"elapsed_ms":  fmt.Sprintf("%d", elapsedMS),
+	})
+}
+
 // emitAudit publishes an audit event to aegis.orchestrator.audit.event in a
 // background goroutine. Failures are logged and never propagated — audit
 // emission must not affect the vault execute flow.

@@ -435,6 +435,8 @@ const (
 	AuditEventAgentSpawnResponse   = "agent_spawn_response" // child agent result returned to parent (issue #67)
 	AuditEventSkillInvocation      = "skill_invocation"     // skill tool dispatched by the ReAct loop
 	AuditEventSkillSynthesized     = "skill_synthesized"    // new skill dynamically created by post-task synthesis
+	AuditEventToolCallStarted      = "tool_call_started"    // Claude tool_use block parsed; dispatch about to begin
+	AuditEventToolCallCompleted    = "tool_call_completed"  // tool dispatch finished; result available
 )
 
 // AuditEvent is published to aegis.orchestrator.audit.event (EDD §8.8).

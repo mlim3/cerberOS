@@ -366,6 +366,11 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 			}()
 		}
 
+		// messageID is the Anthropic API message ID for this assistant turn.
+		// It pairs tool_call_started and tool_call_completed events on the frontend
+		// so the UI knows which assistant turn each tool call belongs to.
+		messageID := resp.ID
+
 		// Collect all tool_use blocks in the order the assistant emitted them.
 		// Index order is preserved in outcomes so Phase 3 assembles results correctly.
 		var pending []pendingToolCall
@@ -379,6 +384,10 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 				name:      tu.Name,
 				input:     tu.Input,
 			})
+			// Emit tool_call_started before dispatch begins. The event fires once
+			// per tool_use block, not per goroutine — all tool calls in this
+			// response share the same messageID.
+			ve.EmitToolCallStarted(messageID, tu.ID, tu.Name)
 		}
 
 		// actParentID is the session log parent shared by all concurrent tool_call
@@ -449,6 +458,15 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 				"details", logfields.BoundedDetails(o.result.Details),
 				"tool_interrupted", toolInterrupted,
 			)
+
+			// Emit tool_call_completed for every dispatched tool. Status is
+			// "error" when IsError is true (covers TOOL_TIMEOUT, dispatch errors,
+			// and skill errors); "completed" otherwise.
+			toolCallStatus := "completed"
+			if o.result.IsError {
+				toolCallStatus = "error"
+			}
+			ve.EmitToolCallCompleted(messageID, o.call.toolUseID, toolCallStatus, o.elapsedMS)
 
 			// Persist tool_result entry. Parent is the tool_call session entry
 			// written by vault tools (SessionEntryID); falls back to actParentID
