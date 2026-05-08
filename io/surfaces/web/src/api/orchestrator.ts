@@ -150,6 +150,7 @@ export async function submitCredential(
       headers: {
         'Content-Type': 'application/json',
         'X-Surface-Key': 'dev',
+        'X-Active-User': params.userId,
       },
       body: JSON.stringify({
         taskId: params.taskId,
@@ -183,6 +184,7 @@ export async function* streamOrchestratorReply(
     headers: {
       'Content-Type': 'application/json',
       'X-Surface-Key': 'dev',
+      'X-Active-User': userId,
     },
     body: JSON.stringify({
       taskId,
