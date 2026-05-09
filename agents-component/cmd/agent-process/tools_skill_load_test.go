@@ -584,7 +584,7 @@ parameters:
 
 	registry := newDynamicRegistry(nil)
 	raw, _ := json.Marshal(map[string]string{"repo": "myorg/myrepo@" + validSHA})
-	result := executeSkillLoad(context.Background(), registry, raw)
+	result := executeSkillLoad(context.Background(), registry, nil, raw)
 
 	if result.IsError {
 		t.Fatalf("unexpected error: %s", result.Content)
@@ -631,7 +631,7 @@ execution:
 		"repo": "myorg/myrepo@" + validSHA,
 		"path": "skills/my-skill.yaml",
 	})
-	result := executeSkillLoad(context.Background(), registry, raw)
+	result := executeSkillLoad(context.Background(), registry, nil, raw)
 	if result.IsError {
 		t.Fatalf("unexpected error: %s", result.Content)
 	}
@@ -652,7 +652,7 @@ func TestExecuteSkillLoad_ManifestNotFound(t *testing.T) {
 
 	registry := newDynamicRegistry(nil)
 	raw, _ := json.Marshal(map[string]string{"repo": "myorg/myrepo@" + validSHA})
-	result := executeSkillLoad(context.Background(), registry, raw)
+	result := executeSkillLoad(context.Background(), registry, nil, raw)
 	if !result.IsError {
 		t.Error("expected IsError=true for 404 manifest")
 	}
@@ -670,7 +670,7 @@ func TestExecuteSkillLoad_InvalidYAML(t *testing.T) {
 
 	registry := newDynamicRegistry(nil)
 	raw, _ := json.Marshal(map[string]string{"repo": "myorg/myrepo@" + validSHA})
-	result := executeSkillLoad(context.Background(), registry, raw)
+	result := executeSkillLoad(context.Background(), registry, nil, raw)
 	if !result.IsError {
 		t.Error("expected IsError=true for invalid YAML")
 	}
@@ -695,7 +695,7 @@ execution:
 
 	registry := newDynamicRegistry(nil)
 	raw, _ := json.Marshal(map[string]string{"repo": "myorg/myrepo@" + validSHA})
-	result := executeSkillLoad(context.Background(), registry, raw)
+	result := executeSkillLoad(context.Background(), registry, nil, raw)
 	if !result.IsError {
 		t.Error("expected IsError=true for manifest failing Tool Contract")
 	}
@@ -722,7 +722,7 @@ execution:
 	// Pre-seed the registry with the same name.
 	registry := newDynamicRegistry([]SkillTool{minimalSkillTool("dupe_skill")})
 	raw, _ := json.Marshal(map[string]string{"repo": "myorg/myrepo@" + validSHA})
-	result := executeSkillLoad(context.Background(), registry, raw)
+	result := executeSkillLoad(context.Background(), registry, nil, raw)
 	if !result.IsError {
 		t.Error("expected IsError=true when skill name already registered")
 	}
@@ -731,7 +731,7 @@ execution:
 func TestExecuteSkillLoad_BadRepoRef(t *testing.T) {
 	registry := newDynamicRegistry(nil)
 	raw, _ := json.Marshal(map[string]string{"repo": "myorg/myrepo@main"})
-	result := executeSkillLoad(context.Background(), registry, raw)
+	result := executeSkillLoad(context.Background(), registry, nil, raw)
 	if !result.IsError {
 		t.Error("expected IsError=true for branch-name repo ref")
 	}
@@ -739,7 +739,7 @@ func TestExecuteSkillLoad_BadRepoRef(t *testing.T) {
 
 func TestExecuteSkillLoad_InvalidParams(t *testing.T) {
 	registry := newDynamicRegistry(nil)
-	result := executeSkillLoad(context.Background(), registry, json.RawMessage(`not-json`))
+	result := executeSkillLoad(context.Background(), registry, nil, json.RawMessage(`not-json`))
 	if !result.IsError {
 		t.Error("expected IsError=true for invalid JSON params")
 	}

@@ -240,6 +240,53 @@ func (sl *SessionLog) PersistSkillWithScope(domain string, node *types.SkillNode
 	return nil
 }
 
+// PersistExternalSkill writes an externally loaded skill manifest to the Memory
+// Component as data_type "skill_cache" with origin "external". The manifest JSON
+// is stored in the Recipe field of a SynthesizedSkillRecord so Factory.loadExternalSkills
+// can reconstruct the SkillTool at the next agent spawn without hitting GitHub again.
+//
+// PersistExternalSkill is a no-op and returns nil when sl is nil.
+func (sl *SessionLog) PersistExternalSkill(name, description, manifestJSON string) error {
+	if sl == nil {
+		return nil
+	}
+	record := types.SynthesizedSkillRecord{
+		Name:        name,
+		Description: description,
+		Recipe:      manifestJSON,
+	}
+	tags := map[string]string{
+		"origin":     "external",
+		"skill_name": name,
+	}
+	mw := types.MemoryWrite{
+		AgentID:   sl.agentID,
+		SessionID: sl.taskID,
+		DataType:  "skill_cache",
+		TTLHint:   0,
+		Payload:   record,
+		Tags:      tags,
+	}
+	env := agentEnvelope{
+		MessageID:       newUUID(),
+		MessageType:     comms.MsgTypeStateWrite,
+		SourceComponent: "agents",
+		CorrelationID:   name,
+		Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
+		SchemaVersion:   "1.0",
+		Payload:         mw,
+	}
+	data, err := json.Marshal(env)
+	if err != nil {
+		return fmt.Errorf("session log: persist external skill: marshal: %w", err)
+	}
+	if _, err := sl.js.Publish(comms.SubjectStateWrite, data); err != nil {
+		return fmt.Errorf("session log: persist external skill: publish: %w", err)
+	}
+	sl.log.Info("session log: external skill persisted", "skill_name", name)
+	return nil
+}
+
 // ReadSession issues a state.read.request for this agent's session entries and
 // waits up to sessionReadTimeout for the response. Returns the recovered session
 // entries (all DataType "episode" entries for this task) so the caller can

@@ -189,8 +189,24 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 	// a reference to it so newly loaded skills become available on the next
 	// Reason phase without restarting the agent.
 	registry := newDynamicRegistry(tools)
-	if err := registry.Register(skillLoadTool(registry)); err != nil {
+	if err := registry.Register(skillLoadTool(registry, sl)); err != nil {
 		log.Warn("skill_load tool registration failed", "error", err)
+	}
+
+	// Pre-populate the registry with external skills persisted by skill_load in
+	// prior sessions. Each record carries the serialised externalSkillManifest in
+	// its Recipe field; buildHTTPSkillTool reconstructs the full SkillTool from it.
+	for _, ext := range spawnCtx.ExternalSkills {
+		var m externalSkillManifest
+		if err := json.Unmarshal([]byte(ext.Recipe), &m); err != nil {
+			log.Warn("external skill hydration: unmarshal manifest failed; skipping",
+				"skill_name", ext.Name, "error", err)
+			continue
+		}
+		if err := registry.Register(buildHTTPSkillTool(&m)); err != nil {
+			log.Warn("external skill hydration: registration failed; skipping",
+				"skill_name", ext.Name, "error", err)
+		}
 	}
 
 	systemPrompt := buildSystemPrompt(spawnCtx.SkillDomain, spawnCtx.CommandManifest, spawnCtx.AgentMemory, spawnCtx.UserProfile)

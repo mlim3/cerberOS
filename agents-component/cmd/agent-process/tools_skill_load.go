@@ -72,7 +72,9 @@ type externalParamDef struct {
 
 // skillLoadTool returns the skill_load SkillTool. The registry reference
 // allows the tool to register newly loaded skills without restarting the agent.
-func skillLoadTool(registry *DynamicRegistry) SkillTool {
+// sl is used to persist the loaded manifest to the Memory Component so the skill
+// survives agent restarts; it may be nil (persistence is best-effort).
+func skillLoadTool(registry *DynamicRegistry, sl *SessionLog) SkillTool {
 	return SkillTool{
 		Label:                   "Skill Load",
 		RequiredCredentialTypes: nil,
@@ -100,12 +102,12 @@ func skillLoadTool(registry *DynamicRegistry) SkillTool {
 			},
 		},
 		Execute: func(ctx context.Context, raw json.RawMessage) ToolResult {
-			return executeSkillLoad(ctx, registry, raw)
+			return executeSkillLoad(ctx, registry, sl, raw)
 		},
 	}
 }
 
-func executeSkillLoad(ctx context.Context, registry *DynamicRegistry, raw json.RawMessage) ToolResult {
+func executeSkillLoad(ctx context.Context, registry *DynamicRegistry, sl *SessionLog, raw json.RawMessage) ToolResult {
 	var params struct {
 		Repo string `json:"repo"`
 		Path string `json:"path"`
@@ -143,6 +145,17 @@ func executeSkillLoad(ctx context.Context, registry *DynamicRegistry, raw json.R
 		return ToolResult{
 			Content: fmt.Sprintf("skill registration failed: %v", err),
 			IsError: true,
+		}
+	}
+
+	// Persist the manifest so the skill survives agent restarts. The manifest is
+	// serialised to JSON and stored in the Recipe field of a SynthesizedSkillRecord.
+	// Persistence is best-effort — a failure does not block the current session.
+	manifestJSON, merr := json.Marshal(manifest)
+	if merr == nil {
+		if perr := sl.PersistExternalSkill(manifest.Name, manifest.Description, string(manifestJSON)); perr != nil {
+			// Log but do not surface — the skill is already usable in this session.
+			_ = perr
 		}
 	}
 

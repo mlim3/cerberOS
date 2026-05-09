@@ -247,6 +247,14 @@ func (f *Factory) LoadSynthesizedSkills(ctx context.Context) error {
 
 	loaded := 0
 	for _, record := range records {
+		// External skills (origin: "external") are not SkillNodes — they carry a
+		// serialised externalSkillManifest in their Recipe field and are hydrated
+		// directly into the DynamicRegistry by cmd/agent-process at spawn time.
+		// Skip them here so RegisterCommand does not attempt to parse them as nodes.
+		if record.Tags["origin"] == "external" {
+			continue
+		}
+
 		domain, ok := record.Tags["domain"]
 		if !ok || domain == "" {
 			f.log.Warn("factory: synthesized skill record missing domain tag; skipping",
@@ -505,6 +513,7 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 		ConversationID:      spec.ConversationID,
 		PriorTurns:          priorTurns,
 		SynthesizedSkills:   f.synthesizedSkillsForDomain(entryDomain),
+		ExternalSkills:      f.loadExternalSkills(),
 		OriginalUserMessage: originalUserMessage,
 		UserFacing:          userFacing,
 		OnComplete:          f.processCompletionHandler(agentID),
@@ -625,6 +634,7 @@ func (f *Factory) assignTask(agentID string, spec *types.TaskSpec) error {
 		ConversationID:      spec.ConversationID,
 		PriorTurns:          priorTurns,
 		SynthesizedSkills:   f.synthesizedSkillsForDomain(entryDomain),
+		ExternalSkills:      f.loadExternalSkills(),
 		OriginalUserMessage: originalUserMessage,
 		UserFacing:          userFacing,
 		OnComplete:          f.processCompletionHandler(agentID),
@@ -1347,6 +1357,40 @@ func (f *Factory) synthesizedSkillsForDomain(domain string) []types.SynthesizedS
 	return records
 }
 
+// loadExternalSkills returns all skill_cache records that were persisted by
+// skill_load (origin: "external"). Each record carries the serialised
+// externalSkillManifest JSON in its Recipe field; cmd/agent-process reconstructs
+// the full SkillTool from it at spawn time without hitting GitHub again.
+// Errors are logged and treated as an empty list — a missing external skill
+// does not block agent spawn.
+func (f *Factory) loadExternalSkills() []types.SynthesizedSkillRecord {
+	records, err := f.memory.ReadAllByType("skill_cache", "")
+	if err != nil {
+		f.log.Warn("factory: loadExternalSkills: memory read failed; spawning without external skills", "error", err)
+		return nil
+	}
+	var out []types.SynthesizedSkillRecord
+	for _, record := range records {
+		if record.Tags["origin"] != "external" {
+			continue
+		}
+		raw, err := json.Marshal(record.Payload)
+		if err != nil {
+			f.log.Warn("factory: loadExternalSkills: marshal payload failed; skipping",
+				"skill_name", record.Tags["skill_name"], "error", err)
+			continue
+		}
+		var rec types.SynthesizedSkillRecord
+		if err := json.Unmarshal(raw, &rec); err != nil {
+			f.log.Warn("factory: loadExternalSkills: unmarshal SynthesizedSkillRecord failed; skipping",
+				"skill_name", record.Tags["skill_name"], "error", err)
+			continue
+		}
+		out = append(out, rec)
+	}
+	return out
+}
+
 // spawnSystemPrompt returns the domain-scoped system prompt (including command
 // manifest) that will be used at spawn time for token-budget enforcement.
 // Must stay in sync with buildSystemPrompt in cmd/agent-process/loop.go.
@@ -1790,6 +1834,7 @@ func (f *Factory) wakeAgent(agentID string, spec *types.TaskSpec) error {
 		ConversationID:      spec.ConversationID,
 		PriorTurns:          priorTurns,
 		SynthesizedSkills:   f.synthesizedSkillsForDomain(entryDomain),
+		ExternalSkills:      f.loadExternalSkills(),
 		OriginalUserMessage: originalUserMessage,
 		UserFacing:          userFacing,
 		OnComplete:          f.processCompletionHandler(agentID),
