@@ -9,44 +9,12 @@ import (
 	"unicode"
 )
 
-const (
-	// defaultHashDim is retained for explicit test embedders.
-	defaultHashDim = 512
-)
-
 // Embedder converts a text string into a float64 embedding vector.
 // Implementations must be safe for concurrent use.
 // The returned vector should be L2-normalised so cosine similarity is
 // equivalent to a dot product — the Manager assumes this property.
 type Embedder interface {
 	Embed(text string) ([]float64, error)
-}
-
-// hashEmbedder is a lightweight deterministic Embedder useful in tests. It uses
-// feature hashing on unigrams and bigrams extracted from the input text. The
-// result is L2-normalised.
-type hashEmbedder struct {
-	dim int
-}
-
-// newHashEmbedder returns a hashEmbedder with the given vector dimension.
-func newHashEmbedder(dim int) *hashEmbedder {
-	return &hashEmbedder{dim: dim}
-}
-
-// Embed converts text to a normalised float64 vector via feature hashing.
-func (h *hashEmbedder) Embed(text string) ([]float64, error) {
-	tokens := tokenizeText(text)
-	vec := make([]float64, h.dim)
-	for _, tok := range tokens {
-		idx := int(fnv1aHash(tok)) % h.dim
-		if idx < 0 {
-			idx = -idx
-		}
-		vec[idx]++
-	}
-	l2Normalize(vec)
-	return vec, nil
 }
 
 // tokenizeText lowercases text, splits on non-alphanumeric/underscore boundaries,
