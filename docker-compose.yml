@@ -233,6 +233,48 @@ services:
     networks:
       - cerberos
 
+  # Demo-only sidecar: keeps OpenBao unsealed across container restarts so
+  # `docker compose restart vault` (or any upstream rebuild that cycles
+  # OpenBao) doesn't wedge the vault path. Reads the unseal key from
+  # vault/.openbao-init.json which bootstrap.sh creates on first run.
+  # NOT for production — see the script's header comment for why.
+  openbao-unseal:
+    image: alpine/curl:latest
+    # alpine/curl's default entrypoint is `curl`, so we override to run our
+    # script under sh directly (the script is mounted read-only).
+    entrypoint: ["/bin/sh", "/auto-unseal.sh"]
+    # Mount the WHOLE vault directory rather than the .openbao-init.json file
+    # alone. Docker on Windows has a known footgun: bind-mounting a single
+    # file that doesn't yet exist on the host (or that the host process is
+    # actively writing) creates the destination as a *directory* inside the
+    # container, which then can't be read as a file. Mounting the parent
+    # directory side-steps the whole class of issues — `bao operator init`
+    # writes the file via the host shell, and the sidecar reads it through
+    # the directory mount on its next poll.
+    volumes:
+      - ./vault/auto-unseal.sh:/auto-unseal.sh:ro
+      - ./vault:/vault:ro
+    environment:
+      OPENBAO_ADDR: http://openbao:8200
+      INIT_FILE: /vault/.openbao-init.json
+    depends_on:
+      - openbao
+    restart: unless-stopped
+    # The healthcheck verifies the sidecar can talk to OpenBao at all. We
+    # intentionally do NOT require sealed:false, because OpenBao is sealed
+    # by design between container start and `bao operator init` (run from
+    # bootstrap.sh). Reporting unhealthy in that window only causes false
+    # alarms in `docker ps`. The unseal action itself is logged in the
+    # sidecar's stdout.
+    healthcheck:
+      test: ["CMD", "sh", "-c", "curl -fs --max-time 3 http://openbao:8200/v1/sys/seal-status >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
+    networks:
+      - cerberos
+
   vault:
     build:
       context: ./vault/engine
@@ -245,6 +287,12 @@ services:
       BAO_ADDR: http://openbao:8200
       # Heartbeat emitter publishes to aegis.heartbeat.service.vault.
       NATS_URL: nats://nats:4222
+    # NOTE: We intentionally do NOT depend on openbao-unseal being healthy.
+    # On a fresh bootstrap, OpenBao starts uninitialized → sealed; the unseal
+    # sidecar only succeeds after `bao operator init` runs later in
+    # bootstrap.sh. Gating vault on the sidecar's healthcheck would deadlock
+    # bootstrap. The sidecar still runs alongside as a best-effort safety
+    # net for future restarts (e.g. `docker compose restart openbao`).
     depends_on:
       - openbao
       - nats-1
@@ -441,6 +489,12 @@ services:
       OTEL_SERVICE_NAME: agents
     ports:
       - "9190:9090"
+    # FP-Stefan E3: per-user filesystem for the local_files skill domain.
+    # Bind-mount ./data/agents (host) -> /data (container) so the agent's
+    # local_file_write/read tools can persist user notes etc. across runs.
+    # Files are scoped to /data/users/<AEGIS_USER_CONTEXT_ID>/ by the tool.
+    volumes:
+      - ./data/agents:/data
     restart: unless-stopped
     networks:
       - cerberos

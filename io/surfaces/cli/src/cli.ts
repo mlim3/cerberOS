@@ -14,8 +14,16 @@
 
 import { CerberOSREPL } from './repl'
 import { config } from './config'
+import { dispatchAdmin, isAdminCommand } from './admin'
 
 async function main() {
+  // One-shot admin commands run and exit; the interactive REPL is the
+  // default when no positional arg is given (preserves existing UX).
+  const argv = process.argv.slice(2)
+  if (argv.length > 0 && isAdminCommand(argv)) {
+    const code = await dispatchAdmin(argv)
+    process.exit(code)
+  }
   const repl = new CerberOSREPL(config)
   await repl.start()
 }

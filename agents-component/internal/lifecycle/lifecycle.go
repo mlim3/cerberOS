@@ -48,6 +48,15 @@ type VMConfig struct {
 	PriorTurns        []anthropic.MessageParam       // reconstructed conversation history from prior task; nil for standalone tasks
 	SynthesizedSkills []types.SynthesizedSkillRecord // skills created by prior synthesis; each gets a dynamic SkillTool at spawn
 
+	// OriginalUserMessage is the user's literal chat input. Threaded by the orchestrator
+	// through TaskSpec.Metadata["original_user_message"] so the user-facing agent can
+	// snapshot a clean conversation pair instead of orchestrator-generated subtask scaffolding.
+	OriginalUserMessage string
+
+	// UserFacing marks this spawn as the agent that produces the final user-visible reply
+	// for this conversation turn. Only this agent persists a conversation_snapshot.
+	UserFacing bool
+
 	// OnComplete is called by the process manager when the agent process exits.
 	// output holds the raw TaskOutput JSON written to stdout; exitErr is non-nil
 	// when the process exited with a non-zero status. The factory uses this to
@@ -118,6 +127,9 @@ type agentSpawnContext struct {
 	ConversationID    string                         `json:"conversation_id,omitempty"`    // non-empty when this task continues a prior conversation
 	PriorTurns        []json.RawMessage              `json:"prior_turns,omitempty"`        // per-element serialised anthropic.MessageParam; stable across SDK versions
 	SynthesizedSkills []types.SynthesizedSkillRecord `json:"synthesized_skills,omitempty"` // skills created by prior synthesis; each gets a dynamic SkillTool with LLM-based execution
+
+	OriginalUserMessage string `json:"original_user_message,omitempty"`
+	UserFacing          bool   `json:"user_facing,omitempty"`
 }
 
 // processEntry tracks a single running agent-process subprocess. The process
@@ -197,19 +209,21 @@ func encodeSpawnContext(config VMConfig) ([]byte, error) {
 	}
 
 	payload, err := json.Marshal(agentSpawnContext{
-		TaskID:            config.TaskID,
-		SkillDomain:       config.SkillDomain,
-		PermissionToken:   config.CredentialPtr,
-		Instructions:      config.Instructions,
-		CommandManifest:   config.CommandManifest,
-		RecoveredContext:  config.RecoveredContext,
-		AgentMemory:       config.AgentMemory,
-		UserProfile:       config.UserProfile,
-		TraceID:           config.TraceID,
-		UserContextID:     config.UserContextID,
-		ConversationID:    config.ConversationID,
-		PriorTurns:        priorTurnsRaw,
-		SynthesizedSkills: config.SynthesizedSkills,
+		TaskID:              config.TaskID,
+		SkillDomain:         config.SkillDomain,
+		PermissionToken:     config.CredentialPtr,
+		Instructions:        config.Instructions,
+		CommandManifest:     config.CommandManifest,
+		RecoveredContext:    config.RecoveredContext,
+		AgentMemory:         config.AgentMemory,
+		UserProfile:         config.UserProfile,
+		TraceID:             config.TraceID,
+		UserContextID:       config.UserContextID,
+		ConversationID:      config.ConversationID,
+		PriorTurns:          priorTurnsRaw,
+		SynthesizedSkills:   config.SynthesizedSkills,
+		OriginalUserMessage: config.OriginalUserMessage,
+		UserFacing:          config.UserFacing,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("lifecycle: marshal spawn context: %w", err)
@@ -249,10 +263,14 @@ func (m *processManager) Spawn(config VMConfig) error {
 
 	// Inherit parent env (for ANTHROPIC_API_KEY etc.) then overlay agent-specific
 	// variables so the agent process can identify itself and publish heartbeats.
+	// AEGIS_USER_CONTEXT_ID is included so per-user tools (local_files) can
+	// scope filesystem operations to the owner's directory without threading
+	// userID through every ToolFactory signature.
 	cmd.Env = append(os.Environ(),
 		"AEGIS_AGENT_ID="+config.AgentID,
 		"AEGIS_TASK_ID="+config.TaskID,
 		"AEGIS_TRACE_ID="+config.TraceID,
+		"AEGIS_USER_CONTEXT_ID="+config.UserContextID,
 	)
 
 	if err := cmd.Start(); err != nil {

@@ -19,6 +19,8 @@ import {
   getConversationLogs,
   listConversations,
   listUsers,
+  listUsersWithMeta,
+  createUser,
   deleteConversation,
   renameConversation,
   type MemoryLogEntry,
@@ -35,7 +37,7 @@ import { ioLog, logFromContext, previewHeadTail, previewWords } from './logger'
 import { startHeartbeatEmitter } from './heartbeat'
 import { mirrorMemoryConfigured, persistOrchestratorOutcomeToMemory } from './scheduled-run-mirror'
 import { messageLooksLikeUserCronScheduling } from './scheduling-language'
-import { activeUserId, userIdRequired } from './identity'
+import { activeUserId, userIdRequired, requireRole } from './identity'
 
 // =============================================================================
 // Planner input enrichment
@@ -503,13 +505,13 @@ app.post('/api/conversations', async (c) => {
   })
   if (!conversation) {
     logFromContext(c, 'error', 'http', 'memory rejected conversation creation; returning 502 to ui', {
-      user_id: effectiveUserId,
+      user_id: userId,
     })
     return c.json({ error: 'Failed to create conversation' }, 502)
   }
   c.set('conversationId', conversation.conversationId)
   logFromContext(c, 'info', 'http', 'created new conversation thread for user', {
-    user_id: effectiveUserId,
+    user_id: userId,
     title_preview: previewWords(conversation.title ?? ''),
   })
   return c.json({
@@ -519,12 +521,20 @@ app.post('/api/conversations', async (c) => {
   })
 })
 
+// UUID v1-v8 shape, lowercase or uppercase. Memory's CreateTaskRequest declares
+// ConversationID as *uuid.UUID; passing a non-UUID (e.g. the web UI's 9-char
+// `nextId()` placeholder) would cause memory's JSON decoder to 400 the whole
+// request. Filter at the io boundary so memory mints a new UUID when the
+// caller's id isn't persistable yet.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+
 // Create a new task
 app.post('/api/tasks', async (c) => {
   const userId = activeUserId(c)
   if (!userId) return userIdRequired(c)
   const body = await c.req.json()
-  const conversationId = typeof body.conversationId === 'string' && body.conversationId ? body.conversationId : undefined
+  const rawConversationId = typeof body.conversationId === 'string' && body.conversationId ? body.conversationId : undefined
+  const conversationId = rawConversationId && UUID_RE.test(rawConversationId) ? rawConversationId : undefined
   const title = typeof body.title === 'string' ? body.title : undefined
   const inputSummary = typeof body.inputSummary === 'string' ? body.inputSummary : undefined
   const status = typeof body.status === 'string' ? body.status : 'awaiting_feedback'
@@ -1015,13 +1025,280 @@ app.get('/api/conversations', async (c) => {
   return c.json({ conversations })
 })
 
-// Demo-mode user-switcher roster. Bootstrap endpoint — intentionally does NOT
-// require X-Active-User, since the UI calls this before a user is selected.
-// Real auth (MT-1) replaces the dropdown entirely.
+// Demo-mode user-switcher roster + first-run signup. GET intentionally does
+// NOT require X-Active-User — the UI calls it before any user is selected and
+// uses `root_count` to decide whether to render the "Create your account"
+// screen. POST is gated as follows:
+//   - if no root exists yet, ANY caller may create the first root (signup);
+//   - otherwise the caller must hold role >= manager (FP-Stefan honor system).
 app.get('/api/users', async (c) => {
-  const users = await listUsers()
-  logFromContext(c, 'debug', 'http', 'served user roster to ui', { user_count: users.length })
-  return c.json({ users })
+  const { users, rootCount } = await listUsersWithMeta()
+  logFromContext(c, 'debug', 'http', 'served user roster to ui', {
+    user_count: users.length,
+    root_count: rootCount,
+  })
+  return c.json({ users, root_count: rootCount })
+})
+
+// Skill creation from a natural-language description. Builds a SkillNode
+// from the description heuristically, persists it as `skill_cache` via NATS
+// state.write, and signals aegis-agents to re-hydrate so the new skill is
+// available in the live M4 tree without a process restart. Idempotent on the
+// derived skill name (re-publish overwrites the prior record).
+app.post('/api/skills/create', async (c) => {
+  const userId = activeUserId(c)
+  if (!userId) return userIdRequired(c)
+  const body = await c.req.json().catch(() => null) as
+    | { description?: string; domain?: string; scope?: 'me' | 'all' }
+    | null
+  if (!body || typeof body.description !== 'string' || !body.description.trim()) {
+    return c.json({ error: 'description is required' }, 400)
+  }
+  const scope: 'me' | 'all' = body.scope === 'all' ? 'all' : 'me'
+  // Manager-gate scope=all so a regular user can't push a skill to everyone.
+  if (scope === 'all') {
+    const guard = await requireRole(c, 'manager')
+    if (!('ok' in guard)) return guard
+  }
+  const { nodeFromDescription, publishSkill } = await import('./skills/publisher')
+  const node = nodeFromDescription(body.description)
+  const domain = (typeof body.domain === 'string' && body.domain) || 'general'
+  const ok = publishSkill(natsClient, {
+    domain,
+    node,
+    ownerUserId: userId,
+    scope,
+  })
+  if (!ok) {
+    return c.json({ error: 'skill publish failed (NATS unavailable)' }, 502)
+  }
+  logFromContext(c, 'info', 'http', 'skill created from description', {
+    skill_name: node.name,
+    domain,
+    scope,
+    actor_user_id: userId,
+  })
+  return c.json({ skill: { name: node.name, domain, description: node.description } }, 201)
+})
+
+// Permissive GitHub skill importer. Pulls the repo's README (best-effort) and
+// translates it into a cerberOS skill node, persists, and reloads. scope='all'
+// is manager-gated; scope='me' is the default for regular users. Repos that
+// are private, missing a README, or unreachable still produce a stub skill
+// so the manager-installed-Superpowers flow stays demo-friendly.
+app.post('/api/skills/import-github', async (c) => {
+  const userId = activeUserId(c)
+  if (!userId) return userIdRequired(c)
+  const body = await c.req.json().catch(() => null) as
+    | { repo?: string; domain?: string; scope?: 'me' | 'all' }
+    | null
+  if (!body || typeof body.repo !== 'string' || !body.repo.trim()) {
+    return c.json({ error: 'repo is required' }, 400)
+  }
+  const scope: 'me' | 'all' = body.scope === 'all' ? 'all' : 'me'
+  if (scope === 'all') {
+    const guard = await requireRole(c, 'manager')
+    if (!('ok' in guard)) return guard
+  }
+  const { nodeFromRepo, publishSkill } = await import('./skills/publisher')
+  const node = await nodeFromRepo(body.repo)
+  const domain = (typeof body.domain === 'string' && body.domain) || 'general'
+  const ok = publishSkill(natsClient, {
+    domain,
+    node,
+    ownerUserId: userId,
+    scope,
+  })
+  if (!ok) {
+    return c.json({ error: 'skill publish failed (NATS unavailable)' }, 502)
+  }
+  logFromContext(c, 'info', 'http', 'skill imported from github', {
+    skill_name: node.name,
+    domain,
+    repo: body.repo,
+    scope,
+    actor_user_id: userId,
+  })
+  return c.json({
+    skill: { name: node.name, domain, description: node.description },
+    skills: [{ name: node.name, domain }],
+  }, 201)
+})
+
+// Manager-gated Gmail demo-account configuration. Uses Gmail SMTP +
+// App Password (https://myaccount.google.com/apppasswords) — no OAuth, no
+// Google Cloud Console project. The {email, app_password} pair is stored as
+// a single JSON blob in OpenBao under the key `gmail_app_password`, which
+// the vault engine resolves at execute time for the `vault_gmail_send` and
+// `vault_gmail_calendar_invite` operations. Calendar events are sent as
+// .ics REQUEST attachments via the same SMTP path.
+//
+// The 16-character constraint matches Google's App Password format and
+// catches the most common paste error (account password instead of app
+// password). Spaces in the input are stripped — Google displays app
+// passwords as `xxxx xxxx xxxx xxxx` for readability.
+app.post('/api/admin/gmail-credentials', async (c) => {
+  const guard = await requireRole(c, 'manager')
+  if (!('ok' in guard)) return guard
+  const body = await c.req.json().catch(() => null) as
+    | { email?: string; app_password?: string }
+    | null
+  if (!body || typeof body.email !== 'string' || typeof body.app_password !== 'string') {
+    return c.json({ error: 'email and app_password are required' }, 400)
+  }
+  const email = body.email.trim()
+  const appPassword = body.app_password.replace(/\s+/g, '')
+  if (!email.includes('@')) {
+    return c.json({ error: 'email is not a valid address' }, 400)
+  }
+  if (appPassword.length !== 16) {
+    return c.json({
+      error: 'app_password must be 16 characters (Google App Password format). ' +
+        'Generate one at https://myaccount.google.com/apppasswords — do NOT paste your account password.',
+    }, 400)
+  }
+  const vaultEngineUrl = (process.env.VAULT_ENGINE_URL || 'http://vault:8000').replace(/\/$/, '')
+  const credentialBlob = JSON.stringify({ email, app_password: appPassword })
+  const res = await fetch(`${vaultEngineUrl}/secrets/put`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key: 'gmail_app_password', value: credentialBlob }),
+  })
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    logFromContext(c, 'error', 'http', 'gmail credential write failed', {
+      vault_status: res.status,
+      vault_body_preview: text.slice(0, 200),
+    })
+    return c.json({ error: `vault rejected put (${res.status})` }, 502)
+  }
+  logFromContext(c, 'info', 'http', 'gmail demo account configured', {
+    actor_user_id: guard.userId,
+    actor_role: guard.role,
+    email,
+  })
+  return c.json({
+    ok: true,
+    email,
+    note:
+      'Gmail SMTP credential stored. Agents can now call gmail_send and calendar_create_event ' +
+      'without restart (vault resolves the credential per-call).',
+  })
+})
+
+// GET — non-secret status: was the demo account configured? Returns email
+// only (never the app password). Used by the Admin UI to render the current
+// status and let the manager rotate/revoke as needed.
+app.get('/api/admin/gmail-credentials', async (c) => {
+  const guard = await requireRole(c, 'manager')
+  if (!('ok' in guard)) return guard
+  const vaultEngineUrl = (process.env.VAULT_ENGINE_URL || 'http://vault:8000').replace(/\/$/, '')
+  const res = await fetch(`${vaultEngineUrl}/secrets/get`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ agent_id: 'io', keys: ['gmail_app_password'] }),
+  })
+  if (!res.ok) {
+    return c.json({ configured: false, error: `vault status ${res.status}` })
+  }
+  const payload = (await res.json().catch(() => null)) as { secrets?: Record<string, string> } | null
+  const raw = payload?.secrets?.gmail_app_password
+  if (!raw) {
+    return c.json({ configured: false })
+  }
+  let parsed: { email?: string } | null = null
+  try { parsed = JSON.parse(raw) } catch { parsed = null }
+  return c.json({
+    configured: !!(parsed && parsed.email),
+    email: parsed?.email ?? null,
+  })
+})
+
+// Manager-gated LLM provider key configuration. Writes the key to OpenBao via
+// the vault engine so the value is encrypted at rest and centrally rotatable.
+// NOTE: aegis-agents currently reads ANTHROPIC_API_KEY from its environment at
+// spawn — picking up the new value requires `docker compose restart aegis-agents`
+// (or equivalent in K8s). The response carries `requires_restart: true` so the
+// UI can surface that. The vault-resolved value is intended to become the
+// source of truth at agent spawn in a follow-up; for now this guarantees the
+// audit trail and lets a manager rotate without touching .env.
+app.post('/api/admin/llm-keys', async (c) => {
+  const guard = await requireRole(c, 'manager')
+  if (!('ok' in guard)) return guard
+  const body = await c.req.json().catch(() => null) as
+    | { provider?: string; key?: string }
+    | null
+  if (!body || typeof body.provider !== 'string' || typeof body.key !== 'string' || !body.key) {
+    return c.json({ error: 'provider and key are required' }, 400)
+  }
+  const provider = body.provider.toLowerCase()
+  const keyName =
+    provider === 'anthropic' ? 'ANTHROPIC_API_KEY'
+    : provider === 'openai' ? 'OPENAI_API_KEY'
+    : null
+  if (!keyName) {
+    return c.json({ error: `unknown provider: ${provider}` }, 400)
+  }
+  const vaultEngineUrl = (process.env.VAULT_ENGINE_URL || 'http://vault:8000').replace(/\/$/, '')
+  const vaultRes = await fetch(`${vaultEngineUrl}/secrets/put`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key: keyName, value: body.key }),
+  })
+  if (!vaultRes.ok) {
+    const text = await vaultRes.text().catch(() => '')
+    logFromContext(c, 'error', 'http', 'llm key write failed', {
+      provider,
+      vault_status: vaultRes.status,
+      vault_body_preview: text.slice(0, 200),
+    })
+    return c.json({ error: `vault rejected put (${vaultRes.status})` }, 502)
+  }
+  logFromContext(c, 'info', 'http', 'llm key configured', {
+    provider,
+    actor_user_id: guard.userId,
+    actor_role: guard.role,
+  })
+  return c.json({ ok: true, provider, requires_restart: true })
+})
+
+app.post('/api/users', async (c) => {
+  const body = await c.req.json().catch(() => null) as
+    | { email?: string; role?: 'root' | 'manager' | 'user'; id?: string }
+    | null
+  if (!body || typeof body.email !== 'string' || !body.email.trim()) {
+    return c.json({ error: 'email is required' }, 400)
+  }
+  const requestedRole = body.role ?? 'user'
+
+  const { users, rootCount } = await listUsersWithMeta()
+
+  // First-user-is-root path: when no root exists, anyone may create users.
+  // The UI uses this to perform the one-time signup. After that the route
+  // is locked to role >= manager.
+  if (rootCount > 0) {
+    const guard = await requireRole(c, 'manager')
+    if (!('ok' in guard)) return guard
+    if (requestedRole === 'root') {
+      return c.json({ error: 'root already exists' }, 403)
+    }
+  }
+
+  const result = await createUser({
+    email: body.email,
+    role: requestedRole,
+    id: body.id,
+  })
+  if (!result.ok) {
+    return c.json({ error: result.error ?? 'create failed' }, (result.status as 400 | 403 | 500) ?? 500)
+  }
+  logFromContext(c, 'info', 'http', 'created user', {
+    new_user_id: result.user?.id,
+    role: result.user?.role,
+    bootstrap: rootCount === 0,
+    prior_user_count: users.length,
+  })
+  return c.json({ user: result.user }, 201)
 })
 
 app.delete('/api/conversations/:conversationId', async (c) => {

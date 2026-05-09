@@ -102,6 +102,20 @@ const (
 	MsgTypeMetricsEvent = "metrics.event"
 )
 
+// Skill reload — at-most-once trigger for the aegis-agents component to re-run
+// LoadSynthesizedSkills against the Memory Component. Published by IO when a
+// new skill is created (NL synthesis or GitHub import) so the live M4 tree
+// picks up the new skill_cache record without an aegis-agents restart.
+//
+// FP-Stefan: pragmatic demo wiring. Honor-system trigger; any caller on the
+// NATS bus can fire it. Not routed through the Orchestrator because the only
+// effect is "re-read memory" — no new component-to-component coupling beyond
+// the reads aegis-agents already does at startup.
+const (
+	SubjectSkillReload = "aegis.agents.skill.reload"
+	MsgTypeSkillReload = "skill.reload"
+)
+
 // HeartbeatSubject returns the NATS subject for a specific agent's heartbeat.
 func HeartbeatSubject(agentID string) string {
 	return SubjectHeartbeatPrefix + agentID

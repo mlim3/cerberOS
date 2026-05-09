@@ -19,11 +19,33 @@ CREATE SCHEMA IF NOT EXISTS orchestrator_schema;
 CREATE TABLE IF NOT EXISTS identity_schema.users (
     id UUID PRIMARY KEY,
     email VARCHAR(255) UNIQUE NOT NULL,
+    role VARCHAR(20) NOT NULL DEFAULT 'user',
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-INSERT INTO identity_schema.users (id, email)
-VALUES ('00000000-0000-0000-0000-000000000001', 'dev-default@example.com')
+-- Idempotent role column add for existing volumes (--keep-volumes path)
+ALTER TABLE identity_schema.users
+    ADD COLUMN IF NOT EXISTS role VARCHAR(20) NOT NULL DEFAULT 'user';
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.table_constraints
+        WHERE constraint_schema = 'identity_schema'
+          AND table_name = 'users'
+          AND constraint_name = 'users_role_check'
+    ) THEN
+        ALTER TABLE identity_schema.users
+            ADD CONSTRAINT users_role_check
+            CHECK (role IN ('root','manager','user'));
+    END IF;
+END$$;
+
+-- Seed dev-default user. The first-run UI promotes this row's role to 'root'
+-- when no other root exists; bootstrap from a clean volume therefore lands on
+-- the "Create your account" screen with this row available as a placeholder.
+INSERT INTO identity_schema.users (id, email, role)
+VALUES ('00000000-0000-0000-0000-000000000001', 'dev-default@example.com', 'user')
 ON CONFLICT (id) DO NOTHING;
 
 -- ==========================================

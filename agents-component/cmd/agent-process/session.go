@@ -185,10 +185,31 @@ func (sl *SessionLog) Write(turnType, content, parentID, vaultRequestID string) 
 // data_type "skill_cache". The domain tag is used by Factory.LoadSynthesizedSkills
 // at startup to route each skill into its parent domain's command tree.
 //
+// ownerUserID, when non-empty, tags the record with the user who owns this
+// skill so future per-user filtering at hydration time is possible. scope is
+// "user" (default) or "global"; an explicitly imported skill marked global
+// (e.g. Superpowers installed for all users) bypasses per-user filtering.
+//
 // PersistSkill is a no-op and returns nil when sl is nil.
 func (sl *SessionLog) PersistSkill(domain string, node *types.SkillNode) error {
+	return sl.PersistSkillWithScope(domain, node, "", "user")
+}
+
+func (sl *SessionLog) PersistSkillWithScope(domain string, node *types.SkillNode, ownerUserID, scope string) error {
 	if sl == nil {
 		return nil
+	}
+	if scope == "" {
+		scope = "user"
+	}
+	tags := map[string]string{
+		"domain":     domain,
+		"origin":     "synthesized",
+		"skill_name": node.Name,
+		"scope":      scope,
+	}
+	if ownerUserID != "" {
+		tags["owner_user_id"] = ownerUserID
 	}
 	mw := types.MemoryWrite{
 		AgentID:   sl.agentID,
@@ -196,11 +217,7 @@ func (sl *SessionLog) PersistSkill(domain string, node *types.SkillNode) error {
 		DataType:  "skill_cache",
 		TTLHint:   0, // synthesized skills do not expire
 		Payload:   node,
-		Tags: map[string]string{
-			"domain":     domain,
-			"origin":     "synthesized",
-			"skill_name": node.Name,
-		},
+		Tags:      tags,
 	}
 	env := agentEnvelope{
 		MessageID:       newUUID(),

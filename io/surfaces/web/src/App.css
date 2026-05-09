@@ -206,3 +206,25 @@
   outline: none;
   border-color: var(--accent);
 }
+
+.admin-trigger-btn {
+  margin-left: 8px;
+  padding: 6px 12px;
+  background: transparent;
+  color: var(--accent, #5b8def);
+  border: 1px solid var(--accent, #5b8def);
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.admin-trigger-btn:hover {
+  background: rgba(91, 141, 239, 0.1);
+}
+
+.app-bootstrap-checking {
+  position: fixed;
+  inset: 0;
+  background: var(--background, #0e0f12);
+}

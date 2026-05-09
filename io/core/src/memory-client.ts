@@ -408,17 +408,28 @@ export async function renameConversation(conversationId: string, userId: string,
 export interface MemoryUser {
   id: string
   email: string
+  role?: 'root' | 'manager' | 'user'
+}
+
+export interface MemoryUsersListing {
+  users: MemoryUser[]
+  rootCount: number
 }
 
 const DEMO_USERS: MemoryUser[] = [
-  { id: '00000000-0000-0000-0000-000000000001', email: 'dev-default@example.com' },
-  { id: '11111111-1111-1111-1111-111111111111', email: 'alice@example.com' },
-  { id: '22222222-2222-2222-2222-222222222222', email: 'bob@example.com' },
+  { id: '00000000-0000-0000-0000-000000000001', email: 'dev-default@example.com', role: 'user' },
+  { id: '11111111-1111-1111-1111-111111111111', email: 'alice@example.com', role: 'user' },
+  { id: '22222222-2222-2222-2222-222222222222', email: 'bob@example.com', role: 'user' },
 ]
 
 export async function listUsers(): Promise<MemoryUser[]> {
+  const listing = await listUsersWithMeta()
+  return listing.users
+}
+
+export async function listUsersWithMeta(): Promise<MemoryUsersListing> {
   if (demoMode()) {
-    return DEMO_USERS
+    return { users: DEMO_USERS, rootCount: 0 }
   }
   try {
     const res = await fetch(`${memoryApiBase()}/api/v1/users`, {
@@ -426,13 +437,65 @@ export async function listUsers(): Promise<MemoryUser[]> {
     })
     if (!res.ok) {
       memoryClientLog('error', 'list users failed', { status: res.status })
-      return []
+      return { users: [], rootCount: 0 }
     }
-    const json = await res.json() as { data: { users: MemoryUser[] } }
-    return json.data?.users ?? []
+    const json = await res.json() as { data: { users: MemoryUser[]; root_count?: number } }
+    return {
+      users: json.data?.users ?? [],
+      rootCount: json.data?.root_count ?? 0,
+    }
   } catch (err) {
     memoryClientLog('error', 'list users network error', { error: String(err) })
-    return []
+    return { users: [], rootCount: 0 }
+  }
+}
+
+export interface CreateUserInput {
+  email: string
+  role?: 'root' | 'manager' | 'user'
+  id?: string
+}
+
+export interface CreateUserResult {
+  ok: boolean
+  user?: MemoryUser
+  error?: string
+  status?: number
+}
+
+export async function createUser(input: CreateUserInput): Promise<CreateUserResult> {
+  if (demoMode()) {
+    const id = input.id ?? crypto.randomUUID()
+    const u: MemoryUser = {
+      id,
+      email: input.email.toLowerCase(),
+      role: input.role ?? 'user',
+    }
+    return { ok: true, user: u }
+  }
+  try {
+    const res = await fetch(`${memoryApiBase()}/api/v1/users`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Internal-API-Key': memoryApiKey(),
+      },
+      body: JSON.stringify({
+        email: input.email,
+        role: input.role,
+        id: input.id,
+      }),
+    })
+    const json = await res.json() as { data?: { user?: MemoryUser }; error?: { message?: string } }
+    if (!res.ok) {
+      const msg = json.error?.message ?? `memory returned ${res.status}`
+      memoryClientLog('error', 'create user failed', { status: res.status, error: msg })
+      return { ok: false, error: msg, status: res.status }
+    }
+    return { ok: true, user: json.data?.user, status: res.status }
+  } catch (err) {
+    memoryClientLog('error', 'create user network error', { error: String(err) })
+    return { ok: false, error: String(err) }
   }
 }
 
