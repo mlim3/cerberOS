@@ -316,13 +316,23 @@ func executeHTTPSkill(ctx context.Context, m *externalSkillManifest, raw json.Ra
 		method = "GET"
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, url, nil)
+	var bodyReader io.Reader
+	if method == "POST" && m.Execution.BodyTemplate != "" {
+		bodyReader = strings.NewReader(substituteTemplate(m.Execution.BodyTemplate, params))
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
 	if err != nil {
 		return ToolResult{Content: fmt.Sprintf("failed to build request: %v", err), IsError: true}
 	}
 	req.Header.Set("User-Agent", "aegis-agent/1.0")
 	for k, v := range m.Execution.Headers {
 		req.Header.Set(k, substituteTemplate(v, params))
+	}
+	// Default Content-Type for POST requests with a body, unless the manifest
+	// already set one explicitly via the headers map.
+	if bodyReader != nil && req.Header.Get("Content-Type") == "" {
+		req.Header.Set("Content-Type", "application/json")
 	}
 
 	start := time.Now()

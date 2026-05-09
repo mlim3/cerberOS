@@ -48,8 +48,17 @@ execution:
   #   X-Custom-Header: "{{my_param}}"
 
   # body_template: optional POST body with {{param}} substitution.
-  # Only relevant when method is POST.
+  # Only relevant when method is POST. Content-Type defaults to
+  # application/json unless overridden in headers above.
   # body_template: '{"location": "{{city}}", "units": "metric"}'
+  #
+  # Example POST skill that queries a hypothetical search API:
+  #
+  # execution:
+  #   type: http_call
+  #   url_template: "https://api.example.com/search"
+  #   method: POST
+  #   body_template: '{"query": "{{query}}", "limit": {{limit}}}'
 
 # ── Parameters ────────────────────────────────────────────────────────────────
 

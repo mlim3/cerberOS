@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -445,6 +446,83 @@ func TestExecuteHTTPSkill_CustomHeader(t *testing.T) {
 	}
 	if receivedHeader != "value-abc" {
 		t.Errorf("header substitution: want %q, got %q", "value-abc", receivedHeader)
+	}
+}
+
+func TestExecuteHTTPSkill_PostBodySubstituted(t *testing.T) {
+	var receivedBody string
+	var receivedContentType string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		receivedBody = string(b)
+		receivedContentType = r.Header.Get("Content-Type")
+		fmt.Fprint(w, `{"ok":true}`)
+	}))
+	defer srv.Close()
+
+	m := minimalManifest()
+	m.Execution.Method = "POST"
+	m.Execution.URLTemplate = srv.URL
+	m.Execution.BodyTemplate = `{"city":"{{city}}","units":"metric"}`
+	raw, _ := json.Marshal(map[string]string{"city": "berlin"})
+
+	result := executeHTTPSkill(context.Background(), m, raw)
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content)
+	}
+	if receivedBody != `{"city":"berlin","units":"metric"}` {
+		t.Errorf("body substitution: got %q", receivedBody)
+	}
+	if receivedContentType != "application/json" {
+		t.Errorf("Content-Type: want application/json, got %q", receivedContentType)
+	}
+}
+
+func TestExecuteHTTPSkill_PostBodyContentTypeOverriddenByManifest(t *testing.T) {
+	var receivedContentType string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedContentType = r.Header.Get("Content-Type")
+		fmt.Fprint(w, "ok")
+	}))
+	defer srv.Close()
+
+	m := minimalManifest()
+	m.Execution.Method = "POST"
+	m.Execution.URLTemplate = srv.URL
+	m.Execution.BodyTemplate = `city={{city}}`
+	m.Execution.Headers = map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
+	raw, _ := json.Marshal(map[string]string{"city": "rome"})
+
+	result := executeHTTPSkill(context.Background(), m, raw)
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content)
+	}
+	if receivedContentType != "application/x-www-form-urlencoded" {
+		t.Errorf("Content-Type: manifest header should win, got %q", receivedContentType)
+	}
+}
+
+func TestExecuteHTTPSkill_GetIgnoresBodyTemplate(t *testing.T) {
+	var receivedBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		receivedBody = string(b)
+		fmt.Fprint(w, "ok")
+	}))
+	defer srv.Close()
+
+	m := minimalManifest()
+	m.Execution.Method = "GET"
+	m.Execution.URLTemplate = srv.URL
+	m.Execution.BodyTemplate = `{"should":"not-be-sent"}`
+	raw, _ := json.Marshal(map[string]string{"city": "oslo"})
+
+	result := executeHTTPSkill(context.Background(), m, raw)
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content)
+	}
+	if receivedBody != "" {
+		t.Errorf("GET should send no body, got %q", receivedBody)
 	}
 }
 
