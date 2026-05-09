@@ -184,7 +184,15 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 	// entries if the ceiling is exceeded. Pinned tools (task_complete,
 	// spawn_agent) are never evicted.
 	tools = applySpecBudget(budget, spawnCtx.SkillDomain, tools, log)
-	toolDefs := toolDefinitions(tools)
+
+	// DynamicRegistry extends the static tool list at runtime. skill_load holds
+	// a reference to it so newly loaded skills become available on the next
+	// Reason phase without restarting the agent.
+	registry := newDynamicRegistry(tools)
+	if err := registry.Register(skillLoadTool(registry)); err != nil {
+		log.Warn("skill_load tool registration failed", "error", err)
+	}
+
 	systemPrompt := buildSystemPrompt(spawnCtx.SkillDomain, spawnCtx.CommandManifest, spawnCtx.AgentMemory, spawnCtx.UserProfile)
 
 	// Build conversation history. When priorTurns is non-nil the turns from the
@@ -244,6 +252,9 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 		// LLM cache: lookup first, fall back to Anthropic on miss. Only
 		// end_turn responses are cached on write (see llmcache.go).
 		// --------------------------------------------------------------------
+		// Rebuild toolDefs each iteration so skills registered by skill_load
+		// during a previous Act phase are visible to the next Reason call.
+		toolDefs := toolDefinitions(registry.Tools())
 		reqParams := anthropic.MessageNewParams{
 			Model:     anthropic.ModelClaudeHaiku4_5,
 			MaxTokens: int64(maxOutputTokens),
@@ -435,7 +446,7 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 				// actParentID propagates to vault tools for session log linking (EDD §13.4).
 				toolCtx := WithParentEntryID(actCtx, actParentID)
 				start := time.Now()
-				result := dispatchTool(toolCtx, tools, c.name, c.input)
+				result := dispatchTool(toolCtx, registry.Tools(), c.name, c.input)
 				outcomes[idx] = toolOutcome{call: c, result: result, elapsedMS: time.Since(start).Milliseconds()}
 			}(i, call)
 		}
