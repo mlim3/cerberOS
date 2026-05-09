@@ -745,6 +745,121 @@ func TestExecuteSkillLoad_InvalidParams(t *testing.T) {
 	}
 }
 
+// ── Allowlist / denylist ────────────────────────────────────────────────────
+
+func TestCheckRepoPolicy_NoConfigAllowsAll(t *testing.T) {
+	t.Setenv("SKILL_LOAD_ALLOWLIST", "")
+	t.Setenv("SKILL_LOAD_DENYLIST", "")
+	if err := checkRepoPolicy("anyorg", "anyrepo"); err != nil {
+		t.Errorf("expected nil with no config, got %v", err)
+	}
+}
+
+func TestCheckRepoPolicy_AllowlistExactMatch(t *testing.T) {
+	t.Setenv("SKILL_LOAD_ALLOWLIST", "myorg/myrepo")
+	t.Setenv("SKILL_LOAD_DENYLIST", "")
+	if err := checkRepoPolicy("myorg", "myrepo"); err != nil {
+		t.Errorf("expected nil for exact match, got %v", err)
+	}
+}
+
+func TestCheckRepoPolicy_AllowlistWildcardMatch(t *testing.T) {
+	t.Setenv("SKILL_LOAD_ALLOWLIST", "myorg/*")
+	t.Setenv("SKILL_LOAD_DENYLIST", "")
+	if err := checkRepoPolicy("myorg", "anything"); err != nil {
+		t.Errorf("expected nil for wildcard match, got %v", err)
+	}
+}
+
+func TestCheckRepoPolicy_AllowlistBlocksNonMatch(t *testing.T) {
+	t.Setenv("SKILL_LOAD_ALLOWLIST", "myorg/*")
+	t.Setenv("SKILL_LOAD_DENYLIST", "")
+	if err := checkRepoPolicy("otherorg", "repo"); err == nil {
+		t.Error("expected error for repo not on allowlist")
+	}
+}
+
+func TestCheckRepoPolicy_DenylistBlocksMatch(t *testing.T) {
+	t.Setenv("SKILL_LOAD_ALLOWLIST", "")
+	t.Setenv("SKILL_LOAD_DENYLIST", "badorg/*")
+	if err := checkRepoPolicy("badorg", "anything"); err == nil {
+		t.Error("expected error for repo on denylist")
+	}
+}
+
+func TestCheckRepoPolicy_DenylistTakesPrecedenceOverAllowlist(t *testing.T) {
+	t.Setenv("SKILL_LOAD_ALLOWLIST", "myorg/*")
+	t.Setenv("SKILL_LOAD_DENYLIST", "myorg/dangerous-repo")
+	if err := checkRepoPolicy("myorg", "dangerous-repo"); err == nil {
+		t.Error("expected denylist to take precedence over allowlist")
+	}
+}
+
+func TestCheckRepoPolicy_AllowlistOtherRepoInSameOrgStillPasses(t *testing.T) {
+	t.Setenv("SKILL_LOAD_ALLOWLIST", "myorg/*")
+	t.Setenv("SKILL_LOAD_DENYLIST", "myorg/dangerous-repo")
+	if err := checkRepoPolicy("myorg", "safe-repo"); err != nil {
+		t.Errorf("expected safe-repo to pass, got %v", err)
+	}
+}
+
+func TestCheckRepoPolicy_MultipleAllowlistEntries(t *testing.T) {
+	t.Setenv("SKILL_LOAD_ALLOWLIST", "orgA/repo1, orgB/*")
+	t.Setenv("SKILL_LOAD_DENYLIST", "")
+	if err := checkRepoPolicy("orgB", "anything"); err != nil {
+		t.Errorf("expected orgB/* to match, got %v", err)
+	}
+	if err := checkRepoPolicy("orgC", "repo"); err == nil {
+		t.Error("expected orgC to be blocked")
+	}
+}
+
+func TestMatchRepoPattern_ExactMatch(t *testing.T) {
+	if !matchRepoPattern("myorg/myrepo", "myorg", "myrepo") {
+		t.Error("exact pattern should match")
+	}
+	if matchRepoPattern("myorg/myrepo", "myorg", "other") {
+		t.Error("exact pattern should not match different repo")
+	}
+}
+
+func TestMatchRepoPattern_WildcardMatch(t *testing.T) {
+	if !matchRepoPattern("myorg/*", "myorg", "anything") {
+		t.Error("wildcard should match any repo in org")
+	}
+	if matchRepoPattern("myorg/*", "otherorg", "anything") {
+		t.Error("wildcard should not match different org")
+	}
+}
+
+func TestExecuteSkillLoad_DenylistBlocksLoad(t *testing.T) {
+	t.Setenv("SKILL_LOAD_DENYLIST", "myorg/*")
+	t.Setenv("SKILL_LOAD_ALLOWLIST", "")
+	registry := newDynamicRegistry(nil)
+	raw, _ := json.Marshal(map[string]string{"repo": "myorg/myrepo@" + validSHA})
+	result := executeSkillLoad(context.Background(), registry, nil, raw)
+	if !result.IsError {
+		t.Error("expected IsError=true when repo is on denylist")
+	}
+	if !strings.Contains(result.Content, "denylist") {
+		t.Errorf("expected 'denylist' in error message, got %q", result.Content)
+	}
+}
+
+func TestExecuteSkillLoad_AllowlistBlocksLoad(t *testing.T) {
+	t.Setenv("SKILL_LOAD_ALLOWLIST", "trustedorg/*")
+	t.Setenv("SKILL_LOAD_DENYLIST", "")
+	registry := newDynamicRegistry(nil)
+	raw, _ := json.Marshal(map[string]string{"repo": "myorg/myrepo@" + validSHA})
+	result := executeSkillLoad(context.Background(), registry, nil, raw)
+	if !result.IsError {
+		t.Error("expected IsError=true when repo is not on allowlist")
+	}
+	if !strings.Contains(result.Content, "allowlist") {
+		t.Errorf("expected 'allowlist' in error message, got %q", result.Content)
+	}
+}
+
 // ---- helpers ----
 
 // minimalSkillTool builds a no-op SkillTool with the given name for use in

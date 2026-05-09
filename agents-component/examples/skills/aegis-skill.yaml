@@ -8,6 +8,27 @@
 # The commit SHA must be a full 40-character hex string — branch names are
 # not accepted. Get it with: git rev-parse HEAD
 
+# ── Access Control ────────────────────────────────────────────────────────────
+#
+# The skill_load tool enforces an allowlist/denylist controlled by two
+# environment variables on the agent-process container (or .env file):
+#
+#   SKILL_LOAD_ALLOWLIST=myorg/*,trustedorg/specific-repo
+#   SKILL_LOAD_DENYLIST=myorg/dangerous-repo
+#
+# Pattern syntax:
+#   owner/*       — permits all repositories under that GitHub organisation
+#   owner/repo    — permits only that exact repository
+#
+# Evaluation order:
+#   1. Denylist matched first — rejected immediately if matched.
+#   2. Allowlist checked next — rejected if set and no entry matches.
+#   3. No config (both unset or empty) — all public repositories are permitted.
+#
+# Example: lock down to a single trusted org while blocking one bad repo:
+#   SKILL_LOAD_ALLOWLIST=myorg/*
+#   SKILL_LOAD_DENYLIST=myorg/dangerous-repo
+
 # ── Identity ──────────────────────────────────────────────────────────────────
 
 # name: snake_case identifier the LLM uses when calling the tool.

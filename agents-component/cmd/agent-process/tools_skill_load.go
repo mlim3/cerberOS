@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -124,6 +125,14 @@ func executeSkillLoad(ctx context.Context, registry *DynamicRegistry, sl *Sessio
 		return ToolResult{Content: err.Error(), IsError: true}
 	}
 
+	if err := checkRepoPolicy(owner, repo); err != nil {
+		return ToolResult{
+			Content: fmt.Sprintf("skill load denied: %v", err),
+			IsError: true,
+			Details: map[string]interface{}{"repo": fmt.Sprintf("%s/%s", owner, repo)},
+		}
+	}
+
 	manifest, err := fetchManifest(ctx, owner, repo, sha, params.Path)
 	if err != nil {
 		return ToolResult{
@@ -194,6 +203,66 @@ func parseRepoRef(ref string) (owner, repo, sha string, err error) {
 		return "", "", "", fmt.Errorf("repo must be in the format \"owner/repo@sha\", got %q", ref)
 	}
 	return parts[0], parts[1], sha, nil
+}
+
+// checkRepoPolicy enforces the allowlist/denylist configured via environment
+// variables. Rules are evaluated in this order:
+//
+//  1. If SKILL_LOAD_DENYLIST matches → rejected.
+//  2. If SKILL_LOAD_ALLOWLIST is non-empty and no entry matches → rejected.
+//  3. Otherwise → permitted.
+//
+// Pattern syntax: "owner/repo" for an exact match, "owner/*" for all repos
+// under that org. Patterns are case-sensitive.
+//
+// Example docker-compose configuration:
+//
+//	SKILL_LOAD_ALLOWLIST=myorg/*,trustedorg/specific-repo
+//	SKILL_LOAD_DENYLIST=myorg/dangerous-repo
+func checkRepoPolicy(owner, repo string) error {
+	denyList := parseRepoPatterns(os.Getenv("SKILL_LOAD_DENYLIST"))
+	allowList := parseRepoPatterns(os.Getenv("SKILL_LOAD_ALLOWLIST"))
+
+	for _, pattern := range denyList {
+		if matchRepoPattern(pattern, owner, repo) {
+			return fmt.Errorf("repository %q/%q is on the skill load denylist", owner, repo)
+		}
+	}
+
+	if len(allowList) > 0 {
+		for _, pattern := range allowList {
+			if matchRepoPattern(pattern, owner, repo) {
+				return nil
+			}
+		}
+		return fmt.Errorf("repository %q/%q is not on the skill load allowlist", owner, repo)
+	}
+
+	return nil
+}
+
+// parseRepoPatterns splits a comma-separated env var value into trimmed, non-empty patterns.
+func parseRepoPatterns(env string) []string {
+	if env == "" {
+		return nil
+	}
+	parts := strings.Split(env, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// matchRepoPattern returns true when owner/repo satisfies pattern.
+// "owner/*" matches any repository under that org; "owner/repo" is an exact match.
+func matchRepoPattern(pattern, owner, repo string) bool {
+	if strings.HasSuffix(pattern, "/*") {
+		return strings.TrimSuffix(pattern, "/*") == owner
+	}
+	return pattern == owner+"/"+repo
 }
 
 // fetchManifest downloads and parses the aegis-skill.yaml from GitHub raw content.
