@@ -75,7 +75,10 @@ type externalParamDef struct {
 // allows the tool to register newly loaded skills without restarting the agent.
 // sl is used to persist the loaded manifest to the Memory Component so the skill
 // survives agent restarts; it may be nil (persistence is best-effort).
-func skillLoadTool(registry *DynamicRegistry, sl *SessionLog) SkillTool {
+// allowed is derived from the Orchestrator's policy scope (SKILL_LOAD_ALLOWED_USERS);
+// when false the tool is still registered (so the LLM can see it) but every
+// invocation returns a POLICY_VIOLATION error rather than hitting GitHub.
+func skillLoadTool(registry *DynamicRegistry, sl *SessionLog, allowed bool) SkillTool {
 	return SkillTool{
 		Label:                   "Skill Load",
 		RequiredCredentialTypes: nil,
@@ -103,6 +106,12 @@ func skillLoadTool(registry *DynamicRegistry, sl *SessionLog) SkillTool {
 			},
 		},
 		Execute: func(ctx context.Context, raw json.RawMessage) ToolResult {
+			if !allowed {
+				return ToolResult{
+					Content: "POLICY_VIOLATION: your account is not permitted to load external skills. Contact your administrator to request access.",
+					IsError: true,
+				}
+			}
 			return executeSkillLoad(ctx, registry, sl, raw)
 		},
 	}

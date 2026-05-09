@@ -22,6 +22,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/mlim3/cerberOS/orchestrator/internal/config"
@@ -112,6 +114,19 @@ func (e *Enforcer) ValidateAndScope(
 
 	e.cache.Set(userID, requiredSkillDomains, scope)
 
+	// Annotate the scope with the skill_load permission so the agents-component
+	// can gate the skill_load built-in tool per user without a second Vault call.
+	// The annotation travels with PolicyScope through task state and subtask
+	// inheritance, then exits via buildAgentMetadata in the gateway.
+	if scope.Metadata == nil {
+		scope.Metadata = make(map[string]string)
+	}
+	if e.skillLoadAllowed(userID) {
+		scope.Metadata["skill_load_allowed"] = "true"
+	} else {
+		scope.Metadata["skill_load_allowed"] = "false"
+	}
+
 	auditErr := e.writeAuditEvent(ctx, taskID, orchestratorTaskRef, userID, types.OutcomeSuccess, "")
 	if auditErr != nil {
 		// TODO Phase 1: emit metric for audit write failure.
@@ -156,6 +171,30 @@ func (e *Enforcer) RevokeCredentials(_ context.Context, orchestratorTaskRef stri
 func (e *Enforcer) InvalidateCacheForPolicy(policyName string) {
 	// TODO Phase 2
 	e.cache.InvalidateAll() // conservative: invalidate all on any Vault policy change
+}
+
+// skillLoadAllowed reports whether the given user is permitted to use the
+// skill_load built-in tool. The decision is controlled by the
+// SKILL_LOAD_ALLOWED_USERS environment variable on the Orchestrator:
+//
+//   - Unset or empty → all users are permitted (backward-compatible default).
+//   - "*"            → all users are explicitly permitted.
+//   - Comma-separated list of user IDs → only those users are permitted.
+//
+// The result is stamped into PolicyScope.Metadata["skill_load_allowed"] by
+// ValidateAndScope so it travels with the task through the full subtask fan-out
+// without requiring a second Vault round-trip.
+func (e *Enforcer) skillLoadAllowed(userID string) bool {
+	raw := strings.TrimSpace(os.Getenv("SKILL_LOAD_ALLOWED_USERS"))
+	if raw == "" || raw == "*" {
+		return true
+	}
+	for _, id := range strings.Split(raw, ",") {
+		if strings.TrimSpace(id) == userID {
+			return true
+		}
+	}
+	return false
 }
 
 // writeAuditEvent persists a policy ALLOW or DENY decision to Memory as a

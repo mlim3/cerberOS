@@ -496,6 +496,7 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 	userProfile := f.fetchUserProfile(spec.UserContextID, spec.TraceID)
 	priorTurns, _ := f.fetchPriorTurns(spec.ConversationID, spec.TraceID)
 	originalUserMessage, userFacing := extractConversationMetadata(spec)
+	skillLoadAllowed := extractSkillLoadAllowed(spec)
 
 	// Step 6: Spawn agent process.
 	vmCfg := lifecycle.VMConfig{
@@ -516,6 +517,7 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 		ExternalSkills:      f.loadExternalSkills(),
 		OriginalUserMessage: originalUserMessage,
 		UserFacing:          userFacing,
+		SkillLoadAllowed:    skillLoadAllowed,
 		OnComplete:          f.processCompletionHandler(agentID),
 	}
 	if err := f.lifecycle.Spawn(vmCfg); err != nil {
@@ -619,6 +621,7 @@ func (f *Factory) assignTask(agentID string, spec *types.TaskSpec) error {
 	userProfile := f.fetchUserProfile(spec.UserContextID, spec.TraceID)
 	priorTurns, _ := f.fetchPriorTurns(spec.ConversationID, spec.TraceID)
 	originalUserMessage, userFacing := extractConversationMetadata(spec)
+	skillLoadAllowed := extractSkillLoadAllowed(spec)
 
 	vmCfg := lifecycle.VMConfig{
 		AgentID:             agentID,
@@ -637,6 +640,7 @@ func (f *Factory) assignTask(agentID string, spec *types.TaskSpec) error {
 		ExternalSkills:      f.loadExternalSkills(),
 		OriginalUserMessage: originalUserMessage,
 		UserFacing:          userFacing,
+		SkillLoadAllowed:    skillLoadAllowed,
 		OnComplete:          f.processCompletionHandler(agentID),
 	}
 
@@ -1465,6 +1469,22 @@ func extractConversationMetadata(spec *types.TaskSpec) (string, bool) {
 	return original, userFacing
 }
 
+// extractSkillLoadAllowed reads the orchestrator-stamped skill_load_allowed flag
+// from the TaskSpec metadata. Absent key defaults to true so that agents not
+// routed through the Orchestrator policy check (e.g. unit tests, standalone use)
+// retain the ability to load external skills. An explicit "false" is the only
+// value that disables the tool.
+func extractSkillLoadAllowed(spec *types.TaskSpec) bool {
+	if spec == nil || spec.Metadata == nil {
+		return true
+	}
+	v, ok := spec.Metadata["skill_load_allowed"]
+	if !ok {
+		return true // absent = allowed (backward-compatible default)
+	}
+	return v != "false"
+}
+
 // fetchPriorTurns retrieves the latest ConversationSnapshot for conversationID
 // from the Memory Component and returns the prior turns and their recorded token
 // count. Returns nil, 0 when conversationID is empty, no snapshot exists, or the
@@ -1819,6 +1839,7 @@ func (f *Factory) wakeAgent(agentID string, spec *types.TaskSpec) error {
 	userProfile := f.fetchUserProfile(spec.UserContextID, spec.TraceID)
 	priorTurns, _ := f.fetchPriorTurns(spec.ConversationID, spec.TraceID)
 	originalUserMessage, userFacing := extractConversationMetadata(spec)
+	skillLoadAllowed := extractSkillLoadAllowed(spec)
 	vmCfg := lifecycle.VMConfig{
 		AgentID:             agentID,
 		VMID:                newVMID,
@@ -1837,6 +1858,7 @@ func (f *Factory) wakeAgent(agentID string, spec *types.TaskSpec) error {
 		ExternalSkills:      f.loadExternalSkills(),
 		OriginalUserMessage: originalUserMessage,
 		UserFacing:          userFacing,
+		SkillLoadAllowed:    skillLoadAllowed,
 		OnComplete:          f.processCompletionHandler(agentID),
 	}
 	if err := f.lifecycle.Spawn(vmCfg); err != nil {

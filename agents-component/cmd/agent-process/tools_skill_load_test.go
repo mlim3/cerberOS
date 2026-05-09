@@ -745,6 +745,36 @@ func TestExecuteSkillLoad_InvalidParams(t *testing.T) {
 	}
 }
 
+// ── Policy enforcement (user-level permission) ───────────────────────────────
+
+func TestSkillLoadTool_PolicyDenied(t *testing.T) {
+	registry := newDynamicRegistry(nil)
+	tool := skillLoadTool(registry, nil, false /* not allowed */)
+	raw, _ := json.Marshal(map[string]string{"repo": "myorg/myrepo@" + validSHA})
+	result := tool.Execute(context.Background(), raw)
+	if !result.IsError {
+		t.Error("expected IsError=true when user is not allowed to load skills")
+	}
+	if !strings.Contains(result.Content, "POLICY_VIOLATION") {
+		t.Errorf("expected POLICY_VIOLATION in error content, got %q", result.Content)
+	}
+}
+
+func TestSkillLoadTool_PolicyAllowed_ProceedsNormally(t *testing.T) {
+	// When allowed=true the tool should proceed to parse the repo ref
+	// (and fail on an invalid SHA — verifying it got past the policy gate).
+	registry := newDynamicRegistry(nil)
+	tool := skillLoadTool(registry, nil, true /* allowed */)
+	raw, _ := json.Marshal(map[string]string{"repo": "myorg/myrepo@notasha"})
+	result := tool.Execute(context.Background(), raw)
+	if !result.IsError {
+		t.Error("expected IsError=true for bad SHA (verifying policy gate was passed)")
+	}
+	if strings.Contains(result.Content, "POLICY_VIOLATION") {
+		t.Error("result should not contain POLICY_VIOLATION — user is allowed")
+	}
+}
+
 // ── Allowlist / denylist ────────────────────────────────────────────────────
 
 func TestCheckRepoPolicy_NoConfigAllowsAll(t *testing.T) {

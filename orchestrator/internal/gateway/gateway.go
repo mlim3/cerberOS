@@ -1256,6 +1256,13 @@ func buildAgentMetadata(spec types.TaskSpec) map[string]string {
 	for k, v := range spec.Metadata {
 		meta[k] = v
 	}
+	// Forward the skill_load permission decision from PolicyScope so the
+	// agents-component can gate the skill_load built-in without a second
+	// Vault call. PolicyScope is an internal orchestrator concern and is not
+	// sent on the wire in full — only this derived flag crosses the boundary.
+	if v, ok := spec.PolicyScope.Metadata["skill_load_allowed"]; ok {
+		meta["skill_load_allowed"] = v
+	}
 	return meta
 }
 

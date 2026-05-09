@@ -189,7 +189,7 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 	// a reference to it so newly loaded skills become available on the next
 	// Reason phase without restarting the agent.
 	registry := newDynamicRegistry(tools)
-	if err := registry.Register(skillLoadTool(registry, sl)); err != nil {
+	if err := registry.Register(skillLoadTool(registry, sl, spawnCtx.SkillLoadAllowed)); err != nil {
 		log.Warn("skill_load tool registration failed", "error", err)
 	}
 

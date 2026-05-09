@@ -48,6 +48,7 @@ type VMConfig struct {
 	PriorTurns        []anthropic.MessageParam       // reconstructed conversation history from prior task; nil for standalone tasks
 	SynthesizedSkills []types.SynthesizedSkillRecord // skills created by prior synthesis; each gets a dynamic SkillTool at spawn
 	ExternalSkills    []types.SynthesizedSkillRecord // skills loaded via skill_load in prior sessions; Recipe holds serialised externalSkillManifest JSON
+	SkillLoadAllowed  bool                           // whether this user may invoke the skill_load built-in (derived from policy scope at spawn)
 
 	// OriginalUserMessage is the user's literal chat input. Threaded by the orchestrator
 	// through TaskSpec.Metadata["original_user_message"] so the user-facing agent can
@@ -129,6 +130,7 @@ type agentSpawnContext struct {
 	PriorTurns        []json.RawMessage              `json:"prior_turns,omitempty"`        // per-element serialised anthropic.MessageParam; stable across SDK versions
 	SynthesizedSkills []types.SynthesizedSkillRecord `json:"synthesized_skills,omitempty"` // skills created by prior synthesis; each gets a dynamic SkillTool with LLM-based execution
 	ExternalSkills    []types.SynthesizedSkillRecord `json:"external_skills,omitempty"`    // skills loaded via skill_load in prior sessions; Recipe holds serialised externalSkillManifest JSON
+	SkillLoadAllowed  bool                           `json:"skill_load_allowed,omitempty"` // whether this user may invoke the skill_load built-in
 
 	OriginalUserMessage string `json:"original_user_message,omitempty"`
 	UserFacing          bool   `json:"user_facing,omitempty"`
@@ -225,6 +227,7 @@ func encodeSpawnContext(config VMConfig) ([]byte, error) {
 		PriorTurns:          priorTurnsRaw,
 		SynthesizedSkills:   config.SynthesizedSkills,
 		ExternalSkills:      config.ExternalSkills,
+		SkillLoadAllowed:    config.SkillLoadAllowed,
 		OriginalUserMessage: config.OriginalUserMessage,
 		UserFacing:          config.UserFacing,
 	})
