@@ -37,6 +37,10 @@ const (
 // Branch names, tags, and short SHAs are all rejected.
 var shaPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
+// rawGitHubBase is the base URL used by fetchManifest. Overridden in tests
+// to point at a local httptest server instead of raw.githubusercontent.com.
+var rawGitHubBase = "https://raw.githubusercontent.com"
+
 // externalSkillManifest is the schema for an aegis-skill.yaml placed in a
 // GitHub repository. It defines everything needed to build and execute the skill.
 type externalSkillManifest struct {
@@ -183,7 +187,7 @@ func parseRepoRef(ref string) (owner, repo, sha string, err error) {
 // The URL is always constructed from the validated owner/repo/sha components so
 // it is guaranteed to point to raw.githubusercontent.com.
 func fetchManifest(ctx context.Context, owner, repo, sha, path string) (*externalSkillManifest, error) {
-	rawURL := fmt.Sprintf("https://raw.githubusercontent.com/%s/%s/%s/%s", owner, repo, sha, path)
+	rawURL := fmt.Sprintf("%s/%s/%s/%s/%s", rawGitHubBase, owner, repo, sha, path)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
