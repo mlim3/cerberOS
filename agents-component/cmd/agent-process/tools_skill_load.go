@@ -15,9 +15,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -42,15 +44,20 @@ var shaPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 // to point at a local httptest server instead of raw.githubusercontent.com.
 var rawGitHubBase = "https://raw.githubusercontent.com"
 
+// errManifestNotFound is returned by fetchManifest when the remote file does
+// not exist (HTTP 404). executeSkillLoad uses errors.Is to distinguish a
+// missing file from other fetch failures so it can try fallback filenames.
+var errManifestNotFound = errors.New("manifest not found")
+
 // externalSkillManifest is the schema for an aegis-skill.yaml placed in a
 // GitHub repository. It defines everything needed to build and execute the skill.
 type externalSkillManifest struct {
-	Name           string              `yaml:"name"`
-	Label          string              `yaml:"label"`
-	Description    string              `yaml:"description"`
-	TimeoutSeconds int                 `yaml:"timeout_seconds"`
-	Execution      externalExecution   `yaml:"execution"`
-	Parameters     []externalParamDef  `yaml:"parameters"`
+	Name           string             `yaml:"name"`
+	Label          string             `yaml:"label"`
+	Description    string             `yaml:"description"`
+	TimeoutSeconds int                `yaml:"timeout_seconds"`
+	Execution      externalExecution  `yaml:"execution"`
+	Parameters     []externalParamDef `yaml:"parameters"`
 }
 
 // externalExecution describes how the skill is executed.
@@ -125,8 +132,13 @@ func executeSkillLoad(ctx context.Context, registry *DynamicRegistry, sl *Sessio
 	if err := json.Unmarshal(raw, &params); err != nil {
 		return ToolResult{Content: fmt.Sprintf("invalid parameters: %v", err), IsError: true}
 	}
+	// When no path is specified, try standard filenames in order. Both
+	// "aegis-skill.yaml" and "cerber-skill.yaml" are accepted conventions.
+	var pathCandidates []string
 	if params.Path == "" {
-		params.Path = "aegis-skill.yaml"
+		pathCandidates = []string{"aegis-skill.yaml", "cerber-skill.yaml"}
+	} else {
+		pathCandidates = []string{params.Path}
 	}
 
 	owner, repo, sha, err := parseRepoRef(params.Repo)
@@ -142,10 +154,20 @@ func executeSkillLoad(ctx context.Context, registry *DynamicRegistry, sl *Sessio
 		}
 	}
 
-	manifest, err := fetchManifest(ctx, owner, repo, sha, params.Path)
-	if err != nil {
+	var manifest *externalSkillManifest
+	var fetchErr error
+	for _, candidate := range pathCandidates {
+		manifest, fetchErr = fetchManifest(ctx, owner, repo, sha, candidate)
+		if fetchErr == nil {
+			break
+		}
+		if !errors.Is(fetchErr, errManifestNotFound) {
+			break // non-404 error — no point trying other candidates
+		}
+	}
+	if fetchErr != nil {
 		return ToolResult{
-			Content: fmt.Sprintf("failed to fetch skill manifest: %v", err),
+			Content: fmt.Sprintf("failed to fetch skill manifest: %v", fetchErr),
 			IsError: true,
 			Details: map[string]interface{}{"repo": fmt.Sprintf("%s/%s", owner, repo), "sha": sha},
 		}
@@ -292,7 +314,7 @@ func fetchManifest(ctx context.Context, owner, repo, sha, path string) (*externa
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("manifest not found at %s/%s@%.8s (path: %s)", owner, repo, sha, path)
+		return nil, fmt.Errorf("%w at %s/%s@%.8s (path: %s)", errManifestNotFound, owner, repo, sha, path)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("unexpected HTTP %d fetching manifest", resp.StatusCode)
@@ -401,7 +423,7 @@ func executeHTTPSkill(ctx context.Context, m *externalSkillManifest, raw json.Ra
 		return ToolResult{Content: fmt.Sprintf("invalid parameters: %v", err), IsError: true}
 	}
 
-	url := substituteTemplate(m.Execution.URLTemplate, params)
+	url := substituteTemplate(m.Execution.URLTemplate, params, true)
 	method := strings.ToUpper(m.Execution.Method)
 	if method == "" {
 		method = "GET"
@@ -409,7 +431,7 @@ func executeHTTPSkill(ctx context.Context, m *externalSkillManifest, raw json.Ra
 
 	var bodyReader io.Reader
 	if method == "POST" && m.Execution.BodyTemplate != "" {
-		bodyReader = strings.NewReader(substituteTemplate(m.Execution.BodyTemplate, params))
+		bodyReader = strings.NewReader(substituteTemplate(m.Execution.BodyTemplate, params, false))
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
@@ -418,7 +440,7 @@ func executeHTTPSkill(ctx context.Context, m *externalSkillManifest, raw json.Ra
 	}
 	req.Header.Set("User-Agent", "aegis-agent/1.0")
 	for k, v := range m.Execution.Headers {
-		req.Header.Set(k, substituteTemplate(v, params))
+		req.Header.Set(k, substituteTemplate(v, params, false))
 	}
 	// Default Content-Type for POST requests with a body, unless the manifest
 	// already set one explicitly via the headers map.
@@ -468,7 +490,9 @@ func executeHTTPSkill(ctx context.Context, m *externalSkillManifest, raw json.Ra
 
 // substituteTemplate replaces {{key}} placeholders in template with the
 // corresponding values from params. Non-string values are JSON-encoded.
-func substituteTemplate(template string, params map[string]interface{}) string {
+// When escapeURL is true, string values are percent-encoded with url.PathEscape
+// so they are safe to embed in a URL path segment.
+func substituteTemplate(template string, params map[string]interface{}, escapeURL bool) string {
 	result := template
 	for k, v := range params {
 		var s string
@@ -477,6 +501,9 @@ func substituteTemplate(template string, params map[string]interface{}) string {
 		} else {
 			b, _ := json.Marshal(v)
 			s = string(b)
+		}
+		if escapeURL {
+			s = url.PathEscape(s)
 		}
 		result = strings.ReplaceAll(result, "{{"+k+"}}", s)
 	}

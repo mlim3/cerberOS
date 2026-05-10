@@ -25,6 +25,7 @@ type AppHandlers struct {
 func RegisterRoutes(mux *http.ServeMux, h AppHandlers) {
 	// Users (demo-mode roster)
 	mux.HandleFunc("GET /api/v1/users", h.Users.HandleListUsers)
+	mux.HandleFunc("POST /api/v1/users", h.Users.HandleCreateUser)
 
 	// Chat
 	mux.HandleFunc("GET /api/v1/conversations", h.Chat.HandleListConversations)
