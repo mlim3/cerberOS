@@ -89,12 +89,6 @@ aegis-databus:
     tag: local
     pullPolicy: Never
 
-simulator:
-  image:
-    repository: cerberos-aegis-agents
-    tag: local
-    pullPolicy: Never
-
 aegis-agents:
   image:
     repository: cerberos-aegis-agents

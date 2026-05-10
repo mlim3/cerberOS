@@ -163,7 +163,7 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 	sl := NewSessionLog(ve, log)
 	ctx = WithSessionLog(ctx, sl)
 
-	tools := toolsForDomain(spawnCtx.SkillDomain, ve, as)
+	tools := toolsForDomain(spawnCtx.SkillDomain, ve, as, sl)
 	// Build dynamic SkillTools for skills synthesized in prior sessions.
 	// Each tool's Execute makes an inline LLM call using the stored recipe with
 	// caller parameters substituted in. Existing builtins take precedence: a
@@ -208,6 +208,18 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 				"skill_name", ext.Name, "error", err)
 		}
 	}
+
+	registeredTools := registry.Tools()
+	finalToolNames := make([]string, len(registeredTools))
+	for i, t := range registeredTools {
+		finalToolNames[i] = t.Definition.Name
+	}
+	log.Info("agent tools registered for task",
+		"skill_domain", spawnCtx.SkillDomain,
+		"tool_count", len(registeredTools),
+		"tool_names", finalToolNames,
+		"command_manifest_chars", len(spawnCtx.CommandManifest),
+	)
 
 	systemPrompt := buildSystemPrompt(spawnCtx.SkillDomain, spawnCtx.CommandManifest, spawnCtx.AgentMemory, spawnCtx.UserProfile)
 

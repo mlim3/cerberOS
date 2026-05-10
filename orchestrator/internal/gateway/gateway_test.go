@@ -156,6 +156,67 @@ func TestHandleAgentSpawnRequest_RoutesToRegisteredHandler(t *testing.T) {
 	}
 }
 
+func TestHandleCredentialRequest_RoutesToRegisteredHandler(t *testing.T) {
+	nats := mocks.NewNATSMock()
+	gw := gateway.New(nats, "test-node")
+
+	var got types.CredentialRequest
+	var gotTrace string
+	gw.RegisterCredentialRequestHandler(func(ctx context.Context, req types.CredentialRequest) error {
+		got = req
+		gotTrace = observability.TraceIDFrom(ctx)
+		return nil
+	})
+	if err := gw.Start(); err != nil {
+		t.Fatalf("gateway.Start() error = %v", err)
+	}
+
+	req := types.CredentialRequest{
+		RequestID:    "cred-req-1",
+		AgentID:      "agent-123",
+		TaskID:       "orch-ref-123",
+		Operation:    "authorize",
+		SkillDomains: []string{"general"},
+	}
+	raw, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := types.MessageEnvelope{
+		MessageID:       "msg-cred-1",
+		MessageType:     "credential.request",
+		SourceComponent: "agents",
+		CorrelationID:   req.RequestID,
+		TraceID:         "0123456789abcdef0123456789abcdef",
+		Timestamp:       time.Now().UTC(),
+		SchemaVersion:   "1.0",
+		Payload:         raw,
+	}
+	data, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := nats.Deliver(gateway.TopicCredentialRequest, data); err != nil {
+		t.Fatalf("Deliver(credential.request) error = %v", err)
+	}
+	if got.RequestID != req.RequestID {
+		t.Fatalf("handler request_id = %q, want %q", got.RequestID, req.RequestID)
+	}
+	if got.Operation != "authorize" {
+		t.Fatalf("handler operation = %q, want authorize", got.Operation)
+	}
+	if len(got.SkillDomains) != 1 || got.SkillDomains[0] != "general" {
+		t.Fatalf("handler skill_domains = %v, want [general]", got.SkillDomains)
+	}
+	if got.TraceID != envelope.TraceID {
+		t.Fatalf("handler payload trace_id = %q, want %q", got.TraceID, envelope.TraceID)
+	}
+	if gotTrace != envelope.TraceID {
+		t.Fatalf("handler ctx trace_id = %q, want %q", gotTrace, envelope.TraceID)
+	}
+}
+
 func TestPublishAgentSpawnResponse_PublishesToAgentsTopic(t *testing.T) {
 	gw, nats := newGateway(t)
 

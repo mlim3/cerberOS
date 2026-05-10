@@ -54,7 +54,7 @@ func TestLoad_50ConcurrentAgents(t *testing.T) {
 				Instructions:   fmt.Sprintf("load test agent %d", i),
 				TraceID:        fmt.Sprintf("load-trace-%d", i),
 			}
-			if err := h.sim.PublishTaskInbound(spec); err != nil {
+			if err := h.partner.publishTaskInbound(spec); err != nil {
 				t.Errorf("PublishTaskInbound[%d]: %v", i, err)
 			}
 		}(i)
@@ -134,7 +134,7 @@ func TestLoad_50ConcurrentAgents(t *testing.T) {
 
 	// ── Assertion B: Credential scope bleed ─────────────────────────────────
 	t.Run("credential_scope_no_bleed", func(t *testing.T) {
-		tokens := h.sim.CredentialTokens()
+		tokens := h.partner.credentialTokens()
 		if len(tokens) != loadAgentCount {
 			t.Errorf("credential token count: want %d, got %d", loadAgentCount, len(tokens))
 		}
@@ -171,7 +171,7 @@ func TestLoad_50ConcurrentAgents(t *testing.T) {
 	// ── Assertion D: Vault execute round-trip latency ────────────────────────
 	// Drive 50 concurrent vault.execute.request messages directly through NATS
 	// and measure the round-trip to vault.execute.result. This exercises the
-	// full simulator dispatch path under load without requiring real agent processes.
+	// full partner-fixture dispatch path under load without requiring real agent processes.
 	t.Run("vault_execute_latency", func(t *testing.T) {
 		latencies := measureVaultExecuteLatencies(t, h, loadAgentCount)
 		if len(latencies) == 0 {
@@ -193,7 +193,7 @@ func TestLoad_50ConcurrentAgents(t *testing.T) {
 
 // measureVaultExecuteLatencies publishes n vault.execute.request messages
 // concurrently via JetStream and measures the round-trip to the corresponding
-// vault.execute.result response from the simulator. Returns latencies in ms.
+// vault.execute.result response from the test fixture. Returns latencies in ms.
 func measureVaultExecuteLatencies(t *testing.T, h *natsHarness, n int) []float64 {
 	t.Helper()
 
@@ -209,7 +209,7 @@ func measureVaultExecuteLatencies(t *testing.T, h *natsHarness, n int) []float64
 	received := 0
 
 	// Subscribe to vault.execute.result on the test's raw NATS connection.
-	// The simulator publishes results to aegis.agents.vault.execute.result (JetStream).
+	// The fixture publishes results to aegis.agents.vault.execute.result (JetStream).
 	resultSub, err := h.js.Subscribe(
 		comms.SubjectVaultExecuteResult,
 		func(msg *nats.Msg) {
@@ -243,7 +243,7 @@ func measureVaultExecuteLatencies(t *testing.T, h *natsHarness, n int) []float64
 
 	// Publish n vault.execute.request messages concurrently.
 	// Use a real agent from the registry (any terminated agent) as the agent_id.
-	// The simulator doesn't validate agent state — it responds to any well-formed request.
+	// The fixture doesn't validate agent state — it responds to any well-formed request.
 	allAgents := h.reg.List()
 	if len(allAgents) == 0 {
 		t.Skip("vault latency: no agents in registry")

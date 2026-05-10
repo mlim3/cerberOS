@@ -23,9 +23,9 @@ import sys
 path = pathlib.Path(sys.argv[1])
 dimension = sys.argv[2]
 text = path.read_text()
-updated, count = re.subn(r'embedding VECTOR\(\d+\)', f'embedding VECTOR({dimension})', text, count=1)
-if count != 1:
-    raise SystemExit(f"expected exactly one embedding VECTOR(...) declaration in {path}")
+updated, count = re.subn(r'embedding VECTOR\(\d+\)', f'embedding VECTOR({dimension})', text)
+if count < 1:
+    raise SystemExit(f"expected at least one embedding VECTOR(...) declaration in {path}")
 path.write_text(updated)
 PY
 

@@ -16,6 +16,7 @@ type AppHandlers struct {
 	Agent         *AgentHandler
 	ScheduledJobs *ScheduledJobsHandler
 	Users         *UsersHandler
+	SkillCache    *SkillCacheHandler
 }
 
 // RegisterRoutes mounts all application routes onto mux.
@@ -72,6 +73,15 @@ func RegisterRoutes(mux *http.ServeMux, h AppHandlers) {
 	vaultMux.HandleFunc("GET /api/v1/vault/{userId}/secrets", h.Vault.HandleGetSecret)
 	vaultMux.HandleFunc("DELETE /api/v1/vault/{userId}/secrets/{keyName}", h.Vault.HandleDeleteSecret)
 	mux.Handle("/api/v1/vault/", http.StripPrefix("", RequireVaultKey(vaultMux)))
+
+	// Skill Cache (internal — called by Orchestrator on behalf of Agents Component)
+	if h.SkillCache != nil {
+		mux.HandleFunc("POST /api/v1/skills/cache", h.SkillCache.Upsert)
+		mux.HandleFunc("POST /api/v1/skills/cache/search", h.SkillCache.Search)
+		mux.HandleFunc("POST /api/v1/skills/cache/seed-check", h.SkillCache.CheckSeedHash)
+		mux.HandleFunc("GET /api/v1/skills/cache/{domain}", h.SkillCache.ListByDomain)
+		mux.HandleFunc("DELETE /api/v1/skills/cache/{domain}/{name}", h.SkillCache.Delete)
+	}
 
 	// Agent Logs
 	mux.HandleFunc("POST /api/v1/agent/{taskId}/executions", h.Agent.HandleCreateTaskExecution)

@@ -3,7 +3,7 @@ name: cerberos
 description: |
   cerberOS umbrella chart — deploys the full stack as independent pods
   across a Kubernetes cluster (NATS, Postgres, OpenBao, Vault engine,
-  Memory API, Orchestrator, IO, DataBus, Agents, Simulator, Observability,
+  Memory API, Orchestrator, IO, DataBus, Agents, Observability,
   NetworkPolicies).
 type: application
 version: 0.1.0
@@ -48,10 +48,6 @@ dependencies:
   - name: aegis-databus
     version: "0.1.0"
     repository: "file://../charts/aegis-databus"
-
-  - name: simulator
-    version: "0.1.0"
-    repository: "file://../charts/simulator"
 
   - name: aegis-agents
     version: "0.1.0"

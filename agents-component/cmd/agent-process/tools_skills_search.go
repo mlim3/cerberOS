@@ -1,13 +1,9 @@
 // Package main — tools_skills_search.go implements the skills_search tool.
 //
-// skills_search performs semantic similarity search across all registered skill
-// commands and returns the top-K matches. It is always included in the tool
+// skills_search performs semantic similarity search via the Memory Component's
+// pgvector index and returns the top-K matches. It is always included in the tool
 // registry regardless of domain, enabling cross-domain capability discovery
 // during the ReAct loop without requiring a re-spawn (EDD §13.5).
-//
-// A skills.Manager is lazily initialised once per process from the static domain
-// metadata defined in agentProcessDomainNodes. The manager is search-only: it
-// holds names and descriptions for embedding, not executable tool logic.
 package main
 
 import (
@@ -16,39 +12,22 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"sync"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/cerberOS/agents-component/internal/logfields"
-	"github.com/cerberOS/agents-component/internal/skills"
-	"github.com/cerberOS/agents-component/internal/skillsconfig"
+	"github.com/cerberOS/agents-component/pkg/types"
 )
 
-var (
-	skillsMgrOnce sync.Once
-	skillsMgr     skills.Manager
-)
-
-// getSkillsManager returns the process-wide skills.Manager, initialising it on
-// first call. Safe for concurrent use.
-func getSkillsManager() skills.Manager {
-	skillsMgrOnce.Do(func() {
-		mgr := skills.New()
-		cfg := loadSkillsConfig()
-		if cfg == nil {
-			cfg = &skillsconfig.Config{}
-		}
-		for _, domain := range cfg.ToSkillNodes() {
-			_ = mgr.RegisterDomain(domain) // validation errors mean a bug in this file
-		}
-		skillsMgr = mgr
-	})
-	return skillsMgr
+// SkillSearcher is implemented by *SessionLog in production. Tests may inject
+// a stub that returns canned results without a live NATS connection.
+type SkillSearcher interface {
+	SearchSkills(query string, topK int) []types.SkillSearchResult
 }
 
 // skillsSearchTool returns a SkillTool that searches the skill index semantically.
-// mgr is the skills.Manager holding the pre-computed embedding index.
-func skillsSearchTool(mgr skills.Manager, currentDomain string, spawnAvailable bool) SkillTool {
+// sr is the SkillSearcher (typically *SessionLog) used to issue NATS-backed
+// semantic search requests. Passing nil results in an "unavailable" error.
+func skillsSearchTool(sr SkillSearcher, currentDomain string, spawnAvailable bool) SkillTool {
 	return SkillTool{
 		Label:                   "Skills Search",
 		RequiredCredentialTypes: nil,
@@ -75,12 +54,12 @@ func skillsSearchTool(mgr skills.Manager, currentDomain string, spawnAvailable b
 			},
 		},
 		Execute: func(_ context.Context, raw json.RawMessage) ToolResult {
-			return executeSkillsSearch(mgr, currentDomain, spawnAvailable, raw)
+			return executeSkillsSearch(sr, currentDomain, spawnAvailable, raw)
 		},
 	}
 }
 
-func executeSkillsSearch(mgr skills.Manager, currentDomain string, spawnAvailable bool, raw json.RawMessage) ToolResult {
+func executeSkillsSearch(sr SkillSearcher, currentDomain string, spawnAvailable bool, raw json.RawMessage) ToolResult {
 	log := slog.Default()
 	var params struct {
 		Query string `json:"query"`
@@ -117,20 +96,18 @@ func executeSkillsSearch(mgr skills.Manager, currentDomain string, spawnAvailabl
 		"query_preview", logfields.PreviewWords(params.Query, 20, 180),
 	)
 
-	results, err := mgr.Search(params.Query, params.TopK)
-	if err != nil {
-		log.Error("skills_search: search failed",
+	if sr == nil {
+		log.Warn("skills_search: semantic search unavailable (NATS not connected)",
 			"current_domain", currentDomain,
-			"query_preview", logfields.PreviewWords(params.Query, 20, 180),
-			"error", err,
 		)
 		return ToolResult{
-			Content: fmt.Sprintf("skills search failed: %v", err),
+			Content: "skills semantic search is unavailable in this environment",
 			IsError: true,
-			Details: map[string]interface{}{"error": err.Error()},
+			Details: map[string]interface{}{"error": "SkillSearcher is nil"},
 		}
 	}
 
+	results := sr.SearchSkills(params.Query, params.TopK)
 	if len(results) == 0 {
 		log.Info("skills_search: no matching skills found",
 			"current_domain", currentDomain,
@@ -203,3 +180,4 @@ func executeSkillsSearch(mgr skills.Manager, currentDomain string, spawnAvailabl
 		Details: details,
 	}
 }
+

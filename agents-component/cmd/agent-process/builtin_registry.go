@@ -62,4 +62,7 @@ var builtinRegistry = map[string]ToolFactory{
 	// (no OAuth, no Cloud Console). Calendar uses .ics email invites.
 	"vault_gmail_send":            func(ve *VaultExecutor) SkillTool { return vaultGmailSendTool(ve) },
 	"vault_gmail_calendar_invite": func(ve *VaultExecutor) SkillTool { return vaultGmailCalendarInviteTool(ve) },
+
+	// e2e_test domain — automated testing only; validates skills_search → spawn_agent path
+	"e2e_ping": func(_ *VaultExecutor) SkillTool { return e2ePingTool() },
 }

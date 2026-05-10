@@ -72,6 +72,7 @@ type Gateway interface {
 	PublishError(ctx context.Context, callbackTopic string, resp types.ErrorResponse) error
 	PublishTaskResult(ctx context.Context, callbackTopic string, result types.TaskResult) error
 	PublishTaskSpec(ctx context.Context, spec types.TaskSpec) error
+	PublishCredentialResponse(ctx context.Context, resp types.CredentialResponse) error
 	PublishCapabilityQuery(ctx context.Context, query types.CapabilityQuery) (*types.CapabilityResponse, error)
 	PublishAgentSpawnResponse(ctx context.Context, resp types.AgentSpawnResponse) error
 	PublishStatusUpdate(ctx context.Context, userContextID string, status types.StatusResponse) error
@@ -982,34 +983,137 @@ func (d *Dispatcher) HandleVaultExecuteRequest(ctx context.Context, req types.Va
 	return result, err
 }
 
-// HandleCredentialRequest is registered with the Gateway to handle credential.request
-// (operation: "user_input") messages from agents. It resolves the top-level task_id
-// and user_id from the subtask's orchRef so the IO push reaches the correct SSE stream.
-func (d *Dispatcher) HandleCredentialRequest(agentID, subtaskRef, requestID, keyName, label, traceID string) error {
-	var topTaskID, userID string
+// HandleCredentialRequest is registered with the Gateway to handle
+// credential.request messages from agents.
+func (d *Dispatcher) HandleCredentialRequest(ctx context.Context, req types.CredentialRequest) error {
+	ctx = observability.WithModule(ctx, "task_dispatcher")
+	log := observability.LogFromContext(ctx)
 
-	// Try direct active-task lookup first (subtaskRef == top-level task_id in some flows).
-	if tsVal, ok := d.activeTasks.Load(subtaskRef); ok {
-		ts := tsVal.(*types.TaskState)
-		topTaskID = ts.TaskID
-		userID = ts.UserID
-	} else if ts, ok := d.executor.TaskStateForSubtask(subtaskRef); ok {
-		topTaskID = ts.TaskID
-		userID = ts.UserID
-	} else {
-		observability.LogFromContext(observability.WithModule(context.Background(), "task_dispatcher")).
-			Warn("credential.request: could not resolve top-level task_id",
-				"agent_id", agentID, "subtask_ref", subtaskRef, "request_id", requestID)
-		return nil
+	resolveTaskState := func(taskRef string) (*types.TaskState, bool) {
+		if tsVal, ok := d.activeTasks.Load(taskRef); ok {
+			if ts, ok := tsVal.(*types.TaskState); ok && ts != nil {
+				return ts, true
+			}
+		}
+		if ts := d.activeTaskByOrchRef(taskRef); ts != nil {
+			return ts, true
+		}
+		if ts, ok := d.executor.TaskStateForSubtask(taskRef); ok {
+			return ts, true
+		}
+		if v, ok := d.agentSpawnContexts.Load(taskRef); ok {
+			spawnCtx := v.(*agentSpawnContext)
+			return &types.TaskState{
+				OrchestratorTaskRef: taskRef,
+				TaskID:              taskRef,
+				UserID:              spawnCtx.UserID,
+				TraceID:             spawnCtx.TraceID,
+				PolicyScope:         spawnCtx.PolicyScope,
+				CallbackTopic:       spawnCtx.CallbackTopic,
+				UserContextID:       spawnCtx.UserContextID,
+				ConversationID:      spawnCtx.ConversationID,
+			}, true
+		}
+		return nil, false
 	}
 
-	return d.io.PushCredentialRequest(ioclient.CredentialRequestPayload{
-		TaskID:    topTaskID,
-		RequestID: requestID,
-		UserID:    userID,
-		KeyName:   keyName,
-		Label:     label,
-	}, traceID)
+	switch req.Operation {
+	case "authorize":
+		ts, ok := resolveTaskState(req.TaskID)
+		if !ok {
+			log.Warn("credential authorize: could not resolve active task state",
+				"agent_id", req.AgentID,
+				"task_ref", req.TaskID,
+				"request_id", req.RequestID)
+			return d.gateway.PublishCredentialResponse(ctx, types.CredentialResponse{
+				RequestID:    req.RequestID,
+				Status:       "error",
+				ErrorCode:    types.ErrCodeVaultUnavailable,
+				ErrorMessage: "credential authorization context not found",
+			})
+		}
+		if strings.TrimSpace(req.AgentID) == "" {
+			return d.gateway.PublishCredentialResponse(ctx, types.CredentialResponse{
+				RequestID:    req.RequestID,
+				Status:       "denied",
+				ErrorCode:    types.ErrCodePolicyViolation,
+				ErrorMessage: "agent_id is required",
+			})
+		}
+		if len(req.SkillDomains) == 0 {
+			return d.gateway.PublishCredentialResponse(ctx, types.CredentialResponse{
+				RequestID:    req.RequestID,
+				Status:       "denied",
+				ErrorCode:    types.ErrCodePolicyViolation,
+				ErrorMessage: "skill_domains is required",
+			})
+		}
+		if time.Now().UTC().After(ts.PolicyScope.ExpiresAt) {
+			return d.gateway.PublishCredentialResponse(ctx, types.CredentialResponse{
+				RequestID:    req.RequestID,
+				Status:       "denied",
+				ErrorCode:    types.ErrCodeScopeExpired,
+				ErrorMessage: "credential scope expired",
+			})
+		}
+		if !policyScopeAllowsAll(ts.PolicyScope.Domains, req.SkillDomains) {
+			return d.gateway.PublishCredentialResponse(ctx, types.CredentialResponse{
+				RequestID:    req.RequestID,
+				Status:       "denied",
+				ErrorCode:    types.ErrCodeScopeViolation,
+				ErrorMessage: "requested skill domains are outside the approved policy scope",
+			})
+		}
+
+		return d.gateway.PublishCredentialResponse(ctx, types.CredentialResponse{
+			RequestID:       req.RequestID,
+			Status:          "granted",
+			PermissionToken: ts.PolicyScope.TokenRef,
+			ExpiresAt:       ts.PolicyScope.ExpiresAt.UTC().Format(time.RFC3339),
+		})
+
+	case "revoke":
+		if ts, ok := resolveTaskState(req.TaskID); ok {
+			if err := d.policy.RevokeCredentials(ctx, ts.OrchestratorTaskRef); err != nil {
+				log.Warn("credential revoke: policy revocation failed",
+					"agent_id", req.AgentID,
+					"task_ref", req.TaskID,
+					"request_id", req.RequestID,
+					"error", err)
+			}
+		}
+		return d.gateway.PublishCredentialResponse(ctx, types.CredentialResponse{
+			RequestID: req.RequestID,
+			Status:    "ok",
+		})
+
+	case "user_input":
+		ts, ok := resolveTaskState(req.TaskID)
+		if !ok {
+			log.Warn("credential.request: could not resolve top-level task_id",
+				"agent_id", req.AgentID, "subtask_ref", req.TaskID, "request_id", req.RequestID)
+			return nil
+		}
+		return d.io.PushCredentialRequest(ioclient.CredentialRequestPayload{
+			TaskID:    ts.TaskID,
+			RequestID: req.RequestID,
+			UserID:    ts.UserID,
+			KeyName:   req.KeyName,
+			Label:     req.Label,
+		}, req.TraceID)
+
+	default:
+		log.Warn("credential request: unsupported operation",
+			"agent_id", req.AgentID,
+			"request_id", req.RequestID,
+			"operation", req.Operation)
+		return d.gateway.PublishCredentialResponse(ctx, types.CredentialResponse{
+			RequestID:    req.RequestID,
+			Status:       "error",
+			ErrorCode:    types.ErrCodeInvalidTaskSpec,
+			ErrorMessage: "unsupported credential operation",
+		})
+	}
 }
 
 // HandlePlanComplete is called by the Plan Executor when all subtasks complete successfully.
@@ -1621,6 +1725,19 @@ func (d *Dispatcher) activeTaskByOrchRef(orchRef string) *types.TaskState {
 		return true
 	})
 	return found
+}
+
+func policyScopeAllowsAll(scopeDomains, requestedDomains []string) bool {
+	allowed := make(map[string]struct{}, len(scopeDomains))
+	for _, domain := range scopeDomains {
+		allowed[domain] = struct{}{}
+	}
+	for _, domain := range requestedDomains {
+		if _, ok := allowed[domain]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func minInt(a, b int) int {

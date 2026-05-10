@@ -12,6 +12,7 @@ CREATE SCHEMA IF NOT EXISTS agent_logs_schema;
 CREATE SCHEMA IF NOT EXISTS service_log_schema;
 CREATE SCHEMA IF NOT EXISTS scheduler_schema;
 CREATE SCHEMA IF NOT EXISTS orchestrator_schema;
+CREATE SCHEMA IF NOT EXISTS agents_schema;
 
 -- ==========================================
 -- identity_schema
@@ -342,3 +343,23 @@ CREATE TABLE IF NOT EXISTS scheduling_schema.scheduled_job_runs (
 
 CREATE INDEX IF NOT EXISTS idx_scheduled_job_runs_job_id ON scheduling_schema.scheduled_job_runs(job_id);
 CREATE INDEX IF NOT EXISTS idx_scheduled_job_runs_started_at ON scheduling_schema.scheduled_job_runs(started_at DESC);
+
+-- ==========================================
+-- agents_schema
+-- ==========================================
+CREATE TABLE IF NOT EXISTS agents_schema.skill_cache (
+    id          UUID PRIMARY KEY,
+    domain      TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    origin      TEXT NOT NULL,
+    description TEXT NOT NULL,
+    payload     JSONB NOT NULL,
+    embedding   VECTOR(640),
+    seed_hash   TEXT NOT NULL DEFAULT '',
+    created_at  TIMESTAMPTZ DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (domain, name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_skill_cache_domain ON agents_schema.skill_cache(domain);
+CREATE INDEX IF NOT EXISTS idx_skill_cache_embedding ON agents_schema.skill_cache USING hnsw (embedding vector_cosine_ops);

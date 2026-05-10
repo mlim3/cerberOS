@@ -44,6 +44,14 @@ func main() {
 		"component_id", cfg.ComponentID,
 		"nats_url", cfg.NATSURL,
 	)
+	if embeddingAPIURL := strings.TrimSpace(os.Getenv("AEGIS_EMBEDDING_API_URL")); embeddingAPIURL != "" {
+		log.Info("embedding: using shared embedding API",
+			"url", embeddingAPIURL,
+			"model", strings.TrimSpace(os.Getenv("AEGIS_EMBEDDING_MODEL")),
+			"dimensions", strings.TrimSpace(os.Getenv("AEGIS_EMBEDDING_DIM")),
+			"prompt_style", strings.TrimSpace(os.Getenv("AEGIS_EMBEDDING_PROMPT_STYLE")),
+		)
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -130,29 +138,6 @@ func main() {
 	reg := registry.New(registry.WithStateChangeHook(rec.ObserveStateChange))
 
 	skillOpts := []skills.Option{skills.WithGetSpecHook(rec.ObserveSkillInvocation)}
-	if cfg.EmbeddingAPIURL == "" {
-		log.Error("embedding configuration missing",
-			"error", "AEGIS_EMBEDDING_API_URL must be set; local fallback embedders are disabled",
-		)
-		os.Exit(1)
-	}
-	embedder, err := newEmbeddingAPIEmbedder(
-		cfg.EmbeddingAPIURL,
-		cfg.EmbeddingModel,
-		cfg.EmbeddingDimensions,
-		cfg.EmbeddingPromptStyle,
-	)
-	if err != nil {
-		log.Error("embedding client init failed", "error", err)
-		os.Exit(1)
-	}
-	log.Info("embedding: using shared embedding API",
-		"url", cfg.EmbeddingAPIURL,
-		"model", cfg.EmbeddingModel,
-		"dimensions", cfg.EmbeddingDimensions,
-		"prompt_style", cfg.EmbeddingPromptStyle,
-	)
-	skillOpts = append(skillOpts, skills.WithEmbedder(embedder))
 	skillMgr := skills.New(skillOpts...)
 	credBroker, err := credentials.NewNATSBroker(commsClient,
 		credentials.WithBrokerConfig(credentials.BrokerConfig{
@@ -313,6 +298,13 @@ func main() {
 	}
 
 	f.StartIdleSweep(ctx)
+
+	// Seed static skills to the Memory Component's pgvector index so they are
+	// discoverable via semantic search from agent-process microVMs. Runs before
+	// LoadSynthesizedSkills so only static commands are written here.
+	if err := f.SeedStaticSkills(ctx); err != nil {
+		log.Warn("static skills seed failed — skill semantic search may miss static skills", "error", err)
+	}
 
 	// Rehydrate any skills synthesized in prior sessions into the live skill
 	// tree. Must run after static skills are loaded (loadSkills above) because

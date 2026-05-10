@@ -1,11 +1,7 @@
 package domains_test
 
 import (
-	"hash/fnv"
-	"math"
-	"strings"
 	"testing"
-	"unicode"
 
 	"github.com/cerberOS/agents-component/internal/skills"
 	"github.com/cerberOS/agents-component/internal/skills/domains"
@@ -64,14 +60,13 @@ func TestWebDomain_CredentialRouting(t *testing.T) {
 
 	cases := []struct {
 		command         string
-		wantVaultRouted bool // true == requires vault-delegated execution
+		wantVaultRouted bool
 	}{
 		{"web.fetch", false},
 		{"web.search", true},
 		{"web.extract", false},
 	}
 
-	// Re-check directly from the domain node since GetCommands strips Spec.
 	domain := domains.WebDomain()
 	for _, tc := range cases {
 		cmd, ok := domain.Children[tc.command]
@@ -122,38 +117,6 @@ func TestWebDomain_GetSpecReturnsFullParams(t *testing.T) {
 	}
 }
 
-func TestWebDomain_SearchFindsCorrectCommand(t *testing.T) {
-	mgr := newSearchManager()
-	if err := mgr.RegisterDomain(domains.WebDomain()); err != nil {
-		t.Fatalf("RegisterDomain failed: %v", err)
-	}
-
-	tests := []struct {
-		query string
-		want  string
-	}{
-		{"search the web for news", "web.search"},
-		{"fetch the content of a URL", "web.fetch"},
-		{"extract text from a webpage", "web.extract"},
-	}
-
-	for _, tc := range tests {
-		results, err := mgr.Search(tc.query, 3)
-		if err != nil {
-			t.Errorf("Search(%q) error: %v", tc.query, err)
-			continue
-		}
-		if len(results) == 0 {
-			t.Errorf("Search(%q) returned no results", tc.query)
-			continue
-		}
-		if results[0].Name != tc.want {
-			t.Errorf("Search(%q): expected top result %q, got %q (score %.3f)",
-				tc.query, tc.want, results[0].Name, results[0].Score)
-		}
-	}
-}
-
 func TestWebDomain_TimeoutBoundsValid(t *testing.T) {
 	domain := domains.WebDomain()
 	for name, cmd := range domain.Children {
@@ -164,7 +127,7 @@ func TestWebDomain_TimeoutBoundsValid(t *testing.T) {
 }
 
 func TestBothDomains_CanCoexistInManager(t *testing.T) {
-	mgr := newSearchManager()
+	mgr := skills.New()
 	if err := mgr.RegisterDomain(domains.LogsDomain()); err != nil {
 		t.Fatalf("register logs domain: %v", err)
 	}
@@ -182,82 +145,5 @@ func TestBothDomains_CanCoexistInManager(t *testing.T) {
 	}
 	if !found["web"] {
 		t.Error("'web' domain not listed after registration")
-	}
-
-	// Cross-domain search should return results from both domains.
-	results, err := mgr.Search("search and fetch information", 6)
-	if err != nil {
-		t.Fatalf("cross-domain search failed: %v", err)
-	}
-	if len(results) == 0 {
-		t.Fatal("expected results from cross-domain search")
-	}
-}
-
-func newSearchManager() skills.Manager {
-	return skills.New(skills.WithEmbedder(&lexicalHashEmbedder{dim: 512}))
-}
-
-type lexicalHashEmbedder struct {
-	dim int
-}
-
-func (e *lexicalHashEmbedder) Embed(text string) ([]float64, error) {
-	tokens := tokenizeForTest(text)
-	vec := make([]float64, e.dim)
-	for _, token := range tokens {
-		idx := int(hashTokenForTest(token) % uint32(e.dim))
-		vec[idx]++
-	}
-	normalizeForTest(vec)
-	return vec, nil
-}
-
-func tokenizeForTest(text string) []string {
-	text = strings.ToLower(text)
-	var unigrams []string
-	var cur strings.Builder
-
-	flush := func() {
-		if cur.Len() >= 2 {
-			unigrams = append(unigrams, cur.String())
-		}
-		cur.Reset()
-	}
-
-	for _, r := range text {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' {
-			cur.WriteRune(r)
-		} else {
-			flush()
-		}
-	}
-	flush()
-
-	tokens := make([]string, 0, len(unigrams)*2)
-	tokens = append(tokens, unigrams...)
-	for i := 0; i < len(unigrams)-1; i++ {
-		tokens = append(tokens, unigrams[i]+"_"+unigrams[i+1])
-	}
-	return tokens
-}
-
-func hashTokenForTest(token string) uint32 {
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(token))
-	return h.Sum32()
-}
-
-func normalizeForTest(vec []float64) {
-	sum := 0.0
-	for _, v := range vec {
-		sum += v * v
-	}
-	if sum == 0 {
-		return
-	}
-	norm := math.Sqrt(sum)
-	for i := range vec {
-		vec[i] /= norm
 	}
 }

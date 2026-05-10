@@ -15,7 +15,7 @@ The Agents Component has **one external communication partner**: the Orchestrato
 - [Credential Vault (OpenBao)](#credential-vault-openbao)
 - [Memory / Storage Component](#memory--storage-component)
 - [User I/O Component](#userio-component)
-- [Testing with the Partner Simulator](#testing-with-the-partner-simulator)
+- [Testing with Integration Fixtures](#testing-with-integration-fixtures)
 - [Security Invariants — Non-Negotiable](#security-invariants--non-negotiable)
 
 ---
@@ -309,7 +309,7 @@ Two streams must exist before the Agents Component starts:
 | `AEGIS_ORCHESTRATOR` | `aegis.orchestrator.>` | 24h (configurable) | Outbound messages from the Agents Component to the Orchestrator |
 | `AEGIS_AGENTS` | `aegis.agents.>` | 24h (configurable) | Inbound messages to the Agents Component from the Orchestrator |
 
-In local development, the simulator creates both streams automatically. In production, these must be provisioned before any component starts.
+In local integration tests, the test fixture creates both streams automatically. In production, these must be provisioned before any component starts.
 
 **Create streams manually:**
 
@@ -767,70 +767,23 @@ Task results contain `user_context_id` echoed from the original `task.inbound`. 
 
 ---
 
-## Testing with the Partner Simulator
+## Testing with Integration Fixtures
 
-The repository ships with a **partner simulator** (`cmd/simulator`) that implements the Orchestrator side of the contract. It responds to credential requests, Vault execute requests, state writes, and state reads with synthetic responses — enabling the Agents Component to complete full task flows without any real partner services.
-
-The simulator is included in Docker Compose (`docker-compose.yml`) and runs automatically with `docker compose up`.
-
-### What the simulator implements
+The repository no longer ships a standalone partner simulator binary. Instead,
+the integration test suite in `test/integration/` starts scoped, in-test
+partner fixtures that provide only the synthetic responses each test needs:
 
 | Inbound subject | Synthetic response |
 |----------------|--------------------|
 | `aegis.orchestrator.credential.request` (authorize) | `credential.response {status: granted, permission_token: "sim-token-<agent_id>"}` |
 | `aegis.orchestrator.credential.request` (revoke) | Acked; no response published |
-| `aegis.orchestrator.vault.execute.request` | `vault.execute.result {status: success, operation_result: {"simulated": true}}` |
+| `aegis.orchestrator.vault.execute.request` | `vault.execute.result {status: success}` |
 | `aegis.orchestrator.state.write` | `state.write.ack {status: accepted}` |
 | `aegis.orchestrator.state.read.request` | `state.read.response {records: []}` |
 
-Observation-only (logged, no reply): `task.accepted`, `task.result`, `task.failed`, `agent.status`, `audit.event`, `clarification.request`, `error`.
-
-### Running the simulator standalone
-
-```bash
-# Start NATS
-docker run --rm -p 4222:4222 nats:2.10-alpine --jetstream
-
-# Start the simulator (builds from source)
-AEGIS_NATS_URL=nats://localhost:4222 go run ./cmd/simulator/
-```
-
-### Publishing a test task
-
-```bash
-nats pub aegis.agents.task.inbound '{
-  "message_id": "msg-001",
-  "message_type": "task.inbound",
-  "source_component": "orchestrator",
-  "correlation_id": "task-001",
-  "timestamp": "2026-01-01T00:00:00Z",
-  "schema_version": "1.0",
-  "payload": {
-    "task_id": "task-001",
-    "required_skills": ["web"],
-    "instructions": "Fetch https://example.com and summarise the page.",
-    "trace_id": "trace-001",
-    "user_context_id": "ctx-001"
-  }
-}' --server nats://localhost:4222
-```
-
-### Observing responses
-
-```bash
-# Watch all Orchestrator-bound messages (everything the Agents Component sends)
-nats sub "aegis.orchestrator.>" --server nats://localhost:4222
-
-# Or subscribe to specific subjects:
-nats sub aegis.orchestrator.task.accepted --server nats://localhost:4222
-nats sub aegis.orchestrator.task.result --server nats://localhost:4222
-nats sub aegis.orchestrator.agent.status --server nats://localhost:4222
-nats sub aegis.orchestrator.audit.event --server nats://localhost:4222
-```
-
 ### Integration tests
 
-The integration test suite in `test/integration/` uses the same simulator as a Go library:
+The integration test suite uses these scoped fixtures directly:
 
 ```bash
 # Run all integration tests (requires NATS)

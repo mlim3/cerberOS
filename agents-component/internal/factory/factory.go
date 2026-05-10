@@ -293,6 +293,64 @@ func (f *Factory) LoadSynthesizedSkills(ctx context.Context) error {
 	return nil
 }
 
+// SeedStaticSkills enumerates every command registered in the Skill Hierarchy
+// Manager and writes each one to the Memory Component as a skill_cache record.
+// The Orchestrator gateway intercepts these writes and forwards them to the
+// Memory API for pgvector indexing, making static skills discoverable via
+// semantic search from agent-process microVMs.
+//
+// Call SeedStaticSkills once at startup, after loadSkills has populated the
+// Manager but before LoadSynthesizedSkills, so only static skills are seeded
+// here (synthesized skills were already written via PersistSkill at creation
+// time and are forwarded by the gateway automatically).
+//
+// Individual write failures are logged and skipped; they do not abort the
+// startup sequence. Upserts on the Memory API side are idempotent, so
+// SeedStaticSkills is safe to call on every restart.
+func (f *Factory) SeedStaticSkills(ctx context.Context) error {
+	domains := f.skills.ListDomains()
+	seeded := 0
+	for _, domainName := range domains {
+		cmds, err := f.skills.GetCommands(domainName)
+		if err != nil {
+			f.log.Warn("factory: seed static skills: get commands failed",
+				"domain", domainName, "error", err)
+			continue
+		}
+		for _, node := range cmds {
+			f.log.Info("factory: seeding static skill",
+				"domain", domainName,
+				"skill_name", node.Name,
+				"description_len", len(node.Description),
+				"has_description", node.Description != "",
+			)
+			if err := f.memory.Write(&types.MemoryWrite{
+				AgentID:  "static-skills",
+				DataType: "skill_cache",
+				Tags: map[string]string{
+					"domain":     domainName,
+					"origin":     "static",
+					"skill_name": node.Name,
+				},
+				Payload: node,
+			}); err != nil {
+				f.log.Warn("factory: seed static skill write failed",
+					"domain", domainName, "skill_name", node.Name, "error", err)
+				continue
+			}
+			seeded++
+		}
+		select {
+		case <-ctx.Done():
+			f.log.Info("factory: static skills seed interrupted", "seeded", seeded)
+			return nil
+		default:
+		}
+	}
+	f.log.Info("factory: static skills seeded to Memory Component", "count", seeded)
+	return nil
+}
+
 // emit dispatches an audit event off the critical path. It is a no-op when
 // the emitter is nil (unit tests that do not wire a Comms client).
 func (f *Factory) emit(event types.AuditEvent) {
@@ -377,9 +435,25 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 
 	// Step 1: Resolve entry-point skill domain (first required domain).
 	entryDomain := spec.RequiredSkills[0]
+	f.log.Info("factory: provision step 1 — resolving entry-point skill domain",
+		"agent_id", agentID,
+		"task_id", spec.TaskID,
+		"entry_domain", entryDomain,
+		"all_required_skills", spec.RequiredSkills,
+	)
 	if _, err := f.skills.GetDomain(entryDomain); err != nil {
+		f.log.Warn("factory: provision failed — entry domain not registered",
+			"agent_id", agentID,
+			"task_id", spec.TaskID,
+			"entry_domain", entryDomain,
+			"error", err,
+		)
 		return fmt.Errorf("factory: skills.GetDomain %q: %w", entryDomain, err)
 	}
+	f.log.Info("factory: provision step 1 — entry domain resolved",
+		"agent_id", agentID,
+		"entry_domain", entryDomain,
+	)
 
 	// Step 1a: Build the command manifest for the entry domain. GetCommands
 	// returns command-level nodes (name + description only, no parameter specs)
@@ -391,6 +465,17 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 		return fmt.Errorf("factory: skills.GetCommands %q: %w", entryDomain, err)
 	}
 	manifest := buildManifestText(commands)
+	cmdNames := make([]string, len(commands))
+	for i, c := range commands {
+		cmdNames[i] = c.Name
+	}
+	f.log.Info("factory: provision step 1a — command manifest built for spawned agent",
+		"agent_id", agentID,
+		"entry_domain", entryDomain,
+		"command_count", len(commands),
+		"command_names", cmdNames,
+		"manifest_chars", len(manifest),
+	)
 
 	// Step 1b: Enforce spawn context token budget (EDD §13.3, PRD FR-FAC-05).
 	// Counted components: system prompt (including manifest) + task instructions
@@ -412,10 +497,26 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 		}
 	}
 
+	f.log.Info("factory: provision step 2 — resolving permissions",
+		"agent_id", agentID,
+		"task_id", spec.TaskID,
+		"required_skills", spec.RequiredSkills,
+		"policy_configured", f.policy != nil,
+	)
 	permSet, err := f.resolvePermissions(spec.RequiredSkills, spec.TaskID, spec.TraceID, agentID)
 	if err != nil {
+		f.log.Warn("factory: provision failed — permission resolution error",
+			"agent_id", agentID,
+			"task_id", spec.TaskID,
+			"required_skills", spec.RequiredSkills,
+			"error", err,
+		)
 		return err
 	}
+	f.log.Info("factory: provision step 2 — permissions resolved",
+		"agent_id", agentID,
+		"perm_set", permSet,
+	)
 
 	// Allocate a VM ID now so it can be stored in the registry entry before the
 	// VM is launched. vm_id changes on respawn (same agent_id, new vm_id).

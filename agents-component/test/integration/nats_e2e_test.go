@@ -1,6 +1,6 @@
 // Package integration — nats_e2e_test.go exercises the complete factory flow
-// against a live NATS JetStream instance with the partner simulator providing
-// synthetic responses.
+// against a live NATS JetStream instance with test-local partner fixtures
+// providing synthetic responses.
 //
 // These tests require a real NATS server with JetStream enabled.
 // Set AEGIS_NATS_URL or run the default (nats://localhost:4222).
@@ -29,7 +29,6 @@ import (
 	"github.com/cerberOS/agents-component/internal/registry"
 	"github.com/cerberOS/agents-component/internal/skills"
 	"github.com/cerberOS/agents-component/pkg/types"
-	"github.com/cerberOS/agents-component/test/integration/simulator"
 	"github.com/nats-io/nats.go"
 )
 
@@ -43,9 +42,10 @@ func natsTestURL() string {
 
 // natsHarness holds all wired components connected to real NATS.
 type natsHarness struct {
+	componentID   string
 	nc            *nats.Conn
 	js            nats.JetStreamContext
-	sim           *simulator.Simulator
+	partner       *partnerFixture
 	commsClient   comms.Client
 	reg           registry.Registry
 	lc            lifecycle.Manager
@@ -56,10 +56,12 @@ type natsHarness struct {
 	crashDetector *lifecycle.CrashDetector
 	ctx           context.Context
 	cancel        context.CancelFunc
+	hbMu          sync.RWMutex
+	hbPaused      map[string]bool
 }
 
-// newNATSHarness connects to NATS, starts the simulator, wires all modules,
-// and subscribes the same handlers as aegis-agents/main.go.
+// newNATSHarness connects to NATS, starts test-local partner fixtures, wires
+// all modules, and subscribes the same handlers as aegis-agents/main.go.
 // The test is skipped automatically when NATS is unavailable.
 func newNATSHarness(t *testing.T) *natsHarness {
 	t.Helper()
@@ -77,25 +79,10 @@ func newNATSHarness(t *testing.T) *natsHarness {
 		t.Fatalf("JetStream context: %v", err)
 	}
 
-	// Simulator — subscribes aegis.orchestrator.* and publishes synthetic replies.
-	// Use a unique suffix per test run to avoid durable consumer collisions
-	// when multiple tests share the same NATS server.
 	componentID := fmt.Sprintf("test-%d", time.Now().UnixNano())
-
-	sim, err := simulator.New(url)
-	if err != nil {
-		nc.Close()
-		t.Skipf("simulator init failed (%v)", err)
-	}
-	sim.WithConsumerSuffix(componentID)
-	if err := sim.Start(); err != nil {
-		sim.Stop() //nolint:errcheck
-		nc.Close()
-		t.Fatalf("simulator.Start: %v", err)
-	}
+	partner := newPartnerFixture(t, url, componentID)
 	commsClient, err := comms.NewNATSClient(url, componentID)
 	if err != nil {
-		sim.Stop() //nolint:errcheck
 		nc.Close()
 		t.Fatalf("comms.NewNATSClient: %v", err)
 	}
@@ -104,7 +91,7 @@ func newNATSHarness(t *testing.T) *natsHarness {
 	skillMgr := skills.New()
 
 	// NATS-backed credential broker for the full round-trip (publish
-	// credential.request → simulator responds → PreAuthorize completes).
+	// credential.request → fixture responds → PreAuthorize completes).
 	// Use a unique consumer name per test run to avoid "already bound" errors
 	// when multiple tests share the same NATS server.
 	credBroker, err := credentials.NewNATSBroker(commsClient,
@@ -112,7 +99,6 @@ func newNATSHarness(t *testing.T) *natsHarness {
 	)
 	if err != nil {
 		commsClient.Close() //nolint:errcheck
-		sim.Stop()          //nolint:errcheck
 		nc.Close()
 		t.Fatalf("credentials.NewNATSBroker: %v", err)
 	}
@@ -154,7 +140,6 @@ func newNATSHarness(t *testing.T) *natsHarness {
 	if err != nil {
 		cancel()
 		commsClient.Close() //nolint:errcheck
-		sim.Stop()          //nolint:errcheck
 		nc.Close()
 		t.Fatalf("factory.New: %v", err)
 	}
@@ -168,6 +153,10 @@ func newNATSHarness(t *testing.T) *natsHarness {
 			if err := json.Unmarshal(msg.Data, &spec); err != nil {
 				t.Errorf("task.inbound unmarshal: %v", err)
 				_ = msg.Nak()
+				return
+			}
+			if spec.Metadata[testOwnerMetadataKey] != componentID {
+				_ = msg.Ack()
 				return
 			}
 			if err := f.HandleTaskSpec(&spec); err != nil {
@@ -200,10 +189,30 @@ func newNATSHarness(t *testing.T) *natsHarness {
 	}
 
 	if err := commsClient.Subscribe(
+		comms.SubjectHeartbeatAll,
+		func(msg *comms.Message) {
+			agentID := msg.Subject[len(comms.SubjectHeartbeatPrefix):]
+			if agentID == "" {
+				return
+			}
+			crashDetector.RecordHeartbeat(agentID)
+		},
+	); err != nil {
+		cancel()
+		t.Fatalf("subscribe heartbeat: %v", err)
+	}
+
+	if err := commsClient.Subscribe(
 		comms.SubjectCapabilityQuery,
 		func(msg *comms.Message) {
 			var query types.CapabilityQuery
 			if err := json.Unmarshal(msg.Data, &query); err != nil {
+				return
+			}
+			// Multiple integration harnesses may be connected to the same test
+			// NATS server at once. Scope capability-query handling to the harness
+			// that owns the request so other harness registries cannot answer it.
+			if query.TraceID != "" && query.TraceID != componentID && !hasTracePrefix(query.TraceID, componentID) {
 				return
 			}
 			candidates, err := reg.FindBySkills(query.Domains)
@@ -232,9 +241,10 @@ func newNATSHarness(t *testing.T) *natsHarness {
 	}
 
 	h := &natsHarness{
+		componentID:   componentID,
 		nc:            nc,
 		js:            js,
-		sim:           sim,
+		partner:       partner,
 		commsClient:   commsClient,
 		reg:           reg,
 		lc:            lcMgr,
@@ -245,15 +255,55 @@ func newNATSHarness(t *testing.T) *natsHarness {
 		crashDetector: crashDetector,
 		ctx:           ctx,
 		cancel:        cancel,
+		hbPaused:      make(map[string]bool),
 	}
+	go h.publishSyntheticHeartbeats(t)
 
 	t.Cleanup(func() {
 		cancel()
 		commsClient.Close() //nolint:errcheck
-		sim.Stop()          //nolint:errcheck
 		nc.Close()
 	})
 	return h
+}
+
+func (h *natsHarness) publishSyntheticHeartbeats(t *testing.T) {
+	t.Helper()
+
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-h.ctx.Done():
+			return
+		case <-ticker.C:
+			for _, agent := range h.reg.List() {
+				if agent.State != registry.StateActive && agent.State != registry.StateIdle {
+					continue
+				}
+				if h.isHeartbeatPaused(agent.AgentID) {
+					continue
+				}
+				if err := h.nc.Publish(comms.HeartbeatSubject(agent.AgentID), []byte(`{"message_type":"agent.heartbeat"}`)); err != nil {
+					t.Logf("synthetic heartbeat publish failed for %s: %v", agent.AgentID, err)
+				}
+			}
+		}
+	}
+}
+
+func (h *natsHarness) pauseHeartbeats(agentID string) {
+	h.hbMu.Lock()
+	h.hbPaused[agentID] = true
+	h.hbMu.Unlock()
+}
+
+func (h *natsHarness) isHeartbeatPaused(agentID string) bool {
+	h.hbMu.RLock()
+	paused := h.hbPaused[agentID]
+	h.hbMu.RUnlock()
+	return paused
 }
 
 // seedNATSSkills registers the minimal skill tree used by e2e tests.
@@ -331,7 +381,7 @@ func noMsg(t *testing.T, ch <-chan json.RawMessage, desc string, quiet time.Dura
 // ─── Scenario 1: Full provisioning path ──────────────────────────────────────
 
 // TestNATS_FullProvisioningPath verifies: new task published → task.accepted
-// emitted → credential.request sent (simulator grants token) → agent registered
+// emitted → credential.request sent (fixture grants token) → agent registered
 // ACTIVE → CompleteTask publishes task.result, revokes credentials, and
 // terminates the agent.
 func TestNATS_FullProvisioningPath(t *testing.T) {
@@ -341,14 +391,14 @@ func TestNATS_FullProvisioningPath(t *testing.T) {
 	agentStatusCh := subscribeObserve(t, h.js, comms.SubjectAgentStatus)
 	taskResultCh := subscribeObserve(t, h.js, comms.SubjectTaskResult)
 
-	// Publish task.inbound via simulator.
+	// Publish task.inbound via the test-local partner fixture.
 	spec := types.TaskSpec{
 		TaskID:         "e2e-task-1",
 		RequiredSkills: []string{"web"},
 		Instructions:   "fetch https://example.com",
 		TraceID:        "e2e-trace-1",
 	}
-	if err := h.sim.PublishTaskInbound(spec); err != nil {
+	if err := h.partner.publishTaskInbound(spec); err != nil {
 		t.Fatalf("PublishTaskInbound: %v", err)
 	}
 
@@ -437,7 +487,7 @@ func TestNATS_FastPath(t *testing.T) {
 		Instructions:   "fetch https://example.com",
 		TraceID:        "e2e-fp-trace-1",
 	}
-	if err := h.sim.PublishTaskInbound(spec1); err != nil {
+	if err := h.partner.publishTaskInbound(spec1); err != nil {
 		t.Fatalf("PublishTaskInbound task-1: %v", err)
 	}
 
@@ -468,7 +518,7 @@ func TestNATS_FastPath(t *testing.T) {
 		Instructions:   "fetch https://example.org",
 		TraceID:        "e2e-fp-trace-2",
 	}
-	if err := h.sim.PublishTaskInbound(spec2); err != nil {
+	if err := h.partner.publishTaskInbound(spec2); err != nil {
 		t.Fatalf("PublishTaskInbound task-2: %v", err)
 	}
 
@@ -511,7 +561,7 @@ func TestNATS_CrashAndRecovery(t *testing.T) {
 		Instructions:   "long running task",
 		TraceID:        "e2e-crash-trace-1",
 	}
-	if err := h.sim.PublishTaskInbound(spec); err != nil {
+	if err := h.partner.publishTaskInbound(spec); err != nil {
 		t.Fatalf("PublishTaskInbound: %v", err)
 	}
 
@@ -534,29 +584,24 @@ func TestNATS_CrashAndRecovery(t *testing.T) {
 	inFlightRequestID := "vault-req-crash-test-1"
 	h.f.TrackVaultRequest(agentID, inFlightRequestID)
 
-	// Start heartbeating, then stop — simulates crash.
-	heartbeatDone := make(chan struct{})
-	go func() {
-		defer close(heartbeatDone)
-		ticker := time.NewTicker(200 * time.Millisecond)
-		defer ticker.Stop()
-		// Send a few heartbeats so the detector registers the agent, then stop.
-		for i := 0; i < 3; i++ {
-			h.crashDetector.RecordHeartbeat(agentID)
-			<-ticker.C
-		}
-		// Stop sending — detector will fire after MaxMissed * Interval.
-	}()
-	<-heartbeatDone
+	// Stop the synthetic heartbeat stream for this agent — simulates a crash.
+	h.pauseHeartbeats(agentID)
 
-	// Wait for the agent to enter RECOVERING state.
+	// Wait for crash recovery to actually begin. The agent is already ACTIVE
+	// before the simulated crash, so simply observing ACTIVE again is not
+	// sufficient evidence that the detector fired.
 	recoveryDeadline := time.Now().Add(10 * time.Second)
+	recoveryObserved := false
 	for time.Now().Before(recoveryDeadline) {
 		agent, err := h.reg.Get(agentID)
-		if err == nil && (agent.State == "recovering" || agent.State == "active") {
+		if err == nil && agent.FailureCount >= 1 {
+			recoveryObserved = true
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
+	}
+	if !recoveryObserved {
+		t.Fatal("crash recovery never began")
 	}
 
 	agent, err := h.reg.Get(agentID)
@@ -601,14 +646,19 @@ func TestNATS_CrashAndRecovery(t *testing.T) {
 // partial-match, and no-match cases.
 func TestNATS_CapabilityQuery(t *testing.T) {
 	h := newNATSHarness(t)
+	queryPrefix := fmt.Sprintf("cap-q-%d", time.Now().UnixNano())
 
 	// Subscribe to responses directly on the core NATS connection (at-most-once).
 	respCh := make(chan json.RawMessage, 4)
 	sub, err := h.nc.Subscribe(comms.SubjectCapabilityResponse, func(msg *nats.Msg) {
 		var env struct {
-			Payload json.RawMessage `json:"payload"`
+			SourceComponent string          `json:"source_component"`
+			Payload         json.RawMessage `json:"payload"`
 		}
 		if jsonErr := json.Unmarshal(msg.Data, &env); jsonErr == nil {
+			if env.SourceComponent != h.componentID {
+				return
+			}
 			respCh <- env.Payload
 		}
 	})
@@ -622,50 +672,51 @@ func TestNATS_CapabilityQuery(t *testing.T) {
 		query := types.CapabilityQuery{
 			QueryID: queryID,
 			Domains: domains,
-			TraceID: "e2e-cap-trace-" + queryID,
+			TraceID: h.componentID + ":" + queryID,
 		}
-		data, err := json.Marshal(struct {
-			MessageID       string      `json:"message_id"`
-			MessageType     string      `json:"message_type"`
-			SourceComponent string      `json:"source_component"`
-			Timestamp       string      `json:"timestamp"`
-			SchemaVersion   string      `json:"schema_version"`
-			Payload         interface{} `json:"payload"`
-		}{
-			MessageID:       queryID,
-			MessageType:     comms.MsgTypeCapabilityQuery,
-			SourceComponent: "orchestrator",
-			Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
-			SchemaVersion:   "1.0",
-			Payload:         query,
-		})
-		if err != nil {
-			t.Fatalf("marshal capability.query: %v", err)
-		}
-		if err := h.nc.Publish(comms.SubjectCapabilityQuery, data); err != nil {
+		if err := h.commsClient.Publish(
+			comms.SubjectCapabilityQuery,
+			comms.PublishOptions{
+				MessageType:   comms.MsgTypeCapabilityQuery,
+				CorrelationID: queryID,
+				TraceID:       query.TraceID,
+				Transient:     true,
+			},
+			query,
+		); err != nil {
 			t.Fatalf("publish capability.query: %v", err)
 		}
 
-		select {
-		case raw := <-respCh:
-			var resp types.CapabilityResponse
-			if err := json.Unmarshal(raw, &resp); err != nil {
-				t.Fatalf("unmarshal capability.response: %v", err)
+		deadline := time.After(3 * time.Second)
+		for {
+			select {
+			case raw := <-respCh:
+				var resp types.CapabilityResponse
+				if err := json.Unmarshal(raw, &resp); err != nil {
+					t.Fatalf("unmarshal capability.response: %v", err)
+				}
+				if resp.QueryID != queryID {
+					continue
+				}
+				if resp.TraceID != query.TraceID {
+					continue
+				}
+				if resp.HasMatch != wantMatch {
+					t.Errorf("HasMatch for domains %v: want %v, got %v", domains, wantMatch, resp.HasMatch)
+				}
+				return
+			case <-deadline:
+				t.Fatalf("timed out waiting for capability.response to query %q", queryID)
 			}
-			if resp.QueryID != queryID {
-				t.Errorf("QueryID: want %q, got %q", queryID, resp.QueryID)
-			}
-			if resp.HasMatch != wantMatch {
-				t.Errorf("HasMatch for domains %v: want %v, got %v", domains, wantMatch, resp.HasMatch)
-			}
-		case <-time.After(3 * time.Second):
-			t.Fatalf("timed out waiting for capability.response to query %q", queryID)
 		}
 	}
 
 	// No-match: registry is empty — no agents with any skill.
 	t.Run("no match — empty registry", func(t *testing.T) {
-		queryAndExpect(t, "cap-q-1", []string{"web"}, false)
+		if agents := h.reg.List(); len(agents) != 0 {
+			t.Fatalf("expected empty registry before capability query, found %d agents", len(agents))
+		}
+		queryAndExpect(t, queryPrefix+"-1", []string{"web"}, false)
 	})
 
 	// Provision a web agent so the registry has a match.
@@ -675,7 +726,7 @@ func TestNATS_CapabilityQuery(t *testing.T) {
 		Instructions:   "fetch https://example.com",
 		TraceID:        "e2e-cap-trace-prov",
 	}
-	if err := h.sim.PublishTaskInbound(spec); err != nil {
+	if err := h.partner.publishTaskInbound(spec); err != nil {
 		t.Fatalf("PublishTaskInbound: %v", err)
 	}
 	deadline := time.Now().Add(10 * time.Second)
@@ -689,12 +740,12 @@ func TestNATS_CapabilityQuery(t *testing.T) {
 
 	// Match: agent with "web" skill exists.
 	t.Run("match — web agent active", func(t *testing.T) {
-		queryAndExpect(t, "cap-q-2", []string{"web"}, true)
+		queryAndExpect(t, queryPrefix+"-2", []string{"web"}, true)
 	})
 
 	// No-match: agent exists but doesn't have "storage" skill.
 	t.Run("no match — wrong domain", func(t *testing.T) {
-		queryAndExpect(t, "cap-q-3", []string{"storage"}, false)
+		queryAndExpect(t, queryPrefix+"-3", []string{"storage"}, false)
 	})
 
 	// Drain any lingering responses.
@@ -708,6 +759,10 @@ func TestNATS_CapabilityQuery(t *testing.T) {
 		}
 	}
 	drainCh()
+}
+
+func hasTracePrefix(traceID, componentID string) bool {
+	return len(traceID) > len(componentID) && traceID[:len(componentID)] == componentID && traceID[len(componentID)] == ':'
 }
 
 // ─── In-flight vault request tracking helpers ─────────────────────────────────

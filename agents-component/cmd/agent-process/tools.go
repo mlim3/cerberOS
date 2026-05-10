@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"sync"
@@ -96,15 +97,28 @@ func loadSkillsConfig() *skillsconfig.Config {
 //
 // ve may be nil (vault execution unavailable) — credentialed tools are omitted.
 // as may be nil (agent spawning unavailable) — spawn_agent tool is omitted.
+// sl may be nil (NATS unavailable) — skills_search returns an unavailable notice.
 // task_complete and skills_search are always included.
-func toolsForDomain(domain string, ve *VaultExecutor, as *AgentSpawner) []SkillTool {
-	base := []SkillTool{taskCompleteTool(), skillsSearchTool(getSkillsManager(), domain, as != nil)}
+func toolsForDomain(domain string, ve *VaultExecutor, as *AgentSpawner, sl SkillSearcher) []SkillTool {
+	log := slog.Default()
+	log.Info("tools: assembling registry for domain",
+		"domain", domain,
+		"vault_available", ve != nil,
+		"spawn_available", as != nil,
+		"skill_searcher_available", sl != nil,
+	)
+
+	base := []SkillTool{taskCompleteTool(), skillsSearchTool(sl, domain, as != nil)}
 	if as != nil {
 		base = append(base, spawnAgentTool(as))
 	}
 
 	cfg := loadSkillsConfig()
 	if cfg == nil {
+		log.Warn("tools: skills config not loaded; only base tools available for domain",
+			"domain", domain,
+			"base_tool_count", len(base),
+		)
 		return base
 	}
 
@@ -116,18 +130,43 @@ func toolsForDomain(domain string, ve *VaultExecutor, as *AgentSpawner) []SkillT
 		for _, cmd := range d.Commands {
 			// Skip vault tools when vault execution is unavailable.
 			if len(cmd.RequiredCredentialTypes) > 0 && ve == nil {
+				log.Info("tools: skipping credentialed tool (vault unavailable)",
+					"domain", domain,
+					"implementation", cmd.Implementation,
+					"required_credential_types", cmd.RequiredCredentialTypes,
+				)
 				continue
 			}
 			factory, ok := builtinRegistry[cmd.Implementation]
 			if !ok {
-				continue // Unknown implementation — skip silently.
+				log.Warn("tools: unknown implementation in skills config; skipping",
+					"domain", domain,
+					"implementation", cmd.Implementation,
+				)
+				continue
 			}
-			domainTools = append(domainTools, factory(ve))
+			t := factory(ve)
+			log.Info("tools: registered domain tool", "domain", domain, "tool_name", t.Definition.Name)
+			domainTools = append(domainTools, t)
 		}
-		return append(domainTools, base...)
+		all := append(domainTools, base...)
+		names := make([]string, len(all))
+		for i, t := range all {
+			names[i] = t.Definition.Name
+		}
+		log.Info("tools: registry assembled for domain",
+			"domain", domain,
+			"tool_count", len(all),
+			"tool_names", names,
+		)
+		return all
 	}
 
 	// Domain not in config — return base tools only (task_complete + spawn_agent).
+	log.Warn("tools: domain not found in skills config; only base tools available",
+		"domain", domain,
+		"base_tool_count", len(base),
+	)
 	return base
 }
 

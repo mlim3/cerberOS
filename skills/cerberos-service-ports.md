@@ -37,5 +37,4 @@ When configuring service-to-service communication, debugging connectivity, or ch
 | `vault`                   | Vault engine      | —                                                                |
 | `swagger`                 | Swagger UI        | —                                                                |
 | `aegis-databus`           | DataBus           | —                                                                |
-| `simulator`               | Partner simulator | (profile: agents)                                                |
 | `aegis-agents`            | Agents component  | (profile: agents)                                                |

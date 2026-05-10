@@ -62,8 +62,6 @@ io: {}
 
 aegis-databus: {}
 
-simulator: {}
-
 aegis-agents:
   anthropicApiKey: ""
 

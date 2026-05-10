@@ -201,6 +201,14 @@ func main() {
 	}
 
 	// 3. Initialize the Handlers
+	skillCacheRepo := storage.NewSkillCacheRepository(pool)
+	if err := skillCacheRepo.EnsureSchema(ctx, embeddingDim); err != nil {
+		logger.Error("failed to ensure skill_cache schema", "error", err)
+		os.Exit(1)
+	}
+	logger.Info("skill_cache schema ready", "embedding_dim", embeddingDim)
+	skillCacheProc := logic.NewSkillCacheProcessor(skillCacheRepo, embedder)
+
 	chatHandler := api.NewChatHandler(chatRepo)
 	orchestratorHandler := api.NewOrchestratorHandler(orchestratorRepo)
 	logHandler := api.NewSystemLogHandler(logRepo)
@@ -209,6 +217,7 @@ func main() {
 	agentHandler := api.NewAgentHandler(agentLogsRepo)
 	scheduledJobsHandler := api.NewScheduledJobsHandler(scheduledJobsRepo, userDispatch)
 	usersHandler := api.NewUsersHandler(piRepo, logger)
+	skillCacheHandler := api.NewSkillCacheHandler(skillCacheProc)
 
 	// Set up the router using Go 1.22's enhanced mux
 	mux := http.NewServeMux()
@@ -237,6 +246,7 @@ func main() {
 		Agent:         agentHandler,
 		ScheduledJobs: scheduledJobsHandler,
 		Users:         usersHandler,
+		SkillCache:    skillCacheHandler,
 	})
 
 	// 4. Start the HTTP server. otelhttp.NewHandler is the outermost wrapper

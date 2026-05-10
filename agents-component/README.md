@@ -183,30 +183,29 @@ brew install nats-io/nats-tools/nats
 go install github.com/nats-io/natscli/nats@latest
 ```
 
-### 1. Start NATS and the simulator
-
-The simulator handles the Orchestrator side (credential grants, vault results, state writes) so the Agents Component can complete full task flows without a real partner service.
+### 1. Start the supporting stack
 
 ```bash
-# Start NATS JetStream + partner simulator + aegis-agents in one command
+# Start the local stack
 docker compose up
 ```
 
-Or without Docker:
+For focused local work against a live NATS server:
 
 ```bash
 # Terminal 1 — NATS JetStream
 docker run --rm -p 4222:4222 -p 8222:8222 nats:2.10-alpine --jetstream
 
-# Terminal 2 — partner simulator
-AEGIS_NATS_URL=nats://localhost:4222 go run ./cmd/simulator/
-
-# Terminal 3 — aegis-agents
+# Terminal 2 — aegis-agents
 AEGIS_NATS_URL=nats://localhost:4222 \
 AEGIS_AGENT_PROCESS_PATH=./agent-process \
 ANTHROPIC_API_KEY=<your-key> \
   go run ./cmd/aegis-agents/
 ```
+
+The repository no longer ships a standalone partner simulator binary. Full
+task flows now assume a real Orchestrator-side environment, while the
+integration test suite uses scoped in-test fixtures.
 
 ### 2. Subscribe to response subjects
 

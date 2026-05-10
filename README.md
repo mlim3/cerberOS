@@ -132,7 +132,7 @@ To tear down:
 
 | Profile         | Services                                           | Port(s)                |
 | --------------- | -------------------------------------------------- | ---------------------- |
-| `agents`        | simulator, aegis-agents                            | 9190 (metrics)         |
+| `agents`        | aegis-agents                                       | 9190 (metrics)         |
 | `observability` | prometheus, grafana, loki, promtail, nats-exporter | 9090, 3000, 3100, 7777 |
 
 ## Service startup order
@@ -161,6 +161,25 @@ cerberOS/
 ├── design_docs/          # Architecture and design documents
 └── skills/               # Claude Code skill definitions
 ```
+
+## Running tests
+
+Use the repo-wide test runner to execute the main discovered test suites:
+
+```bash
+./scripts/run-all-tests.sh
+```
+
+Useful flags:
+
+```bash
+./scripts/run-all-tests.sh --skip-e2e
+./scripts/run-all-tests.sh --skip-memory-setup
+./scripts/run-all-tests.sh --e2e-serial
+./scripts/run-all-tests.sh --e2e-verbose
+```
+
+Maintainer note: when you add a new top-level test entrypoint or package-level test command that should be part of the standard repo test pass, please update [scripts/run-all-tests.sh](/Users/colbydobson/cs/cerberOS/scripts/run-all-tests.sh) in the same change.
 
 ## Common issues
 

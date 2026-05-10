@@ -132,7 +132,6 @@ helm upgrade --install cerberos deploy/helm/cerberos \
 | `vault` (engine) | `Deployment` | 8000 | port-forward only |
 | `aegis-databus` | `Deployment` | 9091 | port-forward only |
 | `aegis-agents` | `Deployment` | 9090 | port-forward only |
-| `simulator` | `Deployment` | — | — |
 | `prometheus` | `Deployment` (upstream) | 9090 | port-forward only |
 | `tempo` | `Deployment` (upstream) | 3200 | port-forward only |
 | `loki` | `Deployment` (upstream) | 3100 | port-forward only |
@@ -296,7 +295,6 @@ deploy/
       memory-api/         # Deployment
       aegis-databus/      # Deployment (hardened: read-only FS, uid 65532)
       aegis-agents/       # Deployment (process-manager mode; Firecracker hook)
-      simulator/          # Deployment (uses aegis-agents image)
       observability/      # Prom + Grafana + Loki + Tempo upstream charts
       network-policies/   # NetworkPolicy set (disabled by default)
     cerberos/             # Umbrella chart (depends on all above)

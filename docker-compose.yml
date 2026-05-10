@@ -426,25 +426,6 @@ services:
   # ---------------------------------------------------------------------------
   # 8. AGENTS
   # ---------------------------------------------------------------------------
-  simulator:
-    build:
-      context: ./agents-component
-    entrypoint: [ "/app/simulator" ]
-    depends_on:
-      nats-1:
-        condition: service_healthy
-    environment:
-      AEGIS_NATS_URL: nats://nats:4222
-      # Disable mock vault responses so the real orchestrator handles vault
-      # execute requests end-to-end (set to "true" when running without orchestrator).
-      SIMULATE_VAULT_EXECUTE: "false"
-      # Observability: OTLP HTTP trace export (safe no-op if not using tracing here).
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
-      OTEL_SERVICE_NAME: agents
-    restart: unless-stopped
-    networks:
-      - cerberos
-
   aegis-agents:
     build:
       context: ./agents-component
@@ -456,8 +437,6 @@ services:
         condition: service_healthy
       embedding-api:
         condition: service_healthy
-      simulator:
-        condition: service_started
     environment:
       AEGIS_NATS_URL: nats://nats:4222
       AEGIS_AGENT_PROCESS_PATH: /app/agent-process

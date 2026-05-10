@@ -85,25 +85,6 @@ type Config struct {
 	// Env: AEGIS_SKILLS_CONFIG_PATH (file path). Default: "" (use embedded default).
 	SkillsConfigPath string
 
-	// EmbeddingAPIURL is the shared embeddings service endpoint used for
-	// semantic skill-search embeddings.
-	// Env: AEGIS_EMBEDDING_API_URL.
-	EmbeddingAPIURL string
-
-	// EmbeddingModel is the embedding model id served by the shared embeddings
-	// service for semantic skill-search embeddings.
-	// Env: AEGIS_EMBEDDING_MODEL.
-	EmbeddingModel string
-
-	// EmbeddingDimensions is the expected output vector size for EmbeddingModel.
-	// Env: AEGIS_EMBEDDING_DIM.
-	EmbeddingDimensions int
-
-	// EmbeddingPromptStyle controls query/document formatting for the embedding
-	// client. Supported values: plain, embeddinggemma, harrier.
-	// Env: AEGIS_EMBEDDING_PROMPT_STYLE. Default: plain.
-	EmbeddingPromptStyle string
-
 	// SuspendWakeLatencyTarget is the expected latency budget for waking a SUSPENDED
 	// agent — from task.inbound receipt to the agent process being ACTIVE (OQ-06).
 	// This budget covers credential.authorize round-trip + VM spawn + process startup.
@@ -126,10 +107,7 @@ func Load() (*Config, error) {
 		NATSURL:              os.Getenv("AEGIS_NATS_URL"),
 		ComponentID:          os.Getenv("AEGIS_COMPONENT_ID"),
 		AgentProcessPath:     os.Getenv("AEGIS_AGENT_PROCESS_PATH"),
-		SkillsConfigPath:     os.Getenv("AEGIS_SKILLS_CONFIG_PATH"),
-		EmbeddingAPIURL:      os.Getenv("AEGIS_EMBEDDING_API_URL"),
-		EmbeddingModel:       os.Getenv("AEGIS_EMBEDDING_MODEL"),
-		EmbeddingPromptStyle: os.Getenv("AEGIS_EMBEDDING_PROMPT_STYLE"),
+		SkillsConfigPath: os.Getenv("AEGIS_SKILLS_CONFIG_PATH"),
 	}
 
 	if c.NATSURL == "" {
@@ -137,9 +115,6 @@ func Load() (*Config, error) {
 	}
 	if c.ComponentID == "" {
 		c.ComponentID = "aegis-agents"
-	}
-	if c.EmbeddingPromptStyle == "" {
-		c.EmbeddingPromptStyle = "plain"
 	}
 
 	var err error
@@ -175,9 +150,6 @@ func Load() (*Config, error) {
 		}
 	}
 	if c.SuspendWakeLatencyTarget, err = parseDuration("AEGIS_SUSPEND_WAKE_LATENCY_TARGET", 2*time.Second); err != nil {
-		return nil, err
-	}
-	if c.EmbeddingDimensions, err = parseInt("AEGIS_EMBEDDING_DIM", 0, 1); err != nil {
 		return nil, err
 	}
 

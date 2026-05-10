@@ -43,6 +43,7 @@ import (
 type gatewayMock struct {
 	AcceptedCalls     []types.TaskAccepted
 	CapabilityCalls   []types.CapabilityQuery
+	CredentialCalls   []types.CredentialResponse
 	ErrorCalls        []types.ErrorResponse
 	SpawnRespCalls    []types.AgentSpawnResponse
 	TaskSpecCalls     []types.TaskSpec
@@ -81,6 +82,7 @@ func (g *gatewayMock) PublishCapabilityQuery(_ context.Context, q types.Capabili
 
 func (g *gatewayMock) PublishAgentSpawnResponse(_ context.Context, resp types.AgentSpawnResponse) error {
 	g.SpawnRespCalls = append(g.SpawnRespCalls, resp)
+	g.SpawnResponses = append(g.SpawnResponses, resp)
 	return nil
 }
 
@@ -89,13 +91,13 @@ func (g *gatewayMock) PublishTaskSpec(_ context.Context, spec types.TaskSpec) er
 	return g.PublishTaskSpecError
 }
 
-func (g *gatewayMock) PublishStatusUpdate(_ context.Context, _ string, s types.StatusResponse) error {
-	g.StatusUpdateCalls = append(g.StatusUpdateCalls, s)
+func (g *gatewayMock) PublishCredentialResponse(_ context.Context, resp types.CredentialResponse) error {
+	g.CredentialCalls = append(g.CredentialCalls, resp)
 	return nil
 }
 
-func (g *gatewayMock) PublishAgentSpawnResponse(_ context.Context, r types.AgentSpawnResponse) error {
-	g.SpawnResponses = append(g.SpawnResponses, r)
+func (g *gatewayMock) PublishStatusUpdate(_ context.Context, _ string, s types.StatusResponse) error {
+	g.StatusUpdateCalls = append(g.StatusUpdateCalls, s)
 	return nil
 }
 
@@ -152,6 +154,7 @@ type executorMock struct {
 	}
 	ResultCalls  []types.TaskResult
 	ExecuteError error
+	SubtaskStates map[string]*types.TaskState
 }
 
 func (e *executorMock) Execute(_ context.Context, plan types.ExecutionPlan, ts *types.TaskState) error {
@@ -173,8 +176,12 @@ func (e *executorMock) UserIDForSubtask(_ string) (string, bool) {
 	return "", false
 }
 
-func (e *executorMock) TaskStateForSubtask(_ string) (*types.TaskState, bool) {
-	return nil, false
+func (e *executorMock) TaskStateForSubtask(orchRef string) (*types.TaskState, bool) {
+	if e.SubtaskStates == nil {
+		return nil, false
+	}
+	ts, ok := e.SubtaskStates[orchRef]
+	return ts, ok
 }
 
 // ── Test Helpers ─────────────────────────────────────────────────────────────
@@ -441,6 +448,172 @@ func TestHandleAgentSpawnRequest_PublishesFailureWhenParentContextMissing(t *tes
 	}
 	if resp.ErrorCode != types.ErrCodeInvalidTaskSpec {
 		t.Fatalf("spawn response error_code = %q, want %q", resp.ErrorCode, types.ErrCodeInvalidTaskSpec)
+	}
+}
+
+func TestHandleCredentialRequest_AuthorizeGrantedWithinPolicyScope(t *testing.T) {
+	d, gw, _, _, _, mem := newDispatcher(t)
+
+	task := validTask("22222222-2222-2222-2222-222222222222")
+	if err := d.HandleInboundTask(context.Background(), task); err != nil {
+		t.Fatalf("HandleInboundTask() error = %v", err)
+	}
+
+	orchRef := orchRefFromPlannerTask(t, gw)
+	ts := latestTaskStateRecord(t, mem, task.TaskID)
+
+	err := d.HandleCredentialRequest(context.Background(), types.CredentialRequest{
+		RequestID:    "cred-auth-1",
+		AgentID:      "planner-agent-1",
+		TaskID:       orchRef,
+		Operation:    "authorize",
+		SkillDomains: []string{"web"},
+	})
+	if err != nil {
+		t.Fatalf("HandleCredentialRequest(authorize) error = %v", err)
+	}
+
+	if len(gw.CredentialCalls) != 1 {
+		t.Fatalf("CredentialCalls = %d, want 1", len(gw.CredentialCalls))
+	}
+	resp := gw.CredentialCalls[0]
+	if resp.Status != "granted" {
+		t.Fatalf("credential response status = %q, want granted", resp.Status)
+	}
+	if resp.PermissionToken != ts.PolicyScope.TokenRef {
+		t.Fatalf("permission_token = %q, want %q", resp.PermissionToken, ts.PolicyScope.TokenRef)
+	}
+	if resp.ExpiresAt == "" {
+		t.Fatal("expires_at = empty, want RFC3339 timestamp")
+	}
+}
+
+func TestHandleCredentialRequest_AuthorizeDeniedOutsidePolicyScope(t *testing.T) {
+	d, gw, _, _, _, _ := newDispatcher(t)
+
+	task := validTask("33333333-3333-3333-3333-333333333333")
+	if err := d.HandleInboundTask(context.Background(), task); err != nil {
+		t.Fatalf("HandleInboundTask() error = %v", err)
+	}
+
+	orchRef := orchRefFromPlannerTask(t, gw)
+	initialCalls := len(gw.CredentialCalls)
+
+	err := d.HandleCredentialRequest(context.Background(), types.CredentialRequest{
+		RequestID:    "cred-auth-2",
+		AgentID:      "planner-agent-2",
+		TaskID:       orchRef,
+		Operation:    "authorize",
+		SkillDomains: []string{"financial"},
+	})
+	if err != nil {
+		t.Fatalf("HandleCredentialRequest(authorize denied) error = %v", err)
+	}
+
+	if len(gw.CredentialCalls) != initialCalls+1 {
+		t.Fatalf("CredentialCalls = %d, want %d", len(gw.CredentialCalls), initialCalls+1)
+	}
+	resp := gw.CredentialCalls[len(gw.CredentialCalls)-1]
+	if resp.Status != "denied" {
+		t.Fatalf("credential response status = %q, want denied", resp.Status)
+	}
+	if resp.ErrorCode != types.ErrCodeScopeViolation {
+		t.Fatalf("credential response error_code = %q, want %q", resp.ErrorCode, types.ErrCodeScopeViolation)
+	}
+}
+
+func TestHandleCredentialRequest_RevokePublishesOkAndRevokesPolicy(t *testing.T) {
+	d, gw, pol, _, _, _ := newDispatcher(t)
+
+	task := validTask("44444444-4444-4444-4444-444444444444")
+	if err := d.HandleInboundTask(context.Background(), task); err != nil {
+		t.Fatalf("HandleInboundTask() error = %v", err)
+	}
+
+	orchRef := orchRefFromPlannerTask(t, gw)
+	initialCalls := len(gw.CredentialCalls)
+
+	err := d.HandleCredentialRequest(context.Background(), types.CredentialRequest{
+		RequestID: "cred-revoke-1",
+		AgentID:   "planner-agent-3",
+		TaskID:    orchRef,
+		Operation: "revoke",
+	})
+	if err != nil {
+		t.Fatalf("HandleCredentialRequest(revoke) error = %v", err)
+	}
+
+	if len(gw.CredentialCalls) != initialCalls+1 {
+		t.Fatalf("CredentialCalls = %d, want %d", len(gw.CredentialCalls), initialCalls+1)
+	}
+	resp := gw.CredentialCalls[len(gw.CredentialCalls)-1]
+	if resp.Status != "ok" {
+		t.Fatalf("credential response status = %q, want ok", resp.Status)
+	}
+	if len(pol.RevokedRefs) != 1 || pol.RevokedRefs[0] != orchRef {
+		t.Fatalf("RevokedRefs = %v, want [%s]", pol.RevokedRefs, orchRef)
+	}
+}
+
+func TestHandleCredentialRequest_AuthorizeGrantedForSpawnedChildContext(t *testing.T) {
+	d, gw, _, _, exec, _ := newDispatcher(t)
+
+	parentRef := "parent-subtask-ref-1"
+	exec.SubtaskStates = map[string]*types.TaskState{
+		parentRef: {
+			OrchestratorTaskRef: parentRef,
+			TaskID:              "parent-task-1",
+			UserID:              "user-1",
+			TraceID:             "spawn-trace-1",
+			PolicyScope: types.PolicyScope{
+				Domains:   []string{"web", "general"},
+				TokenRef:  "tok-child-1",
+				IssuedAt:  time.Now().UTC(),
+				ExpiresAt: time.Now().UTC().Add(1 * time.Hour),
+			},
+			CallbackTopic:   "cb.topic",
+			UserContextID:   "user-context-1",
+			ConversationID:  "conversation-1",
+		},
+	}
+
+	req := types.AgentSpawnRequest{
+		RequestID:      "spawn-cred-1",
+		ParentAgentID:  "parent-agent-1",
+		ParentTaskID:   parentRef,
+		RequiredSkills: []string{"web"},
+		Instructions:   "Fetch a public page title",
+		TraceID:        "spawn-trace-1",
+	}
+	if err := d.HandleAgentSpawnRequest(context.Background(), req); err != nil {
+		t.Fatalf("HandleAgentSpawnRequest() error = %v", err)
+	}
+	if len(gw.TaskSpecCalls) == 0 {
+		t.Fatal("expected child task spec to be published")
+	}
+	childSpec := gw.TaskSpecCalls[len(gw.TaskSpecCalls)-1]
+	initialCredCalls := len(gw.CredentialCalls)
+
+	err := d.HandleCredentialRequest(context.Background(), types.CredentialRequest{
+		RequestID:    "spawn-child-auth-1",
+		AgentID:      "child-agent-1",
+		TaskID:       childSpec.OrchestratorTaskRef,
+		Operation:    "authorize",
+		SkillDomains: []string{"web"},
+	})
+	if err != nil {
+		t.Fatalf("HandleCredentialRequest(child authorize) error = %v", err)
+	}
+
+	if len(gw.CredentialCalls) != initialCredCalls+1 {
+		t.Fatalf("CredentialCalls = %d, want %d", len(gw.CredentialCalls), initialCredCalls+1)
+	}
+	resp := gw.CredentialCalls[len(gw.CredentialCalls)-1]
+	if resp.Status != "granted" {
+		t.Fatalf("credential response status = %q, want granted", resp.Status)
+	}
+	if resp.PermissionToken != "tok-child-1" {
+		t.Fatalf("permission_token = %q, want tok-child-1", resp.PermissionToken)
 	}
 }
 

@@ -27,6 +27,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/cerberOS/agents-component/internal/comms"
+	"github.com/cerberOS/agents-component/internal/logfields"
 	"github.com/cerberOS/agents-component/pkg/types"
 	nats "github.com/nats-io/nats.go"
 )
@@ -718,6 +719,152 @@ func (sl *SessionLog) ReadSystemLogs(contextTag string, queryParams json.RawMess
 
 	sl.log.Warn("logs read: timed out", "context_tag", contextTag, "timeout", logsReadTimeout)
 	return "(logs query timed out — the Memory Component did not respond in time)"
+}
+
+// SearchSkills issues a semantic state.read.request for skill_cache records and
+// returns the top matching skills. When NATS is unavailable or the request times
+// out, an empty slice is returned so the caller can report a graceful failure.
+//
+// SearchSkills is safe to call when sl is nil; it returns nil.
+func (sl *SessionLog) SearchSkills(query string, topK int) []types.SkillSearchResult {
+	if sl == nil {
+		return nil
+	}
+	if topK <= 0 {
+		topK = 3
+	}
+
+	requestTraceID := newUUID()
+
+	sub, err := sl.js.SubscribeSync(
+		comms.SubjectStateReadResponse,
+		nats.DeliverNew(),
+		nats.AckNone(),
+	)
+	if err != nil {
+		sl.log.Warn("skills search: subscribe to state.read.response failed", "error", err)
+		return nil
+	}
+	defer func() { _ = sub.Unsubscribe() }()
+	sl.log.Info("skills search: subscribed to state.read.response",
+		"request_trace_id", requestTraceID,
+		"agent_id", sl.agentID,
+		"top_k", topK,
+		"query_preview", logfields.PreviewWords(query, 20, 180),
+	)
+
+	req := types.MemoryReadRequest{
+		AgentID:       sl.agentID,
+		DataType:      "skill_cache",
+		TraceID:       requestTraceID,
+		SemanticQuery: query,
+		MaxResults:    topK,
+	}
+	env := agentEnvelope{
+		MessageID:       newUUID(),
+		MessageType:     comms.MsgTypeStateReadRequest,
+		SourceComponent: "agents",
+		CorrelationID:   sl.taskID,
+		TraceID:         requestTraceID,
+		Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
+		SchemaVersion:   "1.0",
+		Payload:         req,
+	}
+	data, err := json.Marshal(env)
+	if err != nil {
+		sl.log.Warn("skills search: marshal state.read.request failed", "error", err)
+		return nil
+	}
+	if _, err := sl.js.Publish(comms.SubjectStateReadRequest, data); err != nil {
+		sl.log.Warn("skills search: publish state.read.request failed", "error", err)
+		return nil
+	}
+	sl.log.Info("skills search: published semantic query to orchestrator",
+		"request_trace_id", requestTraceID,
+		"data_type", "skill_cache",
+		"semantic_query_preview", logfields.PreviewWords(query, 20, 180),
+		"max_results", topK,
+	)
+
+	messagesReceived := 0
+	deadline := time.Now().Add(sessionReadTimeout)
+	for time.Now().Before(deadline) {
+		msg, err := sub.NextMsg(time.Until(deadline))
+		if err != nil {
+			sl.log.Info("skills search: done waiting for responses",
+				"messages_received", messagesReceived,
+				"err", err,
+			)
+			break
+		}
+		messagesReceived++
+		_ = msg.Ack()
+
+		var envelope struct {
+			Payload json.RawMessage `json:"payload"`
+		}
+		if err := json.Unmarshal(msg.Data, &envelope); err != nil {
+			sl.log.Warn("skills search: unmarshal envelope failed",
+				"message_index", messagesReceived,
+				"error", err,
+			)
+			continue
+		}
+		var resp struct {
+			AgentID string            `json:"agent_id"`
+			Records []json.RawMessage `json:"records"`
+			TraceID string            `json:"trace_id"`
+		}
+		if err := json.Unmarshal(envelope.Payload, &resp); err != nil {
+			sl.log.Warn("skills search: unmarshal response payload failed",
+				"message_index", messagesReceived,
+				"error", err,
+			)
+			continue
+		}
+		matched := resp.AgentID == sl.agentID && resp.TraceID == requestTraceID
+		sl.log.Info("skills search: received response message",
+			"message_index", messagesReceived,
+			"resp_agent_id", resp.AgentID,
+			"want_agent_id", sl.agentID,
+			"resp_trace_id", resp.TraceID,
+			"want_trace_id", requestTraceID,
+			"matched", matched,
+			"record_count", len(resp.Records),
+		)
+		if !matched {
+			continue
+		}
+
+		results := make([]types.SkillSearchResult, 0, len(resp.Records))
+		for _, raw := range resp.Records {
+			var r types.SkillSearchResult
+			if err := json.Unmarshal(raw, &r); err == nil && r.Name != "" {
+				results = append(results, r)
+			}
+		}
+		sl.log.Info("skills search: matched response parsed",
+			"raw_record_count", len(resp.Records),
+			"parsed_skill_count", len(results),
+		)
+		if len(results) > 0 {
+			top := results[0]
+			sl.log.Info("skills search: top result",
+				"domain", top.Domain,
+				"name", top.Name,
+				"score", top.Score,
+				"description_preview", logfields.PreviewWords(top.Description, 20, 180),
+			)
+		}
+		return results
+	}
+
+	sl.log.Warn("skills search: timed out waiting for state.read.response",
+		"messages_received", messagesReceived,
+		"timeout", sessionReadTimeout,
+		"query_preview", logfields.PreviewWords(query, 20, 180),
+	)
+	return nil
 }
 
 // extractSessionEntries unpacks MemoryWrite.Payload into SessionEntry values.

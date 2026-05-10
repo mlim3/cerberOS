@@ -10,7 +10,6 @@ ORCHESTRATOR_DEPLOYMENT="${ORCHESTRATOR_DEPLOYMENT:-orchestrator}"
 CHAT_TIMEOUT_SECONDS="${CHAT_TIMEOUT_SECONDS:-180}"
 LOG_SINCE="${LOG_SINCE:-5m}"
 TEST_USER_ID="${TEST_USER_ID:-00000000-0000-0000-0000-000000000001}"
-TEST_URL="${TEST_URL:-https://example.com}"
 
 bold() {
   printf '\033[1m%s\033[0m\n' "$*"
@@ -129,9 +128,35 @@ deployment_ready() {
   kubectl get deployment "$deployment" -n "$NAMESPACE" -o jsonpath="{.status.conditions[?(@.type==\"Available\")].status}"
 }
 
+latest_deployment_pod() {
+  kubectl get pods -n "$NAMESPACE" -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' \
+    | rg "^${AGENTS_DEPLOYMENT}-" \
+    | tail -n 1
+}
+
+container_started_recently() {
+  local pod_name="$1"
+  local threshold_seconds="${2:-900}"
+  local started_at
+
+  started_at="$(kubectl get pod "$pod_name" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[0].state.running.startedAt}')"
+  [[ -n "${started_at}" ]] || return 1
+
+  python3 - "${started_at}" "${threshold_seconds}" <<'PY'
+from datetime import datetime, timezone
+import sys
+
+started = datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00"))
+threshold_seconds = int(sys.argv[2])
+age_seconds = (datetime.now(timezone.utc) - started).total_seconds()
+sys.exit(0 if age_seconds < threshold_seconds else 1)
+PY
+}
+
 require_cmd kubectl
 require_cmd curl
 require_cmd jq
+require_cmd python3
 require_cmd uuidgen
 
 trap cleanup EXIT
@@ -144,7 +169,7 @@ echo "Agents deployment:  ${AGENTS_DEPLOYMENT}"
 echo "Embedding deploy:   ${EMBEDDING_DEPLOYMENT}"
 echo "Orchestrator deploy:${ORCHESTRATOR_DEPLOYMENT}"
 echo "Test user id:       ${TEST_USER_ID}"
-echo "Target URL:         ${TEST_URL}"
+echo "Test domain:        e2e_test (e2e_ping)"
 echo "Log window:         ${LOG_SINCE}"
 
 section "Pod Status"
@@ -163,6 +188,9 @@ agents_embedding_dim="$(jsonpath_env "${AGENTS_DEPLOYMENT}" AEGIS_EMBEDDING_DIM)
 agents_prompt_style="$(jsonpath_env "${AGENTS_DEPLOYMENT}" AEGIS_EMBEDDING_PROMPT_STYLE)"
 embedding_model="$(jsonpath_env "${EMBEDDING_DEPLOYMENT}" MODEL_ID)"
 embedding_dim="$(jsonpath_env "${EMBEDDING_DEPLOYMENT}" EMBEDDING_DIM)"
+orchestrator_memory_endpoint="$(jsonpath_env "${ORCHESTRATOR_DEPLOYMENT}" MEMORY_ENDPOINT)"
+memory_embedding_url="$(jsonpath_env "memory-api" EMBEDDING_API_URL 2>/dev/null || true)"
+memory_embedding_dim="$(jsonpath_env "memory-api" EMBEDDING_DIM 2>/dev/null || true)"
 
 [[ -n "${agents_embedding_url}" ]] || fail "aegis-agents AEGIS_EMBEDDING_API_URL is empty"
 [[ -n "${agents_embedding_model}" ]] || fail "aegis-agents AEGIS_EMBEDDING_MODEL is empty"
@@ -170,6 +198,7 @@ embedding_dim="$(jsonpath_env "${EMBEDDING_DEPLOYMENT}" EMBEDDING_DIM)"
 [[ -n "${agents_prompt_style}" ]] || fail "aegis-agents AEGIS_EMBEDDING_PROMPT_STYLE is empty"
 [[ -n "${embedding_model}" ]] || fail "embedding-api MODEL_ID is empty"
 [[ -n "${embedding_dim}" ]] || fail "embedding-api EMBEDDING_DIM is empty"
+[[ -n "${orchestrator_memory_endpoint}" ]] || fail "orchestrator MEMORY_ENDPOINT is empty — orchestrator cannot forward skill_cache writes to Memory API"
 
 assert_eq "${agents_embedding_model}" "${embedding_model}" "aegis-agents and embedding-api model mismatch"
 assert_eq "${agents_embedding_dim}" "${embedding_dim}" "aegis-agents and embedding-api dimension mismatch"
@@ -184,13 +213,48 @@ echo "  AEGIS_EMBEDDING_PROMPT_STYLE:${agents_prompt_style}"
 echo "embedding-api:"
 echo "  MODEL_ID:                    ${embedding_model}"
 echo "  EMBEDDING_DIM:               ${embedding_dim}"
+echo "orchestrator:"
+echo "  MEMORY_ENDPOINT:             ${orchestrator_memory_endpoint}"
+if [[ -n "${memory_embedding_url}" ]]; then
+  echo "memory-api:"
+  echo "  EMBEDDING_API_URL:           ${memory_embedding_url}"
+  echo "  EMBEDDING_DIM:               ${memory_embedding_dim}"
+fi
 
 section "Startup Log Check"
 info "Checking that aegis-agents announced the shared embedding API on startup"
-startup_logs="$(kubectl logs -n "$NAMESPACE" "deployment/${AGENTS_DEPLOYMENT}" --tail=200)"
-assert_contains "${startup_logs}" "embedding: using shared embedding API" "shared embedding API startup log missing"
-echo "${startup_logs}" | rg "embedding: using shared embedding API|aegis-agents ready" || true
-ok "aegis-agents startup logs show the shared embedding API"
+startup_logs="$(kubectl logs -n "$NAMESPACE" "deployment/${AGENTS_DEPLOYMENT}")"
+if [[ "${startup_logs}" == *"embedding: using shared embedding API"* ]]; then
+  echo "${startup_logs}" | rg "embedding: using shared embedding API|aegis-agents ready" || true
+  ok "aegis-agents startup logs show the shared embedding API"
+else
+  agents_pod="$(latest_deployment_pod)"
+  if [[ -z "${agents_pod}" ]]; then
+    fail "could not determine current ${AGENTS_DEPLOYMENT} pod for startup log validation"
+  fi
+
+  if container_started_recently "${agents_pod}" 900; then
+    fail "shared embedding API startup log missing for recently started pod ${agents_pod}"
+  fi
+
+  echo "startup log line not present in accessible container logs; pod ${agents_pod} is older than 15m, so relying on deployment config above"
+  echo "WARNING: if ${agents_pod} restarted more recently than expected, investigate log retention or startup logging."
+fi
+
+info "Checking that aegis-agents seeded static skills at startup"
+if [[ "${startup_logs}" == *"factory: static skills seeded to Memory Component"* ]]; then
+  echo "${startup_logs}" | rg "factory: static skills seeded|factory: seeding static skill" | tail -20 || true
+  ok "aegis-agents seeded static skills to Memory Component"
+else
+  agents_pod="$(latest_deployment_pod)"
+  if [[ -z "${agents_pod}" ]]; then
+    fail "could not determine current ${AGENTS_DEPLOYMENT} pod for skill seed validation"
+  fi
+  if container_started_recently "${agents_pod}" 900; then
+    fail "static skill seed log missing — skills_search will return no results"
+  fi
+  echo "WARNING: static skill seed log not present for pod ${agents_pod} (older than 15m, relying on persistent DB state)"
+fi
 
 section "IO Chat Request"
 info "Starting temporary port-forward to io"
@@ -200,14 +264,15 @@ ok "io is reachable at ${base_url}"
 
 task_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
 conversation_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
-request_query="fetch the public URL ${TEST_URL} and return the page title"
+# The probe value is echoed back by e2e_ping so we can assert it appears in logs.
+E2E_PROBE="skill-search-delegation-$(date +%s)"
+# The prompt describes what we need without naming the domain or tool — the agent
+# must use skills_search to discover e2e_ping, then spawn_agent to run it.
 chat_prompt="$(
   cat <<EOF
-Follow these steps exactly:
-1. Call skills_search with query "${request_query}" and top_k 3.
-2. If skills_search recommends spawn_agent, call spawn_agent with the suggested domain and instructions.
-3. If skills_search does not recommend spawn_agent, use the best matching tool yourself.
-4. Return the final result and then call task_complete.
+Run an automated connectivity check to verify that skill discovery and cross-domain delegation work end-to-end.
+Use skills_search to find the right tool for running an e2e connectivity probe, then use spawn_agent to run it with probe="${E2E_PROBE}".
+Return the result from the probe.
 EOF
 )"
 
@@ -217,15 +282,16 @@ chat_payload="$(
     --arg conversationId "${conversation_id}" \
     --arg userId "${TEST_USER_ID}" \
     --arg content "${chat_prompt}" \
-    '{taskId:$taskId, conversationId:$conversationId, userId:$userId, content:$content, required_skill_domains:["general"]}'
+    '{taskId:$taskId, conversationId:$conversationId, userId:$userId, content:$content, required_skill_domains:["general","e2e_test"]}'
 )"
 
 stream_file="$(mktemp /tmp/cerberos-agents-sse.XXXXXX)"
 event_stream_file="$(mktemp /tmp/cerberos-agent-events.XXXXXX)"
 plan_auto_approved="false"
 plan_preview_seen="false"
-info "Sending /api/chat request with required_skill_domains=[general]"
-info "Subscribing to /api/events/${task_id} for plan previews and status updates"
+approve_resp=""
+info "Sending /api/chat request with required_skill_domains=[general,e2e_test]"
+info "Subscribing to /api/events/${task_id} for plan previews and status updates (probe=${E2E_PROBE})"
 curl -N -sS "${base_url}/api/events/${task_id}" >"${event_stream_file}" 2>/dev/null &
 EVENT_STREAM_PID=$!
 
@@ -251,7 +317,9 @@ for _ in $(seq 1 "${CHAT_TIMEOUT_SECONDS}"); do
           --arg orchestratorTaskRef "${orchestrator_task_ref}" \
           '{taskId:$taskId, orchestratorTaskRef:$orchestratorTaskRef, approved:true}'
       )"
-      approve_resp="$(curl -fsS -H "Content-Type: application/json" -H "X-Active-User: ${TEST_USER_ID}" -H "X-Surface-Key: cli" -X POST "${base_url}/api/orchestrator/plan-decision" -d "${approve_payload}")"
+      if ! approve_resp="$(curl -fsS -H "Content-Type: application/json" -H "X-Active-User: ${TEST_USER_ID}" -H "X-Surface-Key: cli" -X POST "${base_url}/api/orchestrator/plan-decision" -d "${approve_payload}")"; then
+        fail "plan approval request failed"
+      fi
       echo "plan approval response:"
       echo "${approve_resp}" | jq .
       plan_auto_approved="true"
@@ -282,6 +350,9 @@ assert_eq "${stream_done}" "true" "chat stream did not finish cleanly"
 ok "chat stream completed"
 echo "Combined streamed response:"
 echo "  ${stream_chunks}"
+if [[ "${stream_chunks}" == *"Planner agent failed:"* ]]; then
+  fail "planner failed before skills delegation could run: ${stream_chunks}"
+fi
 if [[ "${plan_preview_seen}" == "true" ]]; then
   ok "Observed plan preview during execution"
 fi
@@ -294,15 +365,23 @@ sleep 5
 section "Agents Log Inspection"
 info "Reading recent aegis-agents logs and checking for skill search delegation flow"
 agent_logs="$(latest_agents_logs)"
-filtered_logs="$(echo "${agent_logs}" | rg 'skills_search|spawn_agent|web_fetch|observe phase: tool result|agent spawner ready|example.com' || true)"
+filtered_logs="$(echo "${agent_logs}" | rg 'skills_search|spawn_agent|e2e_ping|observe phase: tool result|agent spawner ready' || true)"
 echo "${filtered_logs}" | sed 's/^/  /'
 
-assert_contains "${agent_logs}" '"tool":"skills_search"' "skills_search tool result log missing"
-assert_contains "${agent_logs}" "${TEST_URL}" "expected delegated query/URL not present in recent agent logs"
-assert_contains "${agent_logs}" '"tool":"spawn_agent"' "spawn_agent tool dispatch/result log missing"
-if [[ "${agent_logs}" != *'"tool":"web_fetch"'* && "${agent_logs}" != *'"tool":"web_extract"'* ]]; then
-  fail "expected delegated web tool execution log (web_fetch or web_extract)"
-fi
+# 1. skills_search must have been called by the general agent.
+assert_contains "${agent_logs}" '"tool":"skills_search"' "skills_search tool was not called — agent must use skills_search to discover e2e_ping"
+
+# 2. skills_search must have found the e2e_ping skill (top_domain=e2e_test).
+assert_contains "${agent_logs}" '"top_domain":"e2e_test"' "skills_search did not return e2e_test as top domain — e2e_ping may not be seeded to pgvector"
+
+# 3. The general agent must have called spawn_agent to delegate to the e2e_test domain.
+assert_contains "${agent_logs}" '"tool":"spawn_agent"' "spawn_agent was not called — agent must delegate to e2e_test domain after discovering e2e_ping"
+
+# 4. The e2e_test agent must have executed e2e_ping with the probe value.
+assert_contains "${agent_logs}" '"tool":"e2e_ping"' "e2e_ping tool was not executed by the e2e_test domain agent"
+assert_contains "${agent_logs}" "${E2E_PROBE}" "probe value not found in agent logs — e2e_ping may not have run with the correct parameters"
+
+ok "skills_search → spawn_agent → e2e_ping delegation chain confirmed"
 
 section "Summary"
 echo "  model:         ${agents_embedding_model}"
@@ -310,7 +389,7 @@ echo "  dimensions:    ${agents_embedding_dim}"
 echo "  prompt style:  ${agents_prompt_style}"
 echo "  task id:       ${task_id}"
 echo "  conversation:  ${conversation_id}"
-echo "  query:         ${request_query}"
+echo "  probe:         ${E2E_PROBE}"
 echo "  plan preview:  ${plan_preview_seen}"
 echo "  auto-approved: ${plan_auto_approved}"
 echo "  response:      ${stream_chunks}"

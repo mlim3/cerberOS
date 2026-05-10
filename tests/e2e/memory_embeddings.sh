@@ -5,6 +5,7 @@ NAMESPACE="${NAMESPACE:-cerberos}"
 MEMORY_SERVICE="${MEMORY_SERVICE:-memory-api}"
 MEMORY_LOCAL_PORT="${MEMORY_LOCAL_PORT:-18081}"
 DB_RESOURCE="${DB_RESOURCE:-statefulset/memory-db}"
+DB_POD="${DB_POD:-memory-db-0}"
 DB_USER="${DB_USER:-user}"
 DB_NAME="${DB_NAME:-memory_db}"
 TEST_USER_ID="${TEST_USER_ID:-00000000-0000-0000-0000-000000000001}"
@@ -33,6 +34,17 @@ fail() {
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
+}
+
+run_db_query() {
+  local sql="$1"
+
+  kubectl --request-timeout=20s exec -n "$NAMESPACE" "$DB_POD" -- \
+    pg_isready -U "$DB_USER" -d "$DB_NAME" >/dev/null 2>&1 || \
+    fail "database pod ${DB_POD} is not ready for psql queries"
+
+  kubectl --request-timeout=20s exec -n "$NAMESPACE" "$DB_POD" -- \
+    psql -v ON_ERROR_STOP=1 -X -q -U "$DB_USER" -d "$DB_NAME" -Atc "$sql" | tr -d '\r'
 }
 
 jsonpath_env() {
@@ -101,6 +113,7 @@ echo "Namespace:     ${NAMESPACE}"
 echo "Memory svc:    ${MEMORY_SERVICE}"
 echo "Memory port:   ${MEMORY_LOCAL_PORT}"
 echo "DB resource:   ${DB_RESOURCE}"
+echo "DB pod:        ${DB_POD}"
 echo "Test user id:  ${TEST_USER_ID}"
 
 section "Pod Status"
@@ -134,17 +147,13 @@ echo "  EMBEDDING_DIM:          ${embedding_dim}"
 
 section "Database Schema"
 info "Checking database vector column type"
-db_vector_type="$(
-  kubectl exec -n "$NAMESPACE" "$DB_RESOURCE" -- \
-    psql -U "$DB_USER" -d "$DB_NAME" -Atc \
-    "SELECT pg_catalog.format_type(a.atttypid, a.atttypmod)
-     FROM pg_attribute a
-     JOIN pg_class c ON a.attrelid = c.oid
-     JOIN pg_namespace n ON c.relnamespace = n.oid
-     WHERE n.nspname = 'personal_info_schema'
-       AND c.relname = 'personal_info_chunks'
-       AND a.attname = 'embedding';" | tr -d '\r'
-)"
+db_vector_type="$(run_db_query "SELECT pg_catalog.format_type(a.atttypid, a.atttypmod)
+  FROM pg_attribute a
+  JOIN pg_class c ON a.attrelid = c.oid
+  JOIN pg_namespace n ON c.relnamespace = n.oid
+  WHERE n.nspname = 'personal_info_schema'
+    AND c.relname = 'personal_info_chunks'
+    AND a.attname = 'embedding';")"
 
 assert_eq "${db_vector_type}" "vector(${memory_dim})" "database embedding column type mismatch"
 ok "Database column uses ${db_vector_type}"
@@ -194,15 +203,11 @@ echo "save #2 response:"
 echo "${save_resp_2}" | jq .
 
 section "Database Chunk Inspection"
-latest_chunks="$(
-  kubectl exec -n "$NAMESPACE" "$DB_RESOURCE" -- \
-    psql -U "$DB_USER" -d "$DB_NAME" -AtF '|' -c \
-    "SELECT model_version, vector_dims(embedding), left(raw_text, 100)
-     FROM personal_info_schema.personal_info_chunks
-     WHERE user_id = '${TEST_USER_ID}'
-     ORDER BY created_at DESC
-     LIMIT 5;" | tr -d '\r'
-)"
+latest_chunks="$(run_db_query "SELECT model_version || '|' || vector_dims(embedding) || '|' || left(raw_text, 100)
+  FROM personal_info_schema.personal_info_chunks
+  WHERE user_id = '${TEST_USER_ID}'
+  ORDER BY created_at DESC
+  LIMIT 5;")"
 
 if [[ -z "${latest_chunks}" ]]; then
   fail "no chunks found in database after save"

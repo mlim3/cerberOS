@@ -2,61 +2,26 @@ package main
 
 import (
 	"encoding/json"
-	"hash/fnv"
-	"math"
 	"strings"
 	"testing"
-	"unicode"
 
-	"github.com/cerberOS/agents-component/internal/skills"
 	"github.com/cerberOS/agents-component/pkg/types"
 )
 
-func TestGetSkillsManager_InitialisesWithKnownDomains(t *testing.T) {
-	mgr := newProcessSkillsManager(t)
-
-	domains := mgr.ListDomains()
-	if len(domains) == 0 {
-		t.Fatal("expected at least one domain, got none")
-	}
-
-	found := false
-	for _, d := range domains {
-		if d == "web" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("expected \"web\" domain to be registered; got %v", domains)
-	}
+// fakeSearcher is a test stub that implements SkillSearcher without NATS.
+type fakeSearcher struct {
+	results []types.SkillSearchResult
 }
 
-func TestGetSkillsManager_WebCommandsIndexed(t *testing.T) {
-	mgr := newProcessSkillsManager(t)
-
-	results, err := mgr.Search("fetch a web page", 5)
-	if err != nil {
-		t.Fatalf("Search: %v", err)
+func (f *fakeSearcher) SearchSkills(_ string, topK int) []types.SkillSearchResult {
+	if topK > 0 && topK < len(f.results) {
+		return f.results[:topK]
 	}
-	if len(results) == 0 {
-		t.Fatal("expected search results for \"fetch a URL\", got none")
-	}
-
-	found := false
-	for _, r := range results {
-		if r.Domain == "web" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("expected at least one web-domain result; got %+v", results)
-	}
+	return f.results
 }
 
 func TestToolsForDomain_IncludesSkillsSearch(t *testing.T) {
-	tools := toolsForDomain("web", nil, nil)
+	tools := toolsForDomain("web", nil, nil, nil)
 
 	found := false
 	for _, tool := range tools {
@@ -75,7 +40,7 @@ func TestToolsForDomain_IncludesSkillsSearch(t *testing.T) {
 }
 
 func TestSkillsSearchTool_EmptyQueryReturnsError(t *testing.T) {
-	tool := skillsSearchTool(newProcessSkillsManager(t), "web", false)
+	tool := skillsSearchTool(&fakeSearcher{}, "web", false)
 
 	raw, _ := json.Marshal(map[string]interface{}{"query": ""})
 	result := tool.Execute(nil, raw)
@@ -85,22 +50,41 @@ func TestSkillsSearchTool_EmptyQueryReturnsError(t *testing.T) {
 	}
 }
 
-func TestSkillsSearchTool_ValidQueryReturnsContent(t *testing.T) {
-	tool := skillsSearchTool(newProcessSkillsManager(t), "web", false)
+func TestSkillsSearchTool_NilSearcherReturnsUnavailable(t *testing.T) {
+	tool := skillsSearchTool(nil, "web", false)
 
-	raw, _ := json.Marshal(map[string]interface{}{"query": "fetch a web page"})
+	raw, _ := json.Marshal(map[string]interface{}{"query": "fetch a URL"})
+	result := tool.Execute(nil, raw)
+
+	if !result.IsError {
+		t.Error("expected IsError=true when SkillSearcher is nil")
+	}
+	if !strings.Contains(result.Content, "unavailable") {
+		t.Errorf("expected 'unavailable' in content, got %q", result.Content)
+	}
+}
+
+func TestSkillsSearchTool_NoResultsReturnsNotFound(t *testing.T) {
+	tool := skillsSearchTool(&fakeSearcher{results: nil}, "web", false)
+
+	raw, _ := json.Marshal(map[string]interface{}{"query": "something obscure"})
 	result := tool.Execute(nil, raw)
 
 	if result.IsError {
 		t.Errorf("unexpected error: %s", result.Content)
 	}
-	if result.Content == "" {
-		t.Error("expected non-empty content for valid query")
+	if !strings.Contains(result.Content, "No matching skills") {
+		t.Errorf("expected 'No matching skills' in content, got %q", result.Content)
 	}
 }
 
 func TestSkillsSearchTool_TopKRespected(t *testing.T) {
-	tool := skillsSearchTool(newProcessSkillsManager(t), "web", false)
+	sr := &fakeSearcher{results: []types.SkillSearchResult{
+		{Domain: "web", Name: "web_fetch", Description: "Fetch a URL"},
+		{Domain: "web", Name: "web_parse", Description: "Parse HTML"},
+		{Domain: "data", Name: "data_query", Description: "Query data"},
+	}}
+	tool := skillsSearchTool(sr, "web", false)
 
 	raw, _ := json.Marshal(map[string]interface{}{"query": "fetch URL", "top_k": 1})
 	result := tool.Execute(nil, raw)
@@ -115,8 +99,10 @@ func TestSkillsSearchTool_TopKRespected(t *testing.T) {
 }
 
 func TestSkillsSearchTool_CrossDomainSuggestsSpawnAgent(t *testing.T) {
-	mgr := newTestSkillsManager(t)
-	tool := skillsSearchTool(mgr, "general", true)
+	sr := &fakeSearcher{results: []types.SkillSearchResult{
+		{Domain: "web", Name: "web_fetch", Description: "Fetch a public URL"},
+	}}
+	tool := skillsSearchTool(sr, "general", true)
 
 	raw, _ := json.Marshal(map[string]interface{}{"query": "fetch a public URL"})
 	result := tool.Execute(nil, raw)
@@ -132,8 +118,10 @@ func TestSkillsSearchTool_CrossDomainSuggestsSpawnAgent(t *testing.T) {
 }
 
 func TestSkillsSearchTool_CrossDomainReturnsSpawnInstructions(t *testing.T) {
-	mgr := newTestSkillsManager(t)
-	tool := skillsSearchTool(mgr, "general", true)
+	sr := &fakeSearcher{results: []types.SkillSearchResult{
+		{Domain: "web", Name: "web_fetch", Description: "Fetch a public URL"},
+	}}
+	tool := skillsSearchTool(sr, "general", true)
 
 	raw, _ := json.Marshal(map[string]interface{}{"query": "fetch a public URL"})
 	result := tool.Execute(nil, raw)
@@ -160,8 +148,10 @@ func TestSkillsSearchTool_CrossDomainReturnsSpawnInstructions(t *testing.T) {
 }
 
 func TestSkillsSearchTool_WithinDomainStaysDirect(t *testing.T) {
-	mgr := newTestSkillsManager(t)
-	tool := skillsSearchTool(mgr, "web", true)
+	sr := &fakeSearcher{results: []types.SkillSearchResult{
+		{Domain: "web", Name: "web_fetch", Description: "Fetch a public URL"},
+	}}
+	tool := skillsSearchTool(sr, "web", true)
 
 	raw, _ := json.Marshal(map[string]interface{}{"query": "fetch a public URL"})
 	result := tool.Execute(nil, raw)
@@ -173,118 +163,5 @@ func TestSkillsSearchTool_WithinDomainStaysDirect(t *testing.T) {
 	}
 	if !strings.Contains(result.Content, "Use the tool name directly") {
 		t.Fatalf("expected direct-use guidance, got %q", result.Content)
-	}
-}
-
-func newTestSkillsManager(t *testing.T) skills.Manager {
-	t.Helper()
-
-	mgr := skills.New(skills.WithEmbedder(&lexicalHashEmbedder{dim: 512}))
-	for _, domain := range []*types.SkillNode{
-		{
-			Name:  "general",
-			Level: "domain",
-			Children: map[string]*types.SkillNode{},
-		},
-		{
-			Name:  "web",
-			Level: "domain",
-			Children: map[string]*types.SkillNode{
-				"web_fetch": {
-					Name:        "web_fetch",
-					Level:       "command",
-					Label:       "Web Fetch",
-					Description: "Fetch a public URL and return the response body. Do NOT use for authenticated requests.",
-					Spec: &types.SkillSpec{Parameters: map[string]types.ParameterDef{
-						"url": {Type: "string", Required: true, Description: "URL to fetch"},
-					}},
-				},
-			},
-		},
-	} {
-		if err := mgr.RegisterDomain(domain); err != nil {
-			t.Fatalf("RegisterDomain(%s): %v", domain.Name, err)
-		}
-	}
-	return mgr
-}
-
-func newProcessSkillsManager(t *testing.T) skills.Manager {
-	t.Helper()
-
-	mgr := skills.New(skills.WithEmbedder(&lexicalHashEmbedder{dim: 512}))
-	cfg := loadSkillsConfig()
-	if cfg == nil {
-		t.Fatal("expected embedded skills config to load")
-	}
-	for _, domain := range cfg.ToSkillNodes() {
-		if err := mgr.RegisterDomain(domain); err != nil {
-			t.Fatalf("RegisterDomain(%s): %v", domain.Name, err)
-		}
-	}
-	return mgr
-}
-
-type lexicalHashEmbedder struct {
-	dim int
-}
-
-func (e *lexicalHashEmbedder) Embed(text string) ([]float64, error) {
-	tokens := tokenizeForTest(text)
-	vec := make([]float64, e.dim)
-	for _, token := range tokens {
-		idx := int(hashTokenForTest(token) % uint32(e.dim))
-		vec[idx]++
-	}
-	normalizeForTest(vec)
-	return vec, nil
-}
-
-func tokenizeForTest(text string) []string {
-	text = strings.ToLower(text)
-	var unigrams []string
-	var cur strings.Builder
-
-	flush := func() {
-		if cur.Len() >= 2 {
-			unigrams = append(unigrams, cur.String())
-		}
-		cur.Reset()
-	}
-
-	for _, r := range text {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' {
-			cur.WriteRune(r)
-		} else {
-			flush()
-		}
-	}
-	flush()
-
-	tokens := make([]string, 0, len(unigrams)*2)
-	tokens = append(tokens, unigrams...)
-	for i := 0; i < len(unigrams)-1; i++ {
-		tokens = append(tokens, unigrams[i]+"_"+unigrams[i+1])
-	}
-	return tokens
-}
-
-func hashTokenForTest(token string) uint32 {
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(token))
-	return h.Sum32()
-}
-
-func normalizeForTest(vec []float64) {
-	sum := 0.0
-	for _, v := range vec {
-		sum += v * v
-	}
-	if sum == 0 {
-		return
-	}
-	norm := math.Sqrt(sum)
-	for i := range vec {
-		vec[i] /= norm
 	}
 }

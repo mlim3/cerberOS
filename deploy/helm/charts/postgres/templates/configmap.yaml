@@ -20,6 +20,7 @@ data:
     CREATE SCHEMA IF NOT EXISTS scheduler_schema;
     CREATE SCHEMA IF NOT EXISTS orchestrator_schema;
     CREATE SCHEMA IF NOT EXISTS vault_schema;
+    CREATE SCHEMA IF NOT EXISTS agents_schema;
 
     CREATE TABLE IF NOT EXISTS identity_schema.users (
         id UUID PRIMARY KEY,
@@ -244,6 +245,28 @@ data:
         UNIQUE(user_id, key_name)
     );
     CREATE INDEX IF NOT EXISTS idx_secrets_user_id ON vault_schema.secrets(user_id);
+
+    -- agents_schema — skill_cache for semantic skill discovery (pgvector)
+    CREATE SCHEMA IF NOT EXISTS agents_schema;
+
+    CREATE TABLE IF NOT EXISTS agents_schema.skill_cache (
+        id          UUID PRIMARY KEY,
+        domain      TEXT NOT NULL,
+        name        TEXT NOT NULL,
+        origin      TEXT NOT NULL,
+        description TEXT NOT NULL,
+        payload     JSONB NOT NULL,
+        embedding   VECTOR({{ default "768" ((.Values.global).embedding).dimensions }}),
+        seed_hash   TEXT NOT NULL DEFAULT '',
+        created_at  TIMESTAMPTZ DEFAULT NOW(),
+        updated_at  TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE (domain, name)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_skill_cache_domain
+        ON agents_schema.skill_cache(domain);
+    CREATE INDEX IF NOT EXISTS idx_skill_cache_embedding
+        ON agents_schema.skill_cache USING hnsw (embedding vector_cosine_ops);
 
     -- scheduling_schema — matches memory/scripts/init-db.sql (user_cron, ListUserCrons, CreateScheduledJob)
     CREATE SCHEMA IF NOT EXISTS scheduling_schema;
