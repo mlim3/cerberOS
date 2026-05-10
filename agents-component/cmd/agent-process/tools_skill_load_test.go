@@ -230,36 +230,43 @@ func TestValidateManifest_ParameterMissingName(t *testing.T) {
 // ---- substituteTemplate ----
 
 func TestSubstituteTemplate_SinglePlaceholder(t *testing.T) {
-	got := substituteTemplate("https://example.com/{{city}}", map[string]interface{}{"city": "london"})
+	got := substituteTemplate("https://example.com/{{city}}", map[string]interface{}{"city": "london"}, false)
 	if got != "https://example.com/london" {
 		t.Errorf("got %q", got)
 	}
 }
 
 func TestSubstituteTemplate_MultiplePlaceholders(t *testing.T) {
-	got := substituteTemplate("{{a}}-{{b}}", map[string]interface{}{"a": "foo", "b": "bar"})
+	got := substituteTemplate("{{a}}-{{b}}", map[string]interface{}{"a": "foo", "b": "bar"}, false)
 	if got != "foo-bar" {
 		t.Errorf("got %q", got)
 	}
 }
 
 func TestSubstituteTemplate_NumericValue(t *testing.T) {
-	got := substituteTemplate("count={{n}}", map[string]interface{}{"n": float64(42)})
+	got := substituteTemplate("count={{n}}", map[string]interface{}{"n": float64(42)}, false)
 	if got != "count=42" {
 		t.Errorf("got %q", got)
 	}
 }
 
 func TestSubstituteTemplate_UnknownPlaceholderUnchanged(t *testing.T) {
-	got := substituteTemplate("hello={{missing}}", map[string]interface{}{})
+	got := substituteTemplate("hello={{missing}}", map[string]interface{}{}, false)
 	if got != "hello={{missing}}" {
 		t.Errorf("unresolved placeholder should remain: got %q", got)
 	}
 }
 
 func TestSubstituteTemplate_NoPlaceholders(t *testing.T) {
-	got := substituteTemplate("static", map[string]interface{}{"unused": "val"})
+	got := substituteTemplate("static", map[string]interface{}{"unused": "val"}, false)
 	if got != "static" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestSubstituteTemplate_URLEscape(t *testing.T) {
+	got := substituteTemplate("https://example.com/{{q}}", map[string]interface{}{"q": "hello world"}, true)
+	if got != "https://example.com/hello%20world" {
 		t.Errorf("got %q", got)
 	}
 }
