@@ -9,7 +9,18 @@
   "panels": [
     {
       "datasource": { "type": "loki", "uid": "loki" },
-      "gridPos": { "h": 18, "w": 24, "x": 0, "y": 0 },
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 0 },
+      "id": 2,
+      "type": "text",
+      "title": "How to search",
+      "options": {
+        "mode": "markdown",
+        "content": "**Search across all cerberOS components.** Loki/Grafana/Promtail containers are pre-filtered out at ingest, so this panel only shows app logs.\n\n- Leave the **Search** variable empty to see all logs.\n- Type any substring (e.g. an API key, a trace_id, a task_id) to filter cluster-wide.\n- Use the **Component** variable to narrow to one service.\n\nWhy is this safer than `Explore`? `Explore` rejects label-less queries; this dashboard always supplies `cluster=\"cerberos\"`."
+      }
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 18, "w": 24, "x": 0, "y": 4 },
       "id": 1,
       "options": {
         "dedupStrategy": "none",
@@ -25,7 +36,7 @@
         {
           "datasource": { "type": "loki", "uid": "loki" },
           "editorMode": "code",
-          "expr": "{job=\"docker\", component=~\".+\"}",
+          "expr": "{cluster=\"cerberos\", component=~\"$component\"} |~ \"(?i)$search\"",
           "queryType": "range",
           "refId": "A"
         }
@@ -37,12 +48,35 @@
   "refresh": "10s",
   "schemaVersion": 38,
   "tags": ["cerberos", "loki"],
-  "templating": { "list": [] },
+  "templating": {
+    "list": [
+      {
+        "name": "search",
+        "label": "Search",
+        "type": "textbox",
+        "current": { "text": "", "value": "" },
+        "query": "",
+        "description": "Case-insensitive substring filter applied across all components. Empty = show everything."
+      },
+      {
+        "name": "component",
+        "label": "Component",
+        "type": "query",
+        "datasource": { "type": "loki", "uid": "loki" },
+        "query": "label_values({cluster=\"cerberos\"}, component)",
+        "refresh": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": { "text": "All", "value": "$__all", "selected": true }
+      }
+    ]
+  },
   "time": { "from": "now-15m", "to": "now" },
   "timepicker": {},
   "timezone": "",
   "title": "CerberOS — container logs",
   "uid": "cerberos-logs",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }
