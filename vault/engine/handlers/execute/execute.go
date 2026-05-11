@@ -261,7 +261,7 @@ func defaultCredentialType(operationType, credentialType string) string {
 // users send through the same demo Gmail account.
 func isSystemSharedCredential(credentialType string) bool {
 	switch credentialType {
-	case "gmail_app_password":
+	case "gmail_app_password", "search_api_key":
 		return true
 	}
 	return false

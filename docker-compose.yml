@@ -244,6 +244,8 @@ services:
       BAO_TOKEN: ${BAO_TOKEN:-}
       # Heartbeat emitter publishes to aegis.heartbeat.service.vault.
       NATS_URL: nats://nats:4222
+      # Bootstrap-seed the shared Tavily search key into OpenBao on startup.
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
     # NOTE: We intentionally do NOT depend on openbao-unseal being healthy.
     # On a fresh bootstrap, OpenBao starts uninitialized → sealed; the unseal
     # sidecar only succeeds after `bao operator init` runs later in
