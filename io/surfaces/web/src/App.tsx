@@ -1971,22 +1971,24 @@ function App() {
               </div>
             )}
           </div>
-          <UserSwitcher />
-          {(activeRole === 'manager' || activeRole === 'root') && (
-            <button
-              type="button"
-              className="admin-trigger-btn"
-              onClick={() => setShowAdmin(true)}
-              title="Admin (manager/root only)"
-              aria-label="Open admin panel"
-            >
-              Admin
-            </button>
-          )}
-          <SettingsButton
-            isOpen={showSettings}
-            onToggle={toggleSettings}
-          />
+          <div className="header-actions">
+            <UserSwitcher />
+            {(activeRole === 'manager' || activeRole === 'root') && (
+              <button
+                type="button"
+                className="admin-trigger-btn"
+                onClick={() => setShowAdmin(true)}
+                title="Admin (manager/root only)"
+                aria-label="Open admin panel"
+              >
+                Admin
+              </button>
+            )}
+            <SettingsButton
+              isOpen={showSettings}
+              onToggle={toggleSettings}
+            />
+          </div>
         </header>
         {showAdmin && <AdminPanel onClose={() => setShowAdmin(false)} />}
         {selectedTask ? (
@@ -2037,15 +2039,8 @@ function App() {
           </div>
         ) : (
           <div className="empty-state">
-            <pre className="empty-state-ascii">{`
-  ██████╗███████╗██████╗ ██████╗ ███████╗██████╗  ██████╗ ███████╗
- ██╔════╝██╔════╝██╔══██╗██╔══██╗██╔════╝██╔══██╗██╔═══██╗██╔════╝
- ██║     █████╗  ██████╔╝██████╔╝█████╗  ██████╔╝██║   ██║███████╗
- ██║     ██╔══╝  ██╔══██╗██╔══██╗██╔══╝  ██╔══██╗██║   ██║╚════██║
- ╚██████╗███████╗██║  ██║██████╔╝███████╗██║  ██║╚██████╔╝███████║
-  ╚═════╝╚══════╝╚═╝  ╚═╝╚═════╝ ╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝`}</pre>
-            <h2 className="empty-state-title">Create a new task to begin</h2>
-            <p className="empty-state-text">Press "Create New Task" in the sidebar to start working with the agent.</p>
+            <h2 className="empty-state-title empty-state-brand">CerberOS</h2>
+            <p className="empty-state-text">Create a new task to start a focused agent conversation.</p>
           </div>
         )}
         {showSettings && (

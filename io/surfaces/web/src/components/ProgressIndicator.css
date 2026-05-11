@@ -16,7 +16,7 @@
 }
 
 .progress-text {
-  font-size: 10px;
+  font-size: var(--font-xs);
   color: var(--text-muted);
 }
 

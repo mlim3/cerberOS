@@ -8,10 +8,10 @@
   width: 32px;
   height: 32px;
   border-radius: 50%;
-  border: none;
-  background: transparent;
-  color: var(--text-muted);
-  font-size: 14px;
+  border: var(--border-subtle);
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  font-size: var(--font-sm);
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -23,7 +23,9 @@
 }
 
 .voice-btn:hover:not(:disabled) {
-  color: var(--text-secondary);
+  background: var(--bg-card);
+  border-color: var(--accent-border);
+  color: var(--text-primary);
 }
 
 .voice-btn.recording {
@@ -51,7 +53,7 @@
 }
 
 .voice-error {
-  font-size: 10px;
+  font-size: var(--font-xs);
   color: var(--error);
 }
 

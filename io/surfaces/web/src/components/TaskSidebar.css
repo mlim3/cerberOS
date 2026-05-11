@@ -1,12 +1,13 @@
 .sidebar {
   width: var(--sidebar-width);
   flex-shrink: 0;
-  background-color: var(--bg-sidebar);
+  background:
+    linear-gradient(180deg, #0b2240, var(--bg-sidebar));
   border-right: var(--border);
   display: flex;
   flex-direction: column;
   height: 100%;
-  font-size: calc(13px * var(--font-scale, 1));
+  font-size: calc(var(--font-sm) * var(--font-scale));
 }
 
 .sidebar-header {
@@ -16,10 +17,11 @@
   justify-content: space-between;
   padding: 0 var(--sp-4);
   border-bottom: var(--border);
+  background: color-mix(in srgb, var(--bg-card) 52%, transparent);
 }
 
 .sidebar-header h2 {
-  font-size: calc(10px * var(--font-scale, 1));
+  font-size: var(--font-xs);
   font-weight: 500;
   text-transform: uppercase;
   letter-spacing: 0.1em;
@@ -32,11 +34,11 @@
 
 .task-count {
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: var(--font-xs);
 }
 
 .sidebar-controls {
-  padding: var(--sp-2) var(--sp-4);
+  padding: var(--sp-3) var(--sp-4);
   border-bottom: var(--border);
 }
 
@@ -58,13 +60,13 @@
   gap: 2px;
   padding: var(--sp-2) var(--sp-4);
   border-bottom: var(--border);
-  background: var(--surface-subtle);
+  background: color-mix(in srgb, var(--surface-subtle) 72%, transparent);
 }
 
 .sidebar-tab {
   flex: 1;
   padding: 6px var(--sp-2);
-  font-size: 11px;
+  font-size: var(--font-xs);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -83,7 +85,7 @@
 .sidebar-tab.sidebar-tab-active {
   background: var(--bg-card);
   color: var(--text-primary);
-  box-shadow: 0 0 0 1px oklch(0.25 0.02 160 / 0.06);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.24);
 }
 
 .sidebar-tab:focus-visible {
@@ -93,8 +95,8 @@
 
 .sidebar-recurring-explainer {
   margin: var(--sp-2) 0 0;
-  font-size: 11px;
-  line-height: 1.44;
+  font-size: var(--font-xs);
+  line-height: var(--leading-normal);
   color: var(--text-muted);
 }
 
@@ -102,7 +104,7 @@
   margin: var(--sp-2) var(--sp-4) 0;
   padding: var(--sp-2);
   border-radius: var(--radius-sm);
-  font-size: 11px;
+  font-size: var(--font-xs);
   color: var(--error);
   background: var(--error-bg);
   border: 1px solid var(--error-border);
@@ -111,7 +113,7 @@
 .sidebar-recurring-cta-link {
   margin-top: var(--sp-2);
   padding: 4px var(--sp-2);
-  font-size: 11px;
+  font-size: var(--font-xs);
   font-weight: 600;
   border: none;
   border-radius: var(--radius-sm);
@@ -145,7 +147,7 @@
   align-items: center;
   gap: var(--sp-2);
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--font-sm);
   color: var(--text-secondary);
   user-select: none;
 }
@@ -177,7 +179,8 @@
   border: var(--border-subtle);
   border-radius: var(--radius-sm);
   color: var(--text-primary);
-  font-size: 12px;
+  font-size: var(--font-sm);
+  line-height: var(--leading-normal);
   transition: border-color 0.18s ease, box-shadow 0.18s ease;
 }
 
@@ -198,7 +201,7 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: var(--sp-1);
+  padding: var(--sp-2);
 }
 
 .task-list-empty {
@@ -211,12 +214,19 @@
 }
 
 .empty-icon {
-  font-size: 24px;
+  font-size: 1.5rem;
   opacity: 0.3;
 }
 
+.empty-icon--svg {
+  display: block;
+  flex-shrink: 0;
+  color: var(--accent);
+  opacity: 0.85;
+}
+
 .empty-text {
-  font-size: 12px;
+  font-size: var(--font-sm);
   color: var(--text-muted);
 }
 
@@ -227,16 +237,24 @@
   width: 100%;
   display: flex;
   align-items: center;
-  border-radius: var(--radius-sm);
-  transition: background-color 0.18s ease;
+  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+  transition:
+    background-color 0.18s ease,
+    border-color 0.18s ease,
+    box-shadow 0.18s ease;
 }
 
 .task-item:hover {
   background-color: var(--surface-hover);
+  border-color: color-mix(in srgb, var(--accent) 9%, transparent);
 }
 
 .task-item.selected {
-  background-color: var(--surface-selected);
+  background:
+    linear-gradient(90deg, var(--surface-selected), color-mix(in srgb, var(--bg-card) 64%, transparent));
+  border-color: color-mix(in srgb, var(--accent) 16%, transparent);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22);
 }
 
 .task-item.awaiting,
@@ -256,10 +274,10 @@
   display: flex;
   align-items: center;
   gap: var(--sp-3);
-  padding: var(--sp-2) var(--sp-3);
+  padding: 10px var(--sp-3);
   background: transparent;
   border: none;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   cursor: pointer;
   text-align: left;
   color: var(--text-primary);
@@ -289,7 +307,7 @@
   border-radius: var(--radius-xs);
   cursor: pointer;
   color: var(--text-muted);
-  font-size: 14px;
+  font-size: var(--font-sm);
   letter-spacing: 1px;
   opacity: 0;
   transition: opacity 0.15s ease, background-color 0.15s ease, color 0.15s ease;
@@ -338,7 +356,7 @@
   border-radius: var(--radius-xs);
   cursor: pointer;
   text-align: left;
-  font-size: 12px;
+  font-size: var(--font-sm);
   color: var(--text-secondary);
   transition: background-color 0.12s ease, color 0.12s ease;
 }
@@ -375,7 +393,7 @@
   border: var(--border-subtle);
   border-radius: var(--radius-xs);
   color: var(--text-primary);
-  font-size: 12px;
+  font-size: var(--font-sm);
   font-weight: 500;
   min-width: 0;
 }
@@ -390,7 +408,7 @@
 
 .new-task-button {
   padding: 4px 10px;
-  font-size: 11px;
+  font-size: var(--font-xs);
   border-radius: var(--radius-xs);
   border: var(--border-subtle);
   background-color: transparent;
@@ -421,17 +439,20 @@
 
 .new-task-button-primary {
   width: 100%;
-  padding: 7px var(--sp-3);
-  font-size: 12px;
-  font-weight: 600;
+  padding: 9px var(--sp-3);
+  font-size: var(--font-sm);
+  font-weight: 750;
   border: none;
   background-color: var(--accent);
-  color: var(--bg-card);
+  color: #041325;
+  border-radius: var(--radius-md);
+  box-shadow: 0 12px 28px rgba(103, 183, 255, 0.2);
 }
 
 .new-task-button-primary:hover:not(:disabled) {
   filter: brightness(1.06);
-  color: var(--bg-card);
+  color: #041325;
+  transform: translateY(-1px);
 }
 
 .new-task-button-primary:disabled {
@@ -442,7 +463,7 @@
 .new-task-button-secondary {
   width: 100%;
   padding: 6px var(--sp-3);
-  font-size: 11px;
+  font-size: var(--font-xs);
   font-weight: 600;
 }
 
@@ -461,16 +482,19 @@
 }
 
 .status-icon {
-  font-size: 16px;
+  font-size: 1rem;
 }
 
 .status-icon.completed {
   color: var(--success);
-  font-size: 10px;
+  font-size: var(--font-xs);
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .status-icon.heartbeat {
-  font-size: 9px;
+  font-size: var(--font-2xs);
   color: var(--text-muted);
   white-space: nowrap;
   min-width: 24px;
@@ -508,10 +532,10 @@
 }
 
 .task-item-unread-thread {
-  box-shadow: inset 3px 0 0 oklch(0.72 0.14 156 / 0.85);
+  box-shadow: inset 3px 0 0 rgba(103, 183, 255, 0.9);
   background: linear-gradient(
     90deg,
-    oklch(0.72 0.14 156 / 0.08),
+    rgba(103, 183, 255, 0.1),
     transparent 52%
   );
 }
@@ -519,14 +543,14 @@
 .thread-unread-badge {
   display: inline-block;
   align-self: flex-start;
-  font-size: 9px;
+  font-size: var(--font-2xs);
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   padding: 2px 6px;
   border-radius: 999px;
-  background: oklch(0.72 0.14 156 / 0.22);
-  color: oklch(0.38 0.08 156);
+  background: rgba(103, 183, 255, 0.2);
+  color: #b8e0ff;
 }
 
 .task-info {
@@ -538,8 +562,8 @@
 }
 
 .task-title {
-  font-size: 12px;
-  font-weight: 500;
+  font-size: var(--font-sm);
+  font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -547,11 +571,30 @@
 }
 
 .task-update {
-  font-size: 10px;
+  font-size: var(--font-xs);
   color: var(--text-muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* Conversation-ID hint line. Sits below .task-update so log correlation is
+   one hover/click away without dominating the sidebar visually. Uses a
+   monospace font to make the prefix scannable against Loki output. */
+.task-cid {
+  font-size: var(--font-2xs);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--text-muted);
+  opacity: 0.55;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: help;
+}
+.task-item:hover .task-cid,
+.task-item.selected .task-cid {
+  opacity: 0.9;
 }
 
 .task-eta {
@@ -564,7 +607,7 @@
   position: fixed;
   inset: 0;
   z-index: 200;
-  background-color: oklch(0.1 0.01 160 / 0.4);
+  background-color: rgba(1, 8, 19, 0.62);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -583,9 +626,9 @@
 }
 
 .confirm-message {
-  font-size: 13px;
+  font-size: var(--font-sm);
   color: var(--text-primary);
-  line-height: 1.4;
+  line-height: var(--leading-normal);
 }
 
 .confirm-message strong {
@@ -593,7 +636,7 @@
 }
 
 .confirm-subtext {
-  font-size: 11px;
+  font-size: var(--font-xs);
   color: var(--text-muted);
 }
 
@@ -607,7 +650,7 @@
 .confirm-cancel,
 .confirm-delete {
   padding: 5px 14px;
-  font-size: 12px;
+  font-size: var(--font-sm);
   border-radius: var(--radius-xs);
   cursor: pointer;
   transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
@@ -632,7 +675,7 @@
 
 .confirm-delete:hover {
   background-color: var(--error);
-  color: oklch(0.98 0.005 160);
+  color: #ffffff;
 }
 
 .confirm-cancel:focus,
