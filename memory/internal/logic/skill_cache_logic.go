@@ -13,11 +13,37 @@ import (
 
 // SkillSearchResult is a single hit returned by SemanticSearchSkills.
 type SkillSearchResult struct {
-	Domain      string          `json:"domain"`
-	Name        string          `json:"name"`
-	Origin      string          `json:"origin"`
-	Description string          `json:"description"`
-	Payload     json.RawMessage `json:"payload"`
+	Domain         string          `json:"domain"`
+	Name           string          `json:"name"`
+	Origin         string          `json:"origin"`
+	Description    string          `json:"description"`
+	RequiresCred   bool            `json:"requires_cred"`   // true when the skill needs vault execution
+	Implementation string          `json:"implementation"`  // builtinRegistry key; empty for synthesized skills
+	Payload        json.RawMessage `json:"payload"`
+}
+
+// skillNodePayload is used to extract cross-domain routing fields from the
+// JSON payload stored in agents_schema.skill_cache. Only the fields needed for
+// cross-domain skill discovery are decoded here; the full SkillNode struct is
+// not imported to keep the memory component free of the agents-component types.
+type skillNodePayload struct {
+	RequiredCredentialTypes []string `json:"required_credential_types"`
+	Implementation          string   `json:"implementation"`
+}
+
+// extractSkillFields decodes the stored SkillNode payload to populate
+// RequiresCred and Implementation in the returned SkillSearchResult.
+// On any decode error the fields are left at their zero values — the caller
+// receives a valid (if incomplete) result rather than an error.
+func extractSkillFields(payload json.RawMessage) (requiresCred bool, implementation string) {
+	if len(payload) == 0 {
+		return false, ""
+	}
+	var node skillNodePayload
+	if err := json.Unmarshal(payload, &node); err != nil {
+		return false, ""
+	}
+	return len(node.RequiredCredentialTypes) > 0, node.Implementation
 }
 
 // SkillCacheProcessor coordinates embedding-on-write and pgvector search for
@@ -103,12 +129,16 @@ func (p *SkillCacheProcessor) SemanticSearch(ctx context.Context, query string, 
 
 	results := make([]SkillSearchResult, 0, len(rows))
 	for _, r := range rows {
+		payload := json.RawMessage(r.Payload)
+		requiresCred, impl := extractSkillFields(payload)
 		results = append(results, SkillSearchResult{
-			Domain:      r.Domain,
-			Name:        r.Name,
-			Origin:      r.Origin,
-			Description: r.Description,
-			Payload:     json.RawMessage(r.Payload),
+			Domain:         r.Domain,
+			Name:           r.Name,
+			Origin:         r.Origin,
+			Description:    r.Description,
+			RequiresCred:   requiresCred,
+			Implementation: impl,
+			Payload:        payload,
 		})
 	}
 	return results, nil
@@ -138,12 +168,16 @@ func (p *SkillCacheProcessor) ListByDomain(ctx context.Context, domain string) (
 	}
 	results := make([]SkillSearchResult, 0, len(rows))
 	for _, r := range rows {
+		payload := json.RawMessage(r.Payload)
+		requiresCred, impl := extractSkillFields(payload)
 		results = append(results, SkillSearchResult{
-			Domain:      r.Domain,
-			Name:        r.Name,
-			Origin:      r.Origin,
-			Description: r.Description,
-			Payload:     json.RawMessage(r.Payload),
+			Domain:         r.Domain,
+			Name:           r.Name,
+			Origin:         r.Origin,
+			Description:    r.Description,
+			RequiresCred:   requiresCred,
+			Implementation: impl,
+			Payload:        payload,
 		})
 	}
 	return results, nil

@@ -43,6 +43,23 @@ func (r *DynamicRegistry) Register(tool SkillTool) error {
 	return nil
 }
 
+// Replace swaps the existing tool entry whose name matches name with the
+// provided replacement. Returns an error if no tool with that name is found.
+// This is used by loop.go to upgrade skills_search with a registry-aware
+// version after the DynamicRegistry is created, resolving the chicken-and-egg
+// dependency between toolsForDomain and the registry.
+func (r *DynamicRegistry) Replace(name string, tool SkillTool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i, t := range r.tools {
+		if t.Definition.Name == name {
+			r.tools[i] = tool
+			return nil
+		}
+	}
+	return fmt.Errorf("skill %q not found in registry; cannot replace", name)
+}
+
 // Tools returns a snapshot of the current tool list. The returned slice is
 // safe for concurrent use; mutations to it do not affect the registry.
 func (r *DynamicRegistry) Tools() []SkillTool {

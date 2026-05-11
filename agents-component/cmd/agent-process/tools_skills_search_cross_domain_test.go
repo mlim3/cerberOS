@@ -1,61 +1,35 @@
 // Package main — tools_skills_search_cross_domain_test.go
 //
-// TDD tests for cross-domain skill access via skills_search.
+// Unit tests for cross-domain skill access behavior in skills_search.
 //
-// These tests define the intended behavior for two cases that are NOT YET
-// IMPLEMENTED. They will fail to compile until:
+// These tests cover two behaviors:
 //
-//  1. executeSkillsSearch (or skillsSearchTool) accepts a *DynamicRegistry so
-//     it can auto-register credential-free discovered tools at search time.
+//  1. Credential-free tool auto-registration: skills_search finds a static,
+//     requires_cred=false skill outside the agent's domain and auto-registers
+//     it into DynamicRegistry using builtinRegistry[result.Implementation].
+//     The agent is told it can call the tool directly. No spawn_agent, no
+//     clarification.
 //
-//  2. skillsSearchTool accepts a ClarificationSender so it can surface
-//     out-of-scope credentialed skills to the user via clarification.request
-//     rather than blindly recommending spawn_agent (which the orchestrator
-//     would reject for undeclared domains).
-//
-// Intended behavior summary
-// ─────────────────────────
-//
-// Credential-free, out-of-domain skill discovered:
-//   skills_search finds a static, requires_cred=false skill in a domain not
-//   declared at spawn. The tool auto-registers it into DynamicRegistry using
-//   builtinRegistry[result.Implementation]. The agent is told it can call the
-//   tool directly. No spawn_agent. No clarification.
-//
-// Credentialed, out-of-domain skill discovered:
-//   skills_search finds a requires_cred=true skill outside the agent's scope.
-//   The tool calls ClarificationSender.SendClarification. The agent receives
-//   a "waiting for user approval" response and pauses. When the response
-//   arrives (approved or denied), the loop resumes:
-//   - Approved: spawn_agent is recommended with the new domain (orchestrator
-//     will issue a scoped permission_token for the child).
-//   - Denied: the tool returns a message saying the user declined and the
-//     agent should either find an alternative or explain it cannot complete
-//     the task.
-//
-// Build tag
-// ─────────
-//   //go:build cross_domain_tdd
-//
-// Remove the build tag (and the t.Skip calls) once the feature is implemented.
-
-//go:build cross_domain_tdd
-
+//  2. Credentialed tool user-gating: skills_search finds a requires_cred=true
+//     skill outside the agent's scope and calls ClarificationSender.
+//     If approved → recommend spawn_agent.
+//     If denied → explain gracefully, do not register the tool.
 package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/cerberOS/agents-component/pkg/types"
 )
 
-// ─── Fixtures ────────────────────────────────────────────────────────────────
+// ─── Additional stub types ────────────────────────────────────────────────────
 
-// fakeSearcherWithMeta extends fakeSearcher with the new RequiresCred /
-// Implementation / Origin fields populated so the auto-registration and
-// clarification paths can be exercised.
+// fakeSearcherWithMeta extends fakeSearcher with RequiresCred / Implementation
+// / Origin populated so the auto-registration and clarification paths can be
+// exercised without a live NATS connection.
 type fakeSearcherWithMeta struct {
 	results []types.SkillSearchResult
 }
@@ -68,17 +42,20 @@ func (f *fakeSearcherWithMeta) SearchSkills(_ string, topK int) []types.SkillSea
 }
 
 // fakeClarificationSender captures calls to SendClarification so tests can
-// assert on what was sent.
+// assert on what was sent and control what is returned.
 type fakeClarificationSender struct {
-	sent []types.ClarificationRequest
+	sent     []types.ClarificationRequest
+	response types.ClarificationResponse
+	err      error
 }
 
-func (f *fakeClarificationSender) SendClarification(req types.ClarificationRequest) {
+func (f *fakeClarificationSender) SendClarification(req types.ClarificationRequest) (types.ClarificationResponse, error) {
 	f.sent = append(f.sent, req)
+	return f.response, f.err
 }
 
-// minimalCredFreeResult returns a SkillSearchResult for a static,
-// credential-free skill outside the querying agent's domain.
+// minimalCredFreeResult returns a SkillSearchResult for a static, credential-free
+// skill outside the querying agent's domain.
 func minimalCredFreeResult(domain, name, impl string) types.SkillSearchResult {
 	return types.SkillSearchResult{
 		Domain:         domain,
@@ -91,8 +68,8 @@ func minimalCredFreeResult(domain, name, impl string) types.SkillSearchResult {
 	}
 }
 
-// minimalCredResult returns a SkillSearchResult for a credentialed skill
-// outside the querying agent's domain.
+// minimalCredResult returns a SkillSearchResult for a credentialed skill outside
+// the querying agent's domain.
 func minimalCredResult(domain, name string) types.SkillSearchResult {
 	return types.SkillSearchResult{
 		Domain:         domain,
@@ -105,48 +82,78 @@ func minimalCredResult(domain, name string) types.SkillSearchResult {
 	}
 }
 
+// testWebFetchTool is a helper that returns the web_fetch builtin for use in
+// seeding a DynamicRegistry in tests. Named to avoid collision with the
+// production webFetchTool constructor in tools.go.
+func testWebFetchTool() SkillTool {
+	factory := builtinRegistry["web_fetch"]
+	return factory(nil)
+}
+
+// ─── DynamicRegistry.Replace unit tests ──────────────────────────────────────
+
+func TestDynamicRegistry_Replace_SwapsExistingTool(t *testing.T) {
+	original := testWebFetchTool()
+	registry := newDynamicRegistry([]SkillTool{original})
+
+	// Create a replacement tool with the same name but different label.
+	replacement := testWebFetchTool()
+	replacement.Label = "Replaced"
+
+	if err := registry.Replace("web_fetch", replacement); err != nil {
+		t.Fatalf("Replace: unexpected error: %v", err)
+	}
+
+	tools := registry.Tools()
+	if len(tools) != 1 {
+		t.Fatalf("expected 1 tool after replace, got %d", len(tools))
+	}
+	if tools[0].Label != "Replaced" {
+		t.Errorf("expected Label=Replaced after replace, got %q", tools[0].Label)
+	}
+}
+
+func TestDynamicRegistry_Replace_ErrorWhenNotFound(t *testing.T) {
+	registry := newDynamicRegistry(nil)
+	err := registry.Replace("nonexistent_tool", testWebFetchTool())
+	if err == nil {
+		t.Error("expected error when replacing a tool not in registry, got nil")
+	}
+}
+
+func TestDynamicRegistry_Replace_DoesNotAppend(t *testing.T) {
+	registry := newDynamicRegistry([]SkillTool{testWebFetchTool()})
+	_ = registry.Replace("web_fetch", testWebFetchTool())
+	if len(registry.Tools()) != 1 {
+		t.Errorf("Replace should not append; expected 1 tool, got %d", len(registry.Tools()))
+	}
+}
+
 // ─── Credential-free auto-registration ───────────────────────────────────────
 
 // TestSkillsSearch_CredFreeOutOfDomain_AutoRegisters verifies that when
 // skills_search returns a credential-free static skill in a domain the agent
 // was not provisioned for, the tool is immediately registered into the
 // DynamicRegistry and the agent is told it can call it directly.
-//
-// This is the core of the "fix the gate" approach: domain scoping should only
-// gate credential-requiring tools (where the vault needs a scoped token).
-// Credential-free tools have no vault implication and should be available to
-// any agent that discovers them.
 func TestSkillsSearch_CredFreeOutOfDomain_AutoRegisters(t *testing.T) {
-	t.Skip("TODO: implement credential-free cross-domain auto-registration")
-
-	registry := newDynamicRegistry([]SkillTool{
-		// agent was provisioned for "web" only — no e2e_test tools
-		webFetchTool(),
-	})
-
+	registry := newDynamicRegistry([]SkillTool{testWebFetchTool()})
 	cs := &fakeClarificationSender{}
 	searcher := &fakeSearcherWithMeta{
 		results: []types.SkillSearchResult{
-			// e2e_ping: credential-free, static, outside "web" domain
+			// e2e_ping is in builtinRegistry, credential-free, outside "web" domain.
 			minimalCredFreeResult("e2e_test", "e2e_ping", "e2e_ping"),
 		},
 	}
 
-	// TODO: update skillsSearchTool (or executeSkillsSearch) to accept:
-	//   registry *DynamicRegistry — for auto-registration
-	//   cs ClarificationSender   — for credentialed out-of-scope skills
 	tool := skillsSearchTool(searcher, "web", false, registry, cs)
-
-	raw, _ := json.Marshal(map[string]interface{}{
-		"query": "automated e2e connectivity probe",
-	})
+	raw, _ := json.Marshal(map[string]interface{}{"query": "automated e2e connectivity probe"})
 	result := tool.Execute(nil, raw)
 
 	if result.IsError {
 		t.Fatalf("unexpected error: %s", result.Content)
 	}
 
-	// 1. e2e_ping must now be in the registry — callable without spawn_agent.
+	// e2e_ping must now be in the registry — callable without spawn_agent.
 	found := false
 	for _, rt := range registry.Tools() {
 		if rt.Definition.Name == "e2e_ping" {
@@ -158,7 +165,7 @@ func TestSkillsSearch_CredFreeOutOfDomain_AutoRegisters(t *testing.T) {
 		t.Error("e2e_ping was not auto-registered after discovery via skills_search")
 	}
 
-	// 2. Response must tell the agent it can call the tool directly.
+	// Response must tell the agent it can call the tool directly.
 	if !strings.Contains(result.Content, "e2e_ping") {
 		t.Errorf("expected response to mention e2e_ping; got: %q", result.Content)
 	}
@@ -166,20 +173,23 @@ func TestSkillsSearch_CredFreeOutOfDomain_AutoRegisters(t *testing.T) {
 		t.Errorf("response should NOT recommend spawn_agent for a credential-free tool; got: %q", result.Content)
 	}
 
-	// 3. No clarification should have been sent.
+	// No clarification should have been sent.
 	if len(cs.sent) != 0 {
 		t.Errorf("expected no clarification request for credential-free tool; got %d", len(cs.sent))
+	}
+
+	// recommended_action must be "call_directly".
+	if result.Details["recommended_action"] != "call_directly" {
+		t.Errorf("expected recommended_action=call_directly, got %v", result.Details["recommended_action"])
 	}
 }
 
 // TestSkillsSearch_CredFreeOutOfDomain_UnknownImpl treats a credential-free
 // result whose Implementation is not in builtinRegistry as unregisterable.
-// The tool should fall back to recommending spawn_agent (or silently skip),
+// The tool should fall back to recommending spawn_agent (if available),
 // not panic or hard-error.
 func TestSkillsSearch_CredFreeOutOfDomain_UnknownImpl(t *testing.T) {
-	t.Skip("TODO: implement credential-free cross-domain auto-registration")
-
-	registry := newDynamicRegistry([]SkillTool{webFetchTool()})
+	registry := newDynamicRegistry([]SkillTool{testWebFetchTool()})
 	cs := &fakeClarificationSender{}
 	searcher := &fakeSearcherWithMeta{
 		results: []types.SkillSearchResult{
@@ -211,19 +221,17 @@ func TestSkillsSearch_CredFreeOutOfDomain_UnknownImpl(t *testing.T) {
 }
 
 // TestSkillsSearch_CredFreeOutOfDomain_SynthesizedSkipped verifies that
-// synthesized skills (origin="synthesized") are NOT auto-registered, even
-// when requires_cred=false. Synthesized skills use LLM-recipe execution and
-// are unreliable; only static builtins are safe to auto-register.
+// synthesized skills (Origin="synthesized") are NOT auto-registered, even when
+// requires_cred=false. Synthesized skills use LLM-recipe execution and are
+// unreliable; only static builtins are safe to auto-register.
 func TestSkillsSearch_CredFreeOutOfDomain_SynthesizedSkipped(t *testing.T) {
-	t.Skip("TODO: implement credential-free cross-domain auto-registration")
-
-	registry := newDynamicRegistry([]SkillTool{webFetchTool()})
+	registry := newDynamicRegistry([]SkillTool{testWebFetchTool()})
 	cs := &fakeClarificationSender{}
 	searcher := &fakeSearcherWithMeta{
 		results: []types.SkillSearchResult{
 			{
 				Domain:         "e2e_test",
-				Name:           "execute_e2e_connectivity_probe", // synthesized from prior run
+				Name:           "execute_e2e_connectivity_probe",
 				Description:    "LLM recipe that calls e2e_ping",
 				Score:          0.95,
 				RequiresCred:   false,
@@ -244,21 +252,119 @@ func TestSkillsSearch_CredFreeOutOfDomain_SynthesizedSkipped(t *testing.T) {
 	}
 }
 
+// TestSkillsSearch_CredFreeOutOfDomain_VaultToolSkipped verifies that even if
+// a skill is stored with requires_cred=false (incorrect metadata), the safety
+// check in tryAutoRegister catches vault tools via RequiredCredentialTypes
+// and refuses to register them.
+func TestSkillsSearch_CredFreeOutOfDomain_VaultToolSkipped(t *testing.T) {
+	registry := newDynamicRegistry([]SkillTool{testWebFetchTool()})
+	cs := &fakeClarificationSender{}
+	searcher := &fakeSearcherWithMeta{
+		results: []types.SkillSearchResult{
+			{
+				// vault_web_fetch requires credentials but is incorrectly tagged.
+				Domain:         "web",
+				Name:           "vault_web_fetch",
+				Description:    "Vault-backed web fetch",
+				Score:          0.9,
+				RequiresCred:   false, // wrong metadata, but factory should catch it
+				Implementation: "vault_web_fetch",
+				Origin:         "static",
+			},
+		},
+	}
+
+	tool := skillsSearchTool(searcher, "general", true, registry, cs)
+	raw, _ := json.Marshal(map[string]interface{}{"query": "fetch with vault credentials"})
+	result := tool.Execute(nil, raw)
+
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content)
+	}
+
+	// vault_web_fetch must not be auto-registered — it has RequiredCredentialTypes set.
+	for _, rt := range registry.Tools() {
+		if rt.Definition.Name == "vault_web_fetch" {
+			t.Error("vault tool must not be auto-registered even if stored requires_cred=false")
+		}
+	}
+}
+
+// TestSkillsSearch_CredFreeOutOfDomain_NilRegistry_FallsBack verifies that
+// when registry is nil, the tool falls back to the legacy spawn_agent
+// recommendation rather than panicking.
+func TestSkillsSearch_CredFreeOutOfDomain_NilRegistry_FallsBack(t *testing.T) {
+	searcher := &fakeSearcherWithMeta{
+		results: []types.SkillSearchResult{
+			minimalCredFreeResult("e2e_test", "e2e_ping", "e2e_ping"),
+		},
+	}
+
+	// No registry, no cs — nil safe.
+	tool := skillsSearchTool(searcher, "web", true, nil, nil)
+	raw, _ := json.Marshal(map[string]interface{}{"query": "automated probe"})
+	result := tool.Execute(nil, raw)
+
+	if result.IsError {
+		t.Fatalf("unexpected error with nil registry: %s", result.Content)
+	}
+	// Without registry, should fall back to spawn_agent.
+	if result.Details["recommended_action"] != "spawn_agent" {
+		t.Errorf("expected spawn_agent fallback with nil registry, got %v", result.Details["recommended_action"])
+	}
+}
+
+// TestSkillsSearch_CredFreeOutOfDomain_AlreadyRegistered verifies that calling
+// skills_search twice for the same credential-free tool does not panic or error
+// (Register returns duplicate error which tryAutoRegister treats as "already registered").
+func TestSkillsSearch_CredFreeOutOfDomain_AlreadyRegistered(t *testing.T) {
+	registry := newDynamicRegistry([]SkillTool{testWebFetchTool()})
+	cs := &fakeClarificationSender{}
+	searcher := &fakeSearcherWithMeta{
+		results: []types.SkillSearchResult{
+			minimalCredFreeResult("e2e_test", "e2e_ping", "e2e_ping"),
+		},
+	}
+
+	tool := skillsSearchTool(searcher, "web", false, registry, cs)
+	raw, _ := json.Marshal(map[string]interface{}{"query": "probe"})
+
+	// First call — registers.
+	r1 := tool.Execute(nil, raw)
+	if r1.IsError {
+		t.Fatalf("first call: unexpected error: %s", r1.Content)
+	}
+
+	// Second call — duplicate, must not error.
+	r2 := tool.Execute(nil, raw)
+	if r2.IsError {
+		t.Fatalf("second call (duplicate): unexpected error: %s", r2.Content)
+	}
+
+	// Registry still contains exactly one e2e_ping entry.
+	count := 0
+	for _, rt := range registry.Tools() {
+		if rt.Definition.Name == "e2e_ping" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("expected exactly 1 e2e_ping in registry, got %d", count)
+	}
+}
+
 // ─── Credentialed skill clarification ────────────────────────────────────────
 
 // TestSkillsSearch_CredentialedOutOfDomain_SendsClarification verifies that
 // when skills_search finds a credentialed skill outside the agent's scope, it
-// calls ClarificationSender.SendClarification with enough context for the user
-// to make an informed decision.
-//
-// The agent must NOT blindly recommend spawn_agent — the orchestrator would
-// reject the spawn because the parent's policy scope doesn't include the domain.
-// Instead it surfaces the decision to the user.
+// calls ClarificationSender.SendClarification with the correct fields and
+// returns a response indicating the user is being consulted.
 func TestSkillsSearch_CredentialedOutOfDomain_SendsClarification(t *testing.T) {
-	t.Skip("TODO: implement credentialed cross-domain user clarification")
-
-	registry := newDynamicRegistry([]SkillTool{webFetchTool()})
-	cs := &fakeClarificationSender{}
+	registry := newDynamicRegistry([]SkillTool{testWebFetchTool()})
+	cs := &fakeClarificationSender{
+		// Simulate the response arriving (but we check the send before the response).
+		response: types.ClarificationResponse{Approved: false},
+	}
 	searcher := &fakeSearcherWithMeta{
 		results: []types.SkillSearchResult{
 			minimalCredResult("google_workspace", "vault_gmail_send"),
@@ -273,13 +379,13 @@ func TestSkillsSearch_CredentialedOutOfDomain_SendsClarification(t *testing.T) {
 		t.Fatalf("unexpected error: %s", result.Content)
 	}
 
-	// 1. Clarification must have been sent.
+	// Clarification must have been sent.
 	if len(cs.sent) != 1 {
 		t.Fatalf("expected 1 clarification request, got %d", len(cs.sent))
 	}
 	req := cs.sent[0]
 
-	// 2. The request must identify the skill and domain clearly.
+	// The request must identify the skill and domain clearly.
 	if req.SkillName != "vault_gmail_send" {
 		t.Errorf("SkillName: want vault_gmail_send, got %q", req.SkillName)
 	}
@@ -287,17 +393,20 @@ func TestSkillsSearch_CredentialedOutOfDomain_SendsClarification(t *testing.T) {
 		t.Errorf("SkillDomain: want google_workspace, got %q", req.SkillDomain)
 	}
 
-	// 3. The request must explain why (non-empty Reason).
+	// The request must explain why (non-empty Reason).
 	if req.Reason == "" {
 		t.Error("ClarificationRequest.Reason must not be empty")
 	}
-
-	// 4. The response to the agent must indicate it is waiting for approval.
-	if !strings.Contains(result.Content, "approval") && !strings.Contains(result.Content, "permission") {
-		t.Errorf("response should mention waiting for approval; got: %q", result.Content)
+	// The request must have a non-empty question for the user.
+	if req.Question == "" {
+		t.Error("ClarificationRequest.Question must not be empty")
+	}
+	// RequestID must be set.
+	if req.RequestID == "" {
+		t.Error("ClarificationRequest.RequestID must not be empty")
 	}
 
-	// 5. vault_gmail_send must NOT be in the registry (not auto-registered).
+	// vault_gmail_send must NOT be in the registry (not auto-registered).
 	for _, rt := range registry.Tools() {
 		if rt.Definition.Name == "vault_gmail_send" {
 			t.Error("credentialed tool must not be auto-registered before user approval")
@@ -306,25 +415,23 @@ func TestSkillsSearch_CredentialedOutOfDomain_SendsClarification(t *testing.T) {
 }
 
 // TestSkillsSearch_CredentialedOutOfDomain_Approved verifies the post-approval
-// path: after the user approves, the agent receives a recommendation to call
-// spawn_agent for the approved domain. The orchestrator will issue a scoped
-// permission_token for that domain when handling the spawn.
+// path: the agent receives a recommendation to call spawn_agent for the
+// approved domain.
 func TestSkillsSearch_CredentialedOutOfDomain_Approved(t *testing.T) {
-	t.Skip("TODO: implement credentialed cross-domain user clarification")
-
-	registry := newDynamicRegistry([]SkillTool{webFetchTool()})
-
-	// Simulate a clarification sender that immediately calls back with approval.
-	// In production this would be async (NATS round-trip); the test uses a
-	// synchronous stub to keep the test deterministic.
-	approvingCS := &autoRespondClarificationSender{approved: true, message: ""}
+	registry := newDynamicRegistry([]SkillTool{testWebFetchTool()})
+	cs := &fakeClarificationSender{
+		response: types.ClarificationResponse{
+			Approved:    true,
+			UserMessage: "Go ahead.",
+		},
+	}
 	searcher := &fakeSearcherWithMeta{
 		results: []types.SkillSearchResult{
 			minimalCredResult("google_workspace", "vault_gmail_send"),
 		},
 	}
 
-	tool := skillsSearchTool(searcher, "web", true, registry, approvingCS)
+	tool := skillsSearchTool(searcher, "web", true, registry, cs)
 	raw, _ := json.Marshal(map[string]interface{}{"query": "send an email to the team"})
 	result := tool.Execute(nil, raw)
 
@@ -339,28 +446,36 @@ func TestSkillsSearch_CredentialedOutOfDomain_Approved(t *testing.T) {
 	if !strings.Contains(result.Content, "google_workspace") {
 		t.Errorf("approved result should name the approved domain; got: %q", result.Content)
 	}
+	if result.Details["approved"] != true {
+		t.Errorf("expected approved=true in details; got %v", result.Details["approved"])
+	}
+	if result.Details["recommended_action"] != "spawn_agent" {
+		t.Errorf("expected recommended_action=spawn_agent; got %v", result.Details["recommended_action"])
+	}
 }
 
 // TestSkillsSearch_CredentialedOutOfDomain_Denied verifies the post-denial
-// path: after the user denies, the agent receives a message explaining the
-// skill was not authorized and is told to find an alternative or report that
-// the task cannot be completed.
+// path: the agent receives a user-facing explanation; vault_gmail_send is not
+// registered; no internal error.
 func TestSkillsSearch_CredentialedOutOfDomain_Denied(t *testing.T) {
-	t.Skip("TODO: implement credentialed cross-domain user clarification")
-
-	registry := newDynamicRegistry([]SkillTool{webFetchTool()})
-	denyingCS := &autoRespondClarificationSender{approved: false, message: "I don't want the agent sending emails"}
+	registry := newDynamicRegistry([]SkillTool{testWebFetchTool()})
+	cs := &fakeClarificationSender{
+		response: types.ClarificationResponse{
+			Approved:    false,
+			UserMessage: "I don't want the agent sending emails",
+		},
+	}
 	searcher := &fakeSearcherWithMeta{
 		results: []types.SkillSearchResult{
 			minimalCredResult("google_workspace", "vault_gmail_send"),
 		},
 	}
 
-	tool := skillsSearchTool(searcher, "web", true, registry, denyingCS)
+	tool := skillsSearchTool(searcher, "web", true, registry, cs)
 	raw, _ := json.Marshal(map[string]interface{}{"query": "send an email to the team"})
 	result := tool.Execute(nil, raw)
 
-	// Must not error — denial is not an error, it is a policy decision.
+	// Must not error — denial is a policy decision, not an error.
 	if result.IsError {
 		t.Fatalf("denial should not produce an error result: %s", result.Content)
 	}
@@ -372,26 +487,170 @@ func TestSkillsSearch_CredentialedOutOfDomain_Denied(t *testing.T) {
 		}
 	}
 
-	// Response must explain the denial so the agent can try an alternative.
-	if !strings.Contains(result.Content, "not authorized") && !strings.Contains(result.Content, "declined") && !strings.Contains(result.Content, "denied") {
+	// Response must explain the denial.
+	if !strings.Contains(result.Content, "not authorized") &&
+		!strings.Contains(result.Content, "declined") &&
+		!strings.Contains(result.Content, "denied") {
 		t.Errorf("denial response should explain the tool was not authorized; got: %q", result.Content)
+	}
+	if result.Details["denied"] != true {
+		t.Errorf("expected denied=true in details; got %v", result.Details["denied"])
 	}
 }
 
-// autoRespondClarificationSender is a test stub that immediately resolves a
-// ClarificationRequest synchronously. In production, clarification is async
-// (NATS round-trip to the user via the I/O component), but the synchronous
-// stub keeps unit tests deterministic.
-//
-// TODO: this interface implies that skillsSearchTool must block or return a
-// "pending clarification" sentinel until the response arrives. The exact
-// blocking mechanism (channel, callback, or a new ReAct loop phase) is an
-// implementation detail left to the developer.
-type autoRespondClarificationSender struct {
-	approved bool
-	message  string
+// TestSkillsSearch_CredentialedOutOfDomain_NilCS_FallsBackToSpawn verifies
+// that when cs is nil (no clarification sender), the tool falls back to the
+// legacy spawn_agent recommendation rather than panicking.
+func TestSkillsSearch_CredentialedOutOfDomain_NilCS_FallsBackToSpawn(t *testing.T) {
+	registry := newDynamicRegistry([]SkillTool{testWebFetchTool()})
+	searcher := &fakeSearcherWithMeta{
+		results: []types.SkillSearchResult{
+			minimalCredResult("google_workspace", "vault_gmail_send"),
+		},
+	}
+
+	tool := skillsSearchTool(searcher, "web", true, registry, nil)
+	raw, _ := json.Marshal(map[string]interface{}{"query": "send an email"})
+	result := tool.Execute(nil, raw)
+
+	if result.IsError {
+		t.Fatalf("unexpected error with nil cs: %s", result.Content)
+	}
+	if result.Details["recommended_action"] != "spawn_agent" {
+		t.Errorf("expected spawn_agent fallback with nil cs, got %v", result.Details["recommended_action"])
+	}
 }
 
-func (a *autoRespondClarificationSender) SendClarification(req types.ClarificationRequest) {
-	// no-op in stub — the response is injected via the tool's return value
+// TestSkillsSearch_CredentialedOutOfDomain_ClarificationError treats a
+// SendClarification error as an implicit denial — the agent is told to find
+// an alternative, but the result is not marked IsError.
+func TestSkillsSearch_CredentialedOutOfDomain_ClarificationError(t *testing.T) {
+	registry := newDynamicRegistry([]SkillTool{testWebFetchTool()})
+	cs := &fakeClarificationSender{
+		err: fmt.Errorf("timed out waiting for user response"),
+	}
+	searcher := &fakeSearcherWithMeta{
+		results: []types.SkillSearchResult{
+			minimalCredResult("google_workspace", "vault_gmail_send"),
+		},
+	}
+
+	tool := skillsSearchTool(searcher, "web", true, registry, cs)
+	raw, _ := json.Marshal(map[string]interface{}{"query": "send email"})
+	result := tool.Execute(nil, raw)
+
+	// Not an IsError — it is a graceful message.
+	if result.IsError {
+		t.Fatalf("clarification error should produce graceful message, not IsError: %s", result.Content)
+	}
+	if result.Details["clarification_error"] == nil {
+		t.Error("expected clarification_error in details")
+	}
+}
+
+// ─── Nil-safety for SendClarification ────────────────────────────────────────
+
+// ─── RunLoop bootstrap wiring ─────────────────────────────────────────────────
+
+// TestLoopBootstrap_SkillsSearchUpgrade verifies the two-phase bootstrap used
+// in RunLoop:
+//  1. toolsForDomain builds an initial tool list containing a nil-registry skills_search.
+//  2. newDynamicRegistry wraps that list.
+//  3. registry.Replace swaps in an upgraded, registry-aware skills_search.
+//  4. The upgraded tool auto-registers a credential-free cross-domain skill,
+//     proving the replacement (not the original) is the one the loop dispatches.
+func TestLoopBootstrap_SkillsSearchUpgrade(t *testing.T) {
+	// Step 1 & 2 — mirror RunLoop's bootstrap.
+	tools := toolsForDomain("web", nil, nil, nil)
+	registry := newDynamicRegistry(tools)
+
+	// Confirm skills_search is present after toolsForDomain.
+	found := false
+	for _, rt := range registry.Tools() {
+		if rt.Definition.Name == "skills_search" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("skills_search must be in registry after toolsForDomain")
+	}
+
+	// Step 3 — mirror RunLoop's upgrade call.
+	sr := &fakeSearcherWithMeta{results: []types.SkillSearchResult{
+		minimalCredFreeResult("e2e_test", "e2e_ping", "e2e_ping"),
+	}}
+	upgraded := skillsSearchTool(sr, "web", false, registry, nil)
+	if err := registry.Replace("skills_search", upgraded); err != nil {
+		t.Fatalf("registry.Replace(skills_search): %v", err)
+	}
+
+	// Step 4 — execute the replaced tool through the registry to prove the
+	// upgrade is live. The original (nil-registry) version cannot auto-register;
+	// the upgraded version can. Successful auto-registration of e2e_ping means
+	// the replacement is the one being dispatched.
+	var search SkillTool
+	for _, rt := range registry.Tools() {
+		if rt.Definition.Name == "skills_search" {
+			search = rt
+			break
+		}
+	}
+	raw, _ := json.Marshal(map[string]interface{}{"query": "automated e2e probe"})
+	result := search.Execute(nil, raw)
+	if result.IsError {
+		t.Fatalf("upgraded skills_search: unexpected error: %s", result.Content)
+	}
+
+	// If the upgrade worked, e2e_ping must now be in the registry.
+	pingRegistered := false
+	for _, rt := range registry.Tools() {
+		if rt.Definition.Name == "e2e_ping" {
+			pingRegistered = true
+			break
+		}
+	}
+	if !pingRegistered {
+		t.Error("bootstrap wiring failed: e2e_ping was not auto-registered, indicating skills_search was not upgraded (nil-registry version was not replaced)")
+	}
+	if result.Details["auto_registered"] != true {
+		t.Errorf("expected auto_registered=true in details; got %v", result.Details["auto_registered"])
+	}
+}
+
+// TestLoopBootstrap_ReplaceFailsGracefully verifies that if registry.Replace
+// were to fail (e.g. skills_search missing from the initial tool list), it
+// does not panic — it returns an error that the caller can log and continue
+// with the original (non-upgraded) version. This mirrors the log.Warn path in
+// RunLoop.
+func TestLoopBootstrap_ReplaceFailsGracefully(t *testing.T) {
+	// Build a registry without skills_search (simulates a missing base tool).
+	registry := newDynamicRegistry([]SkillTool{taskCompleteTool()})
+
+	sr := &fakeSearcherWithMeta{}
+	upgraded := skillsSearchTool(sr, "web", false, registry, nil)
+	err := registry.Replace("skills_search", upgraded)
+	if err == nil {
+		t.Error("expected error when replacing a tool not in registry, got nil")
+	}
+	// Registry contents must be unchanged.
+	if len(registry.Tools()) != 1 {
+		t.Errorf("registry must be unchanged after failed Replace; got %d tools", len(registry.Tools()))
+	}
+}
+
+// ─── Nil-safety for SendClarification ────────────────────────────────────────
+
+// TestSessionLog_SendClarification_NilSafe verifies that calling SendClarification
+// on a nil *SessionLog returns an error and does not panic.
+func TestSessionLog_SendClarification_NilSafe(t *testing.T) {
+	var sl *SessionLog
+	_, err := sl.SendClarification(types.ClarificationRequest{
+		RequestID:   "test-id",
+		SkillName:   "some_skill",
+		SkillDomain: "some_domain",
+	})
+	if err == nil {
+		t.Error("expected error from nil SessionLog.SendClarification, got nil")
+	}
 }

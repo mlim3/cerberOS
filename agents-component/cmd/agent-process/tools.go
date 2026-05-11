@@ -108,7 +108,12 @@ func toolsForDomain(domain string, ve *VaultExecutor, as *AgentSpawner, sl Skill
 		"skill_searcher_available", sl != nil,
 	)
 
-	base := []SkillTool{taskCompleteTool(), skillsSearchTool(sl, domain, as != nil)}
+	// skills_search is built here with nil registry and cs. After the DynamicRegistry
+	// is created in loop.go, skills_search is replaced with a registry-aware version
+	// via registry.Replace("skills_search", ...) that enables cross-domain
+	// auto-registration and user clarification. The nil values here are intentional —
+	// they keep toolsForDomain free of the registry/cs dependency at construction time.
+	base := []SkillTool{taskCompleteTool(), skillsSearchTool(sl, domain, as != nil, nil, nil)}
 	if as != nil {
 		base = append(base, spawnAgentTool(as))
 	}

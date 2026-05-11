@@ -116,6 +116,13 @@ type SkillNode struct {
 	RequiredCredentialTypes []string `json:"required_credential_types,omitempty"` // empty = no vault execution needed
 	TimeoutSeconds          int      `json:"timeout_seconds,omitempty"`           // 0 = default (30s); hard max 300s
 
+	// Implementation is the builtinRegistry key used by the agent-process to
+	// look up the concrete SkillTool factory at runtime. Set only on command-level
+	// nodes for static skills; empty for synthesized skills that use an LLM recipe.
+	// Populated by skillsconfig.ToSkillNodes() and stored in the skill_cache payload
+	// so the agent can auto-register credential-free tools discovered via skills_search.
+	Implementation string `json:"implementation,omitempty"`
+
 	// Origin and SynthesizedAt are set by the skill synthesis pipeline.
 	// Static skills loaded from config carry Origin "" (zero value).
 	Origin        string     `json:"origin,omitempty"`         // "static" | "synthesized"

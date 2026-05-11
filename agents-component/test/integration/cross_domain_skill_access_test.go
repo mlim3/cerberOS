@@ -73,14 +73,13 @@ func TestNATS_CrossDomainCredFree_CompletesWithoutSpawn(t *testing.T) {
 
 	spec := types.TaskSpec{
 		TaskID:         fmt.Sprintf("e2e-cdfree-%d", time.Now().UnixNano()),
-		RequiredSkills: []string{"general"},
-		// Task is deliberately vague so the planner routes to "general" and the
-		// agent must use skills_search to discover e2e_ping.
-		Instructions: fmt.Sprintf(
-			`Run an automated e2e connectivity probe with identifier "cdfree-integ-test". `+
-				`Use skills_search to find the right tool. `+
-				`Return the probe result.`,
-		),
+		RequiredSkills: []string{"web"},
+		// Agent is provisioned for "web" only. e2e_ping lives in "e2e_test" domain,
+		// so the agent must use skills_search to discover it. With auto-registration
+		// the agent should call e2e_ping directly without spawning a child.
+		Instructions: `Run an automated e2e connectivity probe with identifier "cdfree-integ-test". ` +
+			`Use skills_search to find the right tool. ` +
+			`Return the probe result.`,
 	}
 	if err := h.partner.publishTaskInbound(spec); err != nil {
 		t.Fatalf("publishTaskInbound: %v", err)
@@ -101,7 +100,7 @@ func TestNATS_CrossDomainCredFree_CompletesWithoutSpawn(t *testing.T) {
 	// agent for e2e_test, which is the wasteful pre-fix behavior.
 	//
 	// We drain the credential request channel and check how many were issued.
-	// Exactly one is expected: the initial general-domain credential at spawn.
+	// Exactly one is expected: the initial web-domain credential at spawn.
 	credRequestCount := 0
 	drain := time.After(500 * time.Millisecond)
 drainLoop:

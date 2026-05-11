@@ -40,7 +40,7 @@ func TestToolsForDomain_IncludesSkillsSearch(t *testing.T) {
 }
 
 func TestSkillsSearchTool_EmptyQueryReturnsError(t *testing.T) {
-	tool := skillsSearchTool(&fakeSearcher{}, "web", false)
+	tool := skillsSearchTool(&fakeSearcher{}, "web", false, nil, nil)
 
 	raw, _ := json.Marshal(map[string]interface{}{"query": ""})
 	result := tool.Execute(nil, raw)
@@ -51,7 +51,7 @@ func TestSkillsSearchTool_EmptyQueryReturnsError(t *testing.T) {
 }
 
 func TestSkillsSearchTool_NilSearcherReturnsUnavailable(t *testing.T) {
-	tool := skillsSearchTool(nil, "web", false)
+	tool := skillsSearchTool(nil, "web", false, nil, nil)
 
 	raw, _ := json.Marshal(map[string]interface{}{"query": "fetch a URL"})
 	result := tool.Execute(nil, raw)
@@ -65,7 +65,7 @@ func TestSkillsSearchTool_NilSearcherReturnsUnavailable(t *testing.T) {
 }
 
 func TestSkillsSearchTool_NoResultsReturnsNotFound(t *testing.T) {
-	tool := skillsSearchTool(&fakeSearcher{results: nil}, "web", false)
+	tool := skillsSearchTool(&fakeSearcher{results: nil}, "web", false, nil, nil)
 
 	raw, _ := json.Marshal(map[string]interface{}{"query": "something obscure"})
 	result := tool.Execute(nil, raw)
@@ -84,7 +84,7 @@ func TestSkillsSearchTool_TopKRespected(t *testing.T) {
 		{Domain: "web", Name: "web_parse", Description: "Parse HTML"},
 		{Domain: "data", Name: "data_query", Description: "Query data"},
 	}}
-	tool := skillsSearchTool(sr, "web", false)
+	tool := skillsSearchTool(sr, "web", false, nil, nil)
 
 	raw, _ := json.Marshal(map[string]interface{}{"query": "fetch URL", "top_k": 1})
 	result := tool.Execute(nil, raw)
@@ -102,7 +102,7 @@ func TestSkillsSearchTool_CrossDomainSuggestsSpawnAgent(t *testing.T) {
 	sr := &fakeSearcher{results: []types.SkillSearchResult{
 		{Domain: "web", Name: "web_fetch", Description: "Fetch a public URL"},
 	}}
-	tool := skillsSearchTool(sr, "general", true)
+	tool := skillsSearchTool(sr, "general", true, nil, nil)
 
 	raw, _ := json.Marshal(map[string]interface{}{"query": "fetch a public URL"})
 	result := tool.Execute(nil, raw)
@@ -121,7 +121,7 @@ func TestSkillsSearchTool_CrossDomainReturnsSpawnInstructions(t *testing.T) {
 	sr := &fakeSearcher{results: []types.SkillSearchResult{
 		{Domain: "web", Name: "web_fetch", Description: "Fetch a public URL"},
 	}}
-	tool := skillsSearchTool(sr, "general", true)
+	tool := skillsSearchTool(sr, "general", true, nil, nil)
 
 	raw, _ := json.Marshal(map[string]interface{}{"query": "fetch a public URL"})
 	result := tool.Execute(nil, raw)
@@ -151,7 +151,7 @@ func TestSkillsSearchTool_WithinDomainStaysDirect(t *testing.T) {
 	sr := &fakeSearcher{results: []types.SkillSearchResult{
 		{Domain: "web", Name: "web_fetch", Description: "Fetch a public URL"},
 	}}
-	tool := skillsSearchTool(sr, "web", true)
+	tool := skillsSearchTool(sr, "web", true, nil, nil)
 
 	raw, _ := json.Marshal(map[string]interface{}{"query": "fetch a public URL"})
 	result := tool.Execute(nil, raw)

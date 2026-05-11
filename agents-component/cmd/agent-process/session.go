@@ -46,6 +46,12 @@ const (
 // state.read.response before giving up.
 const sessionReadTimeout = 5 * time.Second
 
+// clarificationTimeout is the maximum time SendClarification waits for a
+// clarification.response from the Orchestrator (and therefore the user).
+// It is intentionally long — the user must have time to read the question
+// and decide before the agent gives up and treats the request as denied.
+const clarificationTimeout = 120 * time.Second
+
 // logsReadTimeout is the maximum time ReadSystemLogs waits for a
 // state.read.response before giving up. Slightly longer than sessionReadTimeout
 // because log queries may involve Memory Component DB lookups.
@@ -865,6 +871,134 @@ func (sl *SessionLog) SearchSkills(query string, topK int) []types.SkillSearchRe
 		"query_preview", logfields.PreviewWords(query, 20, 180),
 	)
 	return nil
+}
+
+// SendClarification publishes a clarification.request to the Orchestrator and
+// blocks until a matching clarification.response arrives or clarificationTimeout
+// elapses. It follows the subscribe-before-publish pattern used by SearchSkills
+// to avoid missing the response if the Orchestrator is fast.
+//
+// AgentID and TaskID are populated from sl's session context if not already set
+// on req. The caller (tools_skills_search.go) sets RequestID, SkillName,
+// SkillDomain, Question, and Reason before calling.
+//
+// SendClarification is nil-safe; when sl is nil it returns an error immediately
+// so callers receive a graceful "clarification unavailable" failure.
+func (sl *SessionLog) SendClarification(req types.ClarificationRequest) (types.ClarificationResponse, error) {
+	if sl == nil {
+		return types.ClarificationResponse{}, fmt.Errorf("clarification unavailable (session log is nil)")
+	}
+
+	// Fill session-scoped fields if not set by the caller.
+	if req.AgentID == "" {
+		req.AgentID = sl.agentID
+	}
+	if req.TaskID == "" {
+		req.TaskID = sl.taskID
+	}
+	if req.RequestID == "" {
+		req.RequestID = newUUID()
+	}
+
+	// Subscribe to clarification.response BEFORE publishing the request to
+	// avoid the race where the Orchestrator replies faster than we subscribe.
+	sub, err := sl.js.SubscribeSync(
+		comms.SubjectClarificationResponse,
+		nats.DeliverNew(),
+		nats.AckNone(),
+	)
+	if err != nil {
+		sl.log.Warn("clarification: subscribe to clarification.response failed",
+			"request_id", req.RequestID,
+			"error", err,
+		)
+		return types.ClarificationResponse{}, fmt.Errorf("clarification: subscribe failed: %w", err)
+	}
+	defer func() { _ = sub.Unsubscribe() }()
+
+	// Publish the clarification.request to the Orchestrator.
+	env := agentEnvelope{
+		MessageID:       newUUID(),
+		MessageType:     comms.MsgTypeClarificationRequest,
+		SourceComponent: "agents",
+		CorrelationID:   req.RequestID,
+		TraceID:         req.RequestID,
+		Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
+		SchemaVersion:   "1.0",
+		Payload:         req,
+	}
+	data, err := json.Marshal(env)
+	if err != nil {
+		return types.ClarificationResponse{}, fmt.Errorf("clarification: marshal request failed: %w", err)
+	}
+	if _, err := sl.js.Publish(comms.SubjectClarificationRequest, data); err != nil {
+		return types.ClarificationResponse{}, fmt.Errorf("clarification: publish failed: %w", err)
+	}
+
+	sl.log.Info("clarification: request published; waiting for user response",
+		"request_id", req.RequestID,
+		"skill_name", req.SkillName,
+		"skill_domain", req.SkillDomain,
+		"timeout", clarificationTimeout,
+	)
+
+	// Wait for a matching clarification.response.
+	messagesReceived := 0
+	deadline := time.Now().Add(clarificationTimeout)
+	for time.Now().Before(deadline) {
+		msg, err := sub.NextMsg(time.Until(deadline))
+		if err != nil {
+			sl.log.Info("clarification: done waiting for response",
+				"request_id", req.RequestID,
+				"messages_received", messagesReceived,
+				"error", err,
+			)
+			break
+		}
+		messagesReceived++
+
+		var envelope struct {
+			Payload json.RawMessage `json:"payload"`
+		}
+		if err := json.Unmarshal(msg.Data, &envelope); err != nil {
+			sl.log.Warn("clarification: unmarshal envelope failed",
+				"request_id", req.RequestID,
+				"error", err,
+			)
+			continue
+		}
+
+		var resp types.ClarificationResponse
+		if err := json.Unmarshal(envelope.Payload, &resp); err != nil {
+			sl.log.Warn("clarification: unmarshal response payload failed",
+				"request_id", req.RequestID,
+				"error", err,
+			)
+			continue
+		}
+
+		// Filter: only our own request's response.
+		if resp.RequestID != req.RequestID {
+			sl.log.Info("clarification: received response for different request; skipping",
+				"want_request_id", req.RequestID,
+				"got_request_id", resp.RequestID,
+			)
+			continue
+		}
+
+		sl.log.Info("clarification: response received",
+			"request_id", req.RequestID,
+			"approved", resp.Approved,
+		)
+		return resp, nil
+	}
+
+	sl.log.Warn("clarification: timed out waiting for user response",
+		"request_id", req.RequestID,
+		"messages_received", messagesReceived,
+		"timeout", clarificationTimeout,
+	)
+	return types.ClarificationResponse{}, fmt.Errorf("clarification: timed out waiting for user response")
 }
 
 // extractSessionEntries unpacks MemoryWrite.Payload into SessionEntry values.

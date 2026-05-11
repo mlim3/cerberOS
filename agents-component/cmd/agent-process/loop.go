@@ -143,6 +143,15 @@ type toolOutcome struct {
 // RunLoop returns the final task result, the final history slice (for the caller
 // to thread through the warm process-reuse loop), and any error.
 func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *VaultExecutor, steerer *Steerer, as *AgentSpawner, budget *skills.SpecBudget, priorTurns []anthropic.MessageParam, opts ...option.RequestOption) (string, []anthropic.MessageParam, error) {
+	// Fail fast when the task was pre-authorized with credentials but vault is
+	// unreachable. A non-empty PermissionToken means the Orchestrator issued a
+	// scoped token for this task — continuing without vault would silently drop
+	// all credentialed tools, leaving the agent unable to complete the task with
+	// no user-visible explanation.
+	if ve == nil && spawnCtx.PermissionToken != "" {
+		return "", nil, fmt.Errorf("vault unavailable: task was pre-authorized with credentials but the vault executor could not connect (NATS unreachable or env vars missing) — credentialed tools cannot be executed")
+	}
+
 	apiKey := os.Getenv("ANTHROPIC_API_KEY")
 	if apiKey == "" {
 		return "", nil, fmt.Errorf("ANTHROPIC_API_KEY environment variable is not set")
@@ -189,6 +198,17 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 	// a reference to it so newly loaded skills become available on the next
 	// Reason phase without restarting the agent.
 	registry := newDynamicRegistry(tools)
+
+	// Upgrade skills_search with a registry-aware version that can:
+	//   1. Auto-register credential-free static tools discovered cross-domain.
+	//   2. Send a user clarification request for credentialed cross-domain tools.
+	// The plain version built by toolsForDomain had no registry reference because
+	// the registry did not exist yet (chicken-and-egg). Replace it now.
+	upgradedSearch := skillsSearchTool(sl, spawnCtx.SkillDomain, as != nil, registry, sl)
+	if err := registry.Replace("skills_search", upgradedSearch); err != nil {
+		log.Warn("skills_search upgrade failed; falling back to non-registry-aware version", "error", err)
+	}
+
 	if err := registry.Register(skillLoadTool(registry, sl, spawnCtx.SkillLoadAllowed)); err != nil {
 		log.Warn("skill_load tool registration failed", "error", err)
 	}
