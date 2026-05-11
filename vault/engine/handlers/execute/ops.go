@@ -35,6 +35,16 @@ func dispatchOperation(ctx context.Context, operationType, credential string, pa
 		return execGmailSend(ctx, credential, params)
 	case "vault_gmail_calendar_invite":
 		return execGmailCalendarInvite(ctx, credential, params)
+	case "vault_gmail_search":
+		return execGmailSearch(ctx, credential, params)
+	case "vault_gmail_get_message":
+		return execGmailGetMessage(ctx, credential, params)
+	case "vault_calendar_list_events":
+		return execCalendarListEvents(ctx, credential, params)
+	case "vault_gmail_send_oauth":
+		return execGmailSendOAuth(ctx, credential, params)
+	case "vault_calendar_create_event":
+		return execCalendarCreateEventOAuth(ctx, credential, params)
 	case "vault_data_read":
 		return opResult{err: fmt.Errorf("vault_data_read not yet implemented"), code: ErrCodeUnsupportedOp}
 	case "vault_data_write":
@@ -198,7 +208,7 @@ func httpRequest(ctx context.Context, method, rawURL string, headers map[string]
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	if body != nil {
+	if body != nil && req.Header.Get("Content-Type") == "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
 

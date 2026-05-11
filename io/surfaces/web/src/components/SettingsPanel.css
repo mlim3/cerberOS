@@ -214,3 +214,35 @@
   color: var(--text-primary);
   font-weight: 600;
 }
+
+.settings-connect-btn,
+.settings-disconnect-btn {
+  margin-top: 6px;
+  padding: 6px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--border-color, #444);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.settings-connect-btn {
+  background: var(--accent, #4f8ef7);
+  color: #fff;
+}
+
+.settings-disconnect-btn {
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.settings-status-ok {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: #4caf50;
+}
+
+.settings-status-error {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: #e57373;
+}

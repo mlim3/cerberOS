@@ -58,8 +58,14 @@ var builtinRegistry = map[string]ToolFactory{
 	"local_file_read":  func(_ *VaultExecutor) SkillTool { return localFileReadTool() },
 	"local_file_write": func(_ *VaultExecutor) SkillTool { return localFileWriteTool() },
 
-	// google_workspace domain (FP-Stefan) — Gmail SMTP via App Password
-	// (no OAuth, no Cloud Console). Calendar uses .ics email invites.
+	// google_workspace domain — SMTP/App-Password tools (write)
 	"vault_gmail_send":            func(ve *VaultExecutor) SkillTool { return vaultGmailSendTool(ve) },
 	"vault_gmail_calendar_invite": func(ve *VaultExecutor) SkillTool { return vaultGmailCalendarInviteTool(ve) },
+
+	// google_workspace domain — OAuth tools (read + write via Google API)
+	"vault_gmail_search":           func(ve *VaultExecutor) SkillTool { return vaultGmailSearchTool(ve) },
+	"vault_gmail_get_message":      func(ve *VaultExecutor) SkillTool { return vaultGmailGetMessageTool(ve) },
+	"vault_calendar_list_events":   func(ve *VaultExecutor) SkillTool { return vaultCalendarListEventsTool(ve) },
+	"vault_gmail_send_oauth":       func(ve *VaultExecutor) SkillTool { return vaultGmailSendOAuthTool(ve) },
+	"vault_calendar_create_event":  func(ve *VaultExecutor) SkillTool { return vaultCalendarCreateEventTool(ve) },
 }

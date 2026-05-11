@@ -263,6 +263,9 @@ func isSystemSharedCredential(credentialType string) bool {
 	switch credentialType {
 	case "gmail_app_password":
 		return true
+	// google_oauth is per-user — each user connects their own Google account.
+	case "google_oauth":
+		return false
 	}
 	return false
 }
@@ -290,7 +293,12 @@ func isSupportedOperation(operationType string) bool {
 		"vault_storage_write",
 		"vault_storage_list",
 		"vault_gmail_send",
-		"vault_gmail_calendar_invite":
+		"vault_gmail_calendar_invite",
+		"vault_gmail_search",
+		"vault_gmail_get_message",
+		"vault_calendar_list_events",
+		"vault_gmail_send_oauth",
+		"vault_calendar_create_event":
 		return true
 	default:
 		return false

@@ -477,5 +477,115 @@ domains:
             required: true
             description: "Relative path within the user's data directory. The prefix '~/' is treated as the user's home dir."
 
+  - name: google_workspace
+    commands:
+      # google_oauth credential is a per-user JSON blob stored in OpenBao under
+      # users/<user_id>/credentials/google_oauth: {email, access_token, refresh_token, expires_at}
+      # Configured by the manager via the Admin UI → "Google Workspace (OAuth)" section.
+
+      - name: gmail_search
+        label: 'Gmail Search'
+        description: 'Search Gmail messages using the Gmail API with OAuth. Returns message IDs, senders, subjects, and snippets. Do NOT use for sending email — use gmail_send. Do NOT include credentials in any parameter.'
+        implementation: vault_gmail_search
+        required_credential_types: [google_oauth]
+        timeout_seconds: 30
+        parameters:
+          - name: query
+            type: string
+            required: true
+            description: 'Gmail search query string. Supports full Gmail syntax (e.g. "from:boss budget", "subject:invoice is:unread", "has:attachment after:2026/01/01").'
+          - name: max_results
+            type: integer
+            required: false
+            description: 'Maximum number of messages to return (default 10, max 50).'
+
+      - name: gmail_get_message
+        label: 'Gmail Get Message'
+        description: 'Fetch the full body, headers, and attachment names of a Gmail message by its ID. Use after gmail_search to read message content. Do NOT use for searching — use gmail_search instead.'
+        implementation: vault_gmail_get_message
+        required_credential_types: [google_oauth]
+        timeout_seconds: 30
+        parameters:
+          - name: message_id
+            type: string
+            required: true
+            description: 'Gmail message ID as returned by gmail_search (the "id" field in each result).'
+
+      - name: calendar_list_events
+        label: 'Calendar List Events'
+        description: 'List upcoming Google Calendar events via the Calendar API with OAuth. Returns event titles, times, descriptions, and attendees. Do NOT use for creating events — use calendar_create_event. Do NOT include credentials in params.'
+        implementation: vault_calendar_list_events
+        required_credential_types: [google_oauth]
+        timeout_seconds: 30
+        parameters:
+          - name: max_results
+            type: integer
+            required: false
+            description: 'Maximum number of events to return (default 10, max 50).'
+          - name: time_min
+            type: string
+            required: false
+            description: 'Start of time range as ISO 8601 datetime (e.g. "2026-05-09T00:00:00Z"). Defaults to now.'
+          - name: time_max
+            type: string
+            required: false
+            description: 'End of time range as ISO 8601 datetime (e.g. "2026-05-16T23:59:59Z"). Defaults to 7 days from now.'
+          - name: calendar_id
+            type: string
+            required: false
+            description: "Calendar ID to query. Omit or pass 'primary' for the user's primary calendar."
+
+      - name: gmail_send
+        label: "Gmail Send (OAuth)"
+        description: "Send a plain-text email via the Gmail API using the user's connected Google account. Use whenever the user asks to send an email to a specific address. Do NOT use for calendar invites — use calendar_create_event. Do NOT include credentials in params."
+        implementation: vault_gmail_send_oauth
+        required_credential_types: [google_oauth]
+        timeout_seconds: 40
+        parameters:
+          - name: to
+            type: string
+            required: true
+            description: 'Recipient email address.'
+          - name: subject
+            type: string
+            required: true
+            description: 'Email subject line.'
+          - name: body
+            type: string
+            required: true
+            description: 'Plain-text email body.'
+
+      - name: calendar_create_event
+        label: 'Calendar Create Event (OAuth)'
+        description: "Create a Google Calendar event using the user's connected Google account. Use when the user asks to add, schedule, or create a calendar event. Do NOT use for sending non-event emails — use gmail_send."
+        implementation: vault_calendar_create_event
+        required_credential_types: [google_oauth]
+        timeout_seconds: 40
+        parameters:
+          - name: title
+            type: string
+            required: true
+            description: 'Event title / summary.'
+          - name: start
+            type: string
+            required: true
+            description: "ISO 8601 start datetime (e.g. '2026-05-12T17:00:00-07:00')."
+          - name: end
+            type: string
+            required: true
+            description: "ISO 8601 end datetime, same format as start."
+          - name: description
+            type: string
+            required: false
+            description: 'Optional event description or agenda.'
+          - name: location
+            type: string
+            required: false
+            description: 'Optional location (address or video link).'
+          - name: calendar_id
+            type: string
+            required: false
+            description: "Calendar to add the event to. Omit or use 'primary' for the user's main calendar."
+
   - name: general
     commands: []

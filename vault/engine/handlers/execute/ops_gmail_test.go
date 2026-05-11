@@ -154,7 +154,8 @@ func TestBuildICSContainsRequiredFields(t *testing.T) {
 }
 
 func TestBuildCalendarInviteEmailIsMultipart(t *testing.T) {
-	msg := buildCalendarInviteEmail("from@gmail.com", "to@gmail.com", "Title", "Body", "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n")
+	now := time.Now()
+	msg := buildCalendarInviteEmail("from@gmail.com", "to@gmail.com", "Title", "Body", "", "", "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n", now, now.Add(time.Hour))
 	s := string(msg)
 	if !strings.Contains(s, "multipart/alternative") {
 		t.Error("expected multipart/alternative content type")

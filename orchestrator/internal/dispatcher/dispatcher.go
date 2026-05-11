@@ -1476,7 +1476,7 @@ func taskKindForPlannerSpec(maintenance bool) string {
 // allSkillDomains is the full set of registered skill domains in the agents component.
 // Used as the fallback when the task's policy scope carries no domain restrictions
 // (empty Domains = "any domain permitted"). Must stay in sync with default_skills.yaml.
-var allSkillDomains = []string{"web", "data", "comms", "storage", "logs", "google_search", "github", "general"}
+var allSkillDomains = []string{"web", "data", "comms", "storage", "logs", "google_search", "github", "local_files", "google_workspace", "general"}
 
 // buildDecompositionInstructionsWithFacts renders the planner prompt with an
 // optional list of user facts (from personal_info via the Memory service).
@@ -1538,7 +1538,7 @@ func buildDecompositionInstructionsWithFacts(taskID, rawInput string, scope type
 			"- Do not invent new skill domain names outside the allowed list\n"+
 			"- Use an empty array for depends_on when a subtask has no dependencies\n"+
 			"- Keep the plan concise and executable\n"+
-			"Skill domain guide: use \"web\" for fetch/parse/extract of known URLs AND for AI web search (web.web_search via Tavily, no Google account needed), \"data\" for transforms/reads/writes, \"comms\" for messaging, \"storage\" for file operations, \"logs\" for log queries, \"google_search\" for explicitly Google-API-backed search, \"github\" for GitHub API calls, \"local_files\" for reading/writing files in the user's home (notes, journal, etc. — paths starting with ~/ map to per-user storage), \"general\" for reasoning/summarization with no external tools.\n"+
+			"Skill domain guide: use \"web\" for fetch/parse/extract of known URLs AND for AI web search (web.web_search via Tavily, no Google account needed), \"data\" for transforms/reads/writes, \"comms\" for messaging, \"storage\" for file operations, \"logs\" for log queries, \"google_search\" for explicitly Google-API-backed search, \"github\" for GitHub API calls, \"local_files\" for reading/writing files in the user's home (notes, journal, etc. — paths starting with ~/ map to per-user storage), \"google_workspace\" for Gmail search/read (gmail_search, gmail_get_message) and Google Calendar access (calendar_list_events) — requires the user to have connected their Google account via OAuth, \"general\" for reasoning/summarization with no external tools.\n"+
 			"- For ANY task that requires real-world or current information (events this weekend, weather, news, prices, hours, addresses, etc.), include AT LEAST one subtask in the \"web\" domain — web.web_search composes well across topics.\n"+
 			"- Multi-fact tasks (e.g. \"events this weekend AND weather AND what to wear\") MUST be decomposed into one web.web_search subtask per fact dimension followed by a final \"general\" subtask that composes the answer. Independent search subtasks have empty depends_on so they run in parallel; only the composer subtask depends on them.\n"+
 			"- Prefer \"google_search\" over \"web\" only when the user explicitly asks for Google or when the system has Google search configured AND web.web_search is unavailable; otherwise default to \"web\" because Tavily is bootstrap-seeded and works out of the box.\n"+
