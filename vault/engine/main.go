@@ -26,6 +26,7 @@ func main() {
 	auditor := audit.New(audit.NewJSONExporter(os.Stdout))
 
 	manager := secretmanager.NewOpenBaoSecretManager(auditor)
+	seedBootstrapSecrets(manager, auditor)
 	pp := preprocessor.New(manager, auditor)
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).
@@ -84,4 +85,40 @@ func main() {
 		os.Exit(1)
 	}
 	logger.Info("vault http server stopped cleanly after shutdown signal")
+}
+
+// seedBootstrapSecrets writes operator-level shared secrets from environment
+// variables into OpenBao on startup. These are platform-wide keys (e.g. Tavily)
+// that apply to all users; they are only written when the env var is non-empty
+// and the key is not already present, so restarts are idempotent.
+func seedBootstrapSecrets(manager secretmanager.SecretManager, auditor *audit.Logger) {
+	seeds := map[string]string{
+		// Store at the bare credential_type key ("search_api_key") so the
+		// system-shared fallback in execute.go resolves it for all users.
+		execute.CredentialTypeSearchAPIKey: os.Getenv("TAVILY_API_KEY"),
+	}
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).
+		With("component", "vault", "module", "bootstrap")
+	ctx := context.Background()
+	for key, val := range seeds {
+		if val == "" {
+			logger.Info("bootstrap secret not set; skipping", "key", key)
+			continue
+		}
+		existing, err := manager.GetSecrets([]string{key})
+		if err == nil && existing[key] != "" {
+			logger.Info("bootstrap secret already present in openbao; skipping write", "key", key)
+			continue
+		}
+		if err := manager.PutSecret(ctx, key, val); err != nil {
+			logger.Warn("failed to seed bootstrap secret into openbao", "key", key, "error", err)
+			continue
+		}
+		auditor.Log(audit.Event{
+			Kind:    audit.KindSecretAccess,
+			Keys:    []string{key},
+			Message: "bootstrap: seeded shared operator secret into openbao",
+		})
+		logger.Info("seeded bootstrap secret into openbao", "key", key)
+	}
 }

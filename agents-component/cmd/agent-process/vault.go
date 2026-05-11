@@ -501,13 +501,14 @@ func (ve *VaultExecutor) Execute(ctx context.Context, operationType, credentialT
 				"operation_type": req.OperationType,
 				"error_code":     vaultResult.ErrorCode,
 			})
-			// When the vault reports a missing credential, ask the user to supply
-			// it via IO and then poll until it appears.
-			// Skip if we're already inside a credential-retry loop (prevents recursion).
-			if vaultResult.ErrorCode == "MISSING_CREDENTIAL" && !isCredentialRetryCtx(ctx) {
-				if retried := ve.requestCredentialAndRetry(ctx, req.OperationType, credentialType, operationParams, timeoutSeconds, onUpdate, toolCallEntryID); retried != nil {
-					return *retried
-				}
+		}
+		// When the vault reports a missing credential (either legacy scope_violation+MISSING_CREDENTIAL
+		// or the post-PR-177 execution_error+CREDENTIAL_UNAVAILABLE), ask the user to supply
+		// it via IO and then poll until it appears.
+		// Skip if we're already inside a credential-retry loop (prevents recursion).
+		if isMissingCredentialError(vaultResult) && !isCredentialRetryCtx(ctx) {
+			if retried := ve.requestCredentialAndRetry(ctx, req.OperationType, credentialType, operationParams, timeoutSeconds, onUpdate, toolCallEntryID); retried != nil {
+				return *retried
 			}
 		}
 		result := vaultResultToToolResult(vaultResult)
@@ -598,6 +599,21 @@ func withCredentialRetryCtx(ctx context.Context) context.Context {
 
 func isCredentialRetryCtx(ctx context.Context) bool {
 	return ctx.Value(credentialRetryKey{}) != nil
+}
+
+// isMissingCredentialError returns true for vault results that indicate a
+// credential is absent — covers the legacy scope_violation+MISSING_CREDENTIAL
+// code and the post-PR-177 execution_error+CREDENTIAL_UNAVAILABLE code emitted
+// by vault engine execute.go after the error-code normalisation change.
+func isMissingCredentialError(r types.VaultOperationResult) bool {
+	return (r.Status == "scope_violation" && r.ErrorCode == "MISSING_CREDENTIAL") ||
+		(r.Status == "execution_error" && r.ErrorCode == "CREDENTIAL_UNAVAILABLE")
+}
+
+// isMissingCredentialCode returns true for an error_code string that represents
+// an absent credential (used in the poll loop where only the code is available).
+func isMissingCredentialCode(code string) bool {
+	return code == "MISSING_CREDENTIAL" || code == "CREDENTIAL_UNAVAILABLE"
 }
 
 // credentialUserInputRequest is the wire payload for a user_input credential
@@ -729,7 +745,7 @@ func (ve *VaultExecutor) requestCredentialAndRetry(
 		}
 
 		retried := ve.Execute(retryCtx, operationType, credentialType, operationParams, timeoutSeconds, onUpdate)
-		if code, _ := retried.Details["error_code"].(string); code != "MISSING_CREDENTIAL" {
+		if code, _ := retried.Details["error_code"].(string); !isMissingCredentialCode(code) {
 			// Either success or a different error — done.
 			ve.log.Info("vault execute: credential poll result",
 				"credential_type", credentialType,
