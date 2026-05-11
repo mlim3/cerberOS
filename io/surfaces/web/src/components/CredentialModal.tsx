@@ -36,7 +36,17 @@ function CredentialModal({ request, onSubmit, onCancel, isSubmitting }: Credenti
     <div className="credential-overlay" onClick={onCancel}>
       <div className="credential-modal" onClick={e => e.stopPropagation()}>
         <div className="credential-modal-header">
-          <span className="credential-lock-icon">{'\u{1F512}'}</span>
+          <span className="credential-lock-icon" aria-hidden>
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect x="5" y="10" width="14" height="11" rx="2" stroke="currentColor" strokeWidth="1.75" />
+              <path
+                d="M8 10V8a4 4 0 0 1 8 0v2"
+                stroke="currentColor"
+                strokeWidth="1.75"
+                strokeLinecap="round"
+              />
+            </svg>
+          </span>
           <h2>Secure Credential Entry</h2>
         </div>
 

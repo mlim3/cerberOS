@@ -13,8 +13,8 @@
 }
 
 .user-cron-title {
-  font-size: 0.95rem;
-  font-weight: 600;
+  font-size: var(--font-md);
+  font-weight: 700;
   margin: 0;
 }
 
@@ -40,11 +40,11 @@
 }
 
 .user-cron-hint {
-  font-size: 0.8rem;
+  font-size: var(--font-sm);
   color: var(--text-muted);
-  opacity: 0.9;
+  opacity: 0.95;
   margin: 0 0 0.65rem 0;
-  line-height: 1.45;
+  line-height: var(--leading-normal);
 }
 
 .user-cron-hint code {
@@ -65,12 +65,12 @@
 
 .user-cron-banner--warn {
   background: var(--warning-bg);
-  border: 1px solid oklch(0.5 0.09 72 / 0.28);
+  border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
   color: var(--text-primary);
 }
 
 .user-cron-banner--ok {
-  background: oklch(0.55 0.08 152 / 0.12);
+  background: rgba(103, 183, 255, 0.12);
   border: 1px solid var(--success-border);
   color: var(--text-primary);
 }
@@ -164,7 +164,8 @@
 
 .user-cron-segment-btn--active {
   background: var(--accent);
-  color: var(--bg-card);
+  color: #041325;
+  font-weight: 700;
 }
 
 .user-cron-presets {
@@ -214,14 +215,16 @@
 
 .user-cron-submit {
   align-self: stretch;
-  padding: 0.5rem 0.85rem;
-  border-radius: 7px;
+  padding: var(--sp-2) var(--sp-4);
+  border-radius: var(--radius-md);
   border: none;
   cursor: pointer;
-  font-weight: 600;
-  font-size: 0.82rem;
+  font-weight: 700;
+  font-size: var(--font-sm);
   background: var(--accent);
-  color: var(--bg-card);
+  color: #041325;
+  box-shadow: 0 8px 20px rgba(103, 183, 255, 0.18);
+  transition: filter 0.18s ease, transform 0.18s ease;
 }
 
 .user-cron-submit:hover:not(:disabled) {

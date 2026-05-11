@@ -3,6 +3,11 @@ import type { Task } from '@cerberos/io-core'
 import type { UserCronJob } from '../api/userCrons'
 import type { UISettings } from './SettingsPanel'
 import SidebarLogo from './SidebarLogo'
+import {
+  SidebarEmptyRecurringIcon,
+  SidebarEmptyTasksIcon,
+  TaskRowCompletedIcon,
+} from './icons/SidebarEmptyIcons'
 import './TaskSidebar.css'
 import './UserCronSection.css'
 
@@ -154,6 +159,8 @@ function TaskSidebar({
 
   return (
     <aside className="sidebar">
+      <SidebarLogo />
+
       <div className={`sidebar-header ${hasUrgentTasks ? 'has-urgent' : ''}`}>
         <h2>{sidebarTab === 'tasks' ? 'Agent tasks' : 'Recurring tasks'}</h2>
         <span className="task-count">{sidebarTab === 'tasks' ? filteredTasks.length : userCronJobs.length}</span>
@@ -202,7 +209,7 @@ function TaskSidebar({
           <div className="task-list">
             {sortedTasks.length === 0 && (
               <div className="task-list-empty">
-                <span className="empty-icon">📋</span>
+                <SidebarEmptyTasksIcon className="empty-icon empty-icon--svg" />
                 <span className="empty-text">No tasks to display</span>
               </div>
             )}
@@ -246,7 +253,9 @@ function TaskSidebar({
                           )
                         )}
                         {task.status === 'completed' && (
-                          <span className="status-icon completed" title="Completed">✓</span>
+                          <span className="status-icon completed" title="Completed">
+                            <TaskRowCompletedIcon />
+                          </span>
                         )}
                       </div>
                       <div className="task-info">
@@ -353,7 +362,7 @@ function TaskSidebar({
           <div className="task-list">
             {userCronJobs.length === 0 ? (
               <div className="task-list-empty">
-                <span className="empty-icon">🔁</span>
+                <SidebarEmptyRecurringIcon className="empty-icon empty-icon--svg" />
                 <span className="empty-text">No recurring tasks yet.</span>
                 <button
                   type="button"
@@ -421,8 +430,6 @@ function TaskSidebar({
           </div>
         </>
       )}
-
-      <SidebarLogo />
 
       {confirmDeleteId && (() => {
         const task = tasks.find(t => t.id === confirmDeleteId)

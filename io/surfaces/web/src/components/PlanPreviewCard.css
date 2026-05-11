@@ -1,5 +1,5 @@
 .plan-preview-card {
-  margin: var(--sp-3) var(--sp-7) 0;
+  margin: var(--sp-3) clamp(var(--sp-5), 3vw, var(--sp-7)) 0;
   padding: var(--sp-4);
   border-radius: var(--radius-sm);
   background: var(--accent-muted-bg);
@@ -88,21 +88,21 @@
 .plan-preview-title {
   display: block;
   margin: 0;
-  font-size: 12px;
-  font-weight: 500;
+  font-size: var(--font-sm);
+  font-weight: 600;
   color: var(--text-primary);
 }
 
 .plan-preview-subtitle {
   display: block;
   margin: 0;
-  font-size: 10px;
+  font-size: var(--font-xs);
   color: var(--text-muted);
 }
 
 .plan-preview-status {
   flex-shrink: 0;
-  font-size: 10px;
+  font-size: var(--font-xs);
   color: var(--text-muted);
 }
 
@@ -138,33 +138,33 @@
 
 .plan-preview-subtask-idx {
   flex-shrink: 0;
-  font-size: 10px;
+  font-size: var(--font-xs);
   color: var(--text-muted);
   min-width: 16px;
 }
 
 .plan-preview-subtask-action {
-  font-size: 12px;
-  font-weight: 500;
+  font-size: var(--font-sm);
+  font-weight: 600;
   color: var(--text-primary);
 }
 
 .plan-preview-subtask-domains {
-  font-size: 10px;
+  font-size: var(--font-xs);
   color: var(--text-muted);
 }
 
 .plan-preview-subtask-instructions {
   margin: var(--sp-1) 0 0;
-  font-size: 11px;
-  line-height: 1.4;
+  font-size: var(--font-xs);
+  line-height: var(--leading-normal);
   color: var(--text-secondary);
   padding-left: 16px;
 }
 
 .plan-preview-subtask-deps {
   margin: 2px 0 0;
-  font-size: 10px;
+  font-size: var(--font-xs);
   color: var(--text-muted);
   font-style: italic;
   padding-left: 16px;
@@ -177,7 +177,7 @@
   color: var(--error);
   background: var(--error-bg);
   border: 1px solid var(--error-border);
-  font-size: 11px;
+  font-size: var(--font-xs);
 }
 
 .plan-preview-actions {
@@ -190,7 +190,7 @@
 .plan-preview-reject {
   padding: 6px var(--sp-4);
   border-radius: var(--radius-sm);
-  font-size: 11px;
+  font-size: var(--font-xs);
   font-weight: 500;
   cursor: pointer;
   transition:

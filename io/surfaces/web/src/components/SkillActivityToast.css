@@ -1,44 +1,47 @@
-/* SkillActivityToast — transient notification chips for notable skill invocations */
+/* SkillActivityToast — transient notifications (navy theme aligned) */
 
 .skill-toast-stack {
   position: fixed;
   bottom: 1.5rem;
   right: 1.5rem;
   display: flex;
-  flex-direction: column-reverse; /* newest on top */
-  gap: 0.5rem;
+  flex-direction: column-reverse;
+  gap: var(--sp-2);
   z-index: 9000;
-  pointer-events: none; /* let clicks pass through to page; buttons re-enable pointer events */
-  max-width: 320px;
+  pointer-events: none;
+  max-width: min(22rem, calc(100vw - 2rem));
 }
 
 .skill-toast {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  padding: 0.5rem 0.75rem;
-  border-radius: 8px;
-  background: rgba(30, 30, 40, 0.92);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  backdrop-filter: blur(8px);
-  color: #e8e8f0;
-  font-size: 0.8125rem;
-  line-height: 1.4;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--bg-card) 94%, transparent);
+  border: var(--border);
+  backdrop-filter: blur(12px);
+  color: var(--text-primary);
+  font-size: var(--font-sm);
+  line-height: var(--leading-normal);
   pointer-events: auto;
   animation: skill-toast-in 0.2s ease-out;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--shadow-elevated);
 }
 
-/* Domain accent colours — left border */
-.skill-toast--web    { border-left: 3px solid #60a5fa; }
-.skill-toast--logs   { border-left: 3px solid #a78bfa; }
-.skill-toast--storage { border-left: 3px solid #34d399; }
-.skill-toast--data   { border-left: 3px solid #fbbf24; }
-.skill-toast--comms  { border-left: 3px solid #f472b6; }
+.skill-toast--web    { border-left: 3px solid #67b7ff; }
+.skill-toast--logs   { border-left: 3px solid #b8a3ff; }
+.skill-toast--storage { border-left: 3px solid #64e6ad; }
+.skill-toast--data   { border-left: 3px solid #ffd166; }
+.skill-toast--comms  { border-left: 3px solid #f4a8d4; }
 
 .skill-toast-icon {
-  font-size: 1rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   flex-shrink: 0;
+  color: var(--accent);
+  opacity: 0.95;
 }
 
 .skill-toast-body {
@@ -46,75 +49,80 @@
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 0.35rem;
+  gap: var(--sp-1);
   min-width: 0;
 }
 
 .skill-toast-label {
-  font-weight: 500;
+  font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .skill-toast-badge {
-  font-size: 0.625rem;
-  font-weight: 600;
+  font-size: var(--font-2xs);
+  font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  padding: 0.1em 0.4em;
-  border-radius: 4px;
+  padding: 0.12em 0.42em;
+  border-radius: var(--radius-xs);
 }
 
 .skill-toast-badge--vault {
-  background: rgba(96, 165, 250, 0.18);
-  color: #93c5fd;
-  border: 1px solid rgba(96, 165, 250, 0.3);
+  background: rgba(103, 183, 255, 0.18);
+  color: var(--accent-hover);
+  border: 1px solid var(--accent-border);
 }
 
-/* "new skill" badge — shown when a skill_synthesized event fires */
 .skill-toast-badge--new {
-  background: rgba(52, 211, 153, 0.18);
-  color: #6ee7b7;
-  border: 1px solid rgba(52, 211, 153, 0.3);
+  background: rgba(100, 230, 173, 0.16);
+  color: var(--success);
+  border: 1px solid var(--success-border);
 }
 
-/* "learned" badge — shown when a previously-synthesized skill is used */
 .skill-toast-badge--learned {
-  background: rgba(167, 139, 250, 0.18);
-  color: #c4b5fd;
-  border: 1px solid rgba(167, 139, 250, 0.3);
+  background: rgba(184, 163, 255, 0.16);
+  color: #d4c4ff;
+  border: 1px solid rgba(184, 163, 255, 0.35);
 }
 
-/* Domain accent for synthesized-skill creation toasts (no domain prefix) */
-.skill-toast--synthesized { border-left: 3px solid #34d399; }
+.skill-toast--synthesized {
+  border-left: 3px solid var(--success);
+}
 
 .skill-toast-elapsed {
-  font-size: 0.6875rem;
-  color: #9ca3af;
+  font-size: var(--font-xs);
+  color: var(--text-muted);
 }
 
 .skill-toast-dismiss {
   background: none;
   border: none;
-  color: #6b7280;
+  color: var(--text-muted);
   cursor: pointer;
-  font-size: 1rem;
+  font-size: var(--font-lg);
   line-height: 1;
   padding: 0;
-  margin-left: 0.25rem;
+  margin-left: var(--sp-1);
   flex-shrink: 0;
-  transition: color 0.15s;
+  transition: color 0.15s ease;
+  border-radius: var(--radius-xs);
 }
 
 .skill-toast-dismiss:hover {
-  color: #e8e8f0;
+  color: var(--text-primary);
+}
+
+.skill-toast-dismiss:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
 }
 
 @keyframes skill-toast-in {
   from {
     opacity: 0;
-    transform: translateX(16px);
+    transform: translateX(12px);
   }
   to {
     opacity: 1;
@@ -122,9 +130,8 @@
   }
 }
 
-/* High-contrast overrides */
-:root.high-contrast .skill-toast {
-  background: #111;
-  border-color: #fff;
-  color: #fff;
+html[data-high-contrast='true'] .skill-toast {
+  background: var(--bg-primary);
+  border-color: var(--accent-border);
+  color: var(--text-primary);
 }
