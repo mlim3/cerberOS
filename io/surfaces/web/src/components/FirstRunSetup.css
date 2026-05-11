@@ -32,6 +32,7 @@
   display: flex;
   align-items: center;
   gap: 0;
+  color: var(--text-primary);
 }
 
 .first-run-logo {

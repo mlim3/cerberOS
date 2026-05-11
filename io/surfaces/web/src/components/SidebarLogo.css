@@ -17,6 +17,7 @@
   align-items: center;
   gap: 0;
   min-width: 0;
+  color: #ffffff;
 }
 
 .sidebar-logo-image {
@@ -33,7 +34,7 @@
 
 .sidebar-logo-mark {
   color: #ffffff;
-  font-size: clamp(1.35rem, 1.1rem + 0.9vw, 2rem);
+  font-size: clamp(1.75rem, 1.4rem + 1.1vw, 2.35rem);
   font-weight: 850;
   letter-spacing: -0.06em;
   line-height: 1;
