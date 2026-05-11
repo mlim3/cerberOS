@@ -1089,7 +1089,16 @@ func (g *Gateway) fetchMemoryLogs(ctx context.Context, contextTag, agentID strin
 // forwardSkillCacheWrite POSTs a skill_cache MemoryWrite payload to the Memory
 // API for vector indexing. Called asynchronously from handleRawStateWrite so it
 // never blocks the NATS handler.
+//
+// Retry behaviour: the Memory API may not be ready immediately at cluster startup
+// (e.g. embedding-api not yet accepting connections). The function retries up to
+// maxSkillCacheRetries times with exponential backoff so that initial static skill
+// seeds that fail at startup are eventually committed once the API is healthy.
 func (g *Gateway) forwardSkillCacheWrite(tags map[string]string, payload json.RawMessage) {
+	const maxSkillCacheRetries = 5
+	const baseBackoff = 2 * time.Second
+	const maxBackoff = 30 * time.Second
+
 	log := observability.LogFromContext(observability.WithModule(context.Background(), "comms_gateway"))
 	if g.memoryEndpoint == "" {
 		log.Warn("skill_cache write: memory endpoint not configured; skipping vector index write")
@@ -1135,34 +1144,79 @@ func (g *Gateway) forwardSkillCacheWrite(tags map[string]string, payload json.Ra
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	backoff := baseBackoff
+	for attempt := 1; attempt <= maxSkillCacheRetries; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		httpReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost,
+			g.memoryEndpoint+"/api/v1/skills/cache", bytes.NewReader(body))
+		if reqErr != nil {
+			cancel()
+			log.Warn("skill_cache write: build request failed", "domain", domain, "name", name, "error", reqErr)
+			return
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		g.memoryEndpoint+"/api/v1/skills/cache", bytes.NewReader(body))
-	if err != nil {
-		log.Warn("skill_cache write: build request failed", "domain", domain, "name", name, "error", err)
-		return
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
+		resp, doErr := http.DefaultClient.Do(httpReq)
+		cancel()
+		if doErr != nil {
+			log.Warn("skill_cache write: HTTP request failed",
+				"domain", domain, "name", name,
+				"attempt", attempt, "max_attempts", maxSkillCacheRetries,
+				"error", doErr,
+			)
+			if attempt < maxSkillCacheRetries {
+				log.Info("skill_cache write: retrying after backoff",
+					"domain", domain, "name", name,
+					"backoff_seconds", backoff.Seconds(),
+				)
+				time.Sleep(backoff)
+				backoff *= 2
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+			}
+			continue
+		}
 
-	resp, err := http.DefaultClient.Do(httpReq)
-	if err != nil {
-		log.Warn("skill_cache write: HTTP request failed", "domain", domain, "name", name, "error", err)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		resp.Body.Close()
+
+		if resp.StatusCode == http.StatusConflict {
+			// 409 = already indexed (idempotent seed re-send). Treat as success.
+			log.Info("skill_cache write: Memory API already has this record (idempotent)",
+				"domain", domain, "name", name, "status", resp.StatusCode)
+			return
+		}
+		if resp.StatusCode >= 400 {
+			log.Warn("skill_cache write: Memory API returned error",
+				"domain", domain, "name", name,
+				"status", resp.StatusCode,
+				"body", strings.TrimSpace(string(respBody)),
+				"attempt", attempt, "max_attempts", maxSkillCacheRetries,
+			)
+			// 4xx errors other than transient ones (e.g. 422 bad schema) are not
+			// worth retrying — the payload won't change.
+			if resp.StatusCode < 500 {
+				return
+			}
+			if attempt < maxSkillCacheRetries {
+				time.Sleep(backoff)
+				backoff *= 2
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+			}
+			continue
+		}
+
+		log.Info("skill_cache write: Memory API accepted",
+			"domain", domain, "name", name, "status", resp.StatusCode,
+			"attempt", attempt)
 		return
 	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	if resp.StatusCode >= 400 {
-		log.Warn("skill_cache write: Memory API returned error",
-			"domain", domain, "name", name,
-			"status", resp.StatusCode,
-			"body", strings.TrimSpace(string(respBody)),
-		)
-		return
-	}
-	log.Info("skill_cache write: Memory API accepted",
-		"domain", domain, "name", name, "status", resp.StatusCode)
+
+	log.Warn("skill_cache write: all retry attempts exhausted; skill will not be indexed",
+		"domain", domain, "name", name, "max_attempts", maxSkillCacheRetries)
 }
 
 // fetchSkillSearch queries the Memory API for skill records semantically similar
@@ -1345,7 +1399,7 @@ func (g *Gateway) PublishTaskResult(ctx context.Context, callbackTopic string, r
 // PublishTaskSpec dispatches a validated task.inbound request to the Agents
 // Component. The internal TaskSpec is adapted to the agents-component schema.
 func (g *Gateway) PublishTaskSpec(ctx context.Context, spec types.TaskSpec) error {
-	traceID := firstNonEmpty(observability.TraceIDFrom(ctx), spec.TraceID, spec.OrchestratorTaskRef)
+	traceID := firstNonEmpty(spec.TraceID, observability.TraceIDFrom(ctx), spec.OrchestratorTaskRef)
 	ctx = observability.WithTraceID(ctx, traceID)
 	wire := struct {
 		TaskID         string            `json:"task_id"`

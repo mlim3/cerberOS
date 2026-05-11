@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -50,8 +51,10 @@ func e2ePingTool() SkillTool {
 			if params.Probe == "" {
 				return ToolResult{Content: "e2e_ping: probe parameter is required", IsError: true}
 			}
+			ts := time.Now().UnixMilli()
+			slog.Default().Info("e2e_ping: executed", "probe", params.Probe, "ts", ts)
 			return ToolResult{
-				Content: fmt.Sprintf("e2e_ping: OK probe=%s ts=%d", params.Probe, time.Now().UnixMilli()),
+				Content: fmt.Sprintf("e2e_ping: OK probe=%s ts=%d", params.Probe, ts),
 				Details: map[string]interface{}{
 					"probe":  params.Probe,
 					"status": "ok",

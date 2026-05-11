@@ -51,6 +51,13 @@ type partnerFixture struct {
 	// the response to send back. If nil, clarification requests are ack'd
 	// and silently dropped (simulates no user present).
 	onClarificationRequest func(types.ClarificationRequest) types.ClarificationResponse
+
+	// onSkillSearch is an optional hook called when the fixture receives a
+	// skill_cache state.read.request (i.e. skills_search inside the agent).
+	// The hook receives the semantic query string and must return the synthetic
+	// SkillSearchResult slice to send back. If nil, skill_cache requests are
+	// ack'd and silently dropped (simulates an empty skill index).
+	onSkillSearch func(query string) []types.SkillSearchResult
 }
 
 func newPartnerFixture(t *testing.T, natsURL, owner string) *partnerFixture {
@@ -278,7 +285,35 @@ func (f *partnerFixture) handleStateReadRequest(msg *nats.Msg) {
 	}
 
 	switch req.DataType {
-	case "system_log", "skill_cache":
+	case "system_log":
+		_ = msg.Ack()
+		return
+	case "skill_cache":
+		f.mu.Lock()
+		hook := f.onSkillSearch
+		f.mu.Unlock()
+		if hook == nil {
+			// No hook registered — silently drop (simulates empty skill index).
+			_ = msg.Ack()
+			return
+		}
+		results := hook(req.SemanticQuery)
+		// SearchSkills in session.go expects the response payload to have
+		// records as a flat []SkillSearchResult (not wrapped in MemoryWrite).
+		type skillSearchResponse struct {
+			AgentID string                    `json:"agent_id"`
+			Records []types.SkillSearchResult `json:"records"`
+			TraceID string                    `json:"trace_id"`
+		}
+		resp := skillSearchResponse{
+			AgentID: req.AgentID,
+			Records: results,
+			TraceID: req.TraceID,
+		}
+		if err := f.publish("aegis.agents.state.read.response", "state.read.response", req.TraceID, resp); err != nil {
+			_ = msg.Nak()
+			return
+		}
 		_ = msg.Ack()
 		return
 	}

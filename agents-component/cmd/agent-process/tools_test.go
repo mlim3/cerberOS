@@ -44,6 +44,47 @@ func TestToolsForDomain_Storage(t *testing.T) {
 	mustNotContain(t, names, "vault_storage_list")
 }
 
+// ---- toolsForDomain with non-nil VaultExecutor ----
+// These mirror the nil-ve tests above but confirm that credentialed tools ARE
+// included when vault is available. VaultExecutor{} is a safe non-nil sentinel:
+// toolsForDomain only checks ve == nil; it never calls methods during assembly.
+
+func TestToolsForDomain_Web_WithVault(t *testing.T) {
+	ve := &VaultExecutor{}
+	tools := toolsForDomain("web", ve, nil, nil)
+	names := toolNames(tools)
+	mustContain(t, names, "web_fetch")
+	mustContain(t, names, "vault_web_fetch")
+	mustContain(t, names, "task_complete")
+	mustContain(t, names, "skills_search")
+}
+
+func TestToolsForDomain_Data_WithVault(t *testing.T) {
+	ve := &VaultExecutor{}
+	tools := toolsForDomain("data", ve, nil, nil)
+	names := toolNames(tools)
+	mustContain(t, names, "data_transform")
+	mustContain(t, names, "vault_data_read")
+	mustContain(t, names, "vault_data_write")
+}
+
+func TestToolsForDomain_Comms_WithVault(t *testing.T) {
+	ve := &VaultExecutor{}
+	tools := toolsForDomain("comms", ve, nil, nil)
+	names := toolNames(tools)
+	mustContain(t, names, "comms_format")
+	mustContain(t, names, "vault_comms_send")
+}
+
+func TestToolsForDomain_Storage_WithVault(t *testing.T) {
+	ve := &VaultExecutor{}
+	tools := toolsForDomain("storage", ve, nil, nil)
+	names := toolNames(tools)
+	mustContain(t, names, "vault_storage_read")
+	mustContain(t, names, "vault_storage_write")
+	mustContain(t, names, "vault_storage_list")
+}
+
 func TestToolsForDomain_Unknown(t *testing.T) {
 	tools := toolsForDomain("unknown-domain", nil, nil, nil)
 	names := toolNames(tools)

@@ -56,8 +56,9 @@ type natsHarness struct {
 	crashDetector *lifecycle.CrashDetector
 	ctx           context.Context
 	cancel        context.CancelFunc
-	hbMu          sync.RWMutex
-	hbPaused      map[string]bool
+	hbMu               sync.RWMutex
+	hbPaused           map[string]bool
+	handleTaskErrOnce  sync.Once
 }
 
 // newNATSHarness connects to NATS, starts test-local partner fixtures, wires
@@ -90,18 +91,14 @@ func newNATSHarness(t *testing.T) *natsHarness {
 	reg := registry.New()
 	skillMgr := skills.New()
 
-	// NATS-backed credential broker for the full round-trip (publish
-	// credential.request → fixture responds → PreAuthorize completes).
-	// Use a unique consumer name per test run to avoid "already bound" errors
-	// when multiple tests share the same NATS server.
-	credBroker, err := credentials.NewNATSBroker(commsClient,
-		credentials.WithConsumerName("cred-resp-"+componentID),
-	)
-	if err != nil {
-		commsClient.Close() //nolint:errcheck
-		nc.Close()
-		t.Fatalf("credentials.NewNATSBroker: %v", err)
-	}
+	// Use the in-process stub credential broker so that PreAuthorize never
+	// publishes to NATS. The credential NATS round-trip is covered by unit
+	// tests in internal/credentials. Using the stub here prevents a race
+	// with any orchestrator instance that may be subscribed to the same
+	// aegis.orchestrator.credential.request stream: a live orchestrator
+	// responds VAULT_UNAVAILABLE (test tasks aren't in its context) and
+	// beats the partner fixture, causing all provisioning to fail.
+	credBroker := credentials.New(nil)
 
 	lcMgr := lifecycle.New()  // in-process stub: no real Firecracker
 	memClient := memory.New() // in-process stub: writes are no-ops
@@ -111,6 +108,7 @@ func newNATSHarness(t *testing.T) *natsHarness {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Crash detector — fires HandleCrash when heartbeats stop.
+	var h *natsHarness
 	var f *factory.Factory
 	crashDetector := lifecycle.NewCrashDetector(
 		lifecycle.HeartbeatConfig{
@@ -160,7 +158,9 @@ func newNATSHarness(t *testing.T) *natsHarness {
 				return
 			}
 			if err := f.HandleTaskSpec(&spec); err != nil {
-				t.Errorf("HandleTaskSpec: %v", err)
+				h.handleTaskErrOnce.Do(func() {
+					t.Errorf("HandleTaskSpec (first of potentially many retries): %v", err)
+				})
 				_ = msg.Nak()
 				return
 			}
@@ -240,7 +240,7 @@ func newNATSHarness(t *testing.T) *natsHarness {
 		t.Fatalf("subscribe capability.query: %v", err)
 	}
 
-	h := &natsHarness{
+	h = &natsHarness{
 		componentID:   componentID,
 		nc:            nc,
 		js:            js,
@@ -328,6 +328,39 @@ func seedNATSSkills(t *testing.T, mgr skills.Manager) {
 		},
 	}); err != nil {
 		t.Fatalf("seed skill web: %v", err)
+	}
+
+	// general — entry domain for broad tasks; no built-in commands.
+	// Agents provisioned here use skills_search to discover tools at runtime.
+	if err := mgr.RegisterDomain(&types.SkillNode{
+		Name:     "general",
+		Level:    "domain",
+		Children: map[string]*types.SkillNode{},
+	}); err != nil {
+		t.Fatalf("seed skill general: %v", err)
+	}
+
+	// e2e_test — credential-free probe used by cross-domain auto-registration tests.
+	if err := mgr.RegisterDomain(&types.SkillNode{
+		Name:  "e2e_test",
+		Level: "domain",
+		Children: map[string]*types.SkillNode{
+			"e2e_ping": {
+				Name:           "e2e_ping",
+				Level:          "command",
+				Label:          "E2E Test Ping",
+				Description:    "Automated e2e connectivity probe. Echoes a probe string. Do NOT use outside automated e2e testing.",
+				Implementation: "e2e_ping",
+				TimeoutSeconds: 5,
+				Spec: &types.SkillSpec{
+					Parameters: map[string]types.ParameterDef{
+						"probe": {Type: "string", Required: true, Description: "Probe identifier echoed back in the response."},
+					},
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("seed skill e2e_test: %v", err)
 	}
 }
 

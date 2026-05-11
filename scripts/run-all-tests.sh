@@ -194,6 +194,36 @@ run_go_module_tests() {
   done < <(discover_go_modules)
 }
 
+discover_bun_workspaces() {
+  find "${ROOT_DIR}" \
+    \( \
+      -path "${ROOT_DIR}/.git" -o \
+      -path "${ROOT_DIR}/.claude" -o \
+      -path "${ROOT_DIR}/.worktrees" -o \
+      -path '*/vendor' -o \
+      -path '*/node_modules' \
+    \) -prune -o \
+    -name package.json -print \
+    | while IFS= read -r package_json; do
+        if rg -q '"workspaces"' "${package_json}"; then
+          dirname "${package_json}"
+        fi
+      done \
+    | sort
+}
+
+ensure_bun_workspaces_installed() {
+  local workspace_dir
+  while IFS= read -r workspace_dir; do
+    [[ -n "${workspace_dir}" ]] || continue
+    require_cmd bun
+    section "Bun Install: ${workspace_dir#${ROOT_DIR}/}"
+    info "(cd ${workspace_dir} && bun install)"
+    (cd "${workspace_dir}" && bun install)
+    pass "Bun Install: ${workspace_dir#${ROOT_DIR}/}"
+  done < <(discover_bun_workspaces)
+}
+
 run_bun_package_tests() {
   local package_dir
   while IFS= read -r package_dir; do
@@ -211,7 +241,7 @@ run_repo_e2e() {
   fi
 
   require_cmd bash
-  run_shell_step "E2E Tests" "${ROOT_DIR}" bash tests/e2e/run_all.sh "${E2E_FLAGS[@]}"
+  run_shell_step "E2E Tests" "${ROOT_DIR}" bash tests/e2e/run_all.sh "${E2E_FLAGS[@]+"${E2E_FLAGS[@]}"}"
 }
 
 main() {
@@ -224,6 +254,7 @@ main() {
   printf 'Skip memory setup: %s\n' "${SKIP_MEMORY_SETUP}"
 
   run_go_module_tests
+  ensure_bun_workspaces_installed
   run_bun_package_tests
   run_repo_e2e
 

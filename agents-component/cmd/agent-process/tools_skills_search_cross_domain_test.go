@@ -17,6 +17,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -182,6 +183,17 @@ func TestSkillsSearch_CredFreeOutOfDomain_AutoRegisters(t *testing.T) {
 	if result.Details["recommended_action"] != "call_directly" {
 		t.Errorf("expected recommended_action=call_directly, got %v", result.Details["recommended_action"])
 	}
+
+	// The auto-registered tool must be dispatchable — not just present in the slice.
+	// A broken Execute closure would be silent until the agent actually calls it.
+	pingRaw, _ := json.Marshal(map[string]interface{}{"probe": "auto-register-test"})
+	dispResult := dispatchTool(context.Background(), registry.Tools(), "e2e_ping", pingRaw)
+	if dispResult.IsError {
+		t.Errorf("auto-registered e2e_ping returned error when dispatched: %s", dispResult.Content)
+	}
+	if !strings.Contains(dispResult.Content, "OK") {
+		t.Errorf("e2e_ping dispatch: expected OK in content; got %q", dispResult.Content)
+	}
 }
 
 // TestSkillsSearch_CredFreeOutOfDomain_UnknownImpl treats a credential-free
@@ -218,6 +230,13 @@ func TestSkillsSearch_CredFreeOutOfDomain_UnknownImpl(t *testing.T) {
 			t.Error("unknown-implementation tool should not be registered")
 		}
 	}
+	// Auto-registration failed, so the agent must be directed to spawn_agent instead.
+	if result.Details["recommended_action"] != "spawn_agent" {
+		t.Errorf("expected spawn_agent fallback when impl unknown; got %v", result.Details["recommended_action"])
+	}
+	if !strings.Contains(result.Content, "spawn_agent") {
+		t.Errorf("expected spawn_agent in content when impl unknown; got %q", result.Content)
+	}
 }
 
 // TestSkillsSearch_CredFreeOutOfDomain_SynthesizedSkipped verifies that
@@ -243,12 +262,22 @@ func TestSkillsSearch_CredFreeOutOfDomain_SynthesizedSkipped(t *testing.T) {
 
 	tool := skillsSearchTool(searcher, "web", true, registry, cs)
 	raw, _ := json.Marshal(map[string]interface{}{"query": "automated e2e connectivity probe"})
-	tool.Execute(nil, raw)
+	result := tool.Execute(nil, raw)
 
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content)
+	}
 	for _, rt := range registry.Tools() {
 		if rt.Definition.Name == "execute_e2e_connectivity_probe" {
 			t.Error("synthesized skill should not be auto-registered")
 		}
+	}
+	// Synthesized skills have no builtinRegistry entry, so the agent falls back to spawn_agent.
+	if result.Details["recommended_action"] != "spawn_agent" {
+		t.Errorf("expected spawn_agent fallback for synthesized skill; got %v", result.Details["recommended_action"])
+	}
+	if !strings.Contains(result.Content, "spawn_agent") {
+		t.Errorf("expected spawn_agent in content for synthesized skill; got %q", result.Content)
 	}
 }
 
@@ -287,6 +316,14 @@ func TestSkillsSearch_CredFreeOutOfDomain_VaultToolSkipped(t *testing.T) {
 		if rt.Definition.Name == "vault_web_fetch" {
 			t.Error("vault tool must not be auto-registered even if stored requires_cred=false")
 		}
+	}
+	// After the safety check rejects the tool, the agent falls back to spawn_agent
+	// (RequiresCred=false in metadata means the clarification path is also skipped).
+	if result.Details["recommended_action"] != "spawn_agent" {
+		t.Errorf("expected spawn_agent fallback after vault safety check; got %v", result.Details["recommended_action"])
+	}
+	if !strings.Contains(result.Content, "spawn_agent") {
+		t.Errorf("expected spawn_agent in content after vault safety check; got %q", result.Content)
 	}
 }
 

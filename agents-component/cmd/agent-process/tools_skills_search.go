@@ -189,7 +189,11 @@ func executeSkillsSearch(sr SkillSearcher, currentDomain string, spawnAvailable 
 	}
 
 	// ── Cross-domain: credential-free + static → auto-register ────────────────
-	if !top.RequiresCred && top.Origin == "static" && top.Implementation != "" && registry != nil {
+	// Origin is "static" when set explicitly, or "" (zero value) for skills
+	// loaded directly from config (see SkillNode.Origin comment in types.go).
+	// Either is a static skill. Synthesized skills ("synthesized") are excluded
+	// because they have no reliable builtinRegistry entry.
+	if !top.RequiresCred && top.Origin != "synthesized" && top.Implementation != "" && registry != nil {
 		tool, registered := tryAutoRegister(top, registry, log)
 		if registered {
 			log.Info("skills_search: credential-free cross-domain tool auto-registered",
