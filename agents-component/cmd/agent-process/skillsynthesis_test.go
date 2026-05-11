@@ -58,14 +58,14 @@ func TestShouldSynthesize_ZeroToolCalls(t *testing.T) {
 // ─── skillSynthesisSystemPrompt ───────────────────────────────────────────────
 
 func TestSkillSynthesisSystemPrompt_ContainsDomain(t *testing.T) {
-	prompt := skillSynthesisSystemPrompt("storage")
+	prompt := skillSynthesisSystemPrompt("storage", "")
 	if !strings.Contains(prompt, "storage") {
 		t.Errorf("system prompt must include the domain name; got %q", prompt)
 	}
 }
 
 func TestSkillSynthesisSystemPrompt_ContainsJSONSchema(t *testing.T) {
-	prompt := skillSynthesisSystemPrompt("web")
+	prompt := skillSynthesisSystemPrompt("web", "")
 	for _, field := range []string{`"name"`, `"label"`, `"description"`, `"spec"`} {
 		if !strings.Contains(prompt, field) {
 			t.Errorf("system prompt must include JSON schema field %s", field)
@@ -74,14 +74,14 @@ func TestSkillSynthesisSystemPrompt_ContainsJSONSchema(t *testing.T) {
 }
 
 func TestSkillSynthesisSystemPrompt_ContainsNegativeGuidance(t *testing.T) {
-	prompt := skillSynthesisSystemPrompt("web")
+	prompt := skillSynthesisSystemPrompt("web", "")
 	if !strings.Contains(prompt, "Do NOT") {
 		t.Error("system prompt must instruct LLM to include negative guidance")
 	}
 }
 
 func TestSkillSynthesisSystemPrompt_ContainsFallbackInstruction(t *testing.T) {
-	prompt := skillSynthesisSystemPrompt("web")
+	prompt := skillSynthesisSystemPrompt("web", "")
 	// The fallback for "no reusable procedure" is signaled by empty name.
 	if !strings.Contains(prompt, `{"name":"","label":"","description":""}`) {
 		t.Error("system prompt must include the empty-name fallback JSON example")
@@ -89,10 +89,49 @@ func TestSkillSynthesisSystemPrompt_ContainsFallbackInstruction(t *testing.T) {
 }
 
 func TestSkillSynthesisSystemPrompt_DifferentDomains(t *testing.T) {
-	p1 := skillSynthesisSystemPrompt("web")
-	p2 := skillSynthesisSystemPrompt("data")
+	p1 := skillSynthesisSystemPrompt("web", "")
+	p2 := skillSynthesisSystemPrompt("data", "")
 	if p1 == p2 {
 		t.Error("prompts for different domains must differ")
+	}
+}
+
+func TestSkillSynthesisSystemPrompt_HonoursRequestedName(t *testing.T) {
+	withName := skillSynthesisSystemPrompt("web", "quick_note")
+	if !strings.Contains(withName, "quick_note") {
+		t.Errorf("prompt with requested name must include it; got %q", withName)
+	}
+	if !strings.Contains(withName, "IMPORTANT") {
+		t.Error("prompt with requested name must emphasise the override")
+	}
+	without := skillSynthesisSystemPrompt("web", "")
+	if strings.Contains(without, "IMPORTANT — the user explicitly named") {
+		t.Error("prompt without a requested name must NOT contain the override directive")
+	}
+}
+
+func TestExtractRequestedSkillName(t *testing.T) {
+	cases := []struct {
+		msg  string
+		want string
+	}{
+		{"Create a skill called quick_note that saves text", "quick_note"},
+		{"please make a skill named MyHelper", "MyHelper"},
+		{`Create a skill called "quick_note" that…`, "quick_note"},
+		{"name it data_loader for me", "data_loader"},
+		{"please name the skill paginate_api", "paginate_api"},
+		{"no directive here, just write a file", ""},
+		{"called 123abc is not a valid identifier", ""},
+		// Hyphenated names are rejected on purpose — skills are snake_case in
+		// the registry, so we'd rather fall back to LLM-inferred than echo a
+		// name that violates the schema.
+		{"called my-skill should not match", ""},
+	}
+	for _, c := range cases {
+		got := extractRequestedSkillName(c.msg)
+		if got != c.want {
+			t.Errorf("extractRequestedSkillName(%q) = %q, want %q", c.msg, got, c.want)
+		}
 	}
 }
 
@@ -148,7 +187,7 @@ func TestSynthesizeSkill_ValidResponse(t *testing.T) {
 	client := newSynthClient(t, srv)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	node, err := synthesizeSkill(context.Background(), client, log, "web", nil)
+	node, err := synthesizeSkill(context.Background(), client, log, "web", nil, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -180,7 +219,7 @@ func TestSynthesizeSkill_EmptyNameReturnsNil(t *testing.T) {
 	client := newSynthClient(t, srv)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	node, err := synthesizeSkill(context.Background(), client, log, "web", nil)
+	node, err := synthesizeSkill(context.Background(), client, log, "web", nil, "")
 	if err != nil {
 		t.Fatalf("unexpected error for no-procedure signal: %v", err)
 	}
@@ -198,7 +237,7 @@ func TestSynthesizeSkill_MarkdownFenceStripped(t *testing.T) {
 	client := newSynthClient(t, srv)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	node, err := synthesizeSkill(context.Background(), client, log, "web", nil)
+	node, err := synthesizeSkill(context.Background(), client, log, "web", nil, "")
 	if err != nil {
 		t.Fatalf("markdown-fenced JSON must parse correctly, got error: %v", err)
 	}
@@ -216,7 +255,7 @@ func TestSynthesizeSkill_PlainFenceStripped(t *testing.T) {
 	client := newSynthClient(t, srv)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	node, err := synthesizeSkill(context.Background(), client, log, "web", nil)
+	node, err := synthesizeSkill(context.Background(), client, log, "web", nil, "")
 	if err != nil {
 		t.Fatalf("plain-fenced JSON must parse correctly, got error: %v", err)
 	}
@@ -233,7 +272,7 @@ func TestSynthesizeSkill_InvalidJSON_ReturnsError(t *testing.T) {
 	client := newSynthClient(t, srv)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	node, err := synthesizeSkill(context.Background(), client, log, "web", nil)
+	node, err := synthesizeSkill(context.Background(), client, log, "web", nil, "")
 	if err == nil {
 		t.Errorf("invalid JSON must return an error; got node=%v", node)
 	}
@@ -252,7 +291,7 @@ func TestSynthesizeSkill_ToolContractViolation_ReturnsError(t *testing.T) {
 	client := newSynthClient(t, srv)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	node, err := synthesizeSkill(context.Background(), client, log, "web", nil)
+	node, err := synthesizeSkill(context.Background(), client, log, "web", nil, "")
 	if err == nil {
 		t.Errorf("Tool Contract violation must return an error; got node=%v", node)
 	}
@@ -270,7 +309,7 @@ func TestSynthesizeSkill_SynthesizedAtIsRecent(t *testing.T) {
 	client := newSynthClient(t, srv)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	node, err := synthesizeSkill(context.Background(), client, log, "web", nil)
+	node, err := synthesizeSkill(context.Background(), client, log, "web", nil, "")
 	after := time.Now().UTC()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

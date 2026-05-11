@@ -155,7 +155,7 @@ func synthesizeSkill(
 // to look like a valid Go-style identifier (letters/digits/underscore, ≤64
 // chars, must start with a letter or underscore). Anything else is rejected
 // so we never echo user typos straight into the registered skill catalogue.
-var skillNameDirectiveRE = regexp.MustCompile(`(?i)\b(?:called|named|name it|name the skill)\s+["'` + "`" + `]?([A-Za-z_][A-Za-z0-9_]{0,63})["'` + "`" + `]?`)
+var skillNameDirectiveRE = regexp.MustCompile(`(?i)\b(?:called|named|name it|name the skill)\s+["'` + "`" + `]?([A-Za-z_][A-Za-z0-9_]{0,63})["'` + "`" + `]?(?:[\s.,;:!?]|$)`)
 
 func extractRequestedSkillName(userMessage string) string {
 	m := skillNameDirectiveRE.FindStringSubmatch(userMessage)
