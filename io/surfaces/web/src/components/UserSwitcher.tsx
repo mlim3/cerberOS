@@ -17,6 +17,7 @@ interface UserSummary {
  */
 function UserSwitcher() {
   const [users, setUsers] = useState<UserSummary[]>([])
+  const [reloadTick, setReloadTick] = useState(0)
   const current = getActiveUserId()
 
   useEffect(() => {
@@ -30,6 +31,15 @@ function UserSwitcher() {
         if (!cancelled) setUsers([])
       })
     return () => { cancelled = true }
+  }, [reloadTick])
+
+  // Listen for cross-component "users changed" events dispatched by
+  // AdminPanel after a successful Create user. This avoids requiring a
+  // full page reload to pick up the new entry in the switcher dropdown.
+  useEffect(() => {
+    function onUsersChanged() { setReloadTick((t) => t + 1) }
+    window.addEventListener('cerberos:users-changed', onUsersChanged)
+    return () => window.removeEventListener('cerberos:users-changed', onUsersChanged)
   }, [])
 
   function onChange(e: React.ChangeEvent<HTMLSelectElement>): void {

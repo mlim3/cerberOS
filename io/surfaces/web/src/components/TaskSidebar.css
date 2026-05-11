@@ -554,6 +554,25 @@
   text-overflow: ellipsis;
 }
 
+/* Conversation-ID hint line. Sits below .task-update so log correlation is
+   one hover/click away without dominating the sidebar visually. Uses a
+   monospace font to make the prefix scannable against Loki output. */
+.task-cid {
+  font-size: 9px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--text-muted);
+  opacity: 0.55;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: help;
+}
+.task-item:hover .task-cid,
+.task-item.selected .task-cid {
+  opacity: 0.9;
+}
+
 .task-eta {
   display: none;
 }

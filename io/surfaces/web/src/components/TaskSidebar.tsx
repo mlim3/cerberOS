@@ -58,6 +58,7 @@ function TaskSidebar({
   const [renameValue, setRenameValue] = useState('')
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
   const [cronActionError, setCronActionError] = useState<string | null>(null)
+  const [copiedCidTaskId, setCopiedCidTaskId] = useState<string | null>(null)
   const renameInputRef = useRef<HTMLInputElement>(null)
 
   const searchLower = searchQuery.trim().toLowerCase()
@@ -121,6 +122,34 @@ function TaskSidebar({
     if (status === 'awaiting_feedback') return 'awaiting'
     if (status === 'working') return 'working'
     return 'completed'
+  }
+
+  // copyConversationId puts the full conversation_id on the clipboard so the
+  // user can paste it into Loki/Grafana queries. We deliberately surface the
+  // copy via a dropdown action (and a hover-revealed short prefix) rather
+  // than always-on text to keep the sidebar density low while still making
+  // the ID one click away for log correlation during the demo.
+  const copyConversationId = async (taskId: string, cid: string) => {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(cid)
+      } else {
+        const ta = document.createElement('textarea')
+        ta.value = cid
+        ta.style.position = 'fixed'
+        ta.style.opacity = '0'
+        document.body.appendChild(ta)
+        ta.select()
+        document.execCommand('copy')
+        document.body.removeChild(ta)
+      }
+      setCopiedCidTaskId(taskId)
+      window.setTimeout(() => setCopiedCidTaskId((curr) => (curr === taskId ? null : curr)), 1500)
+    } catch {
+      // Clipboard rejected (insecure context, permissions, etc.) — fall back
+      // to a window.prompt so the user can still copy the value manually.
+      window.prompt('Copy conversation ID:', cid)
+    }
   }
 
   return (
@@ -228,6 +257,16 @@ function TaskSidebar({
                         )}
                         <span className="task-title">{task.title}</span>
                         <span className="task-update">{task.lastUpdate}</span>
+                        {/* task.id IS the conversation_id once the first
+                            message has been sent — they're unified by the
+                            backend (see App.tsx newCid swap). Surfacing it
+                            here makes Loki log correlation one click away. */}
+                        <span
+                          className="task-cid"
+                          title={`Conversation ID: ${task.id} — open the task menu to copy`}
+                        >
+                          cid: {task.id.slice(0, 8)}…
+                        </span>
                       </div>
                     </button>
                     <button
@@ -245,6 +284,17 @@ function TaskSidebar({
                       <div className="task-dropdown">
                         <button type="button" className="task-dropdown-item" onClick={() => startRename(task.id, task.title)}>
                           Rename
+                        </button>
+                        <button
+                          type="button"
+                          className="task-dropdown-item"
+                          onClick={() => {
+                            setOpenMenuId(null)
+                            void copyConversationId(task.id, task.id)
+                          }}
+                          title={task.id}
+                        >
+                          {copiedCidTaskId === task.id ? 'Copied!' : 'Copy CID to clipboard'}
                         </button>
                         <button
                           type="button"
