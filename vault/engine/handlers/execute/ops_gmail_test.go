@@ -154,7 +154,19 @@ func TestBuildICSContainsRequiredFields(t *testing.T) {
 }
 
 func TestBuildCalendarInviteEmailIsMultipart(t *testing.T) {
-	msg := buildCalendarInviteEmail("from@gmail.com", "to@gmail.com", "Title", "Body", "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n")
+	start := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+	end := start.Add(time.Hour)
+	msg := buildCalendarInviteEmail(
+		"from@gmail.com",
+		"to@gmail.com",
+		"Title",
+		"Body",
+		"Zoom",
+		"https://calendar.google.com/calendar/render?action=TEMPLATE&text=Title",
+		"BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n",
+		start,
+		end,
+	)
 	s := string(msg)
 	if !strings.Contains(s, "multipart/alternative") {
 		t.Error("expected multipart/alternative content type")
@@ -173,6 +185,9 @@ func TestBuildCalendarInviteEmailIsMultipart(t *testing.T) {
 	}
 	if !strings.Contains(s, "Subject: Invitation: Title") {
 		t.Error("expected Subject header with Invitation: prefix")
+	}
+	if !strings.Contains(s, "Add to Google Calendar") {
+		t.Error("expected HTML body to include the Add-to-Google-Calendar button")
 	}
 }
 
