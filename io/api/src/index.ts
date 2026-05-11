@@ -38,6 +38,22 @@ import { startHeartbeatEmitter } from './heartbeat'
 import { mirrorMemoryConfigured, persistOrchestratorOutcomeToMemory } from './scheduled-run-mirror'
 import { messageLooksLikeUserCronScheduling } from './scheduling-language'
 import { activeUserId, userIdRequired, requireRole, assertNoUserIdOverride } from './identity'
+import {
+  broadcastStatus,
+  broadcastStreamEvent,
+  chatPendingKey,
+  deliverChatResponse,
+  dropPendingChatCallback,
+  failPendingChatCallback,
+  getTaskStatus,
+  listTasksForUser,
+  ownerOfTask,
+  persistAndBroadcastStatus,
+  recordTaskOwnership,
+  registerPendingChatCallback,
+  setTaskStatus,
+  subscribeSse,
+} from './task-scope'
 
 // =============================================================================
 // Planner input enrichment
@@ -122,15 +138,8 @@ ioLog(
 startHeartbeatEmitter(natsClient)
 
 // =============================================================================
-// Pending chat responses — POST /api/chat registers here, orchestrator delivers
+// Pending chat responses — POST /api/chat registers via task-scope, orchestrator delivers
 // =============================================================================
-
-type ChatResponseCallback = {
-  push: (content: string) => void
-  complete: () => void
-  error: (msg: string) => void
-}
-const pendingChatResponses = new Map<string, ChatResponseCallback>()
 
 // Last-resort user_id for orchestrator NATS outcomes that arrive WITHOUT a
 // user_id field on the payload (e.g. legacy task_results from older planner
@@ -139,23 +148,6 @@ const pendingChatResponses = new Map<string, ChatResponseCallback>()
 // deployment via IO_MIRROR_FALLBACK_USER_ID.
 const MIRROR_FALLBACK_USER_ID =
   process.env.IO_MIRROR_FALLBACK_USER_ID ?? '00000000-0000-0000-0000-000000000001'
-
-/** Map key for pending chat — UUID string case must match (e.g. uuidgen vs NATS subject). */
-function chatPendingKey(taskId: string): string {
-  return taskId.trim().toLowerCase()
-}
-
-function deliverChatResponse(taskId: string, content: string, done: boolean): boolean {
-  const key = chatPendingKey(taskId)
-  const cb = pendingChatResponses.get(key)
-  if (!cb) return false
-  cb.push(content)
-  if (done) {
-    cb.complete()
-    pendingChatResponses.delete(key)
-  }
-  return true
-}
 
 function parseEnvelopePayload(env: Record<string, unknown>): Record<string, unknown> {
   const p = env.payload
@@ -239,16 +231,27 @@ if (natsClient) {
     const msgType = envelope.message_type as string | undefined
     const taskId = clientTaskIdFromIOResults(subject, payload)
 
+    // MT-3: orchestrator payloads carry only taskId — resolve owner via reverse index.
+    // If the task is unknown (race during restart, orphan task_result), fall through
+    // to the legacy memory-mirror path (which has its own MIRROR_FALLBACK_USER_ID).
+    const ownerFromPayload =
+      typeof payload.user_id === 'string' && payload.user_id.trim()
+        ? payload.user_id.trim().toLowerCase()
+        : undefined
+    const ownerUserId = taskId ? (ownerOfTask(taskId) ?? ownerFromPayload) : undefined
+
     if (msgType === 'task_accepted') {
-      if (taskId) {
-        deliverChatResponse(taskId, 'Task accepted — the orchestrator is working on it.\n', false)
+      if (taskId && ownerUserId) {
+        deliverChatResponse(ownerUserId, taskId, 'Task accepted — the orchestrator is working on it.\n', false)
         ioLog('info', 'nats', 'orchestrator accepted task; relaying acknowledgment to chat stream', { task_id: taskId })
+      } else if (taskId) {
+        ioLog('warn', 'nats', 'orchestrator task_accepted arrived but task owner unknown; dropping ack', { task_id: taskId })
       }
     } else if (msgType === 'task_result') {
       const result = payload.result as unknown
       const content = extractHumanResult(result)
       if (taskId) {
-        const streamed = deliverChatResponse(taskId, content, true)
+        const streamed = ownerUserId ? deliverChatResponse(ownerUserId, taskId, content, true) : false
         ioLog('info', 'nats', 'orchestrator returned final task result; closing chat stream', {
           task_id: taskId,
           result_preview: previewHeadTail(content),
@@ -284,17 +287,16 @@ if (natsClient) {
     } else if (msgType === 'error_response') {
       const userMsg = (payload.user_message ?? 'An error occurred.') as string
       const errKey = pendingKeyFromErrorPayload(payload, subject)
+      const errOwner = errKey ? (ownerOfTask(errKey) ?? ownerFromPayload) : undefined
       if (errKey) {
-        const cb = pendingChatResponses.get(errKey)
-        if (cb) {
-          cb.error(userMsg)
-          pendingChatResponses.delete(errKey)
+        const failed = errOwner ? failPendingChatCallback(errOwner, errKey, userMsg) : false
+        if (failed) {
           ioLog('warn', 'nats', 'orchestrator returned error_response; failing waiting chat stream', {
             task_id: errKey,
             detail_preview: previewHeadTail(userMsg),
           })
         } else {
-          ioLog('warn', 'nats', 'orchestrator returned error_response but no chat stream is waiting (client disconnected or task_id mismatch)', {
+          ioLog('warn', 'nats', 'orchestrator returned error_response but no chat stream is waiting (client disconnected, task_id mismatch, or owner unknown)', {
             task_id: errKey,
             subject,
             detail_preview: previewHeadTail(userMsg),
@@ -323,10 +325,8 @@ if (natsClient) {
 }
 
 // =============================================================================
-// In-memory task state (separate from log persistence)
+// In-memory task state lives in ./task-scope (MT-3: (userId, taskId) scoped)
 // =============================================================================
-
-const tasks = new Map<string, StatusUpdate>();
 
 /** Maps MemoryLogEntry (user|assistant) back to LogEntry (user|orchestrator). */
 function memoryToLogEntry(m: MemoryLogEntry): LogEntry {
@@ -338,46 +338,7 @@ function memoryToLogEntry(m: MemoryLogEntry): LogEntry {
   }
 }
 
-type SsePush = (bytes: Uint8Array) => void;
-const sseClients = new Map<string, Set<SsePush>>();
-
 const text = new TextEncoder();
-
-function subscribeSse(taskId: string, push: SsePush): () => void {
-  let set = sseClients.get(taskId);
-  if (!set) {
-    set = new Set();
-    sseClients.set(taskId, set);
-  }
-  set.add(push);
-  return () => {
-    set!.delete(push);
-    if (set!.size === 0) sseClients.delete(taskId);
-  };
-}
-
-function broadcastStreamEvent(taskId: string, event: OrchestratorStreamEvent): void {
-  const line = `data: ${JSON.stringify(event)}\n\n`;
-  const bytes = text.encode(line);
-  const set = sseClients.get(taskId);
-  if (!set) return;
-  for (const push of set) {
-    try {
-      push(bytes);
-    } catch {
-      /* client disconnected */
-    }
-  }
-}
-
-function broadcastStatus(taskId: string, status: StatusUpdate): void {
-  broadcastStreamEvent(taskId, { type: 'status', payload: status });
-}
-
-function persistAndBroadcastStatus(status: StatusUpdate): void {
-  tasks.set(status.taskId, status);
-  broadcastStatus(status.taskId, status);
-}
 
 // =============================================================================
 // Demo mode only: mock response generator and demo credential
@@ -475,18 +436,28 @@ app.get('/api/status', (c) => {
 // Conversation / Task endpoints
 // =============================================================================
 
-// Get all tasks
+// Get all tasks owned by the active user.
+// MT-3: the in-memory map is scoped by (userId, taskId); prefix-scan the
+// caller's slot so one user can never see another's live task list.
 app.get('/api/tasks', (c) => {
-  logFromContext(c, 'debug', 'http', 'listed in-memory task statuses for ui')
-  const taskList = Array.from(tasks.values());
+  const userId = activeUserId(c)
+  if (!userId) return userIdRequired(c)
+  const taskList = listTasksForUser(userId)
+  logFromContext(c, 'debug', 'http', 'listed in-memory task statuses for ui', {
+    user_id: userId,
+    task_count: taskList.length,
+  })
   return c.json({ tasks: taskList });
 });
 
-// Get status for a specific task
+// Get status for a specific task. MT-3: lookup by (activeUserId, taskId); 404
+// (not 403) on miss so probing doesn't leak whether another user owns the id.
 app.get('/api/tasks/:taskId', (c) => {
+  const userId = activeUserId(c)
+  if (!userId) return userIdRequired(c)
   const taskId = c.req.param('taskId');
   c.set('taskId', taskId)
-  const task = tasks.get(taskId);
+  const task = getTaskStatus(userId, taskId);
   if (!task) {
     logFromContext(c, 'debug', 'http', 'ui requested status for unknown task')
     return c.json({ error: 'Task not found' }, 404);
@@ -576,8 +547,9 @@ app.post('/api/tasks', async (c) => {
     expectedNextInputMinutes: null,
     timestamp: Date.now(),
   }
-  tasks.set(taskId, statusUpdate)
-  broadcastStatus(taskId, statusUpdate)
+  recordTaskOwnership(userId, taskId)
+  setTaskStatus(userId, taskId, statusUpdate)
+  broadcastStatus(userId, taskId, statusUpdate)
 
   return c.json({ taskId, conversationId: createdTask.conversationId, status: 'created' })
 });
@@ -615,13 +587,25 @@ app.post('/api/orchestrator/stream-events', async (c) => {
     if (typeof cr.done === 'boolean') eventLogFields.done = cr.done
   }
   logFromContext(c, 'info', 'orchestrator-proxy', `received ${event.type} push from orchestrator; broadcasting to ui sse listeners`, eventLogFields)
+  // MT-3: orchestrator HTTP push carries only taskId — resolve the owning user
+  // via the reverse index populated at task-create time. An orphan event (owner
+  // unknown after restart, or task never registered) is logged and dropped so
+  // we don't broadcast into the wrong user's SSE slot.
+  const ownerUserId = taskId ? ownerOfTask(taskId) : undefined
+  if (!ownerUserId) {
+    logFromContext(c, 'warn', 'orchestrator-proxy', 'received orchestrator stream event for task with no recorded owner; dropping', {
+      task_id: taskId,
+      event_type: event.type,
+    })
+    return c.json({ ok: true, dropped: 'unknown task owner' });
+  }
   if (event.type === 'status') {
-    tasks.set(taskId, event.payload);
+    setTaskStatus(ownerUserId, taskId, event.payload);
   } else if (event.type === 'chat_response') {
     const { content, done } = event.payload;
-    deliverChatResponse(taskId, content, done);
+    deliverChatResponse(ownerUserId, taskId, content, done);
   }
-  broadcastStreamEvent(taskId, event);
+  broadcastStreamEvent(ownerUserId, taskId, event);
   return c.json({ ok: true });
 });
 
@@ -718,7 +702,12 @@ app.post('/api/chat', async (c) => {
   if (denied) return denied
   const { taskId, content, conversationHistory, conversationId, required_skill_domains } = body as SendMessageRequest & { required_skill_domains?: string[] };
   const traceId = c.get('traceId') as string | undefined;
-  if (taskId) c.set('taskId', taskId)
+  if (taskId) {
+    c.set('taskId', taskId)
+    // MT-3: record (taskId -> userId) so orchestrator inbound paths can resolve
+    // the owning user when delivering chat_response / status frames back.
+    recordTaskOwnership(effectiveUserId, taskId)
+  }
   if (conversationId) c.set('conversationId', conversationId)
   logFromContext(c, 'info', 'http', 'received chat message from user; queuing for orchestrator', {
     user_id: effectiveUserId,
@@ -754,7 +743,7 @@ app.post('/api/chat', async (c) => {
     timestamp: Date.now(),
   };
   if (!scheduleAutomationIntent) {
-    persistAndBroadcastStatus(workingStatus)
+    persistAndBroadcastStatus(effectiveUserId, workingStatus)
   }
 
   const encoder = new TextEncoder();
@@ -826,7 +815,7 @@ app.post('/api/chat', async (c) => {
           expectedNextInputMinutes: 0,
           timestamp: Date.now(),
         }
-        persistAndBroadcastStatus(doneStatus)
+        persistAndBroadcastStatus(effectiveUserId, doneStatus)
       }
 
       if (scheduleAutomationIntent) {
@@ -883,7 +872,8 @@ app.post('/api/chat', async (c) => {
           }
         }
 
-        const pendingKey = chatPendingKey(taskId)
+        // MT-3: parked callback is registered via task-scope, keyed by
+        // (userId, taskId) so two users can't overwrite each other's slot.
         let keepalive: ReturnType<typeof setInterval> | undefined
         const stopKeepalive = () => {
           if (keepalive !== undefined) {
@@ -894,7 +884,7 @@ app.post('/api/chat', async (c) => {
 
         const timeout = setTimeout(() => {
           stopKeepalive()
-          pendingChatResponses.delete(pendingKey)
+          dropPendingChatCallback(effectiveUserId, taskId)
           if (streamDone) return
           const msg = accumulated
             ? accumulated
@@ -910,11 +900,11 @@ app.post('/api/chat', async (c) => {
         cleanupChatStream = () => {
           stopKeepalive()
           clearTimeout(timeout)
-          pendingChatResponses.delete(pendingKey)
+          dropPendingChatCallback(effectiveUserId, taskId)
           streamDone = true
         }
 
-        pendingChatResponses.set(pendingKey, {
+        registerPendingChatCallback(effectiveUserId, taskId, {
           push(chunk: string) {
             if (streamDone) return
             accumulated += chunk
@@ -934,7 +924,7 @@ app.post('/api/chat', async (c) => {
               expectedNextInputMinutes: 0,
               timestamp: Date.now(),
             }
-            persistAndBroadcastStatus(doneStatus)
+            persistAndBroadcastStatus(effectiveUserId, doneStatus)
           },
           error(msg: string) {
             stopKeepalive()
@@ -963,7 +953,7 @@ app.post('/api/chat', async (c) => {
         }, 8_000)
         ioLog('info', 'http', 'registered chat stream as pending; awaiting orchestrator response (timeout 120s)', {
           task_id: taskId,
-          pending_key: pendingKey,
+          user_id: effectiveUserId,
         })
         return
       }
@@ -982,7 +972,7 @@ app.post('/api/chat', async (c) => {
           taskId, status: 'awaiting_feedback', lastUpdate: 'Response complete',
           expectedNextInputMinutes: 0, timestamp: Date.now(),
         }
-        persistAndBroadcastStatus(doneStatus)
+        persistAndBroadcastStatus(effectiveUserId, doneStatus)
       })()
     },
     cancel() {
@@ -1620,8 +1610,25 @@ app.post('/api/credential', async (c) => {
 // =============================================================================
 
 app.get('/api/events/:taskId', (c) => {
+  const userId = activeUserId(c)
+  if (!userId) return userIdRequired(c)
   const taskId = c.req.param('taskId');
   c.set('taskId', taskId)
+
+  // MT-3: ownership check before opening the stream. 404 — not 403 — so probing
+  // doesn't reveal whether the taskId exists for another user. The demo task
+  // (id '13', DEMO_MODE only) is the one exception: it has no real owner and
+  // is intended as a fixed-id reference stream for the mock UI.
+  const isDemoFixedTask = DEMO_MODE && taskId === '13'
+  if (!isDemoFixedTask) {
+    const owner = ownerOfTask(taskId)
+    if (!owner || owner !== userId.toLowerCase()) {
+      logFromContext(c, 'debug', 'http', 'ui requested sse for unknown or unowned task; returning 404', {
+        user_id: userId,
+      })
+      return c.json({ error: 'Task not found' }, 404)
+    }
+  }
   logFromContext(c, 'debug', 'http', 'ui opened sse connection for task event stream')
 
   const stream = new ReadableStream<Uint8Array>({
@@ -1634,19 +1641,19 @@ app.get('/api/events/:taskId', (c) => {
         }
       };
 
-      const unsubscribe = subscribeSse(taskId, push);
+      const unsubscribe = subscribeSse(userId, taskId, push);
 
       // Only push initial status when the BFF has state (e.g. after /api/chat). Otherwise the
       // web UI keeps its local mock task list without being overwritten by a synthetic default.
-      const stored = tasks.get(taskId);
+      const stored = getTaskStatus(userId, taskId);
       if (stored) {
         push(text.encode(`data: ${JSON.stringify({ type: 'status', payload: stored })}\n\n`));
       }
 
       // Demo mode: push a sample credential request for the demo task
-      if (DEMO_MODE && taskId === '13') {
+      if (isDemoFixedTask) {
         setTimeout(() => {
-          broadcastStreamEvent('13', {
+          broadcastStreamEvent(userId, '13', {
             type: 'credential_request',
             payload: DEMO_TASK_13_CREDENTIAL,
           });
@@ -1654,9 +1661,9 @@ app.get('/api/events/:taskId', (c) => {
       }
 
       const interval = setInterval(() => {
-        const current = tasks.get(taskId);
+        const current = getTaskStatus(userId, taskId);
         if (current?.status === 'working') {
-          broadcastStatus(taskId, { ...current, timestamp: Date.now() });
+          broadcastStatus(userId, taskId, { ...current, timestamp: Date.now() });
         }
       }, 2800);
 
