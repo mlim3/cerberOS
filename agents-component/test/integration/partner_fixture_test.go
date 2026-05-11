@@ -45,6 +45,12 @@ type partnerFixture struct {
 	subs   []*nats.Subscription
 	credMu sync.RWMutex
 	creds  map[string]string
+
+	// onClarificationRequest is an optional hook called when the fixture
+	// receives a clarification.request from the agent. The hook must return
+	// the response to send back. If nil, clarification requests are ack'd
+	// and silently dropped (simulates no user present).
+	onClarificationRequest func(types.ClarificationRequest) types.ClarificationResponse
 }
 
 func newPartnerFixture(t *testing.T, natsURL, owner string) *partnerFixture {
@@ -94,6 +100,7 @@ func (f *partnerFixture) start() error {
 		{subject: "aegis.orchestrator.vault.execute.request", base: "itest-vault-execute-request", handler: f.handleVaultExecuteRequest},
 		{subject: "aegis.orchestrator.state.write", base: "itest-state-write", handler: f.handleStateWrite},
 		{subject: "aegis.orchestrator.state.read.request", base: "itest-state-read-request", handler: f.handleStateReadRequest},
+		{subject: "aegis.orchestrator.clarification.request", base: "itest-clarification-request", handler: f.handleClarificationRequest},
 	}
 
 	for _, sub := range subs {
@@ -282,6 +289,41 @@ func (f *partnerFixture) handleStateReadRequest(msg *nats.Msg) {
 		TraceID: req.TraceID,
 	}
 	if err := f.publish("aegis.agents.state.read.response", "state.read.response", req.TraceID, resp); err != nil {
+		_ = msg.Nak()
+		return
+	}
+	_ = msg.Ack()
+}
+
+func (f *partnerFixture) handleClarificationRequest(msg *nats.Msg) {
+	env, ok := unwrapEnvelope(msg.Data)
+	if !ok {
+		_ = msg.Ack()
+		return
+	}
+	if env.SourceComponent != f.owner {
+		_ = msg.Ack()
+		return
+	}
+
+	var req types.ClarificationRequest
+	if err := json.Unmarshal(env.Payload, &req); err != nil {
+		_ = msg.Nak()
+		return
+	}
+
+	f.mu.Lock()
+	hook := f.onClarificationRequest
+	f.mu.Unlock()
+
+	if hook == nil {
+		// No handler registered — silently drop (simulates no user present).
+		_ = msg.Ack()
+		return
+	}
+
+	resp := hook(req)
+	if err := f.publish("aegis.agents.clarification.response", "clarification.response", req.RequestID, resp); err != nil {
 		_ = msg.Nak()
 		return
 	}

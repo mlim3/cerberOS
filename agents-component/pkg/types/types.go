@@ -346,10 +346,40 @@ type MemoryResponse struct {
 // withheld per the progressive disclosure contract. Call GetSpec for the full
 // parameter schema of a specific command.
 type SkillSearchResult struct {
-	Domain      string  `json:"domain"`
-	Name        string  `json:"name"`
-	Description string  `json:"description"`
-	Score       float64 `json:"score"` // cosine similarity in [0, 1]; higher is more relevant
+	Domain         string  `json:"domain"`
+	Name           string  `json:"name"`
+	Description    string  `json:"description"`
+	Score          float64 `json:"score"`          // cosine similarity in [0, 1]; higher is more relevant
+	RequiresCred   bool    `json:"requires_cred"`  // true if the skill needs vault execution
+	Implementation string  `json:"implementation"` // builtinRegistry key; empty for synthesized skills
+	Origin         string  `json:"origin"`         // "static" | "synthesized"
+}
+
+// ClarificationRequest is sent by the agent process to the Orchestrator when it
+// discovers a credentialed skill outside its pre-authorized scope and needs the
+// user to approve expanding that scope before proceeding.
+//
+// The Orchestrator routes this to the user via the I/O component. The user's
+// response arrives as a ClarificationResponse on aegis.agents.clarification.response.
+type ClarificationRequest struct {
+	RequestID   string `json:"request_id"`             // UUID; correlates to ClarificationResponse
+	AgentID     string `json:"agent_id"`
+	TaskID      string `json:"task_id"`
+	Question    string `json:"question"`               // human-readable question shown to the user
+	SkillName   string `json:"skill_name"`             // e.g. "vault_gmail_send"
+	SkillDomain string `json:"skill_domain"`           // e.g. "google_workspace"
+	Reason      string `json:"reason"`                 // why the agent thinks this skill is needed
+}
+
+// ClarificationResponse is returned by the Orchestrator after the user has
+// responded to a ClarificationRequest. Approved=true means the Orchestrator
+// should authorize a child agent for SkillDomain and return the result.
+// Approved=false means the agent must find an alternative or fail gracefully.
+type ClarificationResponse struct {
+	RequestID   string `json:"request_id"`  // matches ClarificationRequest.RequestID
+	AgentID     string `json:"agent_id"`
+	Approved    bool   `json:"approved"`
+	UserMessage string `json:"user_message,omitempty"` // optional user note (e.g. reason for denial)
 }
 
 // SessionEntry is one node in the agent's append-only session log tree (EDD §13.1).
