@@ -147,15 +147,51 @@
 }
 
 .empty-state-brand {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: nowrap;
+  gap: 0;
   color: #ffffff;
-  font-size: clamp(4rem, 10vw, 8rem);
+  font-size: clamp(2.5rem, 8vw, 5.5rem);
   font-weight: 900;
   letter-spacing: -0.08em;
-  line-height: 0.92;
+  line-height: 1;
   margin-bottom: var(--sp-4);
   text-shadow:
     0 24px 80px rgba(103, 183, 255, 0.22),
     0 6px 22px rgba(0, 0, 0, 0.35);
+}
+
+.empty-state-brand-logo {
+  flex-shrink: 0;
+  width: clamp(3.25rem, 12vw, 6rem);
+  height: clamp(3.25rem, 12vw, 6rem);
+  display: block;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  overflow: visible;
+}
+
+.empty-state-brand-text {
+  line-height: 0.92;
+  margin-inline-start: -0.35rem;
+  min-width: 0;
+}
+
+@media (max-width: 380px) {
+  .empty-state-brand {
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+
+  .empty-state-brand-text {
+    margin-inline-start: 0;
+    flex-basis: 100%;
+    text-align: center;
+  }
 }
 
 .empty-state-text {

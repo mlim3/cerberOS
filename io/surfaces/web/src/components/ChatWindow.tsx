@@ -5,6 +5,7 @@ import type { UISettings } from './SettingsPanel'
 import CredentialRequestCard from './CredentialRequestCard'
 import ProgressIndicator from './ProgressIndicator'
 import { VoiceRecorder } from './VoiceRecorder'
+import { CerberOsLogo } from './icons/CerberOsLogo'
 import './ChatWindow.css'
 import './VoiceRecorder.css'
 
@@ -129,8 +130,19 @@ function ChatWindow({
             </div>
             <div className="message-content">
               <div className="message-header">
-                <span className="message-sender">
-                  {message.role === 'user' ? 'You' : 'cerberOS'}
+                <span
+                  className={
+                    message.role === 'user' ? 'message-sender' : 'message-sender message-sender--agent'
+                  }
+                >
+                  {message.role === 'user' ? (
+                    'You'
+                  ) : (
+                    <>
+                      <CerberOsLogo className="message-sender-logo" title={false} />
+                      cerberOS
+                    </>
+                  )}
                 </span>
                 {message.scheduledRun && (
                   <span className="scheduled-turn-badge" title="Automated run from your schedule">
@@ -163,7 +175,10 @@ function ChatWindow({
             <div className="message-avatar"><span className="avatar-glyph">C</span></div>
             <div className="message-content">
               <div className="message-header">
-                <span className="message-sender">cerberOS</span>
+                <span className="message-sender message-sender--agent">
+                  <CerberOsLogo className="message-sender-logo" title={false} />
+                  cerberOS
+                </span>
                 <span className="message-time">{new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
                 <span className="streaming-badge">Streaming</span>
               </div>

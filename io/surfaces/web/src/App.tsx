@@ -41,6 +41,7 @@ import {
 import { createWebSurface, type SurfaceAdapter } from './surface'
 import { parseFirstRunAt, parseRhythmReply } from './recurring/parseRhythm'
 import { extractPromptBodyForCron, looksLikeRepeatingSchedulingIntent } from './recurring/detectIntent'
+import { CerberOsLogo } from './components/icons/CerberOsLogo'
 import './App.css'
 
 const DEMO_MODE = import.meta.env.VITE_DEMO_MODE === 'true'
@@ -2039,7 +2040,10 @@ function App() {
           </div>
         ) : (
           <div className="empty-state">
-            <h2 className="empty-state-title empty-state-brand">CerberOS</h2>
+            <h2 className="empty-state-title empty-state-brand">
+              <CerberOsLogo className="empty-state-brand-logo" title={false} />
+              <span className="empty-state-brand-text">CerberOS</span>
+            </h2>
             <p className="empty-state-text">Create a new task to start a focused agent conversation.</p>
           </div>
         )}
