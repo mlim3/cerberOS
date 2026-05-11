@@ -63,19 +63,21 @@ function UserSwitcher() {
   }
 
   return (
-    <select
-      className="user-switcher"
-      value={current}
-      onChange={onChange}
-      title="Acting as (demo only — not authentication)"
-      aria-label="Active user"
-    >
-      {options.map(u => (
-        <option key={u.id} value={u.id}>
-          {u.email}{roleBadge((u as UserSummary).role)}
-        </option>
-      ))}
-    </select>
+    <div className="user-switcher-control" title="Acting as (demo only — not authentication)">
+      <span className="user-switcher-label">Acting as</span>
+      <select
+        className="user-switcher"
+        value={current}
+        onChange={onChange}
+        aria-label="Active user"
+      >
+        {options.map(u => (
+          <option key={u.id} value={u.id}>
+            {u.email}{roleBadge((u as UserSummary).role)}
+          </option>
+        ))}
+      </select>
+    </div>
   )
 }
 

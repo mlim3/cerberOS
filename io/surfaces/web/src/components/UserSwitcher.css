@@ -1,18 +1,54 @@
-.user-switcher {
+.user-switcher-control {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 4px 6px 4px 10px;
+  background: color-mix(in srgb, var(--bg-card) 78%, transparent);
+  border: var(--border-subtle);
+  border-radius: 999px;
+  box-shadow: 0 1px 2px oklch(0.2 0.02 160 / 0.04);
+}
+
+.user-switcher-label {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-size: var(--font-xs);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.user-switcher,
+.user-switcher-select {
   appearance: none;
   -webkit-appearance: none;
-  width: auto;
-  padding: 6px 26px 6px 10px;
-  background-color: transparent;
-  border: var(--border-subtle);
-  border-radius: var(--radius-sm);
+  min-width: 11rem;
+  max-width: min(20rem, 32vw);
+  padding: 5px 28px 5px 10px;
+  background-color: var(--bg-primary);
+  border: 1px solid transparent;
+  border-radius: 999px;
   color: var(--text-primary);
-  font-size: 12px;
+  font-size: var(--font-sm);
+  font-weight: 600;
+  line-height: var(--leading-tight);
   cursor: pointer;
-  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition:
+    background-color 0.18s ease,
+    border-color 0.18s ease,
+    box-shadow 0.18s ease;
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6' fill='none'><path d='M1 1l4 4 4-4' stroke='currentColor' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
   background-repeat: no-repeat;
-  background-position: right 9px center;
+  background-position: right 11px center;
+}
+
+.user-switcher:hover {
+  background-color: var(--bg-card);
+  border-color: var(--accent-border);
 }
 
 .user-switcher:focus {
@@ -22,4 +58,16 @@
 .user-switcher:focus-visible {
   border-color: var(--accent-border);
   box-shadow: var(--focus-ring);
+}
+
+@media (max-width: 760px) {
+  .user-switcher-label {
+    display: none;
+  }
+
+  .user-switcher,
+  .user-switcher-select {
+    min-width: 9rem;
+    max-width: 42vw;
+  }
 }
