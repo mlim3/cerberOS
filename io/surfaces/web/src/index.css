@@ -39,6 +39,18 @@
   --stuck: #d2a6ff;
   --stuck-bg: rgba(210, 166, 255, 0.12);
 
+  /* Conversation lanes (transcript + activity) */
+  --conv-user-accent: #5ce1c5;
+  --conv-user-glow: rgba(92, 225, 197, 0.18);
+  --conv-assistant-accent: #67b7ff;
+  --conv-assistant-glow: rgba(103, 183, 255, 0.14);
+  --conv-subagent-accent: #c49cff;
+  --conv-subagent-glow: rgba(196, 156, 255, 0.16);
+  --conv-thinking-accent: #ffb86b;
+  --conv-thinking-glow: rgba(255, 184, 107, 0.18);
+  --conv-system-accent: #64e6ad;
+  --conv-system-glow: rgba(100, 230, 173, 0.12);
+
   --surface-hover: rgba(162, 205, 255, 0.08);
   --surface-selected: rgba(103, 183, 255, 0.18);
   --toggle-track-off: rgba(162, 205, 255, 0.14);

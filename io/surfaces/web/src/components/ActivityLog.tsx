@@ -22,36 +22,6 @@ function ActivityLog({ entries, onClose }: ActivityLogProps) {
     logEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [entries])
 
-  const getTypeIcon = (type: LogEntry['type']) => {
-    switch (type) {
-      case 'heartbeat':
-        return '💓'
-      case 'user_message':
-        return '👤'
-      case 'agent_response':
-        return '🤖'
-      case 'status_change':
-        return '🔔'
-      default:
-        return '📝'
-    }
-  }
-
-  const getTypeClass = (type: LogEntry['type']) => {
-    switch (type) {
-      case 'heartbeat':
-        return 'heartbeat'
-      case 'user_message':
-        return 'user'
-      case 'agent_response':
-        return 'agent'
-      case 'status_change':
-        return 'status'
-      default:
-        return ''
-    }
-  }
-
   return (
     <div className="activity-log">
       <div className="activity-log-header">
@@ -70,9 +40,8 @@ function ActivityLog({ entries, onClose }: ActivityLogProps) {
           </div>
         )}
         {entries.map(entry => (
-          <div key={entry.id} className={`log-entry ${getTypeClass(entry.type)}`}>
+          <div key={entry.id} className={`log-entry log-entry--${entry.type}`}>
             <span className="log-timestamp">[{entry.timestamp}]</span>
-            <span className="log-icon">{getTypeIcon(entry.type)}</span>
             <span className="log-task">{entry.taskTitle}:</span>
             <span className="log-message">{entry.message}</span>
           </div>

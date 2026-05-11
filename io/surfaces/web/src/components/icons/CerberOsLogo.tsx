@@ -18,7 +18,7 @@ export function CerberOsLogo({ className, title = 'CerberOS' }: CerberOsLogoProp
       role={decorative ? undefined : 'img'}
       {...(!decorative && title ? { 'aria-label': title } : {})}
     >
-      <g stroke="#ffffff" strokeWidth="18" fill="none" strokeLinecap="round" strokeLinejoin="round">
+      <g stroke="currentColor" strokeWidth="18" fill="none" strokeLinecap="round" strokeLinejoin="round">
         <path d="M 156 43 A 80 80 0 1 0 156 157" />
         <path d="M 100 50 A 50 50 0 0 0 100 150 A 50 50 0 0 0 100 50 A 25 25 0 0 0 100 100 A 25 25 0 0 1 100 150" />
       </g>

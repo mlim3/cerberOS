@@ -1,11 +1,12 @@
 import { useState, useRef, useEffect, useMemo, type ReactNode } from 'react'
 import { marked } from 'marked'
-import type { Task, CredentialRequest, CredentialRequestStatus } from '@cerberos/io-core'
+import type { Task, CredentialRequest, CredentialRequestStatus, ChatMessage } from '@cerberos/io-core'
 import type { UISettings } from './SettingsPanel'
 import CredentialRequestCard from './CredentialRequestCard'
 import ProgressIndicator from './ProgressIndicator'
 import { VoiceRecorder } from './VoiceRecorder'
 import { CerberOsLogo } from './icons/CerberOsLogo'
+import { inferAgentLane } from '../lib/infer-agent-lane'
 import './ChatWindow.css'
 import './VoiceRecorder.css'
 
@@ -41,6 +42,40 @@ const SUGGESTION_CHIPS = [
   'Show me the risks',
   'Proceed with changes',
 ]
+
+type TranscriptDisplayLane = 'user' | 'assistant' | 'sub_agent' | 'system' | 'thinking'
+
+function transcriptLane(message: ChatMessage): Exclude<TranscriptDisplayLane, 'thinking'> {
+  if (message.role === 'user') return message.isRedacted ? 'system' : 'user'
+  if (message.lane === 'system') return 'system'
+  if (message.lane === 'sub_agent') return 'sub_agent'
+  if (message.lane === 'assistant') return 'assistant'
+  return inferAgentLane(message.content)
+}
+
+function MessageSenderRow({ lane }: { lane: TranscriptDisplayLane }) {
+  if (lane === 'user') {
+    return <span className="message-sender message-sender--plain">You</span>
+  }
+  if (lane === 'system') {
+    return <span className="message-sender message-sender--plain">You</span>
+  }
+  if (lane === 'thinking') {
+    return (
+      <span className="message-sender message-sender--agent">
+        <CerberOsLogo className="message-sender-logo" title={false} />
+        Thinking
+      </span>
+    )
+  }
+  const label = lane === 'sub_agent' ? 'Sub-agent' : 'Assistant'
+  return (
+    <span className="message-sender message-sender--agent">
+      <CerberOsLogo className="message-sender-logo" title={false} />
+      {label}
+    </span>
+  )
+}
 
 function ChatWindow({
   task,
@@ -118,10 +153,12 @@ function ChatWindow({
       )}
 
       <div className="messages-container">
-        {task.messages.map(message => (
+        {task.messages.map(message => {
+          const lane = transcriptLane(message)
+          return (
           <div
             key={message.id}
-            className={`message ${message.role}${message.isRedacted ? ' redacted' : ''}${
+            className={`message ${message.role} message-lane-${lane}${message.isRedacted ? ' redacted' : ''}${
               message.scheduledRun ? ' message-scheduled-run' : ''
             }${pulseMessageKey && pulseMessageKey === message.id ? ' message-pulse-new' : ''}`}
           >
@@ -130,20 +167,7 @@ function ChatWindow({
             </div>
             <div className="message-content">
               <div className="message-header">
-                <span
-                  className={
-                    message.role === 'user' ? 'message-sender' : 'message-sender message-sender--agent'
-                  }
-                >
-                  {message.role === 'user' ? (
-                    'You'
-                  ) : (
-                    <>
-                      <CerberOsLogo className="message-sender-logo" title={false} />
-                      cerberOS
-                    </>
-                  )}
-                </span>
+                <MessageSenderRow lane={lane} />
                 {message.scheduledRun && (
                   <span className="scheduled-turn-badge" title="Automated run from your schedule">
                     Scheduled
@@ -160,7 +184,8 @@ function ChatWindow({
               }
             </div>
           </div>
-        ))}
+          )
+        })}
 
         {credentialRequest && credentialStatus && onProvideCredential && (
           <CredentialRequestCard
@@ -171,14 +196,11 @@ function ChatWindow({
         )}
 
         {isStreaming && (
-          <div className="message agent streaming">
+          <div className="message agent streaming message-lane-thinking">
             <div className="message-avatar"><span className="avatar-glyph">C</span></div>
             <div className="message-content">
               <div className="message-header">
-                <span className="message-sender message-sender--agent">
-                  <CerberOsLogo className="message-sender-logo" title={false} />
-                  cerberOS
-                </span>
+                <MessageSenderRow lane="thinking" />
                 <span className="message-time">{new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
                 <span className="streaming-badge">Streaming</span>
               </div>
@@ -192,6 +214,7 @@ function ChatWindow({
         <ProgressIndicator
           isActive={isStreaming || task.status === 'working'}
           statusText={isStreaming ? undefined : task.lastUpdate}
+          className={isStreaming ? 'progress-indicator--thinking' : 'progress-indicator--working'}
         />
         <div ref={messagesEndRef} />
       </div>
