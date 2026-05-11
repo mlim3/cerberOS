@@ -30,6 +30,46 @@ export function userIdRequired(c: { json: (obj: unknown, status: 400) => Respons
   return c.json({ error: 'X-Active-User header is required (UUID)' }, 400)
 }
 
+/**
+ * MT-2: defense-in-depth against userId-override on write endpoints.
+ *
+ * Returns a 403 Response when the request carries a `userId` in the JSON body
+ * or query string that does not match `activeId` (the X-Active-User reader's
+ * result). A matching value is silently accepted for backward compatibility
+ * with older clients that still echo their own id back.
+ *
+ * Handlers MUST short-circuit on a non-null return:
+ *   const denied = assertNoUserIdOverride(c, body, userId)
+ *   if (denied) return denied
+ *
+ * The silent-drop behavior left by MT-D2 (#193) is safe but unobservable;
+ * this turns "your override was ignored" into a hard, auditable boundary.
+ */
+export function assertNoUserIdOverride(
+  c: {
+    req: { query: (name: string) => string | undefined }
+    json: (obj: unknown, status: 403) => Response
+  },
+  body: unknown,
+  activeId: string,
+): Response | null {
+  const active = activeId.toLowerCase()
+  const fromBody =
+    body && typeof body === 'object' && 'userId' in body && typeof (body as { userId?: unknown }).userId === 'string'
+      ? ((body as { userId: string }).userId).trim().toLowerCase()
+      : null
+  const fromQuery = c.req.query('userId')?.trim().toLowerCase() || null
+  for (const candidate of [fromBody, fromQuery]) {
+    if (candidate && candidate !== active) {
+      return c.json(
+        { error: 'userId override does not match X-Active-User' },
+        403,
+      )
+    }
+  }
+  return null
+}
+
 const ROLE_RANK: Record<UserRole, number> = { user: 0, manager: 1, root: 2 }
 
 export async function getActiveRole(userId: string): Promise<UserRole | null> {

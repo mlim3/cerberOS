@@ -37,7 +37,7 @@ import { ioLog, logFromContext, previewHeadTail, previewWords } from './logger'
 import { startHeartbeatEmitter } from './heartbeat'
 import { mirrorMemoryConfigured, persistOrchestratorOutcomeToMemory } from './scheduled-run-mirror'
 import { messageLooksLikeUserCronScheduling } from './scheduling-language'
-import { activeUserId, userIdRequired, requireRole } from './identity'
+import { activeUserId, userIdRequired, requireRole, assertNoUserIdOverride } from './identity'
 
 // =============================================================================
 // Planner input enrichment
@@ -498,7 +498,10 @@ app.get('/api/tasks/:taskId', (c) => {
 app.post('/api/conversations', async (c) => {
   const userId = activeUserId(c)
   if (!userId) return userIdRequired(c)
-  const { title } = await c.req.json()
+  const body = await c.req.json()
+  const denied = assertNoUserIdOverride(c, body, userId)
+  if (denied) return denied
+  const { title } = body
   const conversation = await createConversation({
     userId,
     title: typeof title === 'string' ? title : undefined,
@@ -533,6 +536,8 @@ app.post('/api/tasks', async (c) => {
   const userId = activeUserId(c)
   if (!userId) return userIdRequired(c)
   const body = await c.req.json()
+  const denied = assertNoUserIdOverride(c, body, userId)
+  if (denied) return denied
   const rawConversationId = typeof body.conversationId === 'string' && body.conversationId ? body.conversationId : undefined
   const conversationId = rawConversationId && UUID_RE.test(rawConversationId) ? rawConversationId : undefined
   const title = typeof body.title === 'string' ? body.title : undefined
@@ -709,6 +714,8 @@ app.post('/api/chat', async (c) => {
   const effectiveUserId = activeUserId(c)
   if (!effectiveUserId) return userIdRequired(c)
   const body = (await c.req.json()) as SendMessageRequest;
+  const denied = assertNoUserIdOverride(c, body, effectiveUserId)
+  if (denied) return denied
   const { taskId, content, conversationHistory, conversationId, required_skill_domains } = body as SendMessageRequest & { required_skill_domains?: string[] };
   const traceId = c.get('traceId') as string | undefined;
   if (taskId) c.set('taskId', taskId)
@@ -1054,6 +1061,8 @@ app.post('/api/skills/create', async (c) => {
   if (!body || typeof body.description !== 'string' || !body.description.trim()) {
     return c.json({ error: 'description is required' }, 400)
   }
+  const denied = assertNoUserIdOverride(c, body, userId)
+  if (denied) return denied
   const scope: 'me' | 'all' = body.scope === 'all' ? 'all' : 'me'
   // Manager-gate scope=all so a regular user can't push a skill to everyone.
   if (scope === 'all') {
@@ -1095,6 +1104,8 @@ app.post('/api/skills/import-github', async (c) => {
   if (!body || typeof body.repo !== 'string' || !body.repo.trim()) {
     return c.json({ error: 'repo is required' }, 400)
   }
+  const denied = assertNoUserIdOverride(c, body, userId)
+  if (denied) return denied
   const scope: 'me' | 'all' = body.scope === 'all' ? 'all' : 'me'
   if (scope === 'all') {
     const guard = await requireRole(c, 'manager')
@@ -1304,6 +1315,8 @@ app.post('/api/users', async (c) => {
 app.delete('/api/conversations/:conversationId', async (c) => {
   const userId = activeUserId(c)
   if (!userId) return userIdRequired(c)
+  const denied = assertNoUserIdOverride(c, null, userId)
+  if (denied) return denied
   const conversationId = c.req.param('conversationId')
   c.set('conversationId', conversationId)
   logFromContext(c, 'info', 'http', 'user deleted conversation thread', { user_id: userId })
@@ -1316,6 +1329,8 @@ app.patch('/api/conversations/:conversationId', async (c) => {
   if (!userId) return userIdRequired(c)
   const conversationId = c.req.param('conversationId')
   const body = await c.req.json() as { title?: string }
+  const denied = assertNoUserIdOverride(c, body, userId)
+  if (denied) return denied
   c.set('conversationId', conversationId)
   if (body.title) {
     logFromContext(c, 'info', 'http', 'user renamed conversation thread', {
@@ -1380,6 +1395,8 @@ app.post('/api/user-crons', async (c) => {
   }
   const userId = activeUserId(c)
   if (!userId) return userIdRequired(c)
+  const denied = assertNoUserIdOverride(c, body, userId)
+  if (denied) return denied
   if (!body.name?.trim() || !body.rawInput?.trim() || !body.nextRunAt || !body.scheduleKind) {
     return c.json({ error: 'name, rawInput, nextRunAt, and scheduleKind are required' }, 400)
   }
@@ -1469,6 +1486,8 @@ app.delete('/api/user-crons/:jobId', async (c) => {
   }
   const userId = activeUserId(c)
   if (!userId) return userIdRequired(c)
+  const denied = assertNoUserIdOverride(c, null, userId)
+  if (denied) return denied
   const jobId = c.req.param('jobId')
   const res = await fetch(
     `${base}/api/v1/scheduled_jobs/${encodeURIComponent(jobId)}?userId=${encodeURIComponent(userId)}`,
@@ -1503,6 +1522,8 @@ app.post('/api/credential', async (c) => {
     keyName: string;
     value: string;
   };
+  const denied = assertNoUserIdOverride(c, body, userId)
+  if (denied) return denied
   const { taskId, requestId, keyName } = body;
   c.set('taskId', taskId)
   logFromContext(c, 'info', 'credential', 'received credential value from user; forwarding to memory vault (value not logged)', {
