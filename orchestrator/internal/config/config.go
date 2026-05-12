@@ -24,6 +24,7 @@ type OrchestratorConfig struct {
 	NATSUrl        string // NATS_URL — NATS JetStream server URL
 	NATSCredsPath  string // NATS_CREDS_PATH — optional path to NATS credentials file
 	MemoryEndpoint string // MEMORY_ENDPOINT — Memory Component write/read API
+	MemoryAPIKey   string // MEMORY_API_KEY — X-Internal-API-Key for vault-protected Memory endpoints
 
 	// Vault behavior
 	VaultFailureMode    VaultFailureMode // VAULT_FAILURE_MODE — default: FAIL_CLOSED
@@ -103,6 +104,11 @@ func Load() (*OrchestratorConfig, error) {
 	if cfg.MemoryEndpoint == "" {
 		missing = append(missing, "MEMORY_ENDPOINT")
 	}
+
+	// MEMORY_API_KEY is optional: only required for vault-protected endpoints
+	// (scheduled_jobs, user_crons). Orchestrator logs a warning when unset and
+	// those endpoints are accessed.
+	cfg.MemoryAPIKey = os.Getenv("MEMORY_API_KEY")
 
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("missing required environment variables: %v", missing)

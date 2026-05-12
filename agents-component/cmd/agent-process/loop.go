@@ -214,6 +214,23 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 		log.Warn("skill_load tool registration failed", "error", err)
 	}
 
+	// Skill authoring — propose_skill lets an agent persist a new synthesized
+	// skill into the user's skill_cache for future reuse.
+	if err := registry.Register(proposeSkillTool(sl, spawnCtx.UserContextID)); err != nil {
+		log.Warn("propose_skill tool registration failed", "error", err)
+	}
+
+	// Scheduling tools — let agents create, list, and cancel recurring user tasks.
+	if err := registry.Register(createScheduledJobTool(sl, spawnCtx.UserContextID)); err != nil {
+		log.Warn("create_scheduled_job tool registration failed", "error", err)
+	}
+	if err := registry.Register(listScheduledJobsTool(sl, spawnCtx.UserContextID)); err != nil {
+		log.Warn("list_scheduled_jobs tool registration failed", "error", err)
+	}
+	if err := registry.Register(cancelScheduledJobTool(sl, spawnCtx.UserContextID)); err != nil {
+		log.Warn("cancel_scheduled_job tool registration failed", "error", err)
+	}
+
 	// Pre-populate the registry with external skills persisted by skill_load in
 	// prior sessions. Each record carries the serialised externalSkillManifest in
 	// its Recipe field; buildHTTPSkillTool reconstructs the full SkillTool from it.

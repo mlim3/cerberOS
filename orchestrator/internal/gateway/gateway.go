@@ -177,6 +177,11 @@ type Gateway struct {
 	// aegis.agents.vault.execute.result.
 	vaultEngineEndpoint string
 
+	// memoryAPIKey is the X-Internal-API-Key secret used for vault-protected
+	// Memory API endpoints (scheduled_jobs, user_crons). Optional: when empty
+	// the orchestrator logs a warning and skips those forwarding calls.
+	memoryAPIKey string
+
 	// lokiURL is the base URL of the Loki server (e.g. "http://loki:3100").
 	// When set, logs.tail / logs.query / logs.search requests are answered
 	// directly from Loki rather than the (empty) memory-api system_events table.
@@ -212,6 +217,13 @@ func (g *Gateway) SetMemoryEndpoint(endpoint string) {
 // using compose_service labels (populated by Promtail's Docker scrape config).
 func (g *Gateway) SetLokiURL(u string) {
 	g.lokiURL = strings.TrimRight(u, "/")
+}
+
+// SetMemoryAPIKey stores the X-Internal-API-Key secret used for vault-protected
+// Memory API endpoints (/api/v1/scheduled_jobs, /api/v1/user_crons).
+// Must be set before Start() if scheduled_job routing is needed.
+func (g *Gateway) SetMemoryAPIKey(key string) {
+	g.memoryAPIKey = key
 }
 
 // RegisterTaskHandler registers the callback for inbound user_task messages.
@@ -750,6 +762,29 @@ func (g *Gateway) handleRawStateWrite(subject string, data []byte) error {
 		}
 	}
 
+	// Forward scheduled_job writes to the Memory API.
+	// Tags["operation"] == "create" → POST /api/v1/scheduled_jobs
+	// Tags["operation"] == "delete" → DELETE /api/v1/scheduled_jobs/{job_id}?userId=...
+	if peek.DataType == "scheduled_job" {
+		ctx := extractOrCreateCtx(envelope, "comms_gateway")
+		if g.memoryEndpoint == "" {
+			observability.LogFromContext(ctx).Warn("scheduled_job write: memory endpoint not configured; skipping")
+		} else if g.memoryAPIKey == "" {
+			observability.LogFromContext(ctx).Warn("scheduled_job write: MEMORY_API_KEY not configured; skipping")
+		} else {
+			operation := peek.Tags["operation"]
+			observability.LogFromContext(ctx).Info("scheduled_job write received",
+				"operation", operation,
+				"agent_id", peek.AgentID,
+			)
+			if operation == "delete" {
+				go g.forwardScheduledJobDelete(peek.Tags)
+			} else {
+				go g.forwardScheduledJobCreate(peek.Payload)
+			}
+		}
+	}
+
 	g.agentStoreMu.Lock()
 	g.agentStore[peek.AgentID] = append(g.agentStore[peek.AgentID], raw)
 	g.agentStoreMu.Unlock()
@@ -796,6 +831,43 @@ func (g *Gateway) handleRawStateReadRequest(subject string, data []byte) error {
 
 	traceID := firstNonEmpty(req.TraceID, envelope.CorrelationID)
 	ctx := extractOrCreateCtx(envelope, "comms_gateway")
+
+	// Route scheduled_job queries to the Memory Component HTTP API.
+	if req.DataType == "scheduled_job" {
+		var qp struct {
+			UserID string `json:"userId"`
+		}
+		_ = json.Unmarshal(req.QueryParams, &qp)
+
+		var records []json.RawMessage
+		if strings.HasPrefix(g.memoryEndpoint, "http://") || strings.HasPrefix(g.memoryEndpoint, "https://") {
+			if g.memoryAPIKey == "" {
+				observability.LogFromContext(ctx).Warn("scheduled_job read: MEMORY_API_KEY not configured")
+			} else {
+				var fetchErr error
+				records, fetchErr = g.fetchScheduledJobs(ctx, qp.UserID)
+				if fetchErr != nil {
+					observability.LogFromContext(ctx).Warn("scheduled_job read: fetch failed",
+						"user_id", qp.UserID, "error", fetchErr)
+					errRec, _ := json.Marshal(map[string]string{"error": fetchErr.Error()})
+					records = []json.RawMessage{errRec}
+				}
+			}
+		} else {
+			observability.LogFromContext(ctx).Warn("scheduled_job read: memory endpoint not configured")
+		}
+
+		resp := struct {
+			AgentID string            `json:"agent_id"`
+			Records []json.RawMessage `json:"records"`
+			TraceID string            `json:"trace_id"`
+		}{AgentID: req.AgentID, Records: records, TraceID: traceID}
+		if resp.Records == nil {
+			resp.Records = []json.RawMessage{}
+		}
+		_ = g.publishEnvelope(ctx, TopicAgentStateReadResponse, "state.read.response", traceID, resp)
+		return nil
+	}
 
 	// Route skill_cache semantic queries to the Memory Component HTTP API.
 	if req.DataType == "skill_cache" && req.SemanticQuery != "" {
@@ -1241,6 +1313,154 @@ func (g *Gateway) forwardSkillCacheWrite(tags map[string]string, payload json.Ra
 
 	log.Warn("skill_cache write: all retry attempts exhausted; skill will not be indexed",
 		"domain", domain, "name", name, "max_attempts", maxSkillCacheRetries)
+}
+
+// ── Scheduled Job forwarding helpers ─────────────────────────────────────────
+
+// forwardScheduledJobCreate POSTs a scheduled_job create payload to the Memory
+// API's POST /api/v1/scheduled_jobs endpoint. Called asynchronously from
+// handleRawStateWrite so it never blocks the NATS handler.
+func (g *Gateway) forwardScheduledJobCreate(payload json.RawMessage) {
+	log := observability.LogFromContext(observability.WithModule(context.Background(), "comms_gateway"))
+
+	// The payload is the createScheduledJobRequest-compatible map sent by the
+	// agent. We forward it verbatim to memory-api which validates and persists it.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		g.memoryEndpoint+"/api/v1/scheduled_jobs", bytes.NewReader(payload))
+	if err != nil {
+		log.Warn("scheduled_job create: build request failed", "error", err)
+		return
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-Internal-API-Key", g.memoryAPIKey)
+
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		log.Warn("scheduled_job create: HTTP request failed", "error", err)
+		return
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		log.Warn("scheduled_job create: Memory API returned error",
+			"status", resp.StatusCode,
+			"body", strings.TrimSpace(string(body)),
+		)
+		return
+	}
+	log.Info("scheduled_job create: Memory API accepted", "status", resp.StatusCode)
+}
+
+// forwardScheduledJobDelete sends DELETE /api/v1/scheduled_jobs/{jobId}?userId=...
+// to the Memory API. Called asynchronously from handleRawStateWrite.
+func (g *Gateway) forwardScheduledJobDelete(tags map[string]string) {
+	log := observability.LogFromContext(observability.WithModule(context.Background(), "comms_gateway"))
+
+	jobID := tags["job_id"]
+	userID := tags["user_id"]
+	if jobID == "" || userID == "" {
+		log.Warn("scheduled_job delete: missing job_id or user_id in tags",
+			"job_id", jobID, "user_id", userID)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	rawURL := g.memoryEndpoint + "/api/v1/scheduled_jobs/" + url.PathEscape(jobID) +
+		"?userId=" + url.QueryEscape(userID)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodDelete, rawURL, nil)
+	if err != nil {
+		log.Warn("scheduled_job delete: build request failed", "error", err)
+		return
+	}
+	httpReq.Header.Set("X-Internal-API-Key", g.memoryAPIKey)
+
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		log.Warn("scheduled_job delete: HTTP request failed", "error", err)
+		return
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		log.Warn("scheduled_job delete: job not found or not owned by user",
+			"job_id", jobID, "user_id", userID)
+		return
+	}
+	if resp.StatusCode >= 400 {
+		log.Warn("scheduled_job delete: Memory API returned error",
+			"job_id", jobID,
+			"status", resp.StatusCode,
+			"body", strings.TrimSpace(string(body)),
+		)
+		return
+	}
+	log.Info("scheduled_job delete: Memory API accepted", "job_id", jobID, "status", resp.StatusCode)
+}
+
+// fetchScheduledJobs queries GET /api/v1/user_crons?userId=... and returns
+// each job as a MemoryWrite-envelope raw JSON suitable for state.read.response.
+func (g *Gateway) fetchScheduledJobs(ctx context.Context, userID string) ([]json.RawMessage, error) {
+	log := observability.LogFromContext(observability.WithModule(ctx, "comms_gateway"))
+
+	if userID == "" {
+		return nil, fmt.Errorf("fetchScheduledJobs: userID is required")
+	}
+
+	rawURL := g.memoryEndpoint + "/api/v1/user_crons?userId=" + url.QueryEscape(userID)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("fetchScheduledJobs: build request: %w", err)
+	}
+	httpReq.Header.Set("X-Internal-API-Key", g.memoryAPIKey)
+	httpReq.Header.Set("Accept", "application/json")
+
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("fetchScheduledJobs: HTTP request: %w", err)
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("fetchScheduledJobs: Memory API returned %d: %s",
+			resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	// Parse memory-api response: {"data":{"jobs":[...]}}
+	var apiResp struct {
+		Data struct {
+			Jobs []json.RawMessage `json:"jobs"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &apiResp); err != nil {
+		return nil, fmt.Errorf("fetchScheduledJobs: parse response: %w", err)
+	}
+
+	// Wrap each job in a MemoryWrite-compatible envelope so the agent can
+	// decode records uniformly regardless of DataType.
+	records := make([]json.RawMessage, 0, len(apiResp.Data.Jobs))
+	for _, job := range apiResp.Data.Jobs {
+		wrapped, err := json.Marshal(struct {
+			DataType string          `json:"data_type"`
+			Payload  json.RawMessage `json:"payload"`
+		}{
+			DataType: "scheduled_job",
+			Payload:  job,
+		})
+		if err == nil {
+			records = append(records, wrapped)
+		}
+	}
+
+	log.Info("scheduled_job read: fetched jobs", "user_id", userID, "count", len(records))
+	return records, nil
 }
 
 // fetchSkillSearch queries the Memory API for skill records semantically similar

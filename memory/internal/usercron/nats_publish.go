@@ -23,9 +23,10 @@ type NatsDispatcher struct {
 }
 
 type payloadBody struct {
-	UserID         string `json:"userId"`
-	RawInput       string `json:"rawInput"`
-	ConversationID string `json:"conversationId,omitempty"`
+	UserID               string   `json:"userId"`
+	RawInput             string   `json:"rawInput"`
+	ConversationID       string   `json:"conversationId,omitempty"`
+	RequiredSkillDomains []string `json:"requiredSkillDomains,omitempty"` // nil → unrestricted scope at spawn
 }
 
 type envelope struct {
@@ -84,7 +85,7 @@ func (d *NatsDispatcher) DispatchUserCron(ctx context.Context, job storage.Sched
 	itu := innerUserTask{
 		TaskID:               taskID,
 		UserID:               p.UserID,
-		RequiredSkillDomains: nil, // nil → vault returns unrestricted scope; planner picks the right domain
+		RequiredSkillDomains: p.RequiredSkillDomains, // nil → vault returns unrestricted scope; explicit list → scoped pre-auth at spawn
 		Priority:             5,
 		TimeoutSeconds:       1800,
 		Payload:              inner,
