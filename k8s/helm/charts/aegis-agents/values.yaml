@@ -15,7 +15,7 @@ natsUrl: "nats://nats:4222"
 agentProcessPath: "/app/agent-process"
 
 anthropicApiKey: ""
-anthropicBaseUrl: ""
+# anthropicBaseUrl: ""
 
 embedding:
   apiUrl: "http://embedding-api/v1/embeddings"
