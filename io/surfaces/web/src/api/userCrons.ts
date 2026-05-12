@@ -28,7 +28,7 @@ export async function fetchUserCronJobs(userId: string): Promise<{ ok: true; job
   try {
     const res = await fetch(
       buildApiUrl(`/api/user-crons?userId=${encodeURIComponent(userId)}`),
-      { headers: { 'X-Surface-Key': 'dev' } },
+      { headers: { 'X-Surface-Key': 'dev', 'X-Active-User': userId } },
     )
     const j = (await res.json()) as { ok?: boolean; data?: { jobs?: UserCronJob[] }; error?: { message?: string } }
     if (!res.ok) {
@@ -56,7 +56,7 @@ export async function createUserCronJob(body: CreateUserCronBody): Promise<{ ok:
   try {
     const res = await fetch(buildApiUrl('/api/user-crons'), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Surface-Key': 'dev' },
+      headers: { 'Content-Type': 'application/json', 'X-Surface-Key': 'dev', 'X-Active-User': body.userId },
       body: JSON.stringify(body),
     })
     const j = (await res.json()) as { ok?: boolean; error?: { message?: string } }
@@ -73,7 +73,7 @@ export async function deleteUserCronJob(userId: string, jobId: string): Promise<
   try {
     const res = await fetch(
       buildApiUrl(`/api/user-crons/${encodeURIComponent(jobId)}?userId=${encodeURIComponent(userId)}`),
-      { method: 'DELETE', headers: { 'X-Surface-Key': 'dev' } },
+      { method: 'DELETE', headers: { 'X-Surface-Key': 'dev', 'X-Active-User': userId } },
     )
     if (!res.ok) {
       const t = await res.text()

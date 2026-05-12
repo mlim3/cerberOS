@@ -222,6 +222,7 @@ func main() {
 	// Chat endpoints
 	mux.HandleFunc("GET /api/v1/conversations", chatHandler.HandleListConversations)
 	mux.HandleFunc("POST /api/v1/conversations", chatHandler.HandleCreateConversation)
+	mux.HandleFunc("DELETE /api/v1/conversations/{conversationId}", chatHandler.HandleDeleteConversation)
 	mux.HandleFunc("POST /api/v1/tasks", chatHandler.HandleCreateTask)
 	mux.HandleFunc("GET /api/v1/tasks/{taskId}", chatHandler.HandleGetTask)
 	mux.HandleFunc("POST /api/v1/chat/{conversationId}/messages", chatHandler.HandleCreateMessage)

@@ -1500,11 +1500,39 @@ func buildDecompositionInstructionsWithFacts(taskID, rawInput string, scope type
 		domains = string(raw)
 	}
 
+	// Inject an explicit 7-day weekday→date lookup table so the planner doesn't
+	// have to do its own date arithmetic (LLMs frequently get this wrong near
+	// their training cutoff — e.g. assigning May 13 to "Tuesday" when May 13
+	// is actually Wednesday). Anchor on today's wall-clock and list each of
+	// the next seven dates with its correct weekday label.
+	now := time.Now()
+	var dateTable strings.Builder
+	dateTable.WriteString(fmt.Sprintf(
+		"Today is %s. Current local time is %s. When the user names a weekday (\"Monday\", \"Tuesday\", ...) without a date, use the lookup table below — do NOT compute the date yourself, your training-cutoff prior is unreliable. \"Monday\" means the row labeled Monday below (the first upcoming Monday, or today if today is Monday). Same for any other weekday. Times like \"7:30 AM\" with no timezone mean the user's local timezone (%s); include the offset in any ISO 8601 datetime you emit.\n\nDate lookup (next 7 days):\n",
+		now.Format("Monday, January 2, 2006"),
+		now.Format("15:04 MST"),
+		now.Format("MST"),
+	))
+	for i := 0; i < 7; i++ {
+		d := now.AddDate(0, 0, i)
+		label := ""
+		if i == 0 {
+			label = " (today)"
+		} else if i == 1 {
+			label = " (tomorrow)"
+		}
+		dateTable.WriteString(fmt.Sprintf("  - %s = %s%s\n",
+			d.Format("Monday"), d.Format("2006-01-02"), label))
+	}
+	dateTable.WriteString("\n")
+	dateHeader := dateTable.String()
+
 	systemSection := ""
 	if strings.TrimSpace(systemPrompt) != "" {
 		systemSection = "Scheduled maintenance directives (follow in addition to the rules below):\n" +
 			strings.TrimSpace(systemPrompt) + "\n\n"
 	}
+	systemSection = dateHeader + systemSection
 
 	credSection := ""
 	if len(scope.AvailableCredTypes) > 0 {

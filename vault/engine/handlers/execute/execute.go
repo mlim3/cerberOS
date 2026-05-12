@@ -298,7 +298,11 @@ func isSupportedOperation(operationType string) bool {
 		"vault_gmail_get_message",
 		"vault_calendar_list_events",
 		"vault_gmail_send_oauth",
-		"vault_calendar_create_event":
+		"vault_calendar_create_event",
+		"vault_calendar_freebusy",
+		"vault_calendar_update_event",
+		"vault_calendar_find_free_slot",
+		"vault_gmail_wait_for_replies":
 		return true
 	default:
 		return false

@@ -45,6 +45,14 @@ func dispatchOperation(ctx context.Context, operationType, credential string, pa
 		return execGmailSendOAuth(ctx, credential, params)
 	case "vault_calendar_create_event":
 		return execCalendarCreateEventOAuth(ctx, credential, params)
+	case "vault_calendar_freebusy":
+		return execCalendarFreeBusy(ctx, credential, params)
+	case "vault_calendar_update_event":
+		return execCalendarUpdateEvent(ctx, credential, params)
+	case "vault_calendar_find_free_slot":
+		return execCalendarFindFreeSlot(ctx, credential, params)
+	case "vault_gmail_wait_for_replies":
+		return execGmailWaitForReplies(ctx, credential, params)
 	case "vault_data_read":
 		return opResult{err: fmt.Errorf("vault_data_read not yet implemented"), code: ErrCodeUnsupportedOp}
 	case "vault_data_write":

@@ -394,10 +394,10 @@ func vaultCalendarCreateEventTool(ve *VaultExecutor) SkillTool {
 		Definition: anthropic.ToolParam{
 			Name: "calendar_create_event",
 			Description: anthropic.String(
-				"Create a Google Calendar event using the user's connected Google account. " +
-					"Use when the user asks to add, schedule, or create a calendar event. " +
-					"Do NOT use for sending non-event emails — use gmail_send for that. " +
-					"Do NOT include credentials in any parameter."),
+				"Create a Google Calendar event (OAuth). Before booking a specific time, " +
+					"call calendar_freebusy; if conflicts, ask (a) another time or (b) " +
+					"double-book. If finding a free slot, call calendar_find_free_slot " +
+					"then create without asking. Emails use gmail_send, not this."),
 			InputSchema: anthropic.ToolInputSchemaParam{
 				Properties: map[string]interface{}{
 					"title": map[string]interface{}{
@@ -448,6 +448,175 @@ func vaultCalendarCreateEventTool(ve *VaultExecutor) SkillTool {
 				ve.log.Info("vault calendar_create_event progress", "request_id", p.RequestID)
 			}
 			return ve.Execute(ctx, "vault_calendar_create_event", "google_oauth", opParams, 38, onUpdate)
+		},
+	}
+}
+
+func vaultCalendarFreeBusyTool(ve *VaultExecutor) SkillTool {
+	return SkillTool{
+		Label:                   "Calendar Free/Busy",
+		RequiredCredentialTypes: []string{"google_oauth"},
+		TimeoutSeconds:          30,
+		Definition: anthropic.ToolParam{
+			Name: "calendar_freebusy",
+			Description: anthropic.String(
+				"Check the user's Google Calendar for busy intervals in a window. " +
+					"Call before calendar_create_event to surface conflicts. Returns busy " +
+					"intervals and a 'free' boolean. Do NOT use to list event details — " +
+					"use calendar_list_events for that. Do NOT include credentials."),
+			InputSchema: anthropic.ToolInputSchemaParam{
+				Properties: map[string]interface{}{
+					"time_min": map[string]interface{}{
+						"type":        "string",
+						"description": "ISO 8601 start of the window to check (e.g. '2026-05-12T13:00:00-07:00').",
+					},
+					"time_max": map[string]interface{}{
+						"type":        "string",
+						"description": "ISO 8601 end of the window. Same format as time_min.",
+					},
+					"calendar_id": map[string]interface{}{
+						"type":        "string",
+						"description": "Calendar ID. Omit or use 'primary' for the user's main calendar.",
+					},
+				},
+				Required: []string{"time_min", "time_max"},
+			},
+		},
+		Execute: func(ctx context.Context, raw json.RawMessage) ToolResult {
+			var params struct {
+				TimeMin    string `json:"time_min"`
+				TimeMax    string `json:"time_max"`
+				CalendarID string `json:"calendar_id,omitempty"`
+			}
+			if err := json.Unmarshal(raw, &params); err != nil {
+				return ToolResult{Content: fmt.Sprintf("invalid parameters: %v", err), IsError: true}
+			}
+			opParams, err := json.Marshal(params)
+			if err != nil {
+				return ToolResult{Content: fmt.Sprintf("failed to encode params: %v", err), IsError: true}
+			}
+			onUpdate := func(p types.VaultOperationProgress) {
+				ve.log.Info("vault calendar_freebusy progress", "request_id", p.RequestID)
+			}
+			return ve.Execute(ctx, "vault_calendar_freebusy", "google_oauth", opParams, 28, onUpdate)
+		},
+	}
+}
+
+func vaultCalendarUpdateEventTool(ve *VaultExecutor) SkillTool {
+	return SkillTool{
+		Label:                   "Calendar Update Event",
+		RequiredCredentialTypes: []string{"google_oauth"},
+		TimeoutSeconds:          40,
+		Definition: anthropic.ToolParam{
+			Name: "calendar_update_event",
+			Description: anthropic.String(
+				"Move or edit an existing Google Calendar event by ID. Use to reschedule, rename, " +
+					"or update description/location. When changing start/end, the result includes " +
+					"'conflicts' if the new slot is double-booked. Do NOT use to create a new event — " +
+					"use calendar_create_event."),
+			InputSchema: anthropic.ToolInputSchemaParam{
+				Properties: map[string]interface{}{
+					"event_id": map[string]interface{}{
+						"type":        "string",
+						"description": "The Google Calendar event ID (returned by calendar_create_event or calendar_list_events).",
+					},
+					"calendar_id": map[string]interface{}{"type": "string", "description": "Calendar ID. Omit or use 'primary'."},
+					"title":       map[string]interface{}{"type": "string", "description": "New event title. Omit to keep current."},
+					"start":       map[string]interface{}{"type": "string", "description": "New ISO 8601 start datetime with TZ offset. Omit to keep current."},
+					"end":         map[string]interface{}{"type": "string", "description": "New ISO 8601 end datetime. Omit to keep current."},
+					"description": map[string]interface{}{"type": "string", "description": "New description. Omit to keep current."},
+					"location":    map[string]interface{}{"type": "string", "description": "New location. Omit to keep current."},
+				},
+				Required: []string{"event_id"},
+			},
+		},
+		Execute: func(ctx context.Context, raw json.RawMessage) ToolResult {
+			var params map[string]any
+			if err := json.Unmarshal(raw, &params); err != nil {
+				return ToolResult{Content: fmt.Sprintf("invalid parameters: %v", err), IsError: true}
+			}
+			opParams, _ := json.Marshal(params)
+			onUpdate := func(p types.VaultOperationProgress) {
+				ve.log.Info("vault calendar_update_event progress", "request_id", p.RequestID)
+			}
+			return ve.Execute(ctx, "vault_calendar_update_event", "google_oauth", opParams, 38, onUpdate)
+		},
+	}
+}
+
+func vaultCalendarFindFreeSlotTool(ve *VaultExecutor) SkillTool {
+	return SkillTool{
+		Label:                   "Calendar Find Free Slot",
+		RequiredCredentialTypes: []string{"google_oauth"},
+		TimeoutSeconds:          30,
+		Definition: anthropic.ToolParam{
+			Name: "calendar_find_free_slot",
+			Description: anthropic.String(
+				"Find the first contiguous free slot of N minutes within a time window. Use to " +
+					"answer 'when am I next free for X minutes' or to pick a meeting time. Returns " +
+					"{found, start, end} on success. Do NOT use to list events — use " +
+					"calendar_list_events for that."),
+			InputSchema: anthropic.ToolInputSchemaParam{
+				Properties: map[string]interface{}{
+					"duration_minutes":     map[string]interface{}{"type": "integer", "description": "Slot length in minutes."},
+					"time_min":             map[string]interface{}{"type": "string", "description": "ISO 8601 window start (e.g. '2026-05-12T09:00:00-07:00')."},
+					"time_max":             map[string]interface{}{"type": "string", "description": "ISO 8601 window end."},
+					"calendar_id":          map[string]interface{}{"type": "string", "description": "Calendar ID. Omit or use 'primary'."},
+					"working_hours_start":  map[string]interface{}{"type": "string", "description": "Optional 'HH:MM' lower bound per day (e.g. '09:00')."},
+					"working_hours_end":    map[string]interface{}{"type": "string", "description": "Optional 'HH:MM' upper bound per day (e.g. '17:00')."},
+				},
+				Required: []string{"duration_minutes", "time_min", "time_max"},
+			},
+		},
+		Execute: func(ctx context.Context, raw json.RawMessage) ToolResult {
+			var params map[string]any
+			if err := json.Unmarshal(raw, &params); err != nil {
+				return ToolResult{Content: fmt.Sprintf("invalid parameters: %v", err), IsError: true}
+			}
+			opParams, _ := json.Marshal(params)
+			onUpdate := func(p types.VaultOperationProgress) {
+				ve.log.Info("vault calendar_find_free_slot progress", "request_id", p.RequestID)
+			}
+			return ve.Execute(ctx, "vault_calendar_find_free_slot", "google_oauth", opParams, 28, onUpdate)
+		},
+	}
+}
+
+func vaultGmailWaitForRepliesTool(ve *VaultExecutor) SkillTool {
+	return SkillTool{
+		Label:                   "Gmail Wait For Replies",
+		RequiredCredentialTypes: []string{"google_oauth"},
+		TimeoutSeconds:          290,
+		Definition: anthropic.ToolParam{
+			Name: "gmail_wait_for_replies",
+			Description: anthropic.String(
+				"Poll Gmail for replies matching given criteria, returning when min_count are " +
+					"found or the wait deadline elapses. Single call waits up to 5 minutes; for " +
+					"longer deadlines (e.g. 1 hour), call repeatedly with the same 'since' " +
+					"timestamp and accumulate elapsed time. Returns {found, count, messages, timed_out}."),
+			InputSchema: anthropic.ToolInputSchemaParam{
+				Properties: map[string]interface{}{
+					"since":                  map[string]interface{}{"type": "string", "description": "RFC3339 timestamp — only replies AFTER this are counted. Required."},
+					"subject_contains":       map[string]interface{}{"type": "string", "description": "Optional substring to match in subject (e.g. 'Re: Design review')."},
+					"from":                   map[string]interface{}{"type": "string", "description": "Optional sender filter (email address or display name)."},
+					"min_count":              map[string]interface{}{"type": "integer", "description": "How many matching replies to wait for. Default 1."},
+					"poll_interval_seconds":  map[string]interface{}{"type": "integer", "description": "Seconds between polls. Default 30."},
+					"max_wait_seconds":       map[string]interface{}{"type": "integer", "description": "Maximum seconds to wait this call. Capped at 270."},
+				},
+				Required: []string{"since"},
+			},
+		},
+		Execute: func(ctx context.Context, raw json.RawMessage) ToolResult {
+			var params map[string]any
+			if err := json.Unmarshal(raw, &params); err != nil {
+				return ToolResult{Content: fmt.Sprintf("invalid parameters: %v", err), IsError: true}
+			}
+			opParams, _ := json.Marshal(params)
+			onUpdate := func(p types.VaultOperationProgress) {
+				ve.log.Info("vault gmail_wait_for_replies progress", "request_id", p.RequestID)
+			}
+			return ve.Execute(ctx, "vault_gmail_wait_for_replies", "google_oauth", opParams, 285, onUpdate)
 		},
 	}
 }

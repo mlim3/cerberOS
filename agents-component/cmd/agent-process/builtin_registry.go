@@ -68,4 +68,8 @@ var builtinRegistry = map[string]ToolFactory{
 	"vault_calendar_list_events":   func(ve *VaultExecutor) SkillTool { return vaultCalendarListEventsTool(ve) },
 	"vault_gmail_send_oauth":       func(ve *VaultExecutor) SkillTool { return vaultGmailSendOAuthTool(ve) },
 	"vault_calendar_create_event":  func(ve *VaultExecutor) SkillTool { return vaultCalendarCreateEventTool(ve) },
+	"vault_calendar_freebusy":      func(ve *VaultExecutor) SkillTool { return vaultCalendarFreeBusyTool(ve) },
+	"vault_calendar_update_event":  func(ve *VaultExecutor) SkillTool { return vaultCalendarUpdateEventTool(ve) },
+	"vault_calendar_find_free_slot": func(ve *VaultExecutor) SkillTool { return vaultCalendarFindFreeSlotTool(ve) },
+	"vault_gmail_wait_for_replies": func(ve *VaultExecutor) SkillTool { return vaultGmailWaitForRepliesTool(ve) },
 }

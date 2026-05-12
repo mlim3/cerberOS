@@ -86,6 +86,13 @@ func execCalendarCreateEventOAuth(ctx context.Context, credential string, params
 		calendarID = id
 	}
 
+	// Pre-create conflict check — query freeBusy for the requested window so
+	// the response can warn the agent (and downstream the user) when the slot
+	// is already taken. We do NOT abort on conflict; the event still gets
+	// created (the user explicitly asked for this time), and the warning is
+	// surfaced in the result for the agent to mention in its reply.
+	conflicts := lookupBusy(ctx, token, calendarID, startUTC, endUTC)
+
 	event := map[string]any{
 		"summary":     title,
 		"description": description,
@@ -104,26 +111,555 @@ func execCalendarCreateEventOAuth(ctx context.Context, credential string, params
 	if apiErr == nil && statusCode < 400 {
 		var created map[string]any
 		_ = json.Unmarshal(respBody, &created)
-		return opResult{result: map[string]any{
-			"created":  true,
-			"title":    title,
-			"start":    startUTC.Format(time.RFC3339),
-			"end":      endUTC.Format(time.RFC3339),
-			"event_id": created["id"],
+		result := map[string]any{
+			"created":   true,
+			"title":     title,
+			"start":     startUTC.Format(time.RFC3339),
+			"end":       endUTC.Format(time.RFC3339),
+			"event_id":  created["id"],
 			"html_link": created["htmlLink"],
-		}}
+		}
+		if len(conflicts) > 0 {
+			result["conflicts"] = conflicts
+			result["warning"] = fmt.Sprintf("Double-booked — this slot overlaps %d existing event(s). Created anyway as requested; mention this to the user.", len(conflicts))
+		}
+		return opResult{result: result}
 	}
 
 	// Fallback: return a one-click "add to calendar" URL the agent can share.
 	addURL := buildGoogleCalendarURL(title, description, location, startUTC, endUTC)
-	return opResult{result: map[string]any{
+	fallback := map[string]any{
 		"created":             false,
 		"add_to_calendar_url": addURL,
 		"title":               title,
 		"start":               startUTC.Format(time.RFC3339),
 		"end":                 endUTC.Format(time.RFC3339),
 		"message":             "Calendar write scope not available — click the URL to add this event manually",
+	}
+	if len(conflicts) > 0 {
+		fallback["conflicts"] = conflicts
+		fallback["warning"] = fmt.Sprintf("Note: this slot already overlaps %d existing event(s).", len(conflicts))
+	}
+	return opResult{result: fallback}
+}
+
+// execCalendarFreeBusy queries Google Calendar's freeBusy endpoint for the
+// given window and returns the list of busy intervals per calendar.
+// params: {time_min, time_max, calendar_id?}
+func execCalendarFreeBusy(ctx context.Context, credential string, params map[string]any) opResult {
+	cred, err := parseGoogleOAuthCredential(credential)
+	if err != nil {
+		return opResult{err: err, code: ErrCodeCredentialUnavailable}
+	}
+	token, err := resolveAccessToken(ctx, cred)
+	if err != nil {
+		return opResult{err: err, code: ErrCodeCredentialUnavailable}
+	}
+
+	timeMinStr, _ := params["time_min"].(string)
+	timeMaxStr, _ := params["time_max"].(string)
+	if timeMinStr == "" || timeMaxStr == "" {
+		return opResult{err: fmt.Errorf("time_min and time_max are required (ISO 8601 datetimes)"), code: ErrCodeInvalidParams}
+	}
+	timeMin, err := parseICSTime(timeMinStr)
+	if err != nil {
+		return opResult{err: fmt.Errorf("invalid time_min: %w", err), code: ErrCodeInvalidParams}
+	}
+	timeMax, err := parseICSTime(timeMaxStr)
+	if err != nil {
+		return opResult{err: fmt.Errorf("invalid time_max: %w", err), code: ErrCodeInvalidParams}
+	}
+
+	calendarID := "primary"
+	if id, ok := params["calendar_id"].(string); ok && id != "" {
+		calendarID = id
+	}
+
+	busy := lookupBusy(ctx, token, calendarID, timeMin, timeMax)
+	return opResult{result: map[string]any{
+		"calendar_id": calendarID,
+		"time_min":    timeMin.Format(time.RFC3339),
+		"time_max":    timeMax.Format(time.RFC3339),
+		"busy":        busy,
+		"free":        len(busy) == 0,
 	}}
+}
+
+// lookupBusy returns the busy intervals on calendarID overlapping [start,end].
+// Errors are swallowed — callers that need conflict detection treat an empty
+// slice as "no known conflicts" so a freeBusy outage never blocks a create.
+func lookupBusy(ctx context.Context, token, calendarID string, start, end time.Time) []map[string]string {
+	reqBody, _ := json.Marshal(map[string]any{
+		"timeMin": start.Format(time.RFC3339),
+		"timeMax": end.Format(time.RFC3339),
+		"items":   []map[string]string{{"id": calendarID}},
+	})
+	respBody, statusCode, err := httpRequest(ctx, "POST",
+		"https://www.googleapis.com/calendar/v3/freeBusy",
+		map[string]string{"Authorization": "Bearer " + token},
+		strings.NewReader(string(reqBody)),
+	)
+	if err != nil || statusCode >= 400 {
+		return nil
+	}
+	var parsed struct {
+		Calendars map[string]struct {
+			Busy []struct {
+				Start string `json:"start"`
+				End   string `json:"end"`
+			} `json:"busy"`
+		} `json:"calendars"`
+	}
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		return nil
+	}
+	cal, ok := parsed.Calendars[calendarID]
+	if !ok {
+		return nil
+	}
+	out := make([]map[string]string, 0, len(cal.Busy))
+	for _, b := range cal.Busy {
+		out = append(out, map[string]string{"start": b.Start, "end": b.End})
+	}
+	return out
+}
+
+// execCalendarUpdateEvent moves or edits an existing Google Calendar event.
+// params: {event_id (required), calendar_id?, title?, start?, end?, description?, location?}
+// Only provided fields are updated. When start+end change, runs a freeBusy
+// check on the new window and surfaces conflicts as a warning.
+func execCalendarUpdateEvent(ctx context.Context, credential string, params map[string]any) opResult {
+	cred, err := parseGoogleOAuthCredential(credential)
+	if err != nil {
+		return opResult{err: err, code: ErrCodeCredentialUnavailable}
+	}
+	token, err := resolveAccessToken(ctx, cred)
+	if err != nil {
+		return opResult{err: err, code: ErrCodeCredentialUnavailable}
+	}
+
+	eventID, _ := params["event_id"].(string)
+	if eventID == "" {
+		return opResult{err: fmt.Errorf("event_id is required"), code: ErrCodeInvalidParams}
+	}
+	calendarID := "primary"
+	if id, ok := params["calendar_id"].(string); ok && id != "" {
+		calendarID = id
+	}
+
+	patch := map[string]any{}
+	if v, ok := params["title"].(string); ok && v != "" {
+		patch["summary"] = v
+	}
+	if v, ok := params["description"].(string); ok {
+		patch["description"] = v
+	}
+	if v, ok := params["location"].(string); ok {
+		patch["location"] = v
+	}
+
+	var newStart, newEnd time.Time
+	timeChanged := false
+	if s, ok := params["start"].(string); ok && s != "" {
+		t, err := parseICSTime(s)
+		if err != nil {
+			return opResult{err: fmt.Errorf("invalid start: %w", err), code: ErrCodeInvalidParams}
+		}
+		newStart = t
+		patch["start"] = map[string]any{"dateTime": t.Format(time.RFC3339), "timeZone": "UTC"}
+		timeChanged = true
+	}
+	if s, ok := params["end"].(string); ok && s != "" {
+		t, err := parseICSTime(s)
+		if err != nil {
+			return opResult{err: fmt.Errorf("invalid end: %w", err), code: ErrCodeInvalidParams}
+		}
+		newEnd = t
+		patch["end"] = map[string]any{"dateTime": t.Format(time.RFC3339), "timeZone": "UTC"}
+		timeChanged = true
+	}
+	if len(patch) == 0 {
+		return opResult{err: fmt.Errorf("no updatable fields supplied (title, start, end, description, location)"), code: ErrCodeInvalidParams}
+	}
+
+	// If both new times provided, check freeBusy for the new window (excluding this event).
+	var conflicts []map[string]string
+	if timeChanged && !newStart.IsZero() && !newEnd.IsZero() {
+		raw := lookupBusy(ctx, token, calendarID, newStart, newEnd)
+		// Drop any busy interval that exactly matches this event's intended new window
+		// (Google will report this event itself as busy once it's moved).
+		for _, b := range raw {
+			if b["start"] == newStart.Format(time.RFC3339) && b["end"] == newEnd.Format(time.RFC3339) {
+				continue
+			}
+			conflicts = append(conflicts, b)
+		}
+	}
+
+	reqBody, _ := json.Marshal(patch)
+	apiURL := fmt.Sprintf("https://www.googleapis.com/calendar/v3/calendars/%s/events/%s",
+		url.PathEscape(calendarID), url.PathEscape(eventID))
+	respBody, statusCode, apiErr := httpRequest(ctx, "PATCH", apiURL,
+		map[string]string{"Authorization": "Bearer " + token},
+		strings.NewReader(string(reqBody)),
+	)
+	if apiErr != nil {
+		return opResult{err: fmt.Errorf("calendar update failed: %w", apiErr), code: ErrCodeUpstreamError}
+	}
+	if statusCode >= 400 {
+		return opResult{err: fmt.Errorf("calendar update error (status %d): %s", statusCode, string(respBody)), code: ErrCodeUpstreamError}
+	}
+	var updated map[string]any
+	_ = json.Unmarshal(respBody, &updated)
+	result := map[string]any{
+		"updated":   true,
+		"event_id":  eventID,
+		"html_link": updated["htmlLink"],
+		"summary":   updated["summary"],
+	}
+	if timeChanged {
+		result["start"] = newStart.Format(time.RFC3339)
+		result["end"] = newEnd.Format(time.RFC3339)
+	}
+	if len(conflicts) > 0 {
+		result["conflicts"] = conflicts
+		result["warning"] = fmt.Sprintf("Updated time overlaps %d other event(s). Surface this to the user.", len(conflicts))
+	}
+	return opResult{result: result}
+}
+
+// execCalendarFindFreeSlot scans a time window for the first contiguous free
+// slot of the requested duration. Walks forward in 15-minute increments,
+// optionally restricted to working hours.
+// params: {duration_minutes (required), time_min (required), time_max (required),
+//          calendar_id?, working_hours_start? (e.g. "09:00"), working_hours_end? (e.g. "17:00")}
+func execCalendarFindFreeSlot(ctx context.Context, credential string, params map[string]any) opResult {
+	cred, err := parseGoogleOAuthCredential(credential)
+	if err != nil {
+		return opResult{err: err, code: ErrCodeCredentialUnavailable}
+	}
+	token, err := resolveAccessToken(ctx, cred)
+	if err != nil {
+		return opResult{err: err, code: ErrCodeCredentialUnavailable}
+	}
+
+	durationMin := 0
+	if v, ok := params["duration_minutes"].(float64); ok {
+		durationMin = int(v)
+	}
+	if durationMin <= 0 {
+		return opResult{err: fmt.Errorf("duration_minutes must be a positive integer"), code: ErrCodeInvalidParams}
+	}
+	tMinStr, _ := params["time_min"].(string)
+	tMaxStr, _ := params["time_max"].(string)
+	if tMinStr == "" || tMaxStr == "" {
+		return opResult{err: fmt.Errorf("time_min and time_max are required"), code: ErrCodeInvalidParams}
+	}
+	tMin, err := parseICSTime(tMinStr)
+	if err != nil {
+		return opResult{err: fmt.Errorf("invalid time_min: %w", err), code: ErrCodeInvalidParams}
+	}
+	tMax, err := parseICSTime(tMaxStr)
+	if err != nil {
+		return opResult{err: fmt.Errorf("invalid time_max: %w", err), code: ErrCodeInvalidParams}
+	}
+	if !tMax.After(tMin) {
+		return opResult{err: fmt.Errorf("time_max must be after time_min"), code: ErrCodeInvalidParams}
+	}
+
+	calendarID := "primary"
+	if v, ok := params["calendar_id"].(string); ok && v != "" {
+		calendarID = v
+	}
+
+	// Optional working hours filter (interpreted in the time_min's location).
+	whStartH, whStartM, whEndH, whEndM, useWH := -1, 0, -1, 0, false
+	if v, ok := params["working_hours_start"].(string); ok && v != "" {
+		if _, err := fmt.Sscanf(v, "%d:%d", &whStartH, &whStartM); err == nil {
+			useWH = true
+		}
+	}
+	if v, ok := params["working_hours_end"].(string); ok && v != "" {
+		_, _ = fmt.Sscanf(v, "%d:%d", &whEndH, &whEndM)
+	}
+
+	busy := lookupBusy(ctx, token, calendarID, tMin, tMax)
+	type interval struct{ start, end time.Time }
+	intervals := make([]interval, 0, len(busy))
+	for _, b := range busy {
+		s, err1 := time.Parse(time.RFC3339, b["start"])
+		e, err2 := time.Parse(time.RFC3339, b["end"])
+		if err1 == nil && err2 == nil {
+			intervals = append(intervals, interval{s, e})
+		}
+	}
+
+	duration := time.Duration(durationMin) * time.Minute
+	step := 15 * time.Minute
+	// Walk in 15-minute increments aligned to time_min.
+	for slotStart := tMin; !slotStart.Add(duration).After(tMax); slotStart = slotStart.Add(step) {
+		slotEnd := slotStart.Add(duration)
+
+		// Working hours check (compare in slotStart's location).
+		if useWH && whStartH >= 0 && whEndH >= 0 {
+			loc := slotStart.Location()
+			dayStart := time.Date(slotStart.Year(), slotStart.Month(), slotStart.Day(), whStartH, whStartM, 0, 0, loc)
+			dayEnd := time.Date(slotStart.Year(), slotStart.Month(), slotStart.Day(), whEndH, whEndM, 0, 0, loc)
+			if slotStart.Before(dayStart) || slotEnd.After(dayEnd) {
+				continue
+			}
+		}
+
+		// Conflict check.
+		overlap := false
+		for _, iv := range intervals {
+			if slotStart.Before(iv.end) && iv.start.Before(slotEnd) {
+				overlap = true
+				break
+			}
+		}
+		if !overlap {
+			return opResult{result: map[string]any{
+				"found":            true,
+				"start":            slotStart.Format(time.RFC3339),
+				"end":              slotEnd.Format(time.RFC3339),
+				"duration_minutes": durationMin,
+				"calendar_id":      calendarID,
+			}}
+		}
+	}
+	return opResult{result: map[string]any{
+		"found":   false,
+		"message": fmt.Sprintf("No free %d-minute slot found between %s and %s", durationMin, tMinStr, tMaxStr),
+	}}
+}
+
+// execGmailWaitForReplies polls Gmail for replies matching the criteria,
+// returning when at least min_count match or when max_wait_seconds elapse.
+//
+// IMPORTANT: vault.execute has a hard 300s timeout, so this can wait at most
+// ~5 minutes per call. For longer waits (e.g. H1's 1-hour deadline) the agent
+// should loop this call up to 12 times, persisting state across iterations via
+// the memory component.
+//
+// params: {subject_contains?, from?, since (RFC3339, required),
+//          min_count? (default 1), poll_interval_seconds? (default 30),
+//          max_wait_seconds? (default 240)}
+func execGmailWaitForReplies(ctx context.Context, credential string, params map[string]any) opResult {
+	cred, err := parseGoogleOAuthCredential(credential)
+	if err != nil {
+		return opResult{err: err, code: ErrCodeCredentialUnavailable}
+	}
+
+	sinceStr, _ := params["since"].(string)
+	if sinceStr == "" {
+		return opResult{err: fmt.Errorf("since (RFC3339) is required so only fresh replies are counted"), code: ErrCodeInvalidParams}
+	}
+	since, err := parseICSTime(sinceStr)
+	if err != nil {
+		return opResult{err: fmt.Errorf("invalid since: %w", err), code: ErrCodeInvalidParams}
+	}
+
+	subjectContains, _ := params["subject_contains"].(string)
+	fromAddr, _ := params["from"].(string)
+
+	minCount := 1
+	if v, ok := params["min_count"].(float64); ok && int(v) > 0 {
+		minCount = int(v)
+	}
+	pollInterval := 30
+	if v, ok := params["poll_interval_seconds"].(float64); ok && int(v) > 0 {
+		pollInterval = int(v)
+	}
+	maxWait := 240
+	if v, ok := params["max_wait_seconds"].(float64); ok && int(v) > 0 {
+		if int(v) > 270 { // keep margin under 300s vault deadline
+			maxWait = 270
+		} else {
+			maxWait = int(v)
+		}
+	}
+
+	// Build Gmail search query. Restrict to in:inbox so we don't count outbound
+	// emails the user just sent (those land in /sent and match the same time
+	// window). Also exclude messages from the user's own address as a belt-and-
+	// suspenders filter (some Gmail accounts route self-cc'd mail to inbox).
+	queryParts := []string{
+		"in:inbox",
+		fmt.Sprintf("-from:%s", cred.Email),
+		fmt.Sprintf("after:%d", since.Unix()),
+	}
+	if subjectContains != "" {
+		queryParts = append(queryParts, fmt.Sprintf("subject:%q", subjectContains))
+	}
+	if fromAddr != "" {
+		queryParts = append(queryParts, fmt.Sprintf("from:%s", fromAddr))
+	}
+	query := strings.Join(queryParts, " ")
+
+	deadline := time.Now().Add(time.Duration(maxWait) * time.Second)
+	start := time.Now()
+
+	for {
+		token, err := resolveAccessToken(ctx, cred)
+		if err != nil {
+			return opResult{err: err, code: ErrCodeCredentialUnavailable}
+		}
+		apiURL := fmt.Sprintf(
+			"https://gmail.googleapis.com/gmail/v1/users/me/messages?q=%s&maxResults=20",
+			url.QueryEscape(query),
+		)
+		body, sc, err := httpGET(ctx, apiURL, map[string]string{"Authorization": "Bearer " + token})
+		if err == nil && sc < 400 {
+			var listResp struct {
+				Messages []struct {
+					ID string `json:"id"`
+				} `json:"messages"`
+			}
+			if json.Unmarshal(body, &listResp) == nil && len(listResp.Messages) > 0 {
+				// Fetch metadata for each, then drop anything that's actually outbound.
+				replies := make([]map[string]any, 0, len(listResp.Messages))
+				for _, m := range listResp.Messages {
+					metaURL := fmt.Sprintf(
+						"https://gmail.googleapis.com/gmail/v1/users/me/messages/%s?format=metadata&metadataHeaders=From&metadataHeaders=Subject",
+						url.PathEscape(m.ID),
+					)
+					mb, msc, merr := httpGET(ctx, metaURL, map[string]string{"Authorization": "Bearer " + token})
+					entry := map[string]any{"id": m.ID}
+					fromHeader := ""
+					if merr == nil && msc < 400 {
+						var meta struct {
+							Snippet string `json:"snippet"`
+							Payload struct {
+								Headers []struct {
+									Name, Value string
+								} `json:"headers"`
+							} `json:"payload"`
+						}
+						if json.Unmarshal(mb, &meta) == nil {
+							entry["snippet"] = meta.Snippet
+							for _, h := range meta.Payload.Headers {
+								switch h.Name {
+								case "From":
+									entry["from"] = h.Value
+									fromHeader = h.Value
+								case "Subject":
+									entry["subject"] = h.Value
+								}
+							}
+						}
+					}
+					// Skip if the sender is the user themselves (any outbound that
+					// leaked through the in:inbox filter).
+					if fromHeader != "" && strings.Contains(strings.ToLower(fromHeader), strings.ToLower(cred.Email)) {
+						continue
+					}
+					replies = append(replies, entry)
+				}
+				// When we've hit the threshold, do one extra grace poll after a
+				// short delay so replies that arrived at the same time (within the
+				// same poll window) are also captured before we return.
+				if len(replies) >= minCount {
+					// Short grace period to collect stragglers that arrived concurrently.
+					gracePeriod := 15 * time.Second
+					if time.Now().Add(gracePeriod).Before(deadline) {
+						select {
+						case <-ctx.Done():
+						case <-time.After(gracePeriod):
+						}
+						// One additional fetch to pick up any replies that landed
+						// in the same burst.
+						token2, err2 := resolveAccessToken(ctx, cred)
+						if err2 == nil {
+							body2, sc2, err2 := httpGET(ctx, fmt.Sprintf(
+								"https://gmail.googleapis.com/gmail/v1/users/me/messages?q=%s&maxResults=20",
+								url.QueryEscape(query),
+							), map[string]string{"Authorization": "Bearer " + token2})
+							if err2 == nil && sc2 < 400 {
+								var listResp2 struct {
+									Messages []struct {
+										ID string `json:"id"`
+									} `json:"messages"`
+								}
+								if json.Unmarshal(body2, &listResp2) == nil {
+									seen := make(map[string]bool, len(replies))
+									for _, r := range replies {
+										if id, ok := r["id"].(string); ok {
+											seen[id] = true
+										}
+									}
+									for _, m2 := range listResp2.Messages {
+										if seen[m2.ID] {
+											continue
+										}
+										metaURL2 := fmt.Sprintf(
+											"https://gmail.googleapis.com/gmail/v1/users/me/messages/%s?format=metadata&metadataHeaders=From&metadataHeaders=Subject",
+											url.PathEscape(m2.ID),
+										)
+										mb2, msc2, merr2 := httpGET(ctx, metaURL2, map[string]string{"Authorization": "Bearer " + token2})
+										entry2 := map[string]any{"id": m2.ID}
+										fromHeader2 := ""
+										if merr2 == nil && msc2 < 400 {
+											var meta2 struct {
+												Snippet string `json:"snippet"`
+												Payload struct {
+													Headers []struct{ Name, Value string } `json:"headers"`
+												} `json:"payload"`
+											}
+											if json.Unmarshal(mb2, &meta2) == nil {
+												entry2["snippet"] = meta2.Snippet
+												for _, h := range meta2.Payload.Headers {
+													switch h.Name {
+													case "From":
+														entry2["from"] = h.Value
+														fromHeader2 = h.Value
+													case "Subject":
+														entry2["subject"] = h.Value
+													}
+												}
+											}
+										}
+										if fromHeader2 != "" && strings.Contains(strings.ToLower(fromHeader2), strings.ToLower(cred.Email)) {
+											continue
+										}
+										replies = append(replies, entry2)
+									}
+								}
+							}
+						}
+					}
+					return opResult{result: map[string]any{
+						"found":           true,
+						"count":           len(replies),
+						"min_count":       minCount,
+						"messages":        replies,
+						"elapsed_seconds": int(time.Since(start).Seconds()),
+						"query":           query,
+					}}
+				}
+			}
+		}
+
+		// Bail when the next poll would push us past the deadline.
+		if time.Now().Add(time.Duration(pollInterval) * time.Second).After(deadline) {
+			return opResult{result: map[string]any{
+				"found":           false,
+				"count":           0,
+				"min_count":       minCount,
+				"elapsed_seconds": int(time.Since(start).Seconds()),
+				"timed_out":       true,
+				"query":           query,
+				"hint":            "Call again with the same `since` to keep waiting (max 5 min per call).",
+			}}
+		}
+
+		select {
+		case <-ctx.Done():
+			return opResult{err: fmt.Errorf("wait cancelled: %w", ctx.Err()), code: ErrCodeUpstreamError}
+		case <-time.After(time.Duration(pollInterval) * time.Second):
+			// continue polling
+		}
+	}
 }
 
 // googleOAuthCredential is the JSON blob stored in OpenBao under

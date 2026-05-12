@@ -24,6 +24,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	_ "time/tzdata" // embed IANA timezone database so TZ env (e.g. America/Los_Angeles) resolves in minimal/distroless images
 
 	"github.com/mlim3/cerberOS/orchestrator/internal/api"
 	"github.com/mlim3/cerberOS/orchestrator/internal/config"
