@@ -6,15 +6,51 @@ import CredentialRequestCard from './CredentialRequestCard'
 import ProgressIndicator from './ProgressIndicator'
 import { VoiceRecorder } from './VoiceRecorder'
 import { CerberOsLogo } from './icons/CerberOsLogo'
+import { IconUser } from './icons/InlineUiIcons'
 import { inferAgentLane } from '../lib/infer-agent-lane'
+import { splitAgentTaskStatusPreamble } from '../lib/split-agent-task-preamble'
+import { stripTaskCompleteDisplayNoise } from '../lib/strip-task-complete-display'
 import './ChatWindow.css'
 import './VoiceRecorder.css'
 
 marked.setOptions({ breaks: true, gfm: true })
 
+/** Open markdown links in a new tab; noopener/noreferrer for window.opener safety. */
+marked.use({
+  hooks: {
+    postprocess(html) {
+      return html.replaceAll('<a ', '<a target="_blank" rel="noopener noreferrer" ')
+    },
+  },
+})
+
 function MarkdownContent({ content }: { content: string }) {
-  const html = useMemo(() => marked.parse(content) as string, [content])
-  return <div className="message-text markdown-body" dangerouslySetInnerHTML={{ __html: html }} />
+  const cleaned = useMemo(() => stripTaskCompleteDisplayNoise(content), [content])
+  const { preamble, body } = useMemo(() => splitAgentTaskStatusPreamble(cleaned), [cleaned])
+  const bodyHtml = useMemo(
+    () => (body.trim() ? (marked.parse(body) as string) : ''),
+    [body],
+  )
+  const fullHtml = useMemo(() => marked.parse(cleaned) as string, [cleaned])
+
+  if (!preamble) {
+    return <div className="message-text markdown-body" dangerouslySetInnerHTML={{ __html: fullHtml }} />
+  }
+
+  return (
+    <div className="message-text markdown-body">
+      <div className="agent-task-status" aria-label="Orchestrator status">
+        {preamble.split('\n').map((line, i) => (
+          <p key={i} className="agent-task-status-line">
+            {line}
+          </p>
+        ))}
+      </div>
+      {bodyHtml ? (
+        <div className="agent-markdown-body" dangerouslySetInnerHTML={{ __html: bodyHtml }} />
+      ) : null}
+    </div>
+  )
 }
 
 interface ChatWindowProps {
@@ -155,15 +191,20 @@ function ChatWindow({
       <div className="messages-container">
         {task.messages.map(message => {
           const lane = transcriptLane(message)
+          const agentLaneClass = message.role === 'agent' ? ` message-lane-${lane}` : ''
           return (
           <div
             key={message.id}
-            className={`message ${message.role} message-lane-${lane}${message.isRedacted ? ' redacted' : ''}${
+            className={`message ${message.role}${agentLaneClass}${message.isRedacted ? ' redacted' : ''}${
               message.scheduledRun ? ' message-scheduled-run' : ''
             }${pulseMessageKey && pulseMessageKey === message.id ? ' message-pulse-new' : ''}`}
           >
             <div className="message-avatar">
-              {message.role === 'user' ? '👤' : <span className="avatar-glyph">C</span>}
+              {message.role === 'user' ? (
+                <IconUser className="message-avatar-user" size={15} />
+              ) : (
+                <span className="avatar-glyph">C</span>
+              )}
             </div>
             <div className="message-content">
               <div className="message-header">

@@ -1,4 +1,5 @@
 import type { CredentialRequest, CredentialRequestStatus } from '@cerberos/io-core'
+import { IconCheckCircle, IconLock } from './icons/InlineUiIcons'
 import './CredentialRequestCard.css'
 
 interface CredentialRequestCardProps {
@@ -11,7 +12,9 @@ function CredentialRequestCard({ request, status, onProvide }: CredentialRequest
   if (status === 'submitted') {
     return (
       <div className="cred-card cred-card-done">
-        <div className="cred-card-icon">{'\u{2705}'}</div>
+        <div className="cred-card-icon cred-card-icon--svg" aria-hidden>
+          <IconCheckCircle size={26} />
+        </div>
         <div className="cred-card-body">
           <span className="cred-card-title">Credential provided securely</span>
           <span className="cred-card-subtitle">{request.label}</span>
@@ -22,7 +25,9 @@ function CredentialRequestCard({ request, status, onProvide }: CredentialRequest
 
   return (
     <div className="cred-card cred-card-pending">
-      <div className="cred-card-icon">{'\u{1F512}'}</div>
+      <div className="cred-card-icon cred-card-icon--svg" aria-hidden>
+        <IconLock size={26} />
+      </div>
       <div className="cred-card-body">
         <span className="cred-card-title">{request.label}</span>
         {request.description && (

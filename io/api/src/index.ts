@@ -164,12 +164,44 @@ function parseEnvelopePayload(env: Record<string, unknown>): Record<string, unkn
 }
 
 /**
+ * Some agent / planner paths surface the terminal tool as a literal string, e.g.
+ * `task_complete({"result":"..."})`. That is not JSON for the whole string, so
+ * `JSON.parse` fails and we would otherwise stream the raw call into the chat UI.
+ */
+function unwrapTaskCompletePayloadString(raw: string): string | null {
+  const t = raw.trim()
+  const m = t.match(/^task_complete\s*\(\s*(\{[\s\S]*\})\s*\)\s*$/i)
+  if (!m) return null
+  try {
+    const obj = JSON.parse(m[1]!) as Record<string, unknown>
+    return extractHumanResultFromObject(obj)
+  } catch {
+    return null
+  }
+}
+
+function extractHumanResultFromObject(obj: Record<string, unknown>): string {
+  const text = obj.result ?? obj.output ?? obj.content ?? obj.answer
+  if (typeof text === 'string') {
+    const inner = unwrapTaskCompletePayloadString(text)
+    if (inner !== null) return inner
+    return text
+  }
+  if (text !== undefined && text !== null) {
+    return extractHumanResult(text)
+  }
+  return JSON.stringify(obj)
+}
+
+/**
  * Extract a clean human-readable string from the orchestrator's task_result payload.
  * The result may be: a plain string, a JSON array of subtask results, or an object.
  */
 function extractHumanResult(result: unknown): string {
   if (!result) return 'Task completed.'
   if (typeof result === 'string') {
+    const unwrapped = unwrapTaskCompletePayloadString(result)
+    if (unwrapped !== null) return unwrapped
     try {
       const parsed = JSON.parse(result)
       return extractHumanResult(parsed)
@@ -181,17 +213,14 @@ function extractHumanResult(result: unknown): string {
     const parts = result
       .map((item: Record<string, unknown>) => {
         const r = item.result ?? item.output ?? item.content
-        return typeof r === 'string' ? r : r ? JSON.stringify(r) : null
+        if (r === undefined || r === null) return null
+        return extractHumanResult(r as unknown)
       })
-      .filter(Boolean) as string[]
+      .filter((s): s is string => Boolean(s && String(s).trim()))
     return parts.length > 0 ? parts.join('\n\n') : 'Task completed.'
   }
   if (typeof result === 'object') {
-    const obj = result as Record<string, unknown>
-    const text = obj.result ?? obj.output ?? obj.content ?? obj.answer
-    if (typeof text === 'string') return text
-    if (text) return extractHumanResult(text)
-    return JSON.stringify(result)
+    return extractHumanResultFromObject(result as Record<string, unknown>)
   }
   return String(result)
 }
