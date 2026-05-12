@@ -8,8 +8,14 @@ import (
 	"time"
 )
 
+// testUserID is the dev_default user seeded by init-db.sql. MT-4 (#185)
+// requires every orchestrator record to be tagged with a user_id that
+// references identity_schema.users(id); the seeded row is the simplest fit
+// for black-box contract tests.
+const testUserID = "00000000-0000-0000-0000-000000000001"
+
 func TestOrchestratorRecordsRequireInternalKey(t *testing.T) {
-	status, env := apiJSONRequest(t, http.MethodGet, blackboxBaseURL()+"/api/v1/orchestrator/records?data_type=task_state&task_id=test-task", nil, nil)
+	status, env := apiJSONRequest(t, http.MethodGet, blackboxBaseURL()+"/api/v1/orchestrator/records?data_type=task_state&task_id=test-task&user_id="+testUserID, nil, nil)
 	if status != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want %d", status, http.StatusUnauthorized)
 	}
@@ -18,6 +24,7 @@ func TestOrchestratorRecordsRequireInternalKey(t *testing.T) {
 
 func TestOrchestratorWriteRejectsInvalidDataType(t *testing.T) {
 	status, env := apiJSONRequest(t, http.MethodPost, blackboxBaseURL()+"/api/v1/orchestrator/records", map[string]any{
+		"user_id":               testUserID,
 		"orchestrator_task_ref": "orch-invalid",
 		"task_id":               "task-invalid",
 		"data_type":             "not_real",
@@ -51,6 +58,7 @@ func TestOrchestratorTaskStateUpserts(t *testing.T) {
 		{timestamp: secondTS, state: "PLAN_ACTIVE", retry: 1},
 	} {
 		status, env := apiJSONRequest(t, http.MethodPost, base+"/api/v1/orchestrator/records", map[string]any{
+			"user_id":               testUserID,
 			"orchestrator_task_ref": orchRef,
 			"task_id":               taskID,
 			"trace_id":              traceID,
@@ -68,7 +76,7 @@ func TestOrchestratorTaskStateUpserts(t *testing.T) {
 		assertSuccessEnvelope(t, env)
 	}
 
-	status, env := apiJSONRequest(t, http.MethodGet, base+"/api/v1/orchestrator/records?data_type=task_state&task_id="+taskID, nil, headers)
+	status, env := apiJSONRequest(t, http.MethodGet, base+"/api/v1/orchestrator/records?data_type=task_state&user_id="+testUserID+"&task_id="+taskID, nil, headers)
 	if status != http.StatusOK {
 		t.Fatalf("query status = %d, want %d", status, http.StatusOK)
 	}
@@ -95,7 +103,7 @@ func TestOrchestratorTaskStateUpserts(t *testing.T) {
 		t.Fatalf("payload.state = %v, want PLAN_ACTIVE", got)
 	}
 
-	status, env = apiJSONRequest(t, http.MethodGet, base+"/api/v1/orchestrator/records/latest?task_id="+taskID+"&data_type=task_state", nil, headers)
+	status, env = apiJSONRequest(t, http.MethodGet, base+"/api/v1/orchestrator/records/latest?user_id="+testUserID+"&task_id="+taskID+"&data_type=task_state", nil, headers)
 	if status != http.StatusOK {
 		t.Fatalf("latest status = %d, want %d", status, http.StatusOK)
 	}
@@ -126,6 +134,7 @@ func TestOrchestratorAuditLogAppends(t *testing.T) {
 
 	for i, outcome := range []string{"success", "failed"} {
 		status, env := apiJSONRequest(t, http.MethodPost, base+"/api/v1/orchestrator/records", map[string]any{
+			"user_id":               testUserID,
 			"orchestrator_task_ref": orchRef,
 			"task_id":               taskID,
 			"data_type":             "audit_log",
@@ -145,7 +154,7 @@ func TestOrchestratorAuditLogAppends(t *testing.T) {
 		assertSuccessEnvelope(t, env)
 	}
 
-	status, env := apiJSONRequest(t, http.MethodGet, base+"/api/v1/orchestrator/records?data_type=audit_log&task_id="+taskID, nil, headers)
+	status, env := apiJSONRequest(t, http.MethodGet, base+"/api/v1/orchestrator/records?data_type=audit_log&user_id="+testUserID+"&task_id="+taskID, nil, headers)
 	if status != http.StatusOK {
 		t.Fatalf("query status = %d, want %d", status, http.StatusOK)
 	}
@@ -180,6 +189,7 @@ func TestOrchestratorQueryNotTerminalFiltersTerminalStates(t *testing.T) {
 		{taskID: terminalTaskID, orch: terminalRef, state: "COMPLETED"},
 	} {
 		status, env := apiJSONRequest(t, http.MethodPost, base+"/api/v1/orchestrator/records", map[string]any{
+			"user_id":               testUserID,
 			"orchestrator_task_ref": tc.orch,
 			"task_id":               tc.taskID,
 			"data_type":             "task_state",
@@ -195,7 +205,7 @@ func TestOrchestratorQueryNotTerminalFiltersTerminalStates(t *testing.T) {
 		assertSuccessEnvelope(t, env)
 	}
 
-	status, env := apiJSONRequest(t, http.MethodGet, base+"/api/v1/orchestrator/records?data_type=task_state&state_filter=not_terminal", nil, headers)
+	status, env := apiJSONRequest(t, http.MethodGet, base+"/api/v1/orchestrator/records?data_type=task_state&user_id="+testUserID+"&state_filter=not_terminal", nil, headers)
 	if status != http.StatusOK {
 		t.Fatalf("query status = %d, want %d", status, http.StatusOK)
 	}

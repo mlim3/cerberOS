@@ -226,7 +226,7 @@ func (d *Dispatcher) HandleInboundTask(ctx context.Context, task types.UserTask)
 
 	{
 		dedupCtx, dedupSpan := observability.StartSpan(ctx, "dedup_check")
-		existing := d.dedupCheck(task.TaskID, idempotencyWindow)
+		existing := d.dedupCheck(task.UserID, task.TaskID, idempotencyWindow)
 		dedupSpan.End()
 		_ = dedupCtx
 		// A task_id is only a "duplicate" while a prior attempt is still in
@@ -578,7 +578,7 @@ func (d *Dispatcher) enterAwaitingApproval(ctx context.Context, ts *types.TaskSt
 	if err := d.persistTaskState(ts, now); err != nil {
 		log.Warn("could not persist task transition to AWAITING_APPROVAL in memory; continuing in-process", "error", err)
 	}
-	if err := d.persistPlanState(plan, ts.TaskID, ts.OrchestratorTaskRef, now); err != nil {
+	if err := d.persistPlanState(plan, ts, now); err != nil {
 		log.Warn("could not persist execution plan to memory; continuing in-process", "plan_id", plan.PlanID, "error", err)
 	}
 
@@ -668,7 +668,7 @@ func (d *Dispatcher) startPlanExecution(ctx context.Context, ts *types.TaskState
 	if err := d.persistTaskState(ts, now); err != nil {
 		log.Warn("could not persist task transition to PLAN_ACTIVE in memory; continuing in-process", "error", err)
 	}
-	if err := d.persistPlanState(plan, ts.TaskID, ts.OrchestratorTaskRef, now); err != nil {
+	if err := d.persistPlanState(plan, ts, now); err != nil {
 		log.Warn("could not persist execution plan to memory on PLAN_ACTIVE; continuing in-process", "plan_id", plan.PlanID, "error", err)
 	}
 
@@ -1397,9 +1397,11 @@ func classifyPlanError(err error) string {
 
 // dedupCheck queries Memory for an existing task_state within the idempotency window.
 // Returns the existing TaskState if a duplicate is found, or nil if the task is new.
-func (d *Dispatcher) dedupCheck(taskID string, windowSeconds int) *types.TaskState {
+// MT-4 (#185): scoped to userID so two tenants with colliding task_ids do not collide.
+func (d *Dispatcher) dedupCheck(userID, taskID string, windowSeconds int) *types.TaskState {
 	windowStart := time.Now().UTC().Add(-time.Duration(windowSeconds) * time.Second)
 	records, err := d.memory.Read(types.MemoryQuery{
+		UserID:        userID,
 		TaskID:        taskID,
 		DataType:      types.DataTypeTaskState,
 		FromTimestamp: &windowStart,
@@ -1422,6 +1424,7 @@ func (d *Dispatcher) persistTaskState(ts *types.TaskState, timestamp time.Time) 
 	}
 
 	return d.memory.Write(types.OrchestratorMemoryWritePayload{
+		UserID:              ts.UserID,
 		OrchestratorTaskRef: ts.OrchestratorTaskRef,
 		TaskID:              ts.TaskID,
 		DataType:            types.DataTypeTaskState,
@@ -1430,15 +1433,16 @@ func (d *Dispatcher) persistTaskState(ts *types.TaskState, timestamp time.Time) 
 	})
 }
 
-func (d *Dispatcher) persistPlanState(plan types.ExecutionPlan, taskID, orchRef string, timestamp time.Time) error {
+func (d *Dispatcher) persistPlanState(plan types.ExecutionPlan, ts *types.TaskState, timestamp time.Time) error {
 	planPayload, err := json.Marshal(plan)
 	if err != nil {
 		return fmt.Errorf("marshal plan: %w", err)
 	}
 
 	return d.memory.Write(types.OrchestratorMemoryWritePayload{
-		OrchestratorTaskRef: orchRef,
-		TaskID:              taskID,
+		UserID:              ts.UserID,
+		OrchestratorTaskRef: ts.OrchestratorTaskRef,
+		TaskID:              ts.TaskID,
 		PlanID:              plan.PlanID,
 		DataType:            types.DataTypePlanState,
 		Timestamp:           timestamp,

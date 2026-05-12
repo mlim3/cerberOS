@@ -181,7 +181,7 @@ func (m *Manager) attemptRecovery(ctx context.Context, ts *types.TaskState, reas
 	}
 
 	// ── Read last task state from Memory (§FR-SH-02) ──────────────────────
-	latestState, err := m.memory.ReadLatest(ts.TaskID, types.DataTypeTaskState)
+	latestState, err := m.memory.ReadLatest(ts.UserID, ts.TaskID, types.DataTypeTaskState)
 	if err != nil {
 		logger.Error("failed to read task state for recovery — terminating",
 			"task_id", ts.TaskID,
@@ -230,6 +230,7 @@ func (m *Manager) attemptRecovery(ctx context.Context, ts *types.TaskState, reas
 	eventPayload, err := json.Marshal(recoveryEvent)
 	if err == nil {
 		if writeErr := m.memory.Write(types.OrchestratorMemoryWritePayload{
+			UserID:              recoveredState.UserID,
 			OrchestratorTaskRef: recoveredState.OrchestratorTaskRef,
 			TaskID:              recoveredState.TaskID,
 			DataType:            types.DataTypeRecoveryEvent,

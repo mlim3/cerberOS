@@ -13,6 +13,10 @@ import (
 	"github.com/mlim3/cerberOS/orchestrator/internal/types"
 )
 
+// testUserID is a fixed UUID used by all orchestrator-memory tests so writes/reads
+// satisfy the MT-4 (#185) user_id contract.
+const testUserID = "00000000-0000-0000-0000-000000000001"
+
 // TestWriteValidDataTypeSucceeds verifies that Write succeeds
 // when the payload contains a valid DataType.
 // It also checks that the underlying memory layer is called once
@@ -112,6 +116,7 @@ func TestReadReturnsRecordsOrderedByTimestampAscending(t *testing.T) {
 
 	mem.Records = []types.MemoryRecord{
 		{
+			UserID:              testUserID,
 			OrchestratorTaskRef: "orch-1",
 			TaskID:              "task-1",
 			DataType:            types.DataTypeTaskState,
@@ -119,6 +124,7 @@ func TestReadReturnsRecordsOrderedByTimestampAscending(t *testing.T) {
 			Payload:             mustJSON(t, map[string]any{"state": "RUNNING"}),
 		},
 		{
+			UserID:              testUserID,
 			OrchestratorTaskRef: "orch-1",
 			TaskID:              "task-1",
 			DataType:            types.DataTypeTaskState,
@@ -128,6 +134,7 @@ func TestReadReturnsRecordsOrderedByTimestampAscending(t *testing.T) {
 	}
 
 	records, err := iface.Read(types.MemoryQuery{
+		UserID:   testUserID,
 		TaskID:   "task-1",
 		DataType: types.DataTypeTaskState,
 	})
@@ -152,6 +159,7 @@ func TestReadInvalidDataTypeReturnsError(t *testing.T) {
 	iface := memoryiface.New(mem, &config.OrchestratorConfig{})
 
 	_, err := iface.Read(types.MemoryQuery{
+		UserID:   testUserID,
 		TaskID:   "task-1",
 		DataType: "bad_type",
 	})
@@ -177,6 +185,7 @@ func TestReadLatestReturnsNewestRecord(t *testing.T) {
 
 	mem.Records = []types.MemoryRecord{
 		{
+			UserID:              testUserID,
 			OrchestratorTaskRef: "orch-1",
 			TaskID:              "task-1",
 			DataType:            types.DataTypeTaskState,
@@ -184,6 +193,7 @@ func TestReadLatestReturnsNewestRecord(t *testing.T) {
 			Payload:             mustJSON(t, map[string]any{"state": "DISPATCHED"}),
 		},
 		{
+			UserID:              testUserID,
 			OrchestratorTaskRef: "orch-1",
 			TaskID:              "task-1",
 			DataType:            types.DataTypeTaskState,
@@ -192,7 +202,7 @@ func TestReadLatestReturnsNewestRecord(t *testing.T) {
 		},
 	}
 
-	record, err := iface.ReadLatest("task-1", types.DataTypeTaskState)
+	record, err := iface.ReadLatest(testUserID, "task-1", types.DataTypeTaskState)
 	if err != nil {
 		t.Fatalf("ReadLatest() error = %v", err)
 	}
@@ -207,12 +217,27 @@ func TestReadLatestEmptyTaskIDReturnsError(t *testing.T) {
 	mem := mocks.NewMemoryMock()
 	iface := memoryiface.New(mem, &config.OrchestratorConfig{})
 
-	_, err := iface.ReadLatest("", types.DataTypeTaskState)
+	_, err := iface.ReadLatest(testUserID, "", types.DataTypeTaskState)
 	if err == nil {
 		t.Fatal("ReadLatest() error = nil, want task_id required error")
 	}
 	if !strings.Contains(err.Error(), "task_id is required") {
 		t.Fatalf("ReadLatest() error = %v, want task_id is required", err)
+	}
+}
+
+// TestReadLatestEmptyUserIDReturnsError verifies that ReadLatest rejects
+// empty user IDs — MT-4 (#185) requires every read to be tenant-scoped.
+func TestReadLatestEmptyUserIDReturnsError(t *testing.T) {
+	mem := mocks.NewMemoryMock()
+	iface := memoryiface.New(mem, &config.OrchestratorConfig{})
+
+	_, err := iface.ReadLatest("", "task-1", types.DataTypeTaskState)
+	if err == nil {
+		t.Fatal("ReadLatest() error = nil, want user_id required error")
+	}
+	if !strings.Contains(err.Error(), "user_id is required") {
+		t.Fatalf("ReadLatest() error = %v, want user_id is required", err)
 	}
 }
 
@@ -276,6 +301,7 @@ func TestMemoryInterfaceDemoFlow(t *testing.T) {
 	// The payload is a structured task_state record, not a raw transcript.
 	dispatchedAt := time.Now().UTC().Add(-2 * time.Minute)
 	dispatchedPayload := types.OrchestratorMemoryWritePayload{
+		UserID:              testUserID,
 		OrchestratorTaskRef: "orch-demo-1",
 		TaskID:              "task-demo-1",
 		DataType:            types.DataTypeTaskState,
@@ -296,6 +322,7 @@ func TestMemoryInterfaceDemoFlow(t *testing.T) {
 	// Using the same task_id but a later timestamp lets us verify ReadLatest.
 	runningAt := dispatchedAt.Add(1 * time.Minute)
 	runningPayload := types.OrchestratorMemoryWritePayload{
+		UserID:              testUserID,
 		OrchestratorTaskRef: "orch-demo-1",
 		TaskID:              "task-demo-1",
 		DataType:            types.DataTypeTaskState,
@@ -317,6 +344,7 @@ func TestMemoryInterfaceDemoFlow(t *testing.T) {
 	// other orchestrator modules.
 	t.Log("step 3: reading all task_state records for task-demo-1")
 	records, err := iface.Read(types.MemoryQuery{
+		UserID:   testUserID,
 		TaskID:   "task-demo-1",
 		DataType: types.DataTypeTaskState,
 	})
@@ -340,7 +368,7 @@ func TestMemoryInterfaceDemoFlow(t *testing.T) {
 	// This is the recovery-oriented read path where orchestrator wants the most
 	// recent structured state for a task.
 	t.Log("step 4: reading latest task_state snapshot for task-demo-1")
-	latest, err := iface.ReadLatest("task-demo-1", types.DataTypeTaskState)
+	latest, err := iface.ReadLatest(testUserID, "task-demo-1", types.DataTypeTaskState)
 	if err != nil {
 		t.Fatalf("ReadLatest() error = %v", err)
 	}
@@ -382,6 +410,7 @@ func newWritePayload(t *testing.T, dataType string) types.OrchestratorMemoryWrit
 	t.Helper()
 
 	return types.OrchestratorMemoryWritePayload{
+		UserID:              testUserID,
 		OrchestratorTaskRef: "orch-1",
 		TaskID:              "task-1",
 		DataType:            dataType,

@@ -292,6 +292,7 @@ func (e *PlanExecutor) Execute(ctx context.Context, plan types.ExecutionPlan, ts
 			SubtaskID:            st.SubtaskID,
 			PlanID:               plan.PlanID,
 			TaskID:               ts.TaskID,
+			UserID:               ts.UserID,
 			State:                types.SubtaskStatePending,
 			RequiredSkillDomains: st.RequiredSkillDomains,
 			DependsOn:            st.DependsOn,
@@ -746,6 +747,7 @@ func (e *PlanExecutor) persistSubtaskState(sub *types.SubtaskState, orchRef stri
 	}
 
 	if err := e.memory.Write(types.OrchestratorMemoryWritePayload{
+		UserID:              sub.UserID,
 		OrchestratorTaskRef: orchRef,
 		TaskID:              sub.TaskID,
 		PlanID:              sub.PlanID,

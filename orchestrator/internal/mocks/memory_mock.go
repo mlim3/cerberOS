@@ -59,7 +59,13 @@ func (m *MemoryMock) Write(payload types.OrchestratorMemoryWritePayload) error {
 		return fmt.Errorf("invalid data_type: %q — must be one of: task_state, plan_state, subtask_state, audit_log, recovery_event, policy_event", payload.DataType)
 	}
 
+	// MT-4 (#185): mock now stores user_id so tests can exercise tenant isolation.
+	if payload.UserID == "" {
+		return errors.New("user_id is required")
+	}
+
 	m.Records = append(m.Records, types.MemoryRecord{
+		UserID:              payload.UserID,
 		OrchestratorTaskRef: payload.OrchestratorTaskRef,
 		TaskID:              payload.TaskID,
 		DataType:            payload.DataType,
@@ -96,7 +102,7 @@ func (m *MemoryMock) Read(query types.MemoryQuery) ([]types.MemoryRecord, error)
 	return results, nil
 }
 
-func (m *MemoryMock) ReadLatest(taskID string, dataType string) (*types.MemoryRecord, error) {
+func (m *MemoryMock) ReadLatest(userID, taskID, dataType string) (*types.MemoryRecord, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -106,10 +112,14 @@ func (m *MemoryMock) ReadLatest(taskID string, dataType string) (*types.MemoryRe
 		return nil, errors.New("memory component unavailable")
 	}
 
+	if userID == "" {
+		return nil, errors.New("user_id is required")
+	}
+
 	var latest *types.MemoryRecord
 	for i := range m.Records {
 		r := &m.Records[i]
-		if r.TaskID != taskID || r.DataType != dataType {
+		if r.UserID != userID || r.TaskID != taskID || r.DataType != dataType {
 			continue
 		}
 		if latest == nil || r.Timestamp.After(latest.Timestamp) {
@@ -118,7 +128,7 @@ func (m *MemoryMock) ReadLatest(taskID string, dataType string) (*types.MemoryRe
 	}
 
 	if latest == nil {
-		return nil, fmt.Errorf("no records found for task_id=%s data_type=%s", taskID, dataType)
+		return nil, fmt.Errorf("no records found for user_id=%s task_id=%s data_type=%s", userID, taskID, dataType)
 	}
 
 	return latest, nil
@@ -136,9 +146,10 @@ func (m *MemoryMock) Ping() error {
 	return nil
 }
 
-// GetTaskState is a test helper that deserializes the latest task_state record for a given task.
-func (m *MemoryMock) GetTaskState(taskID string) (*types.TaskState, error) {
-	record, err := m.ReadLatest(taskID, types.DataTypeTaskState)
+// GetTaskState is a test helper that deserializes the latest task_state record
+// for a given user and task. MT-4 (#185): scoped to userID.
+func (m *MemoryMock) GetTaskState(userID, taskID string) (*types.TaskState, error) {
+	record, err := m.ReadLatest(userID, taskID, types.DataTypeTaskState)
 	if err != nil {
 		return nil, err
 	}
@@ -165,6 +176,9 @@ func (m *MemoryMock) Reset() {
 
 // matchesQuery checks if a MemoryRecord satisfies the given MemoryQuery filters.
 func matchesQuery(r types.MemoryRecord, q types.MemoryQuery) bool {
+	if q.UserID != "" && r.UserID != q.UserID {
+		return false
+	}
 	if q.DataType != "" && r.DataType != q.DataType {
 		return false
 	}
@@ -198,7 +212,7 @@ func matchesQuery(r types.MemoryRecord, q types.MemoryQuery) bool {
 var _ interface {
 	Write(types.OrchestratorMemoryWritePayload) error
 	Read(types.MemoryQuery) ([]types.MemoryRecord, error)
-	ReadLatest(string, string) (*types.MemoryRecord, error)
+	ReadLatest(string, string, string) (*types.MemoryRecord, error)
 	Ping() error
 } = &MemoryMock{}
 

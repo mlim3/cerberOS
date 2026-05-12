@@ -22,9 +22,10 @@ type MemoryClient interface {
 	// Supports filtering by orchestrator_task_ref OR task_id, data_type, and time range (§11.4).
 	Read(query types.MemoryQuery) ([]types.MemoryRecord, error)
 
-	// ReadLatest retrieves the single most recent record for a given task_id and data_type.
+	// ReadLatest retrieves the single most recent record for a given user_id, task_id and data_type.
 	// Used by Recovery Manager to restore the last valid task state before re-dispatch (§FR-SH-02).
-	ReadLatest(taskID string, dataType string) (*types.MemoryRecord, error)
+	// MT-4 (#185): userID is required and is the leading filter.
+	ReadLatest(userID, taskID, dataType string) (*types.MemoryRecord, error)
 
 	// Ping checks Memory Component reachability.
 	// Used by the health monitoring loop every 10 seconds (§12.1).

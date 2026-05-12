@@ -107,6 +107,7 @@ func seedTaskState(t *testing.T, mem *mocks.MemoryMock, ts *types.TaskState) {
 	}
 
 	if err := mem.Write(types.OrchestratorMemoryWritePayload{
+		UserID:              ts.UserID,
 		OrchestratorTaskRef: ts.OrchestratorTaskRef,
 		TaskID:              ts.TaskID,
 		DataType:            types.DataTypeTaskState,
@@ -118,51 +119,24 @@ func seedTaskState(t *testing.T, mem *mocks.MemoryMock, ts *types.TaskState) {
 }
 
 // ── Rehydrate ────────────────────────────────────────────────────────────────
+//
+// MT-4 (#185): RehydrateFromMemory is intentionally a no-op until MT-14
+// (#189) wires per-tenant rehydrate. The tests below now assert the temporary
+// "loads nothing" contract; once #189 lands they should be restored to their
+// previous shape (loading newest-per-task, skipping terminal states).
 
-func TestRehydrateFromMemory_LoadsLatestNonTerminalTasks(t *testing.T) {
+func TestRehydrateFromMemory_IsNoOpUntilMT14(t *testing.T) {
 	m, mem, _ := newMonitor(t)
 
-	ts1Old := makeTaskState("task-1", types.StateDispatchPending)
-	ts1New := makeTaskState("task-1", types.StateRunning)
-	ts1New.StateHistory = append(ts1New.StateHistory, types.StateEvent{
-		State:     types.StateRunning,
-		Timestamp: time.Now().UTC().Add(1 * time.Second),
-		NodeID:    "test-node",
-	})
-
-	ts2Terminal := makeTaskState("task-2", types.StateCompleted)
-	now := time.Now().UTC()
-	ts2Terminal.CompletedAt = &now
-
-	seedTaskState(t, mem, ts1Old)
-	seedTaskState(t, mem, ts1New)
-	seedTaskState(t, mem, ts2Terminal)
+	ts1 := makeTaskState("task-1", types.StateRunning)
+	seedTaskState(t, mem, ts1)
 
 	if err := m.RehydrateFromMemory(); err != nil {
 		t.Fatalf("RehydrateFromMemory() error = %v", err)
 	}
 
-	if got := m.GetActiveTaskCount(); got != 1 {
-		t.Fatalf("GetActiveTaskCount() = %d, want 1", got)
-	}
-}
-
-func TestRehydrateFromMemory_ReturnsErrorOnBadPayload(t *testing.T) {
-	m, mem, _ := newMonitor(t)
-
-	if err := mem.Write(types.OrchestratorMemoryWritePayload{
-		OrchestratorTaskRef: "orch-bad",
-		TaskID:              "task-bad",
-		DataType:            types.DataTypeTaskState,
-		Timestamp:           time.Now().UTC(),
-		Payload:             json.RawMessage(`{"state":`), // malformed json
-	}); err != nil {
-		t.Fatalf("memory.Write() error = %v", err)
-	}
-
-	err := m.RehydrateFromMemory()
-	if err == nil {
-		t.Fatal("RehydrateFromMemory() error = nil, want non-nil")
+	if got := m.GetActiveTaskCount(); got != 0 {
+		t.Fatalf("GetActiveTaskCount() = %d, want 0 (rehydrate is a no-op pending #189)", got)
 	}
 }
 
@@ -489,9 +463,11 @@ func TestMonitorDemoFlow(t *testing.T) {
 	t.Log("demo setup: created recoveryMock as the mock Recovery Manager")
 	t.Log("demo setup: created monitor.Monitor as the orchestrator-side M4 monitor")
 
-	// Step 1: simulate startup rehydration from Memory.
-	// We seed one non-terminal DISPATCHED task so the monitor can load it.
-	t.Log("step 1: seeding Memory with a non-terminal DISPATCHED task for startup rehydration")
+	// Step 1: simulate startup tracking.
+	// MT-4 (#185): RehydrateFromMemory is a no-op until MT-14 (#189) wires
+	// per-tenant rehydrate. For now we exercise TrackTask directly so the rest
+	// of the demo (agent status update → state transition → persist) still runs.
+	t.Log("step 1: seeding Memory and tracking a non-terminal DISPATCHED task")
 
 	dispatchedTask := makeTaskState("task-demo-1", types.StateDispatched)
 	dispatchedTask.TimeoutAt = ptrTime(time.Now().UTC().Add(2 * time.Minute))
@@ -500,10 +476,11 @@ func TestMonitorDemoFlow(t *testing.T) {
 	if err := m.RehydrateFromMemory(); err != nil {
 		t.Fatalf("RehydrateFromMemory() error = %v", err)
 	}
+	m.TrackTask(dispatchedTask)
 	if got := m.GetActiveTaskCount(); got != 1 {
-		t.Fatalf("GetActiveTaskCount() after rehydrate = %d, want 1", got)
+		t.Fatalf("GetActiveTaskCount() after track = %d, want 1", got)
 	}
-	t.Logf("step 1 complete: monitor rehydrated %d active task", m.GetActiveTaskCount())
+	t.Logf("step 1 complete: monitor tracking %d active task", m.GetActiveTaskCount())
 
 	// Step 2: agent reports ACTIVE.
 	// This should move the task from DISPATCHED -> RUNNING and persist the new state.

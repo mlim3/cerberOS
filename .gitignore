@@ -3,6 +3,7 @@ context/
 
 # Implementation plans (private, not pushed)
 plans/
+plans/mt-4-orchestrator-records-user-id.md
 
 # OS / filesystem
 .DS_Store

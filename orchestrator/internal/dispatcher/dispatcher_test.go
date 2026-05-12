@@ -857,6 +857,7 @@ func TestHandleInboundTask_ReEntryAfterTerminalState(t *testing.T) {
 		t.Fatalf("marshal terminal state: %v", err)
 	}
 	if err := mem.Write(types.OrchestratorMemoryWritePayload{
+		UserID:              terminalState.UserID,
 		OrchestratorTaskRef: terminalState.OrchestratorTaskRef,
 		TaskID:              task.TaskID,
 		DataType:            types.DataTypeTaskState,

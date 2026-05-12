@@ -23,6 +23,7 @@ const (
 // All fields are required. Untagged payloads are rejected.
 
 type OrchestratorMemoryWritePayload struct {
+	UserID              string          `json:"user_id"` // Required — owning tenant, persisted on every orchestrator record (MT-4 #185).
 	OrchestratorTaskRef string          `json:"orchestrator_task_ref"`
 	TaskID              string          `json:"task_id"`
 	PlanID              string          `json:"plan_id,omitempty"`    // NEW v3.0 — set for plan_state and subtask_state writes
@@ -37,6 +38,7 @@ type OrchestratorMemoryWritePayload struct {
 // Read request sent to Memory Interface (§11.4).
 
 type MemoryQuery struct {
+	UserID              string            `json:"user_id"` // Required — every read is scoped to one tenant (MT-4 #185).
 	OrchestratorTaskRef string            `json:"orchestrator_task_ref,omitempty"`
 	TaskID              string            `json:"task_id,omitempty"`
 	DataType            string            `json:"data_type"`
@@ -49,6 +51,7 @@ type MemoryQuery struct {
 // A single record returned by a Memory Interface read operation.
 
 type MemoryRecord struct {
+	UserID              string          `json:"user_id"`
 	OrchestratorTaskRef string          `json:"orchestrator_task_ref"`
 	TaskID              string          `json:"task_id"`
 	DataType            string          `json:"data_type"`
