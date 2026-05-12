@@ -403,7 +403,7 @@
   font-size: var(--font-sm);
   line-height: var(--leading-normal);
   font-weight: 500;
-  color: color-mix(in srgb, #f0d28c 68%, var(--text-secondary));
+  color: color-mix(in srgb, var(--conv-thinking-accent) 76%, var(--text-secondary));
 }
 
 .markdown-body .agent-task-status-line:last-child {

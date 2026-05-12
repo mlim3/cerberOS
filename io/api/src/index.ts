@@ -119,6 +119,20 @@ function buildRawInputWithHistory(
 
 const DEMO_MODE = process.env.DEMO_MODE === 'true'
 
+/** Vite `dist/` output; Dockerfile copies it here. Override when running the API outside Docker. */
+const WEB_DIST_ROOT = (process.env.WEB_DIST_ROOT ?? '/app/web-dist').replace(/\/$/, '')
+
+function setWebDistCacheHeaders(c: { req: { path: string }; header: (name: string, value: string) => void }) {
+  const pathname = (c.req.path.split('?')[0] ?? c.req.path) || '/'
+  if (pathname === '/' || pathname.endsWith('.html')) {
+    c.header('Cache-Control', 'no-store')
+  } else if (pathname.startsWith('/assets/')) {
+    c.header('Cache-Control', 'public, max-age=31536000, immutable')
+  } else {
+    c.header('Cache-Control', 'public, max-age=3600, must-revalidate')
+  }
+}
+
 // =============================================================================
 // NATS client (stub)
 // =============================================================================
@@ -1755,8 +1769,24 @@ app.post('/api/voice/transcribe', async (c) => {
 // =============================================================================
 
 if (process.env.NODE_ENV === 'production') {
-  app.use('/*', serveStatic({ root: '/app/web-dist/' }))
-  app.use('/*', serveStatic({ path: '/app/web-dist/index.html' })) // SPA routing fallback
+  app.use(
+    '/*',
+    serveStatic({
+      root: `${WEB_DIST_ROOT}/`,
+      onFound: (_path, c) => {
+        setWebDistCacheHeaders(c)
+      },
+    }),
+  )
+  app.use(
+    '/*',
+    serveStatic({
+      path: `${WEB_DIST_ROOT}/index.html`,
+      onFound: (_path, c) => {
+        c.header('Cache-Control', 'no-store')
+      },
+    }),
+  )
 }
 
 // =============================================================================

@@ -8,7 +8,7 @@ import { VoiceRecorder } from './VoiceRecorder'
 import { CerberOsLogo } from './icons/CerberOsLogo'
 import { IconUser } from './icons/InlineUiIcons'
 import { inferAgentLane } from '../lib/infer-agent-lane'
-import { splitAgentTaskStatusPreamble } from '../lib/split-agent-task-preamble'
+import { splitAgentTaskStatusPreamble, hasAgentTaskStatusPreamble } from '../lib/split-agent-task-preamble'
 import { stripTaskCompleteDisplayNoise } from '../lib/strip-task-complete-display'
 import './ChatWindow.css'
 import './VoiceRecorder.css'
@@ -87,6 +87,16 @@ function transcriptLane(message: ChatMessage): Exclude<TranscriptDisplayLane, 't
   if (message.lane === 'sub_agent') return 'sub_agent'
   if (message.lane === 'assistant') return 'assistant'
   return inferAgentLane(message.content)
+}
+
+/** Lane for header + bubble accents: orchestrator handoff messages use the same gold “thinking” styling as streaming. */
+function messageDisplayLane(message: ChatMessage): TranscriptDisplayLane {
+  const lane = transcriptLane(message)
+  if (message.role === 'agent' && lane === 'assistant') {
+    const cleaned = stripTaskCompleteDisplayNoise(message.content)
+    if (hasAgentTaskStatusPreamble(cleaned)) return 'thinking'
+  }
+  return lane as TranscriptDisplayLane
 }
 
 function MessageSenderRow({ lane }: { lane: TranscriptDisplayLane }) {
@@ -190,8 +200,8 @@ function ChatWindow({
 
       <div className="messages-container">
         {task.messages.map(message => {
-          const lane = transcriptLane(message)
-          const agentLaneClass = message.role === 'agent' ? ` message-lane-${lane}` : ''
+          const displayLane = messageDisplayLane(message)
+          const agentLaneClass = message.role === 'agent' ? ` message-lane-${displayLane}` : ''
           return (
           <div
             key={message.id}
@@ -208,7 +218,7 @@ function ChatWindow({
             </div>
             <div className="message-content">
               <div className="message-header">
-                <MessageSenderRow lane={lane} />
+                <MessageSenderRow lane={displayLane} />
                 {message.scheduledRun && (
                   <span className="scheduled-turn-badge" title="Automated run from your schedule">
                     Scheduled
