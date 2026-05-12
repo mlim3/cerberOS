@@ -82,9 +82,6 @@ func executeCreateSkillFromNL(ctx context.Context, client *anthropic.Client, sl 
 	if !nlSkillCreateEnabled() {
 		return ToolResult{Content: "Natural-language skill creation is disabled by AEGIS_NL_SKILL_CREATE_ENABLED.", IsError: true}
 	}
-	if sl == nil {
-		return ToolResult{Content: "Cannot create a skill because the session log/NATS connection is unavailable.", IsError: true}
-	}
 	var input nlSkillCreateInput
 	if err := json.Unmarshal(raw, &input); err != nil {
 		return ToolResult{Content: fmt.Sprintf("invalid create_skill_from_nl input: %v", err), IsError: true}
@@ -140,6 +137,9 @@ func executeCreateSkillFromNL(ctx context.Context, client *anthropic.Client, sl 
 	}
 	if needsConfirm && input.DraftHash == "" {
 		return ToolResult{Content: "Confirmation requires the draft_hash from the reviewed draft.", IsError: true}
+	}
+	if sl == nil {
+		return ToolResult{Content: "Cannot persist skill: session log/NATS connection is unavailable.", IsError: true}
 	}
 	if err := sl.PersistSkillWithScope(domain, generated.Node, generated.Node.OwnerUserID, scope); err != nil {
 		return ToolResult{Content: fmt.Sprintf("skill persistence failed: %v", err), IsError: true}

@@ -429,6 +429,115 @@ func TestLoadSynthesizedSkills_MemoryReadError_ReturnedAsError(t *testing.T) {
 	}
 }
 
+// ─── synthesizedSkillsForDomain — cross-user scope isolation ─────────────────
+
+// registerSynthesizedSkill is a test helper that loads a single synthesized skill
+// node directly into the skills manager so synthesizedSkillsForDomain can filter it.
+func registerSynthesizedSkill(t *testing.T, sm skills.Manager, domain string, node *types.SkillNode) {
+	t.Helper()
+	if err := sm.RegisterCommand(domain, node); err != nil {
+		t.Fatalf("registerSynthesizedSkill(%q): %v", node.Name, err)
+	}
+}
+
+func synthNode(name, ownerID, scope string) *types.SkillNode {
+	now := time.Now().UTC()
+	return &types.SkillNode{
+		Name:          name,
+		Level:         "command",
+		Label:         name,
+		Description:   "Test skill. Do NOT use when unrelated.",
+		Origin:        "synthesized",
+		SynthesizedAt: &now,
+		OwnerUserID:   ownerID,
+		Scope:         scope,
+		Spec:          &types.SkillSpec{Parameters: map[string]types.ParameterDef{}},
+	}
+}
+
+func TestSynthesizedSkillsForDomain_UserSeesOnlyOwnAndGlobal(t *testing.T) {
+	const (
+		aliceID = "user-alice-001"
+		bobID   = "user-bob-002"
+	)
+	sm := skills.New()
+	_ = sm.RegisterDomain(&types.SkillNode{Name: "web", Level: "domain", Children: map[string]*types.SkillNode{}})
+	registerSynthesizedSkill(t, sm, "web", synthNode("alice_skill", aliceID, "user"))
+	registerSynthesizedSkill(t, sm, "web", synthNode("bob_skill", bobID, "user"))
+	registerSynthesizedSkill(t, sm, "web", synthNode("global_skill", "", "global"))
+
+	f := newTestFactory(t, nil, sm)
+
+	aliceSkills := f.synthesizedSkillsForDomain("web", aliceID)
+	names := make(map[string]bool, len(aliceSkills))
+	for _, r := range aliceSkills {
+		names[r.Name] = true
+	}
+	if !names["alice_skill"] {
+		t.Error("Alice must see her own user-scoped skill")
+	}
+	if names["bob_skill"] {
+		t.Error("Alice must NOT see Bob's user-scoped skill")
+	}
+	if !names["global_skill"] {
+		t.Error("Alice must see global-scoped skills")
+	}
+}
+
+func TestSynthesizedSkillsForDomain_GlobalVisibleToAll(t *testing.T) {
+	const bobID = "user-bob-002"
+	sm := skills.New()
+	_ = sm.RegisterDomain(&types.SkillNode{Name: "web", Level: "domain", Children: map[string]*types.SkillNode{}})
+	registerSynthesizedSkill(t, sm, "web", synthNode("global_skill", "", "global"))
+
+	f := newTestFactory(t, nil, sm)
+	bobSkills := f.synthesizedSkillsForDomain("web", bobID)
+	found := false
+	for _, r := range bobSkills {
+		if r.Name == "global_skill" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("global skill must be visible to any user")
+	}
+}
+
+func TestSynthesizedSkillsForDomain_LegacySkillNoOwner_VisibleToAll(t *testing.T) {
+	const aliceID = "user-alice-001"
+	sm := skills.New()
+	_ = sm.RegisterDomain(&types.SkillNode{Name: "web", Level: "domain", Children: map[string]*types.SkillNode{}})
+	// Legacy synthesized skill without explicit owner or scope (pre-NL-creation path).
+	registerSynthesizedSkill(t, sm, "web", synthNode("legacy_skill", "", ""))
+
+	f := newTestFactory(t, nil, sm)
+	skills := f.synthesizedSkillsForDomain("web", aliceID)
+	found := false
+	for _, r := range skills {
+		if r.Name == "legacy_skill" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("legacy skill with no owner must be visible to all users")
+	}
+}
+
+func TestSynthesizedSkillsForDomain_EmptyUserContextID_AllSkillsReturned(t *testing.T) {
+	const aliceID = "user-alice-001"
+	sm := skills.New()
+	_ = sm.RegisterDomain(&types.SkillNode{Name: "web", Level: "domain", Children: map[string]*types.SkillNode{}})
+	registerSynthesizedSkill(t, sm, "web", synthNode("alice_skill", aliceID, "user"))
+	registerSynthesizedSkill(t, sm, "web", synthNode("global_skill", "", "global"))
+
+	f := newTestFactory(t, nil, sm)
+	// Empty userContextID means no filtering — return all (backwards-compat path).
+	allSkills := f.synthesizedSkillsForDomain("web", "")
+	if len(allSkills) != 2 {
+		t.Errorf("empty userContextID must return all skills; want 2, got %d", len(allSkills))
+	}
+}
+
 // ─── fetchPriorTurns ──────────────────────────────────────────────────────────
 
 // writeConversationSnapshot seeds the in-process memory stub with a
