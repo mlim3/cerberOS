@@ -76,27 +76,54 @@
 .log-entry {
   display: flex;
   gap: var(--sp-2);
-  padding: 2px var(--sp-4);
+  padding: 4px var(--sp-4) 4px 10px;
   align-items: flex-start;
   transition: background-color 0.15s ease;
+  border-radius: 0 var(--radius-xs) var(--radius-xs) 0;
+  border-left: 3px solid transparent;
+}
+
+.log-entry--heartbeat {
+  border-left-color: color-mix(in srgb, var(--text-muted) 55%, transparent);
+}
+
+.log-entry--user_message {
+  border-left-color: var(--conv-user-accent);
+}
+
+.log-entry--agent_response {
+  border-left-color: var(--conv-assistant-accent);
+}
+
+.log-entry--status_change {
+  border-left-color: var(--conv-thinking-accent);
+}
+
+.log-entry--heartbeat .log-message {
+  color: var(--text-muted);
+}
+
+.log-entry--user_message .log-message {
+  color: color-mix(in srgb, var(--conv-user-accent) 72%, var(--text-primary));
+}
+
+.log-entry--agent_response .log-message {
+  color: color-mix(in srgb, var(--conv-assistant-accent) 68%, var(--text-secondary));
+}
+
+.log-entry--status_change .log-message {
+  color: color-mix(in srgb, var(--conv-thinking-accent) 65%, var(--text-secondary));
 }
 
 .log-entry:hover {
   background-color: var(--surface-hover);
 }
 
-.log-entry.heartbeat { color: var(--text-muted); }
-.log-entry.user .log-message { color: var(--accent); }
-.log-entry.agent .log-message { color: var(--success); }
-.log-entry.status .log-message { color: var(--warning); }
-
 .log-timestamp {
   color: var(--text-muted);
   flex-shrink: 0;
   opacity: 0.6;
 }
-
-.log-icon { flex-shrink: 0; }
 
 .log-task {
   color: var(--text-muted);

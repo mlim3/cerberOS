@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { buildApiUrl } from '../api/orchestrator'
 import { getActiveUserId } from '../lib/active-user'
+import { IconCheckCircle } from './icons/InlineUiIcons'
 import './AdminPanel.css'
 
 /**
@@ -39,7 +40,7 @@ function AdminPanel({ onClose }: AdminPanelProps): React.ReactElement {
   // last4 hint per provider. Backend stores the real key in OpenBao and
   // intentionally doesn't echo it back, so we capture the last 4 chars
   // client-side at save time and persist in localStorage to render a
-  // "Stored ✓ (…xxxx)" badge that survives page reloads. This is hint
+  // "Stored (…xxxx)" badge that survives page reloads. This is hint
   // material only — never the actual secret.
   const [llmHints, setLlmHints] = useState<Record<'anthropic' | 'openai', string | null>>({
     anthropic: null,
@@ -144,8 +145,8 @@ function AdminPanel({ onClose }: AdminPanelProps): React.ReactElement {
       setLlmStatus({
         kind: 'ok',
         msg: data.requires_restart
-          ? `Stored ✓ (${llmProvider} …${last4}). Restart aegis-agents for the new key to take effect.`
-          : `Stored ✓ (${llmProvider} …${last4}).`,
+          ? `Stored (${llmProvider} …${last4}). Restart aegis-agents for the new key to take effect.`
+          : `Stored (${llmProvider} …${last4}).`,
       })
     } catch (err) {
       setLlmStatus({ kind: 'error', msg: err instanceof Error ? err.message : String(err) })
@@ -315,8 +316,18 @@ function AdminPanel({ onClose }: AdminPanelProps): React.ReactElement {
             </p>
             {(llmHints.anthropic || llmHints.openai) && (
               <div className="admin-status-ok admin-llm-hint">
-                {llmHints.anthropic && <div>Anthropic: stored ✓ (…{llmHints.anthropic})</div>}
-                {llmHints.openai && <div>OpenAI: stored ✓ (…{llmHints.openai})</div>}
+                {llmHints.anthropic && (
+                  <div className="admin-llm-hint-row">
+                    <IconCheckCircle size={15} className="admin-inline-ok-icon" aria-hidden />
+                    <span>Anthropic: stored (…{llmHints.anthropic})</span>
+                  </div>
+                )}
+                {llmHints.openai && (
+                  <div className="admin-llm-hint-row">
+                    <IconCheckCircle size={15} className="admin-inline-ok-icon" aria-hidden />
+                    <span>OpenAI: stored (…{llmHints.openai})</span>
+                  </div>
+                )}
               </div>
             )}
             <form onSubmit={handleSetLlmKey} className="admin-form">
@@ -341,7 +352,12 @@ function AdminPanel({ onClose }: AdminPanelProps): React.ReactElement {
                 />
               </div>
               <button type="submit" className="admin-submit">Save key</button>
-              {llmStatus.kind === 'ok' && <div className="admin-status-ok">{llmStatus.msg}</div>}
+              {llmStatus.kind === 'ok' && (
+                <div className="admin-status-ok admin-status-with-icon">
+                  <IconCheckCircle size={15} className="admin-inline-ok-icon" aria-hidden />
+                  <span>{llmStatus.msg}</span>
+                </div>
+              )}
               {llmStatus.kind === 'error' && <div className="admin-status-error">{llmStatus.msg}</div>}
             </form>
           </section>

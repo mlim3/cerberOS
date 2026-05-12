@@ -180,6 +180,23 @@
   color: #4ade80;
 }
 
+.admin-status-with-icon,
+.admin-llm-hint-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.admin-inline-ok-icon {
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: #4ade80;
+}
+
+.admin-llm-hint .admin-llm-hint-row + .admin-llm-hint-row {
+  margin-top: 4px;
+}
+
 .admin-status-pending {
   font-size: var(--font-xs);
   color: var(--text-secondary);

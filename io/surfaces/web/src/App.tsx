@@ -125,6 +125,13 @@ const mockTasks: UITask[] = [
     messages: [
       { id: '1a', role: 'user', content: 'Set up authentication for the app', timestamp: '10:30 AM' },
       { id: '1b', role: 'agent', content: 'I\'ve analyzed the requirements. For authentication, I recommend implementing OAuth 2.0 with support for Google and GitHub providers. Should I proceed with this approach, or would you prefer a different authentication method?', timestamp: '10:31 AM' },
+      {
+        id: '1c',
+        role: 'agent',
+        content:
+          '[repo-scanner] Found two OAuth-related modules under `src/auth/` — extending the existing OIDC adapter keeps the change set smaller than adding a parallel stack.',
+        timestamp: '10:31 AM',
+      },
     ],
   },
   {
