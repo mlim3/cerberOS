@@ -52,7 +52,7 @@ func nlSkillCreateEnabled() bool {
 	return v == "1" || v == "true" || v == "yes" || v == "on"
 }
 
-func createSkillFromNLTool(client *anthropic.Client, sl *SessionLog, ve *VaultExecutor, spawnCtx *SpawnContext, existingNames map[string]bool) SkillTool {
+func createSkillFromNLTool(client *anthropic.Client, sl *SessionLog, ve *VaultExecutor, spawnCtx *SpawnContext, registry *DynamicRegistry) SkillTool {
 	return SkillTool{
 		Label: "Create Skill From Natural Language",
 		Definition: anthropic.ToolParam{
@@ -73,12 +73,20 @@ func createSkillFromNLTool(client *anthropic.Client, sl *SessionLog, ve *VaultEx
 			},
 		},
 		Execute: func(ctx context.Context, raw json.RawMessage) ToolResult {
-			return executeCreateSkillFromNL(ctx, client, sl, ve, spawnCtx, existingNames, raw)
+			return executeCreateSkillFromNL(ctx, client, sl, ve, spawnCtx, registry, raw)
 		},
 	}
 }
 
-func executeCreateSkillFromNL(ctx context.Context, client *anthropic.Client, sl *SessionLog, ve *VaultExecutor, spawnCtx *SpawnContext, existingNames map[string]bool, raw json.RawMessage) ToolResult {
+func executeCreateSkillFromNL(ctx context.Context, client *anthropic.Client, sl *SessionLog, ve *VaultExecutor, spawnCtx *SpawnContext, registry *DynamicRegistry, raw json.RawMessage) ToolResult {
+	// Build the current name set at call time so skills registered during this
+	// session are included — a spawn-time snapshot misses same-session additions.
+	existingNames := map[string]bool{}
+	if registry != nil {
+		for _, t := range registry.Tools() {
+			existingNames[t.Definition.Name] = true
+		}
+	}
 	if !nlSkillCreateEnabled() {
 		return ToolResult{Content: "Natural-language skill creation is disabled by AEGIS_NL_SKILL_CREATE_ENABLED.", IsError: true}
 	}
@@ -181,7 +189,7 @@ func synthesizeSkillFromDescription(ctx context.Context, client *anthropic.Clien
 	resp, err := client.Messages.New(ctx, anthropic.MessageNewParams{
 		Model: anthropic.ModelClaudeHaiku4_5,
 		MaxTokens: nlSkillCreateMaxTokens,
-		System: []anthropic.TextBlockParam{{Text: skillSynthesisSystemPrompt(domain, requestedName)}},
+		System: []anthropic.TextBlockParam{{Text: skillCreateNLSystemPrompt(domain, requestedName)}},
 		Messages: []anthropic.MessageParam{
 			anthropic.NewUserMessage(anthropic.NewTextBlock("Create a reusable skill from this user request. Output ONLY valid JSON.\n\n" + description)),
 		},
@@ -291,7 +299,10 @@ func classifySkillRisk(node *types.SkillNode, description, scope string) []strin
 		{"transfer", "financial or transfer actions require confirmation"},
 		{"payment", "financial actions require confirmation"},
 		{"api key", "credential-related skills require confirmation"},
-		{"token", "credential-related skills require confirmation"},
+		{"api_key", "credential-related skills require confirmation"},
+		{"bearer token", "credential-related skills require confirmation"},
+		{"access_token", "credential-related skills require confirmation"},
+		{"auth token", "credential-related skills require confirmation"},
 		{"password", "credential-related skills require confirmation"},
 		{"every ", "recurring automation requires confirmation"},
 		{"schedule", "scheduled automation requires confirmation"},
