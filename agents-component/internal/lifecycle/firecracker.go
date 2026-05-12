@@ -417,7 +417,11 @@ func fcGuestEnv(config VMConfig) map[string]string {
 	}
 	// Forward host env vars that the agent-process needs inside the guest.
 	for _, key := range []string{
+		"LLM_PROVIDER",
 		"ANTHROPIC_API_KEY",
+		"OPENAI_API_KEY",
+		"OPENAI_BASE_URL",
+		"OPENAI_MODEL",
 		"AEGIS_NATS_URL",
 		"AEGIS_AGENT_PROCESS_PATH", // in case the guest needs to respawn
 		"AEGIS_SKILL_SPEC_BUDGET",

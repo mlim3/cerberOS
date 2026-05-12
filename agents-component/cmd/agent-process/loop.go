@@ -144,13 +144,33 @@ type toolOutcome struct {
 // RunLoop returns the final task result, the final history slice (for the caller
 // to thread through the warm process-reuse loop), and any error.
 func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *VaultExecutor, steerer *Steerer, as *AgentSpawner, budget *skills.SpecBudget, priorTurns []anthropic.MessageParam, opts ...option.RequestOption) (string, []anthropic.MessageParam, error) {
-	apiKey := os.Getenv("ANTHROPIC_API_KEY")
-	if apiKey == "" {
-		return "", nil, fmt.Errorf("ANTHROPIC_API_KEY environment variable is not set")
+	provider := strings.ToLower(strings.TrimSpace(os.Getenv("LLM_PROVIDER")))
+	if provider == "" {
+		provider = "anthropic"
+		if os.Getenv("ANTHROPIC_API_KEY") == "" && os.Getenv("OPENAI_API_KEY") != "" {
+			provider = "openai"
+		}
 	}
-	clientOpts := append([]option.RequestOption{option.WithAPIKey(apiKey)}, opts...)
-	c := anthropic.NewClient(clientOpts...)
-	client := &c
+	var client *anthropic.Client
+	var openaiClient *openAIClient
+	switch provider {
+	case "openai":
+		c, err := newOpenAIClientFromEnv()
+		if err != nil {
+			return "", nil, err
+		}
+		openaiClient = c
+	case "anthropic":
+		apiKey := os.Getenv("ANTHROPIC_API_KEY")
+		if apiKey == "" {
+			return "", nil, fmt.Errorf("ANTHROPIC_API_KEY environment variable is not set")
+		}
+		clientOpts := append([]option.RequestOption{option.WithAPIKey(apiKey)}, opts...)
+		c := anthropic.NewClient(clientOpts...)
+		client = &c
+	default:
+		return "", nil, fmt.Errorf("unsupported LLM_PROVIDER %q", provider)
+	}
 
 	// LLM response cache (Assignment #9 — LLM caching: Personalization).
 	// Process-lifetime, TTL-bounded, user-scoped. Only end_turn responses are
@@ -170,7 +190,7 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 	// caller parameters substituted in. Existing builtins take precedence: a
 	// synthesized name that matches a builtin is skipped (the builtin is more
 	// reliable than the LLM-executed recipe for that operation).
-	if len(spawnCtx.SynthesizedSkills) > 0 {
+	if client != nil && len(spawnCtx.SynthesizedSkills) > 0 {
 		existingNames := make(map[string]bool, len(tools))
 		for _, t := range tools {
 			existingNames[t.Definition.Name] = true
@@ -268,7 +288,13 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 			if llmCache.Enabled() && ve != nil {
 				ve.PublishMetricsEvent(types.MetricsEventLLMCacheMiss, "", 0)
 			}
-			apiResp, err := client.Messages.New(ctx, reqParams)
+			var apiResp *anthropic.Message
+			var err error
+			if openaiClient != nil {
+				apiResp, err = openaiClient.messagesNew(ctx, reqParams)
+			} else {
+				apiResp, err = client.Messages.New(ctx, reqParams)
+			}
 			if err != nil {
 				return "", nil, fmt.Errorf("react iter %d: API call: %w", iter, err)
 			}
@@ -304,7 +330,9 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 		if resp.StopReason == anthropic.StopReasonEndTurn {
 			for _, block := range resp.Content {
 				if block.Type == "text" && block.Text != "" {
-					attemptSkillSynthesis(ctx, client, log, spawnCtx, sl, ve, history, toolCallCount)
+					if client != nil {
+						attemptSkillSynthesis(ctx, client, log, spawnCtx, sl, ve, history, toolCallCount)
+					}
 					history = append(history, resp.ToParam())
 					persistConversationSnapshot(sl, log, spawnCtx, block.Text, totalTokens)
 					log.Info("model returned end_turn with text reply; finishing task",
@@ -331,7 +359,9 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 						"output_tokens", resp.Usage.OutputTokens,
 						"result_preview", logfields.PreviewHeadTail(block.Text, 15, 10),
 					)
-					attemptSkillSynthesis(ctx, client, log, spawnCtx, sl, ve, history, toolCallCount)
+					if client != nil {
+						attemptSkillSynthesis(ctx, client, log, spawnCtx, sl, ve, history, toolCallCount)
+					}
 					history = append(history, resp.ToParam())
 					const truncationNotice = "\n\n_[Response truncated — output token limit reached. Send a follow-up message to continue.]_"
 					persistConversationSnapshot(sl, log, spawnCtx, block.Text+truncationNotice, totalTokens)
@@ -524,7 +554,9 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 				"result_preview", logfields.PreviewHeadTail(finalResult, 15, 10),
 				"result_len", len(finalResult),
 				"tool_call_count", toolCallCount)
-			attemptSkillSynthesis(ctx, client, log, spawnCtx, sl, ve, history, toolCallCount)
+			if client != nil {
+				attemptSkillSynthesis(ctx, client, log, spawnCtx, sl, ve, history, toolCallCount)
+			}
 
 			// Close the tool_use → tool_result turn pair BEFORE snapshotting so
 			// the persisted history always ends on a well-formed boundary.
