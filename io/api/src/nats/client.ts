@@ -259,15 +259,13 @@ export function createNatsClient(config: NatsConfig): IONatsClient | null {
     },
 
     async publishPlanDecision(decision: PlanDecisionPayload) {
-      if (!js) throw new Error('NATS JetStream not connected')
+      if (!nc) throw new Error('NATS not connected')
       const payload = {
         orchestrator_task_ref: decision.orchestrator_task_ref,
         task_id: decision.task_id,
         approved: decision.approved,
         reason: decision.reason ?? '',
       }
-      // correlation_id = orchestrator_task_ref so orchestrator can fall back
-      // to envelope.correlation_id if the payload is stripped somewhere.
       const envelope = buildEnvelope(
         'plan_decision',
         decision.orchestrator_task_ref,
@@ -275,7 +273,8 @@ export function createNatsClient(config: NatsConfig): IONatsClient | null {
         decision.trace_id,
       )
       const data = new TextEncoder().encode(JSON.stringify(envelope))
-      await js.publish(SUBJECT_PLAN_DECISION, data)
+      nc.publish(SUBJECT_PLAN_DECISION, data)
+      await nc.flush()
     },
 
     publishRaw(subject: string, payload: unknown): void {

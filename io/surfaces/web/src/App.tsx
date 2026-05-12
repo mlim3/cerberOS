@@ -41,6 +41,7 @@ import {
 import { createWebSurface, type SurfaceAdapter } from './surface'
 import { parseFirstRunAt, parseRhythmReply } from './recurring/parseRhythm'
 import { extractPromptBodyForCron, looksLikeRepeatingSchedulingIntent } from './recurring/detectIntent'
+import { CerberOsLogo } from './components/icons/CerberOsLogo'
 import './App.css'
 
 const DEMO_MODE = import.meta.env.VITE_DEMO_MODE === 'true'
@@ -124,6 +125,13 @@ const mockTasks: UITask[] = [
     messages: [
       { id: '1a', role: 'user', content: 'Set up authentication for the app', timestamp: '10:30 AM' },
       { id: '1b', role: 'agent', content: 'I\'ve analyzed the requirements. For authentication, I recommend implementing OAuth 2.0 with support for Google and GitHub providers. Should I proceed with this approach, or would you prefer a different authentication method?', timestamp: '10:31 AM' },
+      {
+        id: '1c',
+        role: 'agent',
+        content:
+          '[repo-scanner] Found two OAuth-related modules under `src/auth/` — extending the existing OIDC adapter keeps the change set smaller than adding a parallel stack.',
+        timestamp: '10:31 AM',
+      },
     ],
   },
   {
@@ -1085,7 +1093,7 @@ function App() {
       try {
         const res = await fetch(buildApiUrl('/api/conversations'), {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'X-Active-User': UI_USER_ID },
           body: JSON.stringify({ title: 'New Conversation', userId: UI_USER_ID }),
         })
         let parsed: unknown
@@ -1143,7 +1151,7 @@ function App() {
       try {
         const res = await fetch(buildApiUrl('/api/conversations'), {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'X-Active-User': UI_USER_ID },
           body: JSON.stringify({ title: 'New recurring task', userId: UI_USER_ID }),
         })
         let parsed: unknown
@@ -1971,22 +1979,24 @@ function App() {
               </div>
             )}
           </div>
-          <UserSwitcher />
-          {(activeRole === 'manager' || activeRole === 'root') && (
-            <button
-              type="button"
-              className="admin-trigger-btn"
-              onClick={() => setShowAdmin(true)}
-              title="Admin (manager/root only)"
-              aria-label="Open admin panel"
-            >
-              Admin
-            </button>
-          )}
-          <SettingsButton
-            isOpen={showSettings}
-            onToggle={toggleSettings}
-          />
+          <div className="header-actions">
+            <UserSwitcher />
+            {(activeRole === 'manager' || activeRole === 'root') && (
+              <button
+                type="button"
+                className="admin-trigger-btn"
+                onClick={() => setShowAdmin(true)}
+                title="Admin (manager/root only)"
+                aria-label="Open admin panel"
+              >
+                Admin
+              </button>
+            )}
+            <SettingsButton
+              isOpen={showSettings}
+              onToggle={toggleSettings}
+            />
+          </div>
         </header>
         {showAdmin && <AdminPanel onClose={() => setShowAdmin(false)} />}
         {selectedTask ? (
@@ -2037,15 +2047,11 @@ function App() {
           </div>
         ) : (
           <div className="empty-state">
-            <pre className="empty-state-ascii">{`
-  ██████╗███████╗██████╗ ██████╗ ███████╗██████╗  ██████╗ ███████╗
- ██╔════╝██╔════╝██╔══██╗██╔══██╗██╔════╝██╔══██╗██╔═══██╗██╔════╝
- ██║     █████╗  ██████╔╝██████╔╝█████╗  ██████╔╝██║   ██║███████╗
- ██║     ██╔══╝  ██╔══██╗██╔══██╗██╔══╝  ██╔══██╗██║   ██║╚════██║
- ╚██████╗███████╗██║  ██║██████╔╝███████╗██║  ██║╚██████╔╝███████║
-  ╚═════╝╚══════╝╚═╝  ╚═╝╚═════╝ ╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝`}</pre>
-            <h2 className="empty-state-title">Create a new task to begin</h2>
-            <p className="empty-state-text">Press "Create New Task" in the sidebar to start working with the agent.</p>
+            <h2 className="empty-state-title empty-state-brand">
+              <CerberOsLogo className="empty-state-brand-logo" title={false} />
+              <span className="empty-state-brand-text">CerberOS</span>
+            </h2>
+            <p className="empty-state-text">Create a new task to start a focused agent conversation.</p>
           </div>
         )}
         {showSettings && (

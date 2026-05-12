@@ -477,6 +477,236 @@ domains:
             required: true
             description: "Relative path within the user's data directory. The prefix '~/' is treated as the user's home dir."
 
+  - name: google_workspace
+    commands:
+      # google_oauth credential is a per-user JSON blob stored in OpenBao under
+      # users/<user_id>/credentials/google_oauth: {email, access_token, refresh_token, expires_at}
+      # Configured by the manager via the Admin UI → "Google Workspace (OAuth)" section.
+
+      - name: gmail_search
+        label: 'Gmail Search'
+        description: 'Search Gmail messages using the Gmail API with OAuth. Returns message IDs, senders, subjects, and snippets. Do NOT use for sending email — use gmail_send. Do NOT include credentials in any parameter.'
+        implementation: vault_gmail_search
+        required_credential_types: [google_oauth]
+        timeout_seconds: 30
+        parameters:
+          - name: query
+            type: string
+            required: true
+            description: 'Gmail search query string. Supports full Gmail syntax (e.g. "from:boss budget", "subject:invoice is:unread", "has:attachment after:2026/01/01").'
+          - name: max_results
+            type: integer
+            required: false
+            description: 'Maximum number of messages to return (default 10, max 50).'
+
+      - name: gmail_get_message
+        label: 'Gmail Get Message'
+        description: 'Fetch the full body, headers, and attachment names of a Gmail message by its ID. Use after gmail_search to read message content. Do NOT use for searching — use gmail_search instead.'
+        implementation: vault_gmail_get_message
+        required_credential_types: [google_oauth]
+        timeout_seconds: 30
+        parameters:
+          - name: message_id
+            type: string
+            required: true
+            description: 'Gmail message ID as returned by gmail_search (the "id" field in each result).'
+
+      - name: calendar_list_events
+        label: 'Calendar List Events'
+        description: 'List upcoming Google Calendar events via the Calendar API with OAuth. Returns event titles, times, descriptions, and attendees. Do NOT use for creating events — use calendar_create_event. Do NOT include credentials in params.'
+        implementation: vault_calendar_list_events
+        required_credential_types: [google_oauth]
+        timeout_seconds: 30
+        parameters:
+          - name: max_results
+            type: integer
+            required: false
+            description: 'Maximum number of events to return (default 10, max 50).'
+          - name: time_min
+            type: string
+            required: false
+            description: 'Start of time range as ISO 8601 datetime (e.g. "2026-05-09T00:00:00Z"). Defaults to now.'
+          - name: time_max
+            type: string
+            required: false
+            description: 'End of time range as ISO 8601 datetime (e.g. "2026-05-16T23:59:59Z"). Defaults to 7 days from now.'
+          - name: calendar_id
+            type: string
+            required: false
+            description: "Calendar ID to query. Omit or pass 'primary' for the user's primary calendar."
+
+      - name: gmail_send
+        label: "Gmail Send (OAuth)"
+        description: "Send a plain-text email via the Gmail API using the user's connected Google account. Use whenever the user asks to send an email to a specific address. Do NOT use for calendar invites — use calendar_create_event. Do NOT include credentials in params."
+        implementation: vault_gmail_send_oauth
+        required_credential_types: [google_oauth]
+        timeout_seconds: 40
+        parameters:
+          - name: to
+            type: string
+            required: true
+            description: 'Recipient email address.'
+          - name: subject
+            type: string
+            required: true
+            description: 'Email subject line.'
+          - name: body
+            type: string
+            required: true
+            description: 'Plain-text email body.'
+
+      - name: calendar_freebusy
+        label: "Calendar Free/Busy"
+        description: "Check the user's Google Calendar for busy intervals in a window. Call before calendar_create_event to surface conflicts. Returns busy intervals and a 'free' boolean. Do NOT use to list event details — use calendar_list_events for that. Do NOT include credentials."
+        implementation: vault_calendar_freebusy
+        required_credential_types: [google_oauth]
+        timeout_seconds: 30
+        parameters:
+          - name: time_min
+            type: string
+            required: true
+            description: "ISO 8601 start of the window to check (e.g. '2026-05-12T13:00:00-07:00')."
+          - name: time_max
+            type: string
+            required: true
+            description: "ISO 8601 end of the window. Same format as time_min."
+          - name: calendar_id
+            type: string
+            required: false
+            description: "Calendar ID. Omit or use 'primary' for the user's main calendar."
+
+      - name: calendar_update_event
+        label: "Calendar Update Event"
+        description: "Move or edit an existing Google Calendar event by ID. Use to reschedule, rename, or update description/location. When changing start/end, the result includes 'conflicts' if the new slot is double-booked. Do NOT use to create a new event — use calendar_create_event."
+        implementation: vault_calendar_update_event
+        required_credential_types: [google_oauth]
+        timeout_seconds: 40
+        parameters:
+          - name: event_id
+            type: string
+            required: true
+            description: "Google Calendar event ID (returned by calendar_create_event / calendar_list_events)."
+          - name: calendar_id
+            type: string
+            required: false
+            description: "Calendar ID. Omit or use 'primary'."
+          - name: title
+            type: string
+            required: false
+            description: "New event title. Omit to keep current."
+          - name: start
+            type: string
+            required: false
+            description: "New ISO 8601 start datetime with TZ offset. Omit to keep current."
+          - name: end
+            type: string
+            required: false
+            description: "New ISO 8601 end datetime. Omit to keep current."
+          - name: description
+            type: string
+            required: false
+            description: "New description. Omit to keep current."
+          - name: location
+            type: string
+            required: false
+            description: "New location. Omit to keep current."
+
+      - name: calendar_find_free_slot
+        label: "Calendar Find Free Slot"
+        description: "Find the first contiguous free slot of N minutes within a time window. Use to answer 'when am I next free for X minutes' or to pick a meeting time. Returns {found, start, end} on success. Do NOT use to list events — use calendar_list_events for that."
+        implementation: vault_calendar_find_free_slot
+        required_credential_types: [google_oauth]
+        timeout_seconds: 30
+        parameters:
+          - name: duration_minutes
+            type: integer
+            required: true
+            description: "Slot length in minutes (e.g. 60 for a 1-hour meeting)."
+          - name: time_min
+            type: string
+            required: true
+            description: "ISO 8601 window start (e.g. '2026-05-12T09:00:00-07:00')."
+          - name: time_max
+            type: string
+            required: true
+            description: "ISO 8601 window end."
+          - name: calendar_id
+            type: string
+            required: false
+            description: "Calendar ID. Omit or use 'primary'."
+          - name: working_hours_start
+            type: string
+            required: false
+            description: "Optional 'HH:MM' lower bound per day (e.g. '09:00')."
+          - name: working_hours_end
+            type: string
+            required: false
+            description: "Optional 'HH:MM' upper bound per day (e.g. '17:00')."
+
+      - name: gmail_wait_for_replies
+        label: "Gmail Wait For Replies"
+        description: "Poll Gmail inbox for replies. ALWAYS set min_count to the number of attendees you need responses from — default 1 returns on the FIRST reply and misses the rest. Polls until min_count reached or max_wait_seconds expires. For >5 min waits, call repeatedly with same 'since'."
+        implementation: vault_gmail_wait_for_replies
+        required_credential_types: [google_oauth]
+        timeout_seconds: 290
+        parameters:
+          - name: since
+            type: string
+            required: true
+            description: "RFC3339 timestamp — only replies received AFTER this time are counted. Set to the timestamp when you sent the emails."
+          - name: subject_contains
+            type: string
+            required: false
+            description: "Optional substring to match in subject (e.g. 'Meeting Reschedule'). Replies often have 'Re:' prepended — omit this to catch all inbox replies in the time window."
+          - name: from
+            type: string
+            required: false
+            description: "Optional sender filter (single email address). Omit to collect replies from any sender."
+          - name: min_count
+            type: integer
+            required: false
+            description: "Number of replies to wait for before returning. IMPORTANT: set this to total number of attendees (e.g. 3 for a 4-person meeting where 3 need to reply). Default 1 returns on first reply only."
+          - name: poll_interval_seconds
+            type: integer
+            required: false
+            description: "Seconds between polls. Default 30. Use 15 for more responsive collection."
+          - name: max_wait_seconds
+            type: integer
+            required: false
+            description: "Maximum seconds to wait this call (capped at 270). Always returns all replies found so far when time is up."
+
+      - name: calendar_create_event
+        label: 'Calendar Create Event (OAuth)'
+        description: "Create a Google Calendar event (OAuth). Before booking a specific time, call calendar_freebusy; if conflicts, ask (a) another time or (b) double-book. If finding a free slot, call calendar_find_free_slot then create without asking. Emails use gmail_send, not this."
+        implementation: vault_calendar_create_event
+        required_credential_types: [google_oauth]
+        timeout_seconds: 40
+        parameters:
+          - name: title
+            type: string
+            required: true
+            description: 'Event title / summary.'
+          - name: start
+            type: string
+            required: true
+            description: "ISO 8601 start datetime (e.g. '2026-05-12T17:00:00-07:00')."
+          - name: end
+            type: string
+            required: true
+            description: "ISO 8601 end datetime, same format as start."
+          - name: description
+            type: string
+            required: false
+            description: 'Optional event description or agenda.'
+          - name: location
+            type: string
+            required: false
+            description: 'Optional location (address or video link).'
+          - name: calendar_id
+            type: string
+            required: false
+            description: "Calendar to add the event to. Omit or use 'primary' for the user's main calendar."
+
   - name: general
     commands: []
 

@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import type { CredentialRequest } from '@cerberos/io-core'
+import { IconEye, IconEyeOff, IconLock } from './icons/InlineUiIcons'
 import './CredentialModal.css'
 
 interface CredentialModalProps {
@@ -36,7 +37,9 @@ function CredentialModal({ request, onSubmit, onCancel, isSubmitting }: Credenti
     <div className="credential-overlay" onClick={onCancel}>
       <div className="credential-modal" onClick={e => e.stopPropagation()}>
         <div className="credential-modal-header">
-          <span className="credential-lock-icon">{'\u{1F512}'}</span>
+          <span className="credential-lock-icon" aria-hidden>
+            <IconLock size={22} />
+          </span>
           <h2>Secure Credential Entry</h2>
         </div>
 
@@ -69,8 +72,9 @@ function CredentialModal({ request, onSubmit, onCancel, isSubmitting }: Credenti
               onMouseUp={() => setReveal(false)}
               onMouseLeave={() => setReveal(false)}
               title="Hold to reveal"
+              aria-label={reveal ? 'Password visible' : 'Hold to reveal password'}
             >
-              {reveal ? '\u{1F441}' : '\u{1F441}\u{200D}\u{1F5E8}'}
+              {reveal ? <IconEye size={18} /> : <IconEyeOff size={18} />}
             </button>
           </div>
 
@@ -88,7 +92,14 @@ function CredentialModal({ request, onSubmit, onCancel, isSubmitting }: Credenti
               className="credential-submit-btn"
               disabled={!value || isSubmitting}
             >
-              {isSubmitting ? 'Submitting…' : '\u{1F512} Submit securely'}
+              {isSubmitting ? (
+                'Submitting…'
+              ) : (
+                <>
+                  <IconLock size={17} className="credential-submit-lock" aria-hidden />
+                  Submit securely
+                </>
+              )}
             </button>
           </div>
         </form>

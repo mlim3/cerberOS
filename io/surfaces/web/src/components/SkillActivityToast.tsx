@@ -1,22 +1,9 @@
 import { useEffect, useRef } from 'react'
 import type { SkillActivity } from '@cerberos/io-core'
 import './SkillActivityToast.css'
+import { SkillDomainIcon } from './icons/SkillDomainIcon'
 
-// How long each toast is visible before fading out (ms).
 const TOAST_DURATION_MS = 4000
-
-// Domain icons shown next to the skill name.
-const DOMAIN_ICONS: Record<string, string> = {
-  web: '🌐',
-  logs: '📋',
-  storage: '🗄️',
-  data: '📊',
-  comms: '📡',
-}
-
-function domainIcon(domain: string): string {
-  return DOMAIN_ICONS[domain] ?? '⚙️'
-}
 
 /** Human-readable label for a command name, e.g. "web.search" → "Web Search". */
 function commandLabel(command: string): string {
@@ -81,7 +68,7 @@ function SkillActivityToast({ toasts, onDismiss }: SkillActivityToastProps) {
           role="status"
         >
           <span className="skill-toast-icon" aria-hidden="true">
-            {domainIcon(activity.domain)}
+            <SkillDomainIcon domain={activity.domain} />
           </span>
           <div className="skill-toast-body">
             <span className="skill-toast-label">{commandLabel(activity.command)}</span>

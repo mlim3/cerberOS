@@ -16,8 +16,27 @@
 }
 
 .progress-text {
-  font-size: 10px;
+  font-size: var(--font-xs);
   color: var(--text-muted);
+}
+
+.progress-indicator--thinking .progress-dot {
+  background: var(--conv-thinking-accent);
+  box-shadow: 0 0 10px var(--conv-thinking-glow);
+}
+
+.progress-indicator--thinking .progress-text {
+  color: color-mix(in srgb, var(--conv-thinking-accent) 72%, var(--text-secondary));
+  font-weight: 600;
+}
+
+.progress-indicator--working .progress-dot {
+  background: var(--conv-assistant-accent);
+  box-shadow: 0 0 8px var(--conv-assistant-glow);
+}
+
+.progress-indicator--working .progress-text {
+  color: color-mix(in srgb, var(--conv-assistant-accent) 55%, var(--text-muted));
 }
 
 @keyframes progressFadeIn {

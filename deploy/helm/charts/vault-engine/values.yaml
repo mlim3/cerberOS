@@ -12,6 +12,13 @@ service:
 # Supply via --set vaultEngine.baoToken=<token> or a sealed-secret.
 baoToken: ""
 
+# Google OAuth credentials for token auto-refresh.
+# Required for long-running sessions where the access token expires (~1hr).
+# Supply via --set or values-dev.yaml — do not commit real secrets here.
+googleOAuth:
+  clientId: ""
+  clientSecret: ""
+
 resources:
   requests:
     cpu: 50m

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { buildApiUrl } from '../api/orchestrator'
 import { getActiveUserId } from '../lib/active-user'
+import { IconCheckCircle } from './icons/InlineUiIcons'
 import './AdminPanel.css'
 
 /**
@@ -36,12 +37,33 @@ function AdminPanel({ onClose }: AdminPanelProps): React.ReactElement {
   const [llmProvider, setLlmProvider] = useState<'anthropic' | 'openai'>('anthropic')
   const [llmKey, setLlmKey] = useState('')
   const [llmStatus, setLlmStatus] = useState<{ kind: 'idle' | 'ok' | 'error'; msg?: string }>({ kind: 'idle' })
+  // last4 hint per provider. Backend stores the real key in OpenBao and
+  // intentionally doesn't echo it back, so we capture the last 4 chars
+  // client-side at save time and persist in localStorage to render a
+  // "Stored (…xxxx)" badge that survives page reloads. This is hint
+  // material only — never the actual secret.
+  const [llmHints, setLlmHints] = useState<Record<'anthropic' | 'openai', string | null>>({
+    anthropic: null,
+    openai: null,
+  })
+
+  useEffect(() => {
+    const read = (provider: 'anthropic' | 'openai'): string | null => {
+      try {
+        return window.localStorage.getItem(`cerberos.llmKeyHint.${provider}`)
+      } catch {
+        return null
+      }
+    }
+    setLlmHints({ anthropic: read('anthropic'), openai: read('openai') })
+  }, [])
 
   // Gmail demo account state (App Password — no OAuth)
   const [gmailEmail, setGmailEmail] = useState('')
   const [gmailAppPassword, setGmailAppPassword] = useState('')
   const [gmailConfigured, setGmailConfigured] = useState<{ email: string | null }>({ email: null })
   const [gmailStatus, setGmailStatus] = useState<{ kind: 'idle' | 'ok' | 'pending' | 'error'; msg?: string }>({ kind: 'idle' })
+
 
   // New user state
   const [newUserEmail, setNewUserEmail] = useState('')
@@ -110,12 +132,21 @@ function AdminPanel({ onClose }: AdminPanelProps): React.ReactElement {
         setLlmStatus({ kind: 'error', msg: data.error ?? `failed (${res.status})` })
         return
       }
+      const last4 = llmKey.slice(-4)
+      try {
+        window.localStorage.setItem(`cerberos.llmKeyHint.${llmProvider}`, last4)
+      } catch {
+        // localStorage unavailable (private mode, quota) — non-fatal, the
+        // server still has the real key in OpenBao; we just won't be able
+        // to render the last-4 hint after reload.
+      }
+      setLlmHints((prev) => ({ ...prev, [llmProvider]: last4 }))
       setLlmKey('')
       setLlmStatus({
         kind: 'ok',
         msg: data.requires_restart
-          ? 'Saved. Restart aegis-agents for the new key to take effect.'
-          : 'Saved.',
+          ? `Stored (${llmProvider} …${last4}). Restart aegis-agents for the new key to take effect.`
+          : `Stored (${llmProvider} …${last4}).`,
       })
     } catch (err) {
       setLlmStatus({ kind: 'error', msg: err instanceof Error ? err.message : String(err) })
@@ -183,6 +214,10 @@ function AdminPanel({ onClose }: AdminPanelProps): React.ReactElement {
       setNewUserEmail('')
       setNewUserRole('user')
       setRefreshKey((k) => k + 1)
+      // Notify other components (UserSwitcher in the top bar) that the
+      // /api/users response has changed so they can refetch without a
+      // full page reload.
+      window.dispatchEvent(new CustomEvent('cerberos:users-changed'))
     } catch (err) {
       setNewUserStatus({ kind: 'error', msg: err instanceof Error ? err.message : String(err) })
     }
@@ -279,6 +314,22 @@ function AdminPanel({ onClose }: AdminPanelProps): React.ReactElement {
               Stored in OpenBao via the vault engine. After saving, restart
               <code> aegis-agents</code> to pick up the new key.
             </p>
+            {(llmHints.anthropic || llmHints.openai) && (
+              <div className="admin-status-ok admin-llm-hint">
+                {llmHints.anthropic && (
+                  <div className="admin-llm-hint-row">
+                    <IconCheckCircle size={15} className="admin-inline-ok-icon" aria-hidden />
+                    <span>Anthropic: stored (…{llmHints.anthropic})</span>
+                  </div>
+                )}
+                {llmHints.openai && (
+                  <div className="admin-llm-hint-row">
+                    <IconCheckCircle size={15} className="admin-inline-ok-icon" aria-hidden />
+                    <span>OpenAI: stored (…{llmHints.openai})</span>
+                  </div>
+                )}
+              </div>
+            )}
             <form onSubmit={handleSetLlmKey} className="admin-form">
               <div className="admin-row">
                 <label>Provider</label>
@@ -301,7 +352,12 @@ function AdminPanel({ onClose }: AdminPanelProps): React.ReactElement {
                 />
               </div>
               <button type="submit" className="admin-submit">Save key</button>
-              {llmStatus.kind === 'ok' && <div className="admin-status-ok">{llmStatus.msg}</div>}
+              {llmStatus.kind === 'ok' && (
+                <div className="admin-status-ok admin-status-with-icon">
+                  <IconCheckCircle size={15} className="admin-inline-ok-icon" aria-hidden />
+                  <span>{llmStatus.msg}</span>
+                </div>
+              )}
               {llmStatus.kind === 'error' && <div className="admin-status-error">{llmStatus.msg}</div>}
             </form>
           </section>

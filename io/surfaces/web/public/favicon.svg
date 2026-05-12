@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" role="img" aria-label="CerberOS">
+  <!-- Same geometry as CerberOsLogo.tsx; transparent background -->
+  <g fill="none" stroke="#ffffff" stroke-width="18" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M 156 43 A 80 80 0 1 0 156 157" />
+    <path d="M 100 50 A 50 50 0 0 0 100 150 A 50 50 0 0 0 100 50 A 25 25 0 0 0 100 100 A 25 25 0 0 1 100 150" />
+  </g>
+</svg>

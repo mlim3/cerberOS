@@ -37,6 +37,12 @@ spec:
               value: "http://openbao:8200"
             - name: BAO_TOKEN
               value: {{ .Values.baoToken | quote }}
+            {{- if .Values.googleOAuth.clientId }}
+            - name: GOOGLE_CLIENT_ID
+              value: {{ .Values.googleOAuth.clientId | quote }}
+            - name: GOOGLE_CLIENT_SECRET
+              value: {{ .Values.googleOAuth.clientSecret | quote }}
+            {{- end }}
           securityContext:
             runAsUser: 1001
             runAsNonRoot: true

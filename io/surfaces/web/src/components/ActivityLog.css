@@ -2,7 +2,7 @@
   position: fixed;
   bottom: 0;
   right: 0;
-  width: 400px;
+  width: min(28rem, 100vw);
   max-width: 100vw;
   height: 240px;
   background-color: var(--bg-sidebar);
@@ -28,8 +28,8 @@
 }
 
 .activity-log-header h3 {
-  font-size: 10px;
-  font-weight: 500;
+  font-size: var(--font-xs);
+  font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--text-muted);
@@ -59,8 +59,8 @@
   overflow-y: auto;
   padding: var(--sp-1) 0;
   font-family: 'SF Mono', 'Fira Code', 'Monaco', 'Inconsolata', monospace;
-  font-size: 10px;
-  line-height: 1.6;
+  font-size: var(--font-xs);
+  line-height: var(--leading-normal);
 }
 
 .activity-log-empty {
@@ -70,33 +70,60 @@
   height: 100%;
   color: var(--text-muted);
   font-style: italic;
-  font-size: 11px;
+  font-size: var(--font-xs);
 }
 
 .log-entry {
   display: flex;
   gap: var(--sp-2);
-  padding: 2px var(--sp-4);
+  padding: 4px var(--sp-4) 4px 10px;
   align-items: flex-start;
   transition: background-color 0.15s ease;
+  border-radius: 0 var(--radius-xs) var(--radius-xs) 0;
+  border-left: 3px solid transparent;
+}
+
+.log-entry--heartbeat {
+  border-left-color: color-mix(in srgb, var(--text-muted) 55%, transparent);
+}
+
+.log-entry--user_message {
+  border-left-color: var(--conv-user-accent);
+}
+
+.log-entry--agent_response {
+  border-left-color: var(--conv-assistant-accent);
+}
+
+.log-entry--status_change {
+  border-left-color: var(--conv-thinking-accent);
+}
+
+.log-entry--heartbeat .log-message {
+  color: var(--text-muted);
+}
+
+.log-entry--user_message .log-message {
+  color: color-mix(in srgb, var(--conv-user-accent) 72%, var(--text-primary));
+}
+
+.log-entry--agent_response .log-message {
+  color: color-mix(in srgb, var(--conv-assistant-accent) 68%, var(--text-secondary));
+}
+
+.log-entry--status_change .log-message {
+  color: color-mix(in srgb, var(--conv-thinking-accent) 65%, var(--text-secondary));
 }
 
 .log-entry:hover {
   background-color: var(--surface-hover);
 }
 
-.log-entry.heartbeat { color: var(--text-muted); }
-.log-entry.user .log-message { color: var(--accent); }
-.log-entry.agent .log-message { color: var(--success); }
-.log-entry.status .log-message { color: var(--warning); }
-
 .log-timestamp {
   color: var(--text-muted);
   flex-shrink: 0;
   opacity: 0.6;
 }
-
-.log-icon { flex-shrink: 0; }
 
 .log-task {
   color: var(--text-muted);

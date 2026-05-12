@@ -1,23 +1,40 @@
 .settings-button {
-  width: 28px;
-  height: 28px;
+  width: 34px;
+  height: 34px;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: transparent;
-  border: none;
-  border-radius: 4px;
-  color: var(--text-muted);
+  background: color-mix(in srgb, var(--bg-card) 78%, transparent);
+  border: var(--border-subtle);
+  border-radius: 999px;
+  color: var(--text-secondary);
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease,
+    transform 0.15s ease;
 }
 
 .settings-button:hover {
-  color: var(--text-secondary);
+  background: var(--bg-card);
+  border-color: var(--accent-border);
+  color: var(--text-primary);
+  transform: translateY(-1px);
 }
 
 .settings-button.active {
+  background: var(--accent-muted-bg);
+  border-color: var(--accent-border);
   color: var(--accent);
+}
+
+.settings-button:focus {
+  outline: none;
+}
+
+.settings-button:focus-visible {
+  box-shadow: var(--focus-ring);
 }
 
 .settings-button svg {

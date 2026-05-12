@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -713,21 +714,31 @@ func contextWindowAction(totalTokens int64) contextAction {
 // non-empty. They are excluded from the spawn context token budget because they
 // are system overhead, not task payload.
 func buildSystemPrompt(skillDomain, manifest, agentMemory, userProfile string) string {
-	// Prepend today's date so the LLM resolves relative phrases ("tomorrow",
-	// "next Monday", "this weekend") against the host's wall-clock instead of
-	// its own training-cutoff prior. Without this, models silently default to
-	// dates near their cutoff (e.g. early 2025) when the user actually means
-	// something in 2026 — most visibly in calendar invites and scheduling.
+	// Prepend an explicit 7-day weekday→date lookup table so the LLM doesn't
+	// have to do its own date arithmetic. Models frequently mis-map weekdays
+	// to dates near their training cutoff (e.g. labelling May 13 2026 as
+	// "Tuesday" when it's Wednesday); a literal table eliminates that step.
 	now := time.Now()
-	header := fmt.Sprintf(
-		"Today's date is %s (%s). The current local time is %s. "+
-			"Resolve any relative date or time references in the user's request "+
-			"(\"tomorrow\", \"next week\", \"in two hours\") against this clock — "+
-			"never against your training cutoff.\n\n",
+	var hb strings.Builder
+	hb.WriteString(fmt.Sprintf(
+		"Today is %s. Current local time is %s. When the user names a weekday (\"Monday\", \"Tuesday\", …) without a date, use the lookup table below — do NOT compute the date yourself. Times like \"7:30 AM\" with no timezone mean the user's local timezone (%s); include the offset in any ISO 8601 datetime you emit (e.g. 2026-05-12T07:30:00-07:00).\n\nDate lookup (next 7 days):\n",
 		now.Format("Monday, January 2, 2006"),
-		now.Format("2006-01-02"),
 		now.Format("15:04 MST"),
-	)
+		now.Format("MST"),
+	))
+	for i := 0; i < 7; i++ {
+		d := now.AddDate(0, 0, i)
+		label := ""
+		if i == 0 {
+			label = " (today)"
+		} else if i == 1 {
+			label = " (tomorrow)"
+		}
+		hb.WriteString(fmt.Sprintf("  - %s = %s%s\n",
+			d.Format("Monday"), d.Format("2006-01-02"), label))
+	}
+	hb.WriteString("\n")
+	header := hb.String()
 
 	var base string
 	if skillDomain == "general" {

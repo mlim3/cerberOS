@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { buildApiUrl } from '../api/orchestrator'
 import { setActiveUserId } from '../lib/active-user'
+import { CerberOsLogo } from './icons/CerberOsLogo'
 import './FirstRunSetup.css'
 
 /**
@@ -58,7 +59,10 @@ function FirstRunSetup({ onComplete }: FirstRunSetupProps): React.ReactElement {
   return (
     <div className="first-run-overlay">
       <div className="first-run-card">
-        <h1 className="first-run-title">Welcome to cerberOS</h1>
+        <h1 className="first-run-title first-run-title-brand">
+          <CerberOsLogo className="first-run-logo" title={false} />
+          <span className="first-run-title-text">Welcome to cerberOS</span>
+        </h1>
         <p className="first-run-subtitle">
           No root user exists yet. Create the first account — it becomes the
           system root and can manage everyone else.

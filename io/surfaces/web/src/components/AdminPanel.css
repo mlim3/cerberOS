@@ -1,7 +1,8 @@
 .admin-panel-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.5);
+  background: var(--overlay-scrim);
+  backdrop-filter: blur(8px);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -11,39 +12,43 @@
 
 .admin-panel-container {
   width: 100%;
-  max-width: 640px;
+  max-width: 44rem;
   max-height: 90vh;
   overflow-y: auto;
-  background: var(--surface, #16181d);
-  border: 1px solid var(--border, #2a2d33);
-  border-radius: 12px;
+  background: var(--bg-card);
+  border: var(--border);
+  border-radius: var(--radius-xl);
   padding: 24px;
-  color: var(--text, #e6e8eb);
-  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.5);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-elevated);
 }
 
 .admin-panel-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  border-bottom: 1px solid var(--border, #2a2d33);
+  border-bottom: var(--border);
   padding-bottom: 16px;
   margin-bottom: 16px;
 }
 
 .admin-panel-header h2 {
   margin: 0;
-  font-size: 20px;
+  font-size: var(--font-xl);
 }
 
 .admin-close-btn {
   background: transparent;
   border: none;
-  color: var(--text, #e6e8eb);
-  font-size: 24px;
+  color: var(--text-secondary);
+  font-size: var(--font-xl);
   line-height: 1;
   cursor: pointer;
   padding: 4px 8px;
+}
+
+.admin-close-btn:hover {
+  color: var(--text-primary);
 }
 
 .admin-sections {
@@ -54,27 +59,27 @@
 
 .admin-section h3 {
   margin: 0 0 8px 0;
-  font-size: 16px;
+  font-size: var(--font-lg);
   font-weight: 600;
 }
 
 .admin-help {
   margin: 0 0 12px 0;
-  font-size: 13px;
-  color: var(--text-secondary, #9ba1a8);
-  line-height: 1.5;
+  font-size: var(--font-sm);
+  color: var(--text-secondary);
+  line-height: var(--leading-normal);
 }
 
 .admin-help code {
-  background: var(--background, #0e0f12);
+  background: var(--code-inline-bg);
   padding: 1px 6px;
   border-radius: 3px;
   font-family: ui-monospace, SFMono-Regular, monospace;
-  font-size: 12px;
+  font-size: 0.9em;
 }
 
 .admin-help a {
-  color: var(--accent, #6aa9ff);
+  color: var(--accent);
   text-decoration: none;
 }
 
@@ -95,7 +100,7 @@
 .admin-form-create-skill {
   margin-top: 16px;
   padding-top: 16px;
-  border-top: 1px dashed var(--border, #2a2d33);
+  border-top: 1px dashed color-mix(in srgb, var(--text-muted) 28%, transparent);
 }
 
 .admin-row {
@@ -106,32 +111,33 @@
 }
 
 .admin-row label {
-  font-size: 13px;
-  color: var(--text-secondary, #9ba1a8);
+  font-size: var(--font-sm);
+  color: var(--text-secondary);
 }
 
 .admin-row input,
 .admin-row select {
   padding: 8px 10px;
-  background: var(--background, #0e0f12);
-  border: 1px solid var(--border, #2a2d33);
-  border-radius: 6px;
-  color: var(--text, #e6e8eb);
-  font-size: 13px;
+  background: var(--bg-primary);
+  border: var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: var(--font-sm);
 }
 
 .admin-row input:focus,
 .admin-row select:focus {
   outline: none;
-  border-color: var(--accent, #5b8def);
+  border-color: var(--accent-border);
+  box-shadow: var(--focus-ring);
 }
 
 .admin-checkbox {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 13px;
-  color: var(--text-secondary, #9ba1a8);
+  font-size: var(--font-sm);
+  color: var(--text-secondary);
   cursor: pointer;
 }
 
@@ -143,11 +149,11 @@
 
 .admin-submit {
   padding: 8px 16px;
-  background: var(--accent, #5b8def);
-  color: white;
+  background: var(--accent);
+  color: var(--bg-card);
   border: none;
-  border-radius: 6px;
-  font-size: 13px;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-sm);
   font-weight: 500;
   cursor: pointer;
   align-self: flex-start;
@@ -156,10 +162,10 @@
 .admin-secondary {
   padding: 8px 16px;
   background: transparent;
-  color: var(--accent, #5b8def);
-  border: 1px solid var(--accent, #5b8def);
-  border-radius: 6px;
-  font-size: 13px;
+  color: var(--accent);
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-sm);
   cursor: pointer;
 }
 
@@ -170,17 +176,34 @@
 }
 
 .admin-status-ok {
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: #4ade80;
 }
 
+.admin-status-with-icon,
+.admin-llm-hint-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.admin-inline-ok-icon {
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: #4ade80;
+}
+
+.admin-llm-hint .admin-llm-hint-row + .admin-llm-hint-row {
+  margin-top: 4px;
+}
+
 .admin-status-pending {
-  font-size: 12px;
-  color: var(--text-secondary, #9ba1a8);
+  font-size: var(--font-xs);
+  color: var(--text-secondary);
 }
 
 .admin-status-error {
-  font-size: 12px;
+  font-size: var(--font-xs);
   color: #f87171;
 }
 
@@ -200,17 +223,17 @@
   align-items: center;
   gap: 8px;
   padding: 6px 10px;
-  background: var(--background, #0e0f12);
-  border: 1px solid var(--border, #2a2d33);
-  border-radius: 6px;
-  font-size: 13px;
+  background: var(--bg-primary);
+  border: var(--border-subtle);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-sm);
 }
 
 .admin-role-badge {
   display: inline-block;
   padding: 2px 8px;
   border-radius: 4px;
-  font-size: 11px;
+  font-size: var(--font-xs);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -234,5 +257,5 @@
 .admin-user-email {
   flex: 1;
   font-family: ui-monospace, SFMono-Regular, monospace;
-  font-size: 12px;
+  font-size: var(--font-xs);
 }

@@ -22,6 +22,7 @@ RUN bun install
 COPY surfaces/web/vite.config.ts ./surfaces/web/vite.config.ts
 COPY surfaces/web/src ./surfaces/web/src
 COPY surfaces/web/index.html ./surfaces/web/index.html
+COPY surfaces/web/public ./surfaces/web/public
 COPY surfaces/web/tsconfig.json ./surfaces/web/tsconfig.json
 
 # Build the web dashboard (tsc && vite build → dist/)

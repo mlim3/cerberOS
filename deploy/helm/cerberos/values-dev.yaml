@@ -47,6 +47,9 @@ vault-engine:
     pullPolicy: Never
   # Dev-mode OpenBao (-dev-root-token-id=root) auto-unseals with this token
   baoToken: "root"
+  googleOAuth:
+    clientId: ""     # set via: helm upgrade ... --set vault-engine.googleOAuth.clientId=<id>
+    clientSecret: "" # set via: helm upgrade ... --set vault-engine.googleOAuth.clientSecret=<secret>
 
 memory-api:
   image:

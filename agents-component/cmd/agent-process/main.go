@@ -63,6 +63,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	_ "time/tzdata" // embed IANA timezone database so TZ env resolves in minimal images
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/cerberOS/agents-component/internal/logfields"

@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"time"
 
@@ -70,6 +71,7 @@ func synthesizeSkill(
 	log *slog.Logger,
 	domain string,
 	history []anthropic.MessageParam,
+	requestedName string,
 ) (*types.SkillNode, error) {
 	historyJSON, err := json.Marshal(history)
 	if err != nil {
@@ -79,7 +81,7 @@ func synthesizeSkill(
 	resp, err := client.Messages.New(ctx, anthropic.MessageNewParams{
 		Model:     anthropic.ModelClaudeHaiku4_5,
 		MaxTokens: skillSynthesisMaxTokens,
-		System:    []anthropic.TextBlockParam{{Text: skillSynthesisSystemPrompt(domain)}},
+		System:    []anthropic.TextBlockParam{{Text: skillSynthesisSystemPrompt(domain, requestedName)}},
 		Messages: []anthropic.MessageParam{
 			anthropic.NewUserMessage(anthropic.NewTextBlock(fmt.Sprintf(
 				"Extract a reusable skill from this completed task. Output ONLY valid JSON.\n\n%s",
@@ -143,9 +145,41 @@ func synthesizeSkill(
 	return node, nil
 }
 
+// extractRequestedSkillName scans a user message for an explicit
+// "called <name>", "named <name>", or "name it <name>" directive and returns
+// the requested snake_case-friendly identifier (or "" when no directive is
+// found). Allows downstream synthesis to honour the user's exact wording
+// instead of inventing a verb-phrase name.
+//
+// Match policy: case-insensitive, accepts optional quotes, requires the name
+// to look like a valid Go-style identifier (letters/digits/underscore, ≤64
+// chars, must start with a letter or underscore). Anything else is rejected
+// so we never echo user typos straight into the registered skill catalogue.
+var skillNameDirectiveRE = regexp.MustCompile(`(?i)\b(?:called|named|name it|name the skill)\s+["'` + "`" + `]?([A-Za-z_][A-Za-z0-9_]{0,63})["'` + "`" + `]?(?:[\s.,;:!?]|$)`)
+
+func extractRequestedSkillName(userMessage string) string {
+	m := skillNameDirectiveRE.FindStringSubmatch(userMessage)
+	if len(m) < 2 {
+		return ""
+	}
+	return m[1]
+}
+
 // skillSynthesisSystemPrompt returns the system prompt for the synthesis LLM call.
-func skillSynthesisSystemPrompt(domain string) string {
-	return fmt.Sprintf(`You are a skill extraction assistant for the %q domain of an AI agent system.
+// When requestedName is non-empty the LLM is instructed to use that exact name
+// rather than inventing one — this lets users say "create a skill called X"
+// and have X show up in the persisted skill catalogue.
+func skillSynthesisSystemPrompt(domain, requestedName string) string {
+	nameDirective := ""
+	if requestedName != "" {
+		nameDirective = fmt.Sprintf(
+			"\n\nIMPORTANT — the user explicitly named this skill %q in the task. "+
+				"Set name to exactly %q (snake_case, do not paraphrase). "+
+				"Override the snake_case-naming guidance below ONLY for the name field.",
+			requestedName, requestedName,
+		)
+	}
+	return fmt.Sprintf(`You are a skill extraction assistant for the %q domain of an AI agent system.%s
 
 Analyse the completed task conversation and extract ONE reusable skill definition.
 
@@ -173,7 +207,7 @@ Rules:
 - recipe must reference every parameter defined in spec.parameters using {{param_name}} syntax.
 - Generalise the procedure: replace task-specific values with named parameters.
 - If the task used no novel procedure worth reusing (e.g. a trivial single-step lookup),
-  output exactly: {"name":"","label":"","description":""}`, domain)
+  output exactly: {"name":"","label":"","description":""}`, domain, nameDirective)
 }
 
 // attemptSkillSynthesis is the top-level driver called at task completion.
@@ -203,7 +237,12 @@ func attemptSkillSynthesis(
 		"tool_call_count", toolCallCount,
 	)
 
-	node, err := synthesizeSkill(ctx, client, log, spawnCtx.SkillDomain, history)
+	requestedName := extractRequestedSkillName(spawnCtx.OriginalUserMessage)
+	if requestedName != "" {
+		log.Info("skill synthesis: honoring user-specified skill name",
+			"requested_name", requestedName)
+	}
+	node, err := synthesizeSkill(ctx, client, log, spawnCtx.SkillDomain, history, requestedName)
 	if err != nil {
 		log.Warn("skill synthesis: failed", "domain", spawnCtx.SkillDomain, "error", err)
 		return

@@ -75,6 +75,7 @@ const (
 	TopicAgentStateWriteAck      = "aegis.agents.state.write.ack"
 	TopicAgentStateReadResponse  = "aegis.agents.state.read.response"
 	TopicVaultExecuteResult      = "aegis.agents.vault.execute.result"
+	TopicAgentCredentialResponse = "aegis.agents.credential.response"
 	TopicOrchestratorErrors      = "aegis.orchestrator.errors"
 	TopicAuditEvents             = "aegis.orchestrator.audit.events"
 	TopicAgentAuditEvent         = "aegis.orchestrator.audit.event" // agents publish skill_invocation events here
@@ -607,6 +608,29 @@ func (g *Gateway) handleRawCredentialRequest(subject string, data []byte) error 
 	var payload types.CredentialRequest
 	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
 		return fmt.Errorf("deserialize credential.request: %w", err)
+	}
+
+	// vault authorize/revoke — the orchestrator already validated policy in the
+	// dispatcher before the task was sent to agents. Grant immediately so the
+	// agent's credential broker unblocks; revoke is fire-and-forget.
+	if payload.Operation == "authorize" {
+		ctx := extractOrCreateCtx(envelope, "comms_gateway")
+		resp := map[string]any{
+			"request_id":       payload.RequestID,
+			"agent_id":         payload.AgentID,
+			"status":           "granted",
+			"permission_token": "orch-perm-" + payload.RequestID,
+			"expires_at":       time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+		}
+		return g.publishEnvelope(ctx, TopicAgentCredentialResponse, "credential.response", payload.RequestID, resp)
+	}
+	if payload.Operation == "revoke" {
+		return nil
+	}
+
+	// Only forward user_input requests to IO.
+	if payload.Operation != "user_input" {
+		return nil
 	}
 
 	if g.credentialRequestHandler == nil {

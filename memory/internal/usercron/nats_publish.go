@@ -65,7 +65,16 @@ func (d *NatsDispatcher) DispatchUserCron(ctx context.Context, job storage.Sched
 	}
 	taskID := uuid.NewString()
 	inner := map[string]any{
-		"raw_input":   p.RawInput,
+		"raw_input": p.RawInput,
+		// Tell the planner this is one scheduled execution — don't interpret
+		// scheduling language ("every X min") as an infrastructure requirement.
+		// The cron infrastructure already handles timing; the planner must execute
+		// the described action ONCE using whatever skill domain it needs (e.g.
+		// google_workspace for Gmail/Calendar).
+		"system_prompt": "This is one scheduled execution of a recurring task. " +
+			"The scheduling infrastructure already handles timing — your job is to execute the action described ONCE right now using available tools. " +
+			"Route to the appropriate skill domain (e.g. google_workspace for Gmail/Calendar reads and sends, web for search). " +
+			"Ignore any frequency language in the task (\"every X minutes\", \"daily\", etc.) — that is metadata for the scheduler, not an instruction to implement recurring loops or timers.",
 		"user_cron":   true,
 		"source":      "user_cron",
 		"job_id":      job.ID.String(),
@@ -75,7 +84,7 @@ func (d *NatsDispatcher) DispatchUserCron(ctx context.Context, job storage.Sched
 	itu := innerUserTask{
 		TaskID:               taskID,
 		UserID:               p.UserID,
-		RequiredSkillDomains: []string{"general"},
+		RequiredSkillDomains: nil, // nil → vault returns unrestricted scope; planner picks the right domain
 		Priority:             5,
 		TimeoutSeconds:       1800,
 		Payload:              inner,

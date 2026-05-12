@@ -130,6 +130,37 @@ func (h *ChatHandler) HandleListConversations(w http.ResponseWriter, r *http.Req
 	json.NewEncoder(w).Encode(SuccessResponse(map[string]any{"conversations": resp}))
 }
 
+func (h *ChatHandler) HandleDeleteConversation(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	conversationIDStr := conversationPathValue(r)
+	conversationID, err := uuid.Parse(conversationIDStr)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid_argument", "invalid conversationId in path", nil)
+		return
+	}
+	userID, ok := parseUserIDQuery(r)
+	if !ok {
+		writeJSONError(w, http.StatusBadRequest, "invalid_argument", "userId query parameter is required", nil)
+		return
+	}
+	err = h.repo.DeleteConversation(ctx, pgtype.UUID{Bytes: conversationID, Valid: true}, pgtype.UUID{Bytes: userID, Valid: true})
+	if errors.Is(err, storage.ErrConversationNotFound) {
+		writeJSONError(w, http.StatusNotFound, "not_found", "conversation not found", nil)
+		return
+	}
+	if errors.Is(err, storage.ErrConversationOwnership) {
+		writeJSONError(w, http.StatusForbidden, "forbidden", "conversation does not belong to user", nil)
+		return
+	}
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "internal", "failed to delete conversation", err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(SuccessResponse(map[string]any{"deleted": true}))
+}
+
 // HandleCreateConversation creates a conversation for a user.
 // @Summary Create conversation
 // @Description Creates a new conversation for a specific user

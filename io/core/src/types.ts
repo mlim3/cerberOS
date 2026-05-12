@@ -22,6 +22,9 @@ export interface Task {
 
 export type MessageRole = 'user' | 'assistant' | 'orchestrator';
 
+/** Transcript lane for multi-actor styling (optional; web may infer when unset). */
+export type TranscriptLane = 'assistant' | 'sub_agent' | 'system';
+
 /** A chat message displayed in the UI */
 export interface ChatMessage {
   id: string;
@@ -32,6 +35,11 @@ export interface ChatMessage {
   isRedacted?: boolean;
   /** Emphasized row for automated scheduled-turn outcomes mirrored into the transcript */
   scheduledRun?: boolean;
+  /**
+   * Optional UI lane for coloring / labels (e.g. delegated workers).
+   * When omitted on agent messages, the web surface may infer from content.
+   */
+  lane?: TranscriptLane;
 }
 
 // ============================================

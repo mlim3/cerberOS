@@ -37,7 +37,23 @@ import { ioLog, logFromContext, previewHeadTail, previewWords } from './logger'
 import { startHeartbeatEmitter } from './heartbeat'
 import { mirrorMemoryConfigured, persistOrchestratorOutcomeToMemory } from './scheduled-run-mirror'
 import { messageLooksLikeUserCronScheduling } from './scheduling-language'
-import { activeUserId, userIdRequired, requireRole } from './identity'
+import { activeUserId, userIdRequired, requireRole, assertNoUserIdOverride } from './identity'
+import {
+  broadcastStatus,
+  broadcastStreamEvent,
+  chatPendingKey,
+  deliverChatResponse,
+  dropPendingChatCallback,
+  failPendingChatCallback,
+  getTaskStatus,
+  listTasksForUser,
+  ownerOfTask,
+  persistAndBroadcastStatus,
+  recordTaskOwnership,
+  registerPendingChatCallback,
+  setTaskStatus,
+  subscribeSse,
+} from './task-scope'
 
 // =============================================================================
 // Planner input enrichment
@@ -103,6 +119,20 @@ function buildRawInputWithHistory(
 
 const DEMO_MODE = process.env.DEMO_MODE === 'true'
 
+/** Vite `dist/` output; Dockerfile copies it here. Override when running the API outside Docker. */
+const WEB_DIST_ROOT = (process.env.WEB_DIST_ROOT ?? '/app/web-dist').replace(/\/$/, '')
+
+function setWebDistCacheHeaders(c: { req: { path: string }; header: (name: string, value: string) => void }) {
+  const pathname = (c.req.path.split('?')[0] ?? c.req.path) || '/'
+  if (pathname === '/' || pathname.endsWith('.html')) {
+    c.header('Cache-Control', 'no-store')
+  } else if (pathname.startsWith('/assets/')) {
+    c.header('Cache-Control', 'public, max-age=31536000, immutable')
+  } else {
+    c.header('Cache-Control', 'public, max-age=3600, must-revalidate')
+  }
+}
+
 // =============================================================================
 // NATS client (stub)
 // =============================================================================
@@ -122,15 +152,8 @@ ioLog(
 startHeartbeatEmitter(natsClient)
 
 // =============================================================================
-// Pending chat responses — POST /api/chat registers here, orchestrator delivers
+// Pending chat responses — POST /api/chat registers via task-scope, orchestrator delivers
 // =============================================================================
-
-type ChatResponseCallback = {
-  push: (content: string) => void
-  complete: () => void
-  error: (msg: string) => void
-}
-const pendingChatResponses = new Map<string, ChatResponseCallback>()
 
 // Last-resort user_id for orchestrator NATS outcomes that arrive WITHOUT a
 // user_id field on the payload (e.g. legacy task_results from older planner
@@ -139,23 +162,6 @@ const pendingChatResponses = new Map<string, ChatResponseCallback>()
 // deployment via IO_MIRROR_FALLBACK_USER_ID.
 const MIRROR_FALLBACK_USER_ID =
   process.env.IO_MIRROR_FALLBACK_USER_ID ?? '00000000-0000-0000-0000-000000000001'
-
-/** Map key for pending chat — UUID string case must match (e.g. uuidgen vs NATS subject). */
-function chatPendingKey(taskId: string): string {
-  return taskId.trim().toLowerCase()
-}
-
-function deliverChatResponse(taskId: string, content: string, done: boolean): boolean {
-  const key = chatPendingKey(taskId)
-  const cb = pendingChatResponses.get(key)
-  if (!cb) return false
-  cb.push(content)
-  if (done) {
-    cb.complete()
-    pendingChatResponses.delete(key)
-  }
-  return true
-}
 
 function parseEnvelopePayload(env: Record<string, unknown>): Record<string, unknown> {
   const p = env.payload
@@ -172,12 +178,44 @@ function parseEnvelopePayload(env: Record<string, unknown>): Record<string, unkn
 }
 
 /**
+ * Some agent / planner paths surface the terminal tool as a literal string, e.g.
+ * `task_complete({"result":"..."})`. That is not JSON for the whole string, so
+ * `JSON.parse` fails and we would otherwise stream the raw call into the chat UI.
+ */
+function unwrapTaskCompletePayloadString(raw: string): string | null {
+  const t = raw.trim()
+  const m = t.match(/^task_complete\s*\(\s*(\{[\s\S]*\})\s*\)\s*$/i)
+  if (!m) return null
+  try {
+    const obj = JSON.parse(m[1]!) as Record<string, unknown>
+    return extractHumanResultFromObject(obj)
+  } catch {
+    return null
+  }
+}
+
+function extractHumanResultFromObject(obj: Record<string, unknown>): string {
+  const text = obj.result ?? obj.output ?? obj.content ?? obj.answer
+  if (typeof text === 'string') {
+    const inner = unwrapTaskCompletePayloadString(text)
+    if (inner !== null) return inner
+    return text
+  }
+  if (text !== undefined && text !== null) {
+    return extractHumanResult(text)
+  }
+  return JSON.stringify(obj)
+}
+
+/**
  * Extract a clean human-readable string from the orchestrator's task_result payload.
  * The result may be: a plain string, a JSON array of subtask results, or an object.
  */
 function extractHumanResult(result: unknown): string {
   if (!result) return 'Task completed.'
   if (typeof result === 'string') {
+    const unwrapped = unwrapTaskCompletePayloadString(result)
+    if (unwrapped !== null) return unwrapped
     try {
       const parsed = JSON.parse(result)
       return extractHumanResult(parsed)
@@ -189,17 +227,14 @@ function extractHumanResult(result: unknown): string {
     const parts = result
       .map((item: Record<string, unknown>) => {
         const r = item.result ?? item.output ?? item.content
-        return typeof r === 'string' ? r : r ? JSON.stringify(r) : null
+        if (r === undefined || r === null) return null
+        return extractHumanResult(r as unknown)
       })
-      .filter(Boolean) as string[]
+      .filter((s): s is string => Boolean(s && String(s).trim()))
     return parts.length > 0 ? parts.join('\n\n') : 'Task completed.'
   }
   if (typeof result === 'object') {
-    const obj = result as Record<string, unknown>
-    const text = obj.result ?? obj.output ?? obj.content ?? obj.answer
-    if (typeof text === 'string') return text
-    if (text) return extractHumanResult(text)
-    return JSON.stringify(result)
+    return extractHumanResultFromObject(result as Record<string, unknown>)
   }
   return String(result)
 }
@@ -239,16 +274,27 @@ if (natsClient) {
     const msgType = envelope.message_type as string | undefined
     const taskId = clientTaskIdFromIOResults(subject, payload)
 
+    // MT-3: orchestrator payloads carry only taskId — resolve owner via reverse index.
+    // If the task is unknown (race during restart, orphan task_result), fall through
+    // to the legacy memory-mirror path (which has its own MIRROR_FALLBACK_USER_ID).
+    const ownerFromPayload =
+      typeof payload.user_id === 'string' && payload.user_id.trim()
+        ? payload.user_id.trim().toLowerCase()
+        : undefined
+    const ownerUserId = taskId ? (ownerOfTask(taskId) ?? ownerFromPayload) : undefined
+
     if (msgType === 'task_accepted') {
-      if (taskId) {
-        deliverChatResponse(taskId, 'Task accepted — the orchestrator is working on it.\n', false)
+      if (taskId && ownerUserId) {
+        deliverChatResponse(ownerUserId, taskId, 'Task accepted — the orchestrator is working on it.\n', false)
         ioLog('info', 'nats', 'orchestrator accepted task; relaying acknowledgment to chat stream', { task_id: taskId })
+      } else if (taskId) {
+        ioLog('warn', 'nats', 'orchestrator task_accepted arrived but task owner unknown; dropping ack', { task_id: taskId })
       }
     } else if (msgType === 'task_result') {
       const result = payload.result as unknown
       const content = extractHumanResult(result)
       if (taskId) {
-        const streamed = deliverChatResponse(taskId, content, true)
+        const streamed = ownerUserId ? deliverChatResponse(ownerUserId, taskId, content, true) : false
         ioLog('info', 'nats', 'orchestrator returned final task result; closing chat stream', {
           task_id: taskId,
           result_preview: previewHeadTail(content),
@@ -284,17 +330,16 @@ if (natsClient) {
     } else if (msgType === 'error_response') {
       const userMsg = (payload.user_message ?? 'An error occurred.') as string
       const errKey = pendingKeyFromErrorPayload(payload, subject)
+      const errOwner = errKey ? (ownerOfTask(errKey) ?? ownerFromPayload) : undefined
       if (errKey) {
-        const cb = pendingChatResponses.get(errKey)
-        if (cb) {
-          cb.error(userMsg)
-          pendingChatResponses.delete(errKey)
+        const failed = errOwner ? failPendingChatCallback(errOwner, errKey, userMsg) : false
+        if (failed) {
           ioLog('warn', 'nats', 'orchestrator returned error_response; failing waiting chat stream', {
             task_id: errKey,
             detail_preview: previewHeadTail(userMsg),
           })
         } else {
-          ioLog('warn', 'nats', 'orchestrator returned error_response but no chat stream is waiting (client disconnected or task_id mismatch)', {
+          ioLog('warn', 'nats', 'orchestrator returned error_response but no chat stream is waiting (client disconnected, task_id mismatch, or owner unknown)', {
             task_id: errKey,
             subject,
             detail_preview: previewHeadTail(userMsg),
@@ -323,10 +368,8 @@ if (natsClient) {
 }
 
 // =============================================================================
-// In-memory task state (separate from log persistence)
+// In-memory task state lives in ./task-scope (MT-3: (userId, taskId) scoped)
 // =============================================================================
-
-const tasks = new Map<string, StatusUpdate>();
 
 /** Maps MemoryLogEntry (user|assistant) back to LogEntry (user|orchestrator). */
 function memoryToLogEntry(m: MemoryLogEntry): LogEntry {
@@ -338,46 +381,7 @@ function memoryToLogEntry(m: MemoryLogEntry): LogEntry {
   }
 }
 
-type SsePush = (bytes: Uint8Array) => void;
-const sseClients = new Map<string, Set<SsePush>>();
-
 const text = new TextEncoder();
-
-function subscribeSse(taskId: string, push: SsePush): () => void {
-  let set = sseClients.get(taskId);
-  if (!set) {
-    set = new Set();
-    sseClients.set(taskId, set);
-  }
-  set.add(push);
-  return () => {
-    set!.delete(push);
-    if (set!.size === 0) sseClients.delete(taskId);
-  };
-}
-
-function broadcastStreamEvent(taskId: string, event: OrchestratorStreamEvent): void {
-  const line = `data: ${JSON.stringify(event)}\n\n`;
-  const bytes = text.encode(line);
-  const set = sseClients.get(taskId);
-  if (!set) return;
-  for (const push of set) {
-    try {
-      push(bytes);
-    } catch {
-      /* client disconnected */
-    }
-  }
-}
-
-function broadcastStatus(taskId: string, status: StatusUpdate): void {
-  broadcastStreamEvent(taskId, { type: 'status', payload: status });
-}
-
-function persistAndBroadcastStatus(status: StatusUpdate): void {
-  tasks.set(status.taskId, status);
-  broadcastStatus(status.taskId, status);
-}
 
 // =============================================================================
 // Demo mode only: mock response generator and demo credential
@@ -475,18 +479,28 @@ app.get('/api/status', (c) => {
 // Conversation / Task endpoints
 // =============================================================================
 
-// Get all tasks
+// Get all tasks owned by the active user.
+// MT-3: the in-memory map is scoped by (userId, taskId); prefix-scan the
+// caller's slot so one user can never see another's live task list.
 app.get('/api/tasks', (c) => {
-  logFromContext(c, 'debug', 'http', 'listed in-memory task statuses for ui')
-  const taskList = Array.from(tasks.values());
+  const userId = activeUserId(c)
+  if (!userId) return userIdRequired(c)
+  const taskList = listTasksForUser(userId)
+  logFromContext(c, 'debug', 'http', 'listed in-memory task statuses for ui', {
+    user_id: userId,
+    task_count: taskList.length,
+  })
   return c.json({ tasks: taskList });
 });
 
-// Get status for a specific task
+// Get status for a specific task. MT-3: lookup by (activeUserId, taskId); 404
+// (not 403) on miss so probing doesn't leak whether another user owns the id.
 app.get('/api/tasks/:taskId', (c) => {
+  const userId = activeUserId(c)
+  if (!userId) return userIdRequired(c)
   const taskId = c.req.param('taskId');
   c.set('taskId', taskId)
-  const task = tasks.get(taskId);
+  const task = getTaskStatus(userId, taskId);
   if (!task) {
     logFromContext(c, 'debug', 'http', 'ui requested status for unknown task')
     return c.json({ error: 'Task not found' }, 404);
@@ -498,7 +512,10 @@ app.get('/api/tasks/:taskId', (c) => {
 app.post('/api/conversations', async (c) => {
   const userId = activeUserId(c)
   if (!userId) return userIdRequired(c)
-  const { title } = await c.req.json()
+  const body = await c.req.json()
+  const denied = assertNoUserIdOverride(c, body, userId)
+  if (denied) return denied
+  const { title } = body
   const conversation = await createConversation({
     userId,
     title: typeof title === 'string' ? title : undefined,
@@ -533,6 +550,8 @@ app.post('/api/tasks', async (c) => {
   const userId = activeUserId(c)
   if (!userId) return userIdRequired(c)
   const body = await c.req.json()
+  const denied = assertNoUserIdOverride(c, body, userId)
+  if (denied) return denied
   const rawConversationId = typeof body.conversationId === 'string' && body.conversationId ? body.conversationId : undefined
   const conversationId = rawConversationId && UUID_RE.test(rawConversationId) ? rawConversationId : undefined
   const title = typeof body.title === 'string' ? body.title : undefined
@@ -571,8 +590,9 @@ app.post('/api/tasks', async (c) => {
     expectedNextInputMinutes: null,
     timestamp: Date.now(),
   }
-  tasks.set(taskId, statusUpdate)
-  broadcastStatus(taskId, statusUpdate)
+  recordTaskOwnership(userId, taskId)
+  setTaskStatus(userId, taskId, statusUpdate)
+  broadcastStatus(userId, taskId, statusUpdate)
 
   return c.json({ taskId, conversationId: createdTask.conversationId, status: 'created' })
 });
@@ -610,13 +630,25 @@ app.post('/api/orchestrator/stream-events', async (c) => {
     if (typeof cr.done === 'boolean') eventLogFields.done = cr.done
   }
   logFromContext(c, 'info', 'orchestrator-proxy', `received ${event.type} push from orchestrator; broadcasting to ui sse listeners`, eventLogFields)
+  // MT-3: orchestrator HTTP push carries only taskId — resolve the owning user
+  // via the reverse index populated at task-create time. An orphan event (owner
+  // unknown after restart, or task never registered) is logged and dropped so
+  // we don't broadcast into the wrong user's SSE slot.
+  const ownerUserId = taskId ? ownerOfTask(taskId) : undefined
+  if (!ownerUserId) {
+    logFromContext(c, 'warn', 'orchestrator-proxy', 'received orchestrator stream event for task with no recorded owner; dropping', {
+      task_id: taskId,
+      event_type: event.type,
+    })
+    return c.json({ ok: true, dropped: 'unknown task owner' });
+  }
   if (event.type === 'status') {
-    tasks.set(taskId, event.payload);
+    setTaskStatus(ownerUserId, taskId, event.payload);
   } else if (event.type === 'chat_response') {
     const { content, done } = event.payload;
-    deliverChatResponse(taskId, content, done);
+    deliverChatResponse(ownerUserId, taskId, content, done);
   }
-  broadcastStreamEvent(taskId, event);
+  broadcastStreamEvent(ownerUserId, taskId, event);
   return c.json({ ok: true });
 });
 
@@ -709,9 +741,16 @@ app.post('/api/chat', async (c) => {
   const effectiveUserId = activeUserId(c)
   if (!effectiveUserId) return userIdRequired(c)
   const body = (await c.req.json()) as SendMessageRequest;
+  const denied = assertNoUserIdOverride(c, body, effectiveUserId)
+  if (denied) return denied
   const { taskId, content, conversationHistory, conversationId, required_skill_domains } = body as SendMessageRequest & { required_skill_domains?: string[] };
   const traceId = c.get('traceId') as string | undefined;
-  if (taskId) c.set('taskId', taskId)
+  if (taskId) {
+    c.set('taskId', taskId)
+    // MT-3: record (taskId -> userId) so orchestrator inbound paths can resolve
+    // the owning user when delivering chat_response / status frames back.
+    recordTaskOwnership(effectiveUserId, taskId)
+  }
   if (conversationId) c.set('conversationId', conversationId)
   logFromContext(c, 'info', 'http', 'received chat message from user; queuing for orchestrator', {
     user_id: effectiveUserId,
@@ -747,7 +786,7 @@ app.post('/api/chat', async (c) => {
     timestamp: Date.now(),
   };
   if (!scheduleAutomationIntent) {
-    persistAndBroadcastStatus(workingStatus)
+    persistAndBroadcastStatus(effectiveUserId, workingStatus)
   }
 
   const encoder = new TextEncoder();
@@ -819,7 +858,7 @@ app.post('/api/chat', async (c) => {
           expectedNextInputMinutes: 0,
           timestamp: Date.now(),
         }
-        persistAndBroadcastStatus(doneStatus)
+        persistAndBroadcastStatus(effectiveUserId, doneStatus)
       }
 
       if (scheduleAutomationIntent) {
@@ -876,7 +915,8 @@ app.post('/api/chat', async (c) => {
           }
         }
 
-        const pendingKey = chatPendingKey(taskId)
+        // MT-3: parked callback is registered via task-scope, keyed by
+        // (userId, taskId) so two users can't overwrite each other's slot.
         let keepalive: ReturnType<typeof setInterval> | undefined
         const stopKeepalive = () => {
           if (keepalive !== undefined) {
@@ -887,7 +927,7 @@ app.post('/api/chat', async (c) => {
 
         const timeout = setTimeout(() => {
           stopKeepalive()
-          pendingChatResponses.delete(pendingKey)
+          dropPendingChatCallback(effectiveUserId, taskId)
           if (streamDone) return
           const msg = accumulated
             ? accumulated
@@ -903,11 +943,11 @@ app.post('/api/chat', async (c) => {
         cleanupChatStream = () => {
           stopKeepalive()
           clearTimeout(timeout)
-          pendingChatResponses.delete(pendingKey)
+          dropPendingChatCallback(effectiveUserId, taskId)
           streamDone = true
         }
 
-        pendingChatResponses.set(pendingKey, {
+        registerPendingChatCallback(effectiveUserId, taskId, {
           push(chunk: string) {
             if (streamDone) return
             accumulated += chunk
@@ -927,7 +967,7 @@ app.post('/api/chat', async (c) => {
               expectedNextInputMinutes: 0,
               timestamp: Date.now(),
             }
-            persistAndBroadcastStatus(doneStatus)
+            persistAndBroadcastStatus(effectiveUserId, doneStatus)
           },
           error(msg: string) {
             stopKeepalive()
@@ -956,7 +996,7 @@ app.post('/api/chat', async (c) => {
         }, 8_000)
         ioLog('info', 'http', 'registered chat stream as pending; awaiting orchestrator response (timeout 120s)', {
           task_id: taskId,
-          pending_key: pendingKey,
+          user_id: effectiveUserId,
         })
         return
       }
@@ -975,7 +1015,7 @@ app.post('/api/chat', async (c) => {
           taskId, status: 'awaiting_feedback', lastUpdate: 'Response complete',
           expectedNextInputMinutes: 0, timestamp: Date.now(),
         }
-        persistAndBroadcastStatus(doneStatus)
+        persistAndBroadcastStatus(effectiveUserId, doneStatus)
       })()
     },
     cancel() {
@@ -1054,6 +1094,8 @@ app.post('/api/skills/create', async (c) => {
   if (!body || typeof body.description !== 'string' || !body.description.trim()) {
     return c.json({ error: 'description is required' }, 400)
   }
+  const denied = assertNoUserIdOverride(c, body, userId)
+  if (denied) return denied
   const scope: 'me' | 'all' = body.scope === 'all' ? 'all' : 'me'
   // Manager-gate scope=all so a regular user can't push a skill to everyone.
   if (scope === 'all') {
@@ -1095,6 +1137,8 @@ app.post('/api/skills/import-github', async (c) => {
   if (!body || typeof body.repo !== 'string' || !body.repo.trim()) {
     return c.json({ error: 'repo is required' }, 400)
   }
+  const denied = assertNoUserIdOverride(c, body, userId)
+  if (denied) return denied
   const scope: 'me' | 'all' = body.scope === 'all' ? 'all' : 'me'
   if (scope === 'all') {
     const guard = await requireRole(c, 'manager')
@@ -1214,6 +1258,221 @@ app.get('/api/admin/gmail-credentials', async (c) => {
   })
 })
 
+// ── Google Workspace OAuth credential management ──────────────────────────────
+//
+// These routes implement the per-user Google OAuth flow that powers the
+// gmail_search, gmail_get_message, and calendar_list_events skills.
+//
+// Setup: create a Google Cloud project, enable the Gmail API and Calendar API,
+// create an OAuth 2.0 client ID (type: Web application), and add the redirect
+// URI below to the list of Authorized Redirect URIs.
+//
+// Required environment variables on the IO container:
+//   GOOGLE_CLIENT_ID      — OAuth 2.0 client ID from Google Cloud Console
+//   GOOGLE_CLIENT_SECRET  — OAuth 2.0 client secret
+//   GOOGLE_REDIRECT_URI   — must exactly match what is registered in Google Cloud
+//                           (e.g. http://localhost:3001/api/admin/google-oauth/callback)
+//
+// The credential stored in vault per user:
+//   key:   users/<user_id>/credentials/google_oauth
+//   value: {"email":"...", "access_token":"...", "refresh_token":"...", "expires_at":"..."}
+
+// GET /api/admin/google-oauth/connect — redirects the manager to the Google
+// OAuth consent screen. Encodes the active user ID in the state parameter so
+// the callback knows which vault key to write.
+app.get('/api/admin/google-oauth/connect', async (c) => {
+  // window.open() popups don't send custom headers, so accept uid as a query
+  // param as a fallback to the X-Active-User header.
+  const uidParam = c.req.query('uid')?.trim()
+  const guard = uidParam
+    ? { ok: true as const, userId: uidParam, role: 'user' as const }
+    : await requireRole(c, 'user')
+  if (!('ok' in guard)) return guard
+
+  const clientID = process.env.GOOGLE_CLIENT_ID
+  const redirectURI = process.env.GOOGLE_REDIRECT_URI
+  if (!clientID || !redirectURI) {
+    return c.json({
+      error: 'GOOGLE_CLIENT_ID and GOOGLE_REDIRECT_URI must be set in the IO container environment.',
+    }, 503)
+  }
+
+  const scopes = [
+    'https://www.googleapis.com/auth/gmail.readonly',
+    'https://www.googleapis.com/auth/gmail.send',
+    'https://www.googleapis.com/auth/calendar',
+    'openid',
+    'email',
+  ].join(' ')
+
+  const params = new URLSearchParams({
+    client_id: clientID,
+    redirect_uri: redirectURI,
+    response_type: 'code',
+    scope: scopes,
+    access_type: 'offline',
+    prompt: 'consent',
+    state: guard.userId,
+  })
+
+  return c.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`)
+})
+
+// GET /api/admin/google-oauth/callback — Google redirects here after the user
+// grants access. Exchanges the authorization code for tokens and stores them
+// in vault under the user's credential key.
+app.get('/api/admin/google-oauth/callback', async (c) => {
+  const code = c.req.query('code')
+  const state = c.req.query('state')   // user ID encoded at connect time
+  const errorParam = c.req.query('error')
+
+  if (errorParam) {
+    logFromContext(c, 'warn', 'http', 'google oauth: user denied consent or error returned', { error: errorParam })
+    return c.html(`<html><body><p>Google OAuth error: ${errorParam}. Close this tab and try again.</p></body></html>`, 400)
+  }
+  if (!code || !state) {
+    return c.html('<html><body><p>Invalid callback: missing code or state. Close this tab.</p></body></html>', 400)
+  }
+
+  const clientID = process.env.GOOGLE_CLIENT_ID
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET
+  const redirectURI = process.env.GOOGLE_REDIRECT_URI
+  if (!clientID || !clientSecret || !redirectURI) {
+    return c.html('<html><body><p>Server misconfigured: Google OAuth env vars not set.</p></body></html>', 503)
+  }
+
+  // Exchange authorization code for access + refresh tokens.
+  const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      code,
+      client_id: clientID,
+      client_secret: clientSecret,
+      redirect_uri: redirectURI,
+      grant_type: 'authorization_code',
+    }).toString(),
+  })
+  if (!tokenRes.ok) {
+    const txt = await tokenRes.text().catch(() => '')
+    logFromContext(c, 'error', 'http', 'google oauth: token exchange failed', { status: tokenRes.status, body_preview: txt.slice(0, 200) })
+    return c.html('<html><body><p>Token exchange failed. Check server logs.</p></body></html>', 502)
+  }
+  const tokenData = await tokenRes.json() as {
+    access_token?: string
+    refresh_token?: string
+    expires_in?: number
+    token_type?: string
+    id_token?: string
+  }
+  if (!tokenData.access_token) {
+    return c.html('<html><body><p>Token exchange returned no access_token.</p></body></html>', 502)
+  }
+
+  // Fetch the user's email address from the Google userinfo endpoint.
+  let email = ''
+  try {
+    const infoRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+      headers: { Authorization: `Bearer ${tokenData.access_token}` },
+    })
+    if (infoRes.ok) {
+      const info = await infoRes.json() as { email?: string }
+      email = info.email ?? ''
+    }
+  } catch { /* non-fatal */ }
+
+  const expiresAt = tokenData.expires_in
+    ? new Date(Date.now() + tokenData.expires_in * 1000).toISOString()
+    : ''
+
+  const credentialBlob = JSON.stringify({
+    email,
+    access_token: tokenData.access_token,
+    refresh_token: tokenData.refresh_token ?? '',
+    expires_at: expiresAt,
+  })
+
+  const vaultEngineUrl = (process.env.VAULT_ENGINE_URL || 'http://vault:8000').replace(/\/$/, '')
+  const putRes = await fetch(`${vaultEngineUrl}/secrets/put`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      key: `users/${state}/credentials/google_oauth`,
+      value: credentialBlob,
+    }),
+  })
+  if (!putRes.ok) {
+    const txt = await putRes.text().catch(() => '')
+    logFromContext(c, 'error', 'http', 'google oauth: vault put failed', { vault_status: putRes.status, preview: txt.slice(0, 200) })
+    return c.html('<html><body><p>Failed to store credential. Check server logs.</p></body></html>', 502)
+  }
+
+  logFromContext(c, 'info', 'http', 'google oauth: credential stored for user', {
+    user_id: state,
+    email,
+  })
+
+  return c.html(`
+    <html><body style="font-family:sans-serif;padding:2rem;">
+      <h2>✓ Google account connected</h2>
+      <p>Account: <strong>${email || 'unknown'}</strong></p>
+      <p>You can close this tab. Agents can now use <code>gmail_search</code>,
+         <code>gmail_get_message</code>, and <code>calendar_list_events</code>.</p>
+      <script>setTimeout(() => window.close(), 3000)</script>
+    </body></html>
+  `)
+})
+
+// GET /api/admin/google-oauth/status — returns whether google_oauth is
+// configured for the requesting user (email only, never the token).
+app.get('/api/admin/google-oauth/status', async (c) => {
+  const guard = await requireRole(c, 'user')
+  if (!('ok' in guard)) return guard
+
+  const vaultEngineUrl = (process.env.VAULT_ENGINE_URL || 'http://vault:8000').replace(/\/$/, '')
+  const res = await fetch(`${vaultEngineUrl}/secrets/get`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      agent_id: 'io',
+      keys: [`users/${guard.userId}/credentials/google_oauth`],
+    }),
+  })
+  if (!res.ok) {
+    return c.json({ configured: false })
+  }
+  const payload = await res.json().catch(() => null) as { secrets?: Record<string, string> } | null
+  const raw = payload?.secrets?.[`users/${guard.userId}/credentials/google_oauth`]
+  if (!raw) {
+    return c.json({ configured: false })
+  }
+  let parsed: { email?: string } | null = null
+  try { parsed = JSON.parse(raw) } catch { parsed = null }
+  return c.json({
+    configured: !!(parsed?.email),
+    email: parsed?.email ?? null,
+  })
+})
+
+// DELETE /api/admin/google-oauth — revokes the stored credential so the
+// user can re-connect with a different account.
+app.delete('/api/admin/google-oauth', async (c) => {
+  const guard = await requireRole(c, 'user')
+  if (!('ok' in guard)) return guard
+
+  const vaultEngineUrl = (process.env.VAULT_ENGINE_URL || 'http://vault:8000').replace(/\/$/, '')
+  const res = await fetch(`${vaultEngineUrl}/secrets/delete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key: `users/${guard.userId}/credentials/google_oauth` }),
+  })
+  if (!res.ok && res.status !== 404) {
+    return c.json({ error: `vault delete failed (${res.status})` }, 502)
+  }
+  logFromContext(c, 'info', 'http', 'google oauth: credential revoked', { user_id: guard.userId })
+  return c.json({ ok: true })
+})
+
 // Manager-gated LLM provider key configuration. Writes the key to OpenBao via
 // the vault engine so the value is encrypted at rest and centrally rotatable.
 // NOTE: aegis-agents currently reads ANTHROPIC_API_KEY from its environment at
@@ -1304,6 +1563,8 @@ app.post('/api/users', async (c) => {
 app.delete('/api/conversations/:conversationId', async (c) => {
   const userId = activeUserId(c)
   if (!userId) return userIdRequired(c)
+  const denied = assertNoUserIdOverride(c, null, userId)
+  if (denied) return denied
   const conversationId = c.req.param('conversationId')
   c.set('conversationId', conversationId)
   logFromContext(c, 'info', 'http', 'user deleted conversation thread', { user_id: userId })
@@ -1316,6 +1577,8 @@ app.patch('/api/conversations/:conversationId', async (c) => {
   if (!userId) return userIdRequired(c)
   const conversationId = c.req.param('conversationId')
   const body = await c.req.json() as { title?: string }
+  const denied = assertNoUserIdOverride(c, body, userId)
+  if (denied) return denied
   c.set('conversationId', conversationId)
   if (body.title) {
     logFromContext(c, 'info', 'http', 'user renamed conversation thread', {
@@ -1380,6 +1643,8 @@ app.post('/api/user-crons', async (c) => {
   }
   const userId = activeUserId(c)
   if (!userId) return userIdRequired(c)
+  const denied = assertNoUserIdOverride(c, body, userId)
+  if (denied) return denied
   if (!body.name?.trim() || !body.rawInput?.trim() || !body.nextRunAt || !body.scheduleKind) {
     return c.json({ error: 'name, rawInput, nextRunAt, and scheduleKind are required' }, 400)
   }
@@ -1469,6 +1734,8 @@ app.delete('/api/user-crons/:jobId', async (c) => {
   }
   const userId = activeUserId(c)
   if (!userId) return userIdRequired(c)
+  const denied = assertNoUserIdOverride(c, null, userId)
+  if (denied) return denied
   const jobId = c.req.param('jobId')
   const res = await fetch(
     `${base}/api/v1/scheduled_jobs/${encodeURIComponent(jobId)}?userId=${encodeURIComponent(userId)}`,
@@ -1503,6 +1770,8 @@ app.post('/api/credential', async (c) => {
     keyName: string;
     value: string;
   };
+  const denied = assertNoUserIdOverride(c, body, userId)
+  if (denied) return denied
   const { taskId, requestId, keyName } = body;
   c.set('taskId', taskId)
   logFromContext(c, 'info', 'credential', 'received credential value from user; forwarding to memory vault (value not logged)', {
@@ -1599,8 +1868,25 @@ app.post('/api/credential', async (c) => {
 // =============================================================================
 
 app.get('/api/events/:taskId', (c) => {
+  const userId = activeUserId(c)
+  if (!userId) return userIdRequired(c)
   const taskId = c.req.param('taskId');
   c.set('taskId', taskId)
+
+  // MT-3: ownership check before opening the stream. 404 — not 403 — so probing
+  // doesn't reveal whether the taskId exists for another user. The demo task
+  // (id '13', DEMO_MODE only) is the one exception: it has no real owner and
+  // is intended as a fixed-id reference stream for the mock UI.
+  const isDemoFixedTask = DEMO_MODE && taskId === '13'
+  if (!isDemoFixedTask) {
+    const owner = ownerOfTask(taskId)
+    if (!owner || owner !== userId.toLowerCase()) {
+      logFromContext(c, 'debug', 'http', 'ui requested sse for unknown or unowned task; returning 404', {
+        user_id: userId,
+      })
+      return c.json({ error: 'Task not found' }, 404)
+    }
+  }
   logFromContext(c, 'debug', 'http', 'ui opened sse connection for task event stream')
 
   const stream = new ReadableStream<Uint8Array>({
@@ -1613,19 +1899,19 @@ app.get('/api/events/:taskId', (c) => {
         }
       };
 
-      const unsubscribe = subscribeSse(taskId, push);
+      const unsubscribe = subscribeSse(userId, taskId, push);
 
       // Only push initial status when the BFF has state (e.g. after /api/chat). Otherwise the
       // web UI keeps its local mock task list without being overwritten by a synthetic default.
-      const stored = tasks.get(taskId);
+      const stored = getTaskStatus(userId, taskId);
       if (stored) {
         push(text.encode(`data: ${JSON.stringify({ type: 'status', payload: stored })}\n\n`));
       }
 
       // Demo mode: push a sample credential request for the demo task
-      if (DEMO_MODE && taskId === '13') {
+      if (isDemoFixedTask) {
         setTimeout(() => {
-          broadcastStreamEvent('13', {
+          broadcastStreamEvent(userId, '13', {
             type: 'credential_request',
             payload: DEMO_TASK_13_CREDENTIAL,
           });
@@ -1633,9 +1919,9 @@ app.get('/api/events/:taskId', (c) => {
       }
 
       const interval = setInterval(() => {
-        const current = tasks.get(taskId);
+        const current = getTaskStatus(userId, taskId);
         if (current?.status === 'working') {
-          broadcastStatus(taskId, { ...current, timestamp: Date.now() });
+          broadcastStatus(userId, taskId, { ...current, timestamp: Date.now() });
         }
       }, 2800);
 
@@ -1698,8 +1984,24 @@ app.post('/api/voice/transcribe', async (c) => {
 // =============================================================================
 
 if (process.env.NODE_ENV === 'production') {
-  app.use('/*', serveStatic({ root: '/app/web-dist/' }))
-  app.use('/*', serveStatic({ path: '/app/web-dist/index.html' })) // SPA routing fallback
+  app.use(
+    '/*',
+    serveStatic({
+      root: `${WEB_DIST_ROOT}/`,
+      onFound: (_path, c) => {
+        setWebDistCacheHeaders(c)
+      },
+    }),
+  )
+  app.use(
+    '/*',
+    serveStatic({
+      path: `${WEB_DIST_ROOT}/index.html`,
+      onFound: (_path, c) => {
+        c.header('Cache-Control', 'no-store')
+      },
+    }),
+  )
 }
 
 // =============================================================================
