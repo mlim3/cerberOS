@@ -176,7 +176,10 @@ func (m *MemoryMock) Reset() {
 
 // matchesQuery checks if a MemoryRecord satisfies the given MemoryQuery filters.
 func matchesQuery(r types.MemoryRecord, q types.MemoryQuery) bool {
-	if q.UserID != "" && r.UserID != q.UserID {
+	// MT-14 (#189): AllTenants is the explicit cross-tenant read opt-in;
+	// when set, skip the user_id equality check so the rehydrate path sees
+	// every user's tasks in one snapshot.
+	if !q.AllTenants && q.UserID != "" && r.UserID != q.UserID {
 		return false
 	}
 	if q.DataType != "" && r.DataType != q.DataType {

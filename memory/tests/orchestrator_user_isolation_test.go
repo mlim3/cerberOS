@@ -152,3 +152,61 @@ func TestOrchestratorQueryRejectsMissingUserID(t *testing.T) {
 	}
 	assertErrorCode(t, env, "invalid_argument")
 }
+
+// TestOrchestratorQueryAllTenantsReturnsBothUsers exercises the MT-14 (#189)
+// cross-tenant read used by orchestrator startup rehydrate: writing task_state
+// for two different users and then reading with all_tenants=true returns both.
+func TestOrchestratorQueryAllTenantsReturnsBothUsers(t *testing.T) {
+	ensureSecondTestUser(t)
+
+	base := blackboxBaseURL()
+	headers := map[string]string{"X-Internal-API-Key": vaultKey}
+	taskA := fmt.Sprintf("task-mt14-A-%d", time.Now().UnixNano())
+	taskB := fmt.Sprintf("task-mt14-B-%d", time.Now().UnixNano())
+
+	write := func(userID, taskID string) {
+		status, env := apiJSONRequest(t, http.MethodPost, base+"/api/v1/orchestrator/records", map[string]any{
+			"user_id":               userID,
+			"orchestrator_task_ref": "orch-" + taskID,
+			"task_id":               taskID,
+			"data_type":             "task_state",
+			"timestamp":             time.Now().UTC().Format(time.RFC3339Nano),
+			"payload":               map[string]any{"task_id": taskID, "state": "RUNNING"},
+		}, headers)
+		if status != http.StatusCreated {
+			t.Fatalf("write %s status = %d (env=%+v)", taskID, status, env)
+		}
+	}
+	write(testUserID, taskA)
+	write(secondTestUserID, taskB)
+
+	status, env := apiJSONRequest(t, http.MethodGet,
+		base+"/api/v1/orchestrator/records?data_type=task_state&state_filter=not_terminal&all_tenants=true",
+		nil, headers)
+	if status != http.StatusOK {
+		t.Fatalf("all_tenants query status = %d", status)
+	}
+	var payload struct {
+		Records []map[string]any `json:"records"`
+	}
+	if err := json.Unmarshal(env.Data, &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	sawA, sawB := false, false
+	for _, rec := range payload.Records {
+		switch rec["task_id"] {
+		case taskA:
+			if rec["user_id"] == testUserID {
+				sawA = true
+			}
+		case taskB:
+			if rec["user_id"] == secondTestUserID {
+				sawB = true
+			}
+		}
+	}
+	if !sawA || !sawB {
+		t.Fatalf("all_tenants response missing rows: sawA=%v sawB=%v records=%+v", sawA, sawB, payload.Records)
+	}
+}
