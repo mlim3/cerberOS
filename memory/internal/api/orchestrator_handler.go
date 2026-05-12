@@ -138,8 +138,13 @@ func (h *OrchestratorHandler) HandleQueryRecords(w http.ResponseWriter, r *http.
 	taskID := r.URL.Query().Get("task_id")
 	orchRef := r.URL.Query().Get("orchestrator_task_ref")
 	stateFilter := r.URL.Query().Get("state_filter")
-	if stringsBlank(userID) {
-		writeJSONError(w, http.StatusBadRequest, "invalid_argument", "user_id is required", nil)
+	// MT-14 (#189): all_tenants=true is the cross-tenant read opt-in used by
+	// the orchestrator startup rehydrate path. This endpoint is already gated
+	// by the internal vault API key (RequireVaultKey in cmd/server/main.go),
+	// so accepting the parameter does not widen the public attack surface.
+	allTenants := r.URL.Query().Get("all_tenants") == "true"
+	if !allTenants && stringsBlank(userID) {
+		writeJSONError(w, http.StatusBadRequest, "invalid_argument", "user_id is required (or all_tenants=true)", nil)
 		return
 	}
 	if stringsBlank(dataType) {
@@ -186,6 +191,7 @@ func (h *OrchestratorHandler) HandleQueryRecords(w http.ResponseWriter, r *http.
 		FromTimestamp:       fromTS,
 		ToTimestamp:         toTS,
 		StateFilter:         stateFilter,
+		AllTenants:          allTenants,
 	})
 	if err != nil {
 		switch {
