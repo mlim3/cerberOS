@@ -290,7 +290,8 @@ func isSupportedOperation(operationType string) bool {
 		"vault_storage_write",
 		"vault_storage_list",
 		"vault_gmail_send",
-		"vault_gmail_calendar_invite":
+		"vault_gmail_calendar_invite",
+		"vault_gmail_calendar_list":
 		return true
 	default:
 		return false

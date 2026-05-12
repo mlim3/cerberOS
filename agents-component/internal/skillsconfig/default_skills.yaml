@@ -252,6 +252,29 @@ domains:
             required: false
             description: 'Optional recipient email address. If omitted, invite is sent to the configured demo Gmail account.'
 
+      # FP-Stefan E1: read access to the manager-configured Google Calendar
+      # without OAuth, using the per-calendar "Secret address in iCal format"
+      # URL stored alongside the Gmail credential. The URL is itself a bearer
+      # secret — the vault engine resolves it per-call and never returns the
+      # value to the agent. Use whenever the user asks "what's my next
+      # meeting / event", "what do I have today", "list my upcoming events",
+      # etc. Do NOT use to create events — that's calendar_create_event.
+      - name: calendar_list_upcoming
+        label: 'Calendar List (Gmail)'
+        description: "Read upcoming events from the configured Google Calendar via its secret iCal URL. Returns events sorted by start (summary, start, end, location). Recurring events show base DTSTART only. Use for 'next event' / 'this week'. Do NOT use to create — use calendar_create_event."
+        implementation: vault_gmail_calendar_list
+        required_credential_types: [gmail_app_password]
+        timeout_seconds: 30
+        parameters:
+          - name: max_results
+            type: integer
+            required: false
+            description: 'How many upcoming events to return (default 10, max 50). Lower this when the user only asks for the next one.'
+          - name: within_days
+            type: integer
+            required: false
+            description: 'Upper bound (in days) on how far ahead to look (default 30, max 365). Useful for "this week" (7) or "this month" (30) queries.'
+
   - name: storage
     commands:
       - name: vault_storage_read

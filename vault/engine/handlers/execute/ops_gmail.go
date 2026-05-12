@@ -12,16 +12,27 @@ import (
 )
 
 // gmailCredential is the JSON shape stored in OpenBao for the Gmail demo
-// account credential. Both fields are required. The app password is a 16-char
-// Google App Password (https://myaccount.google.com/apppasswords) — never an
-// account password and never an OAuth token.
+// account credential. email + app_password are required. calendar_ical_url
+// is OPTIONAL — populated only when the manager wants read access to the
+// account's Google Calendar via its "Secret address in iCal format" (a
+// per-calendar token URL that doesn't require OAuth). Storing it alongside
+// the Gmail credential keeps E1's plumbing on the existing admin section
+// instead of inventing a second credential type.
+//
+// The app password is a 16-char Google App Password
+// (https://myaccount.google.com/apppasswords) — never an account password
+// and never an OAuth token.
 type gmailCredential struct {
-	Email       string `json:"email"`
-	AppPassword string `json:"app_password"`
+	Email           string `json:"email"`
+	AppPassword     string `json:"app_password"`
+	CalendarICalURL string `json:"calendar_ical_url,omitempty"`
 }
 
 // parseGmailCredential decodes the credential blob and validates required
 // fields. Errors are deliberately generic — never leak credential details.
+// calendar_ical_url is NOT validated here because most operations
+// (gmail_send, calendar_create_event) don't need it; the calendar_list
+// op enforces presence itself when called.
 func parseGmailCredential(credential string) (gmailCredential, error) {
 	var c gmailCredential
 	if err := json.Unmarshal([]byte(credential), &c); err != nil {

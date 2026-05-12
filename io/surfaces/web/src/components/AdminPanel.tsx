@@ -60,7 +60,15 @@ function AdminPanel({ onClose }: AdminPanelProps): React.ReactElement {
   // Gmail demo account state (App Password — no OAuth)
   const [gmailEmail, setGmailEmail] = useState('')
   const [gmailAppPassword, setGmailAppPassword] = useState('')
-  const [gmailConfigured, setGmailConfigured] = useState<{ email: string | null }>({ email: null })
+  // calendar_ical_url is the per-calendar "Secret address in iCal format"
+  // (Calendar Settings → "Settings for my calendars" → calendar name →
+  // "Integrate calendar"). It's itself a bearer secret and unlocks the
+  // calendar_list_upcoming skill without OAuth.
+  const [gmailCalendarICalURL, setGmailCalendarICalURL] = useState('')
+  const [gmailConfigured, setGmailConfigured] = useState<{
+    email: string | null
+    calendarICalURLConfigured: boolean
+  }>({ email: null, calendarICalURLConfigured: false })
   const [gmailStatus, setGmailStatus] = useState<{ kind: 'idle' | 'ok' | 'pending' | 'error'; msg?: string }>({ kind: 'idle' })
 
   // New user state
@@ -97,12 +105,17 @@ function AdminPanel({ onClose }: AdminPanelProps): React.ReactElement {
     fetch(buildApiUrl('/api/admin/gmail-credentials'), {
       headers: { 'X-Active-User': userId },
     })
-      .then((r) => (r.ok ? r.json() : { configured: false, email: null }))
-      .then((data: { configured?: boolean; email?: string | null }) => {
-        if (!cancelled) setGmailConfigured({ email: data.email ?? null })
+      .then((r) => (r.ok ? r.json() : { configured: false, email: null, calendar_ical_url_configured: false }))
+      .then((data: { configured?: boolean; email?: string | null; calendar_ical_url_configured?: boolean }) => {
+        if (!cancelled) {
+          setGmailConfigured({
+            email: data.email ?? null,
+            calendarICalURLConfigured: !!data.calendar_ical_url_configured,
+          })
+        }
       })
       .catch(() => {
-        if (!cancelled) setGmailConfigured({ email: null })
+        if (!cancelled) setGmailConfigured({ email: null, calendarICalURLConfigured: false })
       })
     return () => {
       cancelled = true
@@ -165,6 +178,11 @@ function AdminPanel({ onClose }: AdminPanelProps): React.ReactElement {
       })
       return
     }
+    const trimmedICal = gmailCalendarICalURL.trim()
+    if (trimmedICal && !/^https?:\/\//i.test(trimmedICal)) {
+      setGmailStatus({ kind: 'error', msg: 'calendar iCal URL must start with http(s)://' })
+      return
+    }
     setGmailStatus({ kind: 'pending', msg: 'Saving…' })
     try {
       const res = await fetch(buildApiUrl('/api/admin/gmail-credentials'), {
@@ -173,18 +191,32 @@ function AdminPanel({ onClose }: AdminPanelProps): React.ReactElement {
           'Content-Type': 'application/json',
           'X-Active-User': userId,
         },
-        body: JSON.stringify({ email: gmailEmail.trim(), app_password: cleaned }),
+        body: JSON.stringify({
+          email: gmailEmail.trim(),
+          app_password: cleaned,
+          ...(trimmedICal ? { calendar_ical_url: trimmedICal } : {}),
+        }),
       })
-      const data = await res.json().catch(() => ({})) as { error?: string; email?: string }
+      const data = await res.json().catch(() => ({})) as {
+        error?: string
+        email?: string
+        calendar_ical_url_configured?: boolean
+      }
       if (!res.ok) {
         setGmailStatus({ kind: 'error', msg: data.error ?? `failed (${res.status})` })
         return
       }
       setGmailAppPassword('')
-      setGmailConfigured({ email: data.email ?? gmailEmail.trim() })
+      setGmailCalendarICalURL('')
+      setGmailConfigured({
+        email: data.email ?? gmailEmail.trim(),
+        calendarICalURLConfigured: !!data.calendar_ical_url_configured || !!trimmedICal,
+      })
       setGmailStatus({
         kind: 'ok',
-        msg: `Saved. Agents can call gmail_send / calendar_create_event now (no restart needed).`,
+        msg: trimmedICal
+          ? 'Saved. Agents can call gmail_send, calendar_create_event, and calendar_list_upcoming now (no restart needed).'
+          : 'Saved. Agents can call gmail_send / calendar_create_event now (no restart needed). Paste a calendar iCal URL to enable read access.',
       })
     } catch (err) {
       setGmailStatus({ kind: 'error', msg: err instanceof Error ? err.message : String(err) })
@@ -348,8 +380,10 @@ function AdminPanel({ onClose }: AdminPanelProps): React.ReactElement {
           <section className="admin-section">
             <h3>Gmail Demo Account</h3>
             <p className="admin-help">
-              Powers <code>gmail_send</code> and <code>calendar_create_event</code> via SMTP — no
-              OAuth, no Google Cloud Console project. Generate a 16-character App Password at{' '}
+              Powers <code>gmail_send</code>, <code>calendar_create_event</code>, and (when an
+              iCal URL is supplied) <code>calendar_list_upcoming</code> — all via SMTP / HTTPS,
+              no OAuth, no Google Cloud Console project. Generate a 16-character App Password
+              at{' '}
               <a
                 href="https://myaccount.google.com/apppasswords"
                 target="_blank"
@@ -357,12 +391,23 @@ function AdminPanel({ onClose }: AdminPanelProps): React.ReactElement {
               >
                 myaccount.google.com/apppasswords
               </a>{' '}
-              (requires 2-Step Verification on the Google account). Calendar events are sent as
-              .ics email invites — open Gmail to one-click "Add to Calendar".
+              (requires 2-Step Verification on the Google account). For read access to the
+              calendar, copy the "Secret address in iCal format" from{' '}
+              <a
+                href="https://calendar.google.com/calendar/u/0/r/settings"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Calendar settings → Settings for my calendars → [calendar] → Integrate calendar
+              </a>
+              .
             </p>
             {gmailConfigured.email && (
               <div className="admin-status-ok admin-gmail-current">
                 Currently configured: <code>{gmailConfigured.email}</code>
+                {gmailConfigured.calendarICalURLConfigured && (
+                  <span> · calendar read enabled</span>
+                )}
               </div>
             )}
             <form onSubmit={handleSaveGmail} className="admin-form">
@@ -383,6 +428,16 @@ function AdminPanel({ onClose }: AdminPanelProps): React.ReactElement {
                   placeholder="xxxx xxxx xxxx xxxx (spaces ok)"
                   value={gmailAppPassword}
                   onChange={(e) => setGmailAppPassword(e.target.value)}
+                  autoComplete="off"
+                />
+              </div>
+              <div className="admin-row">
+                <label>Calendar iCal URL (optional)</label>
+                <input
+                  type="password"
+                  placeholder="https://calendar.google.com/calendar/ical/.../basic.ics"
+                  value={gmailCalendarICalURL}
+                  onChange={(e) => setGmailCalendarICalURL(e.target.value)}
                   autoComplete="off"
                 />
               </div>

@@ -165,3 +165,70 @@ func executeVaultGmailCalendarInvite(ctx context.Context, ve *VaultExecutor, raw
 	}
 	return ve.Execute(ctx, "vault_gmail_calendar_invite", "gmail_app_password", opParams, 35, onUpdate)
 }
+
+// vaultGmailCalendarListTool reads upcoming events from the demo Gmail
+// account's Google Calendar via its "Secret address in iCal format" URL
+// (E1, no OAuth). The URL lives inside the same gmail_app_password JSON
+// blob stored in OpenBao, so this tool reuses the gmail credential type
+// rather than introducing a second one. The vault engine fetches the URL
+// and parses VEVENTs server-side; the agent never sees the raw URL.
+//
+// Recurring events appear with their base DTSTART only — RRULE is NOT
+// expanded into per-instance occurrences. The tool's response includes
+// an explicit `recurring_event_note` so the LLM can caveat its reply.
+func vaultGmailCalendarListTool(ve *VaultExecutor) SkillTool {
+	return SkillTool{
+		Label:                   "Calendar List (Gmail)",
+		RequiredCredentialTypes: []string{"gmail_app_password"},
+		TimeoutSeconds:          30,
+		Definition: anthropic.ToolParam{
+			Name: "calendar_list_upcoming",
+			Description: anthropic.String(
+				"Read upcoming events from the configured Google Calendar (secret iCal URL). " +
+					"Returns events sorted by start time. Use for 'next event' / 'this week' / " +
+					"'my schedule' questions. Recurring events show base DTSTART only — not expanded. " +
+					"Do NOT use to create events — use calendar_create_event."),
+			InputSchema: anthropic.ToolInputSchemaParam{
+				Properties: map[string]interface{}{
+					"max_results": map[string]interface{}{
+						"type":        "integer",
+						"description": "How many upcoming events to return (default 10, max 50). Lower this when the user only asks for the next one.",
+					},
+					"within_days": map[string]interface{}{
+						"type":        "integer",
+						"description": "Upper bound (in days) on how far ahead to look (default 30, max 365). Use 7 for 'this week', 30 for 'this month'.",
+					},
+				},
+				Required: []string{},
+			},
+		},
+		Execute: func(ctx context.Context, raw json.RawMessage) ToolResult {
+			return executeVaultGmailCalendarList(ctx, ve, raw)
+		},
+	}
+}
+
+func executeVaultGmailCalendarList(ctx context.Context, ve *VaultExecutor, raw json.RawMessage) ToolResult {
+	// Both parameters are optional; the vault engine clamps and defaults
+	// them server-side. We still parse to surface obvious type errors
+	// before the round-trip.
+	var params struct {
+		MaxResults int `json:"max_results,omitempty"`
+		WithinDays int `json:"within_days,omitempty"`
+	}
+	if len(raw) > 0 && string(raw) != "null" {
+		if err := json.Unmarshal(raw, &params); err != nil {
+			return ToolResult{Content: fmt.Sprintf("invalid parameters: %v", err), IsError: true}
+		}
+	}
+	opParams, err := json.Marshal(params)
+	if err != nil {
+		return ToolResult{Content: fmt.Sprintf("failed to encode params: %v", err), IsError: true}
+	}
+	onUpdate := func(p types.VaultOperationProgress) {
+		ve.log.Info("vault gmail_calendar_list progress update from vault engine",
+			"request_id", p.RequestID,
+			"message_preview", logfields.PreviewWords(p.Message, 20, 140))
+	}
+	return ve.Execute(ctx, "vault_gmail_calendar_list", "gmail_app_password", opParams, 25, onUpdate)
+}

@@ -35,6 +35,8 @@ func dispatchOperation(ctx context.Context, operationType, credential string, pa
 		return execGmailSend(ctx, credential, params)
 	case "vault_gmail_calendar_invite":
 		return execGmailCalendarInvite(ctx, credential, params)
+	case "vault_gmail_calendar_list":
+		return execGmailCalendarList(ctx, credential, params)
 	case "vault_data_read":
 		return opResult{err: fmt.Errorf("vault_data_read not yet implemented"), code: ErrCodeUnsupportedOp}
 	case "vault_data_write":

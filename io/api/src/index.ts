@@ -1141,7 +1141,7 @@ app.post('/api/admin/gmail-credentials', async (c) => {
   const guard = await requireRole(c, 'manager')
   if (!('ok' in guard)) return guard
   const body = await c.req.json().catch(() => null) as
-    | { email?: string; app_password?: string }
+    | { email?: string; app_password?: string; calendar_ical_url?: string }
     | null
   if (!body || typeof body.email !== 'string' || typeof body.app_password !== 'string') {
     return c.json({ error: 'email and app_password are required' }, 400)
@@ -1157,8 +1157,25 @@ app.post('/api/admin/gmail-credentials', async (c) => {
         'Generate one at https://myaccount.google.com/apppasswords — do NOT paste your account password.',
     }, 400)
   }
+  // Optional: per-calendar "Secret address in iCal format" URL. Lets the
+  // calendar_list_upcoming skill read events without OAuth. The URL is
+  // itself a bearer secret — handle as such. Validation is lax on purpose
+  // because Google occasionally tweaks the host/path prefix and we don't
+  // want a hard-coded regex to break the flow.
+  let calendarICalURL: string | undefined
+  if (typeof body.calendar_ical_url === 'string' && body.calendar_ical_url.trim()) {
+    const trimmed = body.calendar_ical_url.trim()
+    if (!/^https?:\/\//i.test(trimmed)) {
+      return c.json({ error: 'calendar_ical_url must start with http(s)://' }, 400)
+    }
+    calendarICalURL = trimmed
+  }
   const vaultEngineUrl = (process.env.VAULT_ENGINE_URL || 'http://vault:8000').replace(/\/$/, '')
-  const credentialBlob = JSON.stringify({ email, app_password: appPassword })
+  const credentialBlob = JSON.stringify(
+    calendarICalURL
+      ? { email, app_password: appPassword, calendar_ical_url: calendarICalURL }
+      : { email, app_password: appPassword },
+  )
   const res = await fetch(`${vaultEngineUrl}/secrets/put`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1176,12 +1193,17 @@ app.post('/api/admin/gmail-credentials', async (c) => {
     actor_user_id: guard.userId,
     actor_role: guard.role,
     email,
+    calendar_ical_url_configured: !!calendarICalURL,
   })
   return c.json({
     ok: true,
     email,
+    calendar_ical_url_configured: !!calendarICalURL,
     note:
       'Gmail SMTP credential stored. Agents can now call gmail_send and calendar_create_event ' +
+      (calendarICalURL
+        ? '(plus calendar_list_upcoming for reads) '
+        : '') +
       'without restart (vault resolves the credential per-call).',
   })
 })
@@ -1206,11 +1228,13 @@ app.get('/api/admin/gmail-credentials', async (c) => {
   if (!raw) {
     return c.json({ configured: false })
   }
-  let parsed: { email?: string } | null = null
+  let parsed: { email?: string; calendar_ical_url?: string } | null = null
   try { parsed = JSON.parse(raw) } catch { parsed = null }
   return c.json({
     configured: !!(parsed && parsed.email),
     email: parsed?.email ?? null,
+    // Status only — never echo the URL itself, it's a bearer secret.
+    calendar_ical_url_configured: !!(parsed && parsed.calendar_ical_url),
   })
 })
 
