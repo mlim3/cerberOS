@@ -99,6 +99,10 @@ func TestMain(m *testing.M) {
 	vaultRepo := storage.NewVaultRepository(dbPool)
 	agentLogsRepo := storage.NewAgentLogsRepository(dbPool)
 	scheduledJobsRepo := storage.NewScheduledJobsRepository(dbPool)
+	if err := scheduledJobsRepo.EnsureSchema(ctx); err != nil {
+		logger.Error("failed to ensure scheduling schema for testing", "error", err)
+		os.Exit(1)
+	}
 
 	vaultManager, err := logic.NewVaultManager()
 	if err != nil {

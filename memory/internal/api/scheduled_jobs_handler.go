@@ -99,6 +99,15 @@ func (h *ScheduledJobsHandler) HandleCreateScheduledJob(w http.ResponseWriter, r
 		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "jobType, targetKind, targetService, and name are required", nil))
 		return
 	}
+	// MT-5 (#186): every scheduled_jobs row carries a real owning user_id.
+	// The handler rejects the request before the repository so the 400 cites
+	// the right field; the repo would also reject via ErrScheduledJobMissingUserID.
+	if req.UserID == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "userId is required", nil))
+		return
+	}
 	if req.Status == "" {
 		req.Status = "active"
 	}

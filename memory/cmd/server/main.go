@@ -146,6 +146,13 @@ func main() {
 	vaultRepo := storage.NewVaultRepository(pool)
 	agentLogsRepo := storage.NewAgentLogsRepository(pool)
 	scheduledJobsRepo := storage.NewScheduledJobsRepository(pool)
+	// MT-5 (#186): migrate scheduled_jobs.user_id to UUID NOT NULL with FK.
+	// Idempotent — no-ops on a freshly initialized DB where the column is
+	// already correct; wipes only when an older VARCHAR(64) column exists.
+	if err := scheduledJobsRepo.EnsureSchema(ctx); err != nil {
+		logger.Error("failed to ensure scheduling schema", "error", err)
+		os.Exit(1)
+	}
 
 	// Initialize Vault Manager
 	vaultManager, err := logic.NewVaultManager()
