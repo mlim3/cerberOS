@@ -1215,6 +1215,221 @@ app.get('/api/admin/gmail-credentials', async (c) => {
   })
 })
 
+// ── Google Workspace OAuth credential management ──────────────────────────────
+//
+// These routes implement the per-user Google OAuth flow that powers the
+// gmail_search, gmail_get_message, and calendar_list_events skills.
+//
+// Setup: create a Google Cloud project, enable the Gmail API and Calendar API,
+// create an OAuth 2.0 client ID (type: Web application), and add the redirect
+// URI below to the list of Authorized Redirect URIs.
+//
+// Required environment variables on the IO container:
+//   GOOGLE_CLIENT_ID      — OAuth 2.0 client ID from Google Cloud Console
+//   GOOGLE_CLIENT_SECRET  — OAuth 2.0 client secret
+//   GOOGLE_REDIRECT_URI   — must exactly match what is registered in Google Cloud
+//                           (e.g. http://localhost:3001/api/admin/google-oauth/callback)
+//
+// The credential stored in vault per user:
+//   key:   users/<user_id>/credentials/google_oauth
+//   value: {"email":"...", "access_token":"...", "refresh_token":"...", "expires_at":"..."}
+
+// GET /api/admin/google-oauth/connect — redirects the manager to the Google
+// OAuth consent screen. Encodes the active user ID in the state parameter so
+// the callback knows which vault key to write.
+app.get('/api/admin/google-oauth/connect', async (c) => {
+  // window.open() popups don't send custom headers, so accept uid as a query
+  // param as a fallback to the X-Active-User header.
+  const uidParam = c.req.query('uid')?.trim()
+  const guard = uidParam
+    ? { ok: true as const, userId: uidParam, role: 'user' as const }
+    : await requireRole(c, 'user')
+  if (!('ok' in guard)) return guard
+
+  const clientID = process.env.GOOGLE_CLIENT_ID
+  const redirectURI = process.env.GOOGLE_REDIRECT_URI
+  if (!clientID || !redirectURI) {
+    return c.json({
+      error: 'GOOGLE_CLIENT_ID and GOOGLE_REDIRECT_URI must be set in the IO container environment.',
+    }, 503)
+  }
+
+  const scopes = [
+    'https://www.googleapis.com/auth/gmail.readonly',
+    'https://www.googleapis.com/auth/gmail.send',
+    'https://www.googleapis.com/auth/calendar',
+    'openid',
+    'email',
+  ].join(' ')
+
+  const params = new URLSearchParams({
+    client_id: clientID,
+    redirect_uri: redirectURI,
+    response_type: 'code',
+    scope: scopes,
+    access_type: 'offline',
+    prompt: 'consent',
+    state: guard.userId,
+  })
+
+  return c.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`)
+})
+
+// GET /api/admin/google-oauth/callback — Google redirects here after the user
+// grants access. Exchanges the authorization code for tokens and stores them
+// in vault under the user's credential key.
+app.get('/api/admin/google-oauth/callback', async (c) => {
+  const code = c.req.query('code')
+  const state = c.req.query('state')   // user ID encoded at connect time
+  const errorParam = c.req.query('error')
+
+  if (errorParam) {
+    logFromContext(c, 'warn', 'http', 'google oauth: user denied consent or error returned', { error: errorParam })
+    return c.html(`<html><body><p>Google OAuth error: ${errorParam}. Close this tab and try again.</p></body></html>`, 400)
+  }
+  if (!code || !state) {
+    return c.html('<html><body><p>Invalid callback: missing code or state. Close this tab.</p></body></html>', 400)
+  }
+
+  const clientID = process.env.GOOGLE_CLIENT_ID
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET
+  const redirectURI = process.env.GOOGLE_REDIRECT_URI
+  if (!clientID || !clientSecret || !redirectURI) {
+    return c.html('<html><body><p>Server misconfigured: Google OAuth env vars not set.</p></body></html>', 503)
+  }
+
+  // Exchange authorization code for access + refresh tokens.
+  const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      code,
+      client_id: clientID,
+      client_secret: clientSecret,
+      redirect_uri: redirectURI,
+      grant_type: 'authorization_code',
+    }).toString(),
+  })
+  if (!tokenRes.ok) {
+    const txt = await tokenRes.text().catch(() => '')
+    logFromContext(c, 'error', 'http', 'google oauth: token exchange failed', { status: tokenRes.status, body_preview: txt.slice(0, 200) })
+    return c.html('<html><body><p>Token exchange failed. Check server logs.</p></body></html>', 502)
+  }
+  const tokenData = await tokenRes.json() as {
+    access_token?: string
+    refresh_token?: string
+    expires_in?: number
+    token_type?: string
+    id_token?: string
+  }
+  if (!tokenData.access_token) {
+    return c.html('<html><body><p>Token exchange returned no access_token.</p></body></html>', 502)
+  }
+
+  // Fetch the user's email address from the Google userinfo endpoint.
+  let email = ''
+  try {
+    const infoRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+      headers: { Authorization: `Bearer ${tokenData.access_token}` },
+    })
+    if (infoRes.ok) {
+      const info = await infoRes.json() as { email?: string }
+      email = info.email ?? ''
+    }
+  } catch { /* non-fatal */ }
+
+  const expiresAt = tokenData.expires_in
+    ? new Date(Date.now() + tokenData.expires_in * 1000).toISOString()
+    : ''
+
+  const credentialBlob = JSON.stringify({
+    email,
+    access_token: tokenData.access_token,
+    refresh_token: tokenData.refresh_token ?? '',
+    expires_at: expiresAt,
+  })
+
+  const vaultEngineUrl = (process.env.VAULT_ENGINE_URL || 'http://vault:8000').replace(/\/$/, '')
+  const putRes = await fetch(`${vaultEngineUrl}/secrets/put`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      key: `users/${state}/credentials/google_oauth`,
+      value: credentialBlob,
+    }),
+  })
+  if (!putRes.ok) {
+    const txt = await putRes.text().catch(() => '')
+    logFromContext(c, 'error', 'http', 'google oauth: vault put failed', { vault_status: putRes.status, preview: txt.slice(0, 200) })
+    return c.html('<html><body><p>Failed to store credential. Check server logs.</p></body></html>', 502)
+  }
+
+  logFromContext(c, 'info', 'http', 'google oauth: credential stored for user', {
+    user_id: state,
+    email,
+  })
+
+  return c.html(`
+    <html><body style="font-family:sans-serif;padding:2rem;">
+      <h2>✓ Google account connected</h2>
+      <p>Account: <strong>${email || 'unknown'}</strong></p>
+      <p>You can close this tab. Agents can now use <code>gmail_search</code>,
+         <code>gmail_get_message</code>, and <code>calendar_list_events</code>.</p>
+      <script>setTimeout(() => window.close(), 3000)</script>
+    </body></html>
+  `)
+})
+
+// GET /api/admin/google-oauth/status — returns whether google_oauth is
+// configured for the requesting user (email only, never the token).
+app.get('/api/admin/google-oauth/status', async (c) => {
+  const guard = await requireRole(c, 'user')
+  if (!('ok' in guard)) return guard
+
+  const vaultEngineUrl = (process.env.VAULT_ENGINE_URL || 'http://vault:8000').replace(/\/$/, '')
+  const res = await fetch(`${vaultEngineUrl}/secrets/get`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      agent_id: 'io',
+      keys: [`users/${guard.userId}/credentials/google_oauth`],
+    }),
+  })
+  if (!res.ok) {
+    return c.json({ configured: false })
+  }
+  const payload = await res.json().catch(() => null) as { secrets?: Record<string, string> } | null
+  const raw = payload?.secrets?.[`users/${guard.userId}/credentials/google_oauth`]
+  if (!raw) {
+    return c.json({ configured: false })
+  }
+  let parsed: { email?: string } | null = null
+  try { parsed = JSON.parse(raw) } catch { parsed = null }
+  return c.json({
+    configured: !!(parsed?.email),
+    email: parsed?.email ?? null,
+  })
+})
+
+// DELETE /api/admin/google-oauth — revokes the stored credential so the
+// user can re-connect with a different account.
+app.delete('/api/admin/google-oauth', async (c) => {
+  const guard = await requireRole(c, 'user')
+  if (!('ok' in guard)) return guard
+
+  const vaultEngineUrl = (process.env.VAULT_ENGINE_URL || 'http://vault:8000').replace(/\/$/, '')
+  const res = await fetch(`${vaultEngineUrl}/secrets/delete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key: `users/${guard.userId}/credentials/google_oauth` }),
+  })
+  if (!res.ok && res.status !== 404) {
+    return c.json({ error: `vault delete failed (${res.status})` }, 502)
+  }
+  logFromContext(c, 'info', 'http', 'google oauth: credential revoked', { user_id: guard.userId })
+  return c.json({ ok: true })
+})
+
 // Manager-gated LLM provider key configuration. Writes the key to OpenBao via
 // the vault engine so the value is encrypted at rest and centrally rotatable.
 // NOTE: aegis-agents currently reads ANTHROPIC_API_KEY from its environment at

@@ -422,6 +422,17 @@ func (r *ChatRepository) EnsureConversation(ctx context.Context, conversationID,
 	return err
 }
 
+func (r *ChatRepository) DeleteConversation(ctx context.Context, conversationID, userID pgtype.UUID) error {
+	if err := r.ValidateConversationOwnership(ctx, conversationID, userID); err != nil {
+		return err
+	}
+	const q = `DELETE FROM chat_schema.conversations WHERE id = $1`
+	if _, err := r.pool.Exec(ctx, q, conversationID); err != nil {
+		return fmt.Errorf("delete conversation: %w", err)
+	}
+	return nil
+}
+
 func (r *ChatRepository) TouchConversation(ctx context.Context, conversationID pgtype.UUID, updatedAt time.Time) error {
 	const q = `
 UPDATE chat_schema.conversations

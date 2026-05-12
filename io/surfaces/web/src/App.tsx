@@ -1086,7 +1086,7 @@ function App() {
       try {
         const res = await fetch(buildApiUrl('/api/conversations'), {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'X-Active-User': UI_USER_ID },
           body: JSON.stringify({ title: 'New Conversation', userId: UI_USER_ID }),
         })
         let parsed: unknown
@@ -1144,7 +1144,7 @@ function App() {
       try {
         const res = await fetch(buildApiUrl('/api/conversations'), {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'X-Active-User': UI_USER_ID },
           body: JSON.stringify({ title: 'New recurring task', userId: UI_USER_ID }),
         })
         let parsed: unknown

@@ -25,12 +25,13 @@ import (
 // domainCredTypes maps each skill domain to the credential types it requires.
 // Mirrors the mapping in mocks/vault_mock.go — keep them in sync.
 var domainCredTypes = map[string][]string{
-	"web":           {"web_api_key", "search_api_key"},
-	"data":          {"data_read_key", "data_write_key"},
-	"comms":         {"comms_api_key"},
-	"storage":       {"storage_credential"},
-	"google_search": {"serper_api_key"},
-	"github":        {"github_token"},
+	"web":              {"web_api_key", "search_api_key"},
+	"data":             {"data_read_key", "data_write_key"},
+	"comms":            {"comms_api_key"},
+	"storage":          {"storage_credential"},
+	"google_search":    {"serper_api_key"},
+	"github":           {"github_token"},
+	"google_workspace": {"google_oauth"},
 }
 
 // Client is the real implementation of interfaces.VaultClient.

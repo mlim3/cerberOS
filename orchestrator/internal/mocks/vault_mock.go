@@ -14,12 +14,13 @@ import (
 // domainToCredTypes maps each skill domain to the credential types it requires.
 // Used by VaultMock to derive AvailableCredTypes from requested domains.
 var domainToCredTypes = map[string][]string{
-	"web":           {"web_api_key"},
-	"data":          {"data_read_key", "data_write_key"},
-	"comms":         {"comms_api_key"},
-	"storage":       {"storage_credential"},
-	"google_search": {"google_search_api_key"},
-	"github":        {"github_token"},
+	"web":              {"web_api_key"},
+	"data":             {"data_read_key", "data_write_key"},
+	"comms":            {"comms_api_key"},
+	"storage":          {"storage_credential"},
+	"google_search":    {"google_search_api_key"},
+	"github":           {"github_token"},
+	"google_workspace": {"google_oauth"},
 }
 
 // VaultMock is a controllable in-memory implementation of interfaces.VaultClient.

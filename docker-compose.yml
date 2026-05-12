@@ -112,6 +112,9 @@ services:
       MEMORY_API_KEY: ${INTERNAL_VAULT_API_KEY:?Set INTERNAL_VAULT_API_KEY in .env}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4318
       OTEL_SERVICE_NAME: io
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-http://localhost:3001/api/admin/google-oauth/callback}
     restart: unless-stopped
     networks:
       - cerberos
@@ -244,6 +247,8 @@ services:
       BAO_TOKEN: ${BAO_TOKEN:-}
       # Heartbeat emitter publishes to aegis.heartbeat.service.vault.
       NATS_URL: nats://nats:4222
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       # Bootstrap-seed the shared Tavily search key into OpenBao on startup.
       TAVILY_API_KEY: ${TAVILY_API_KEY:-}
     # NOTE: We intentionally do NOT depend on openbao-unseal being healthy.

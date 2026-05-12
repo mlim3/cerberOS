@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	_ "time/tzdata" // embed IANA timezone database so TZ env resolves in minimal images
 
 	"github.com/cerberOS/agents-component/config"
 	"github.com/cerberOS/agents-component/internal/comms"

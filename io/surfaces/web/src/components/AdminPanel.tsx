@@ -63,6 +63,7 @@ function AdminPanel({ onClose }: AdminPanelProps): React.ReactElement {
   const [gmailConfigured, setGmailConfigured] = useState<{ email: string | null }>({ email: null })
   const [gmailStatus, setGmailStatus] = useState<{ kind: 'idle' | 'ok' | 'pending' | 'error'; msg?: string }>({ kind: 'idle' })
 
+
   // New user state
   const [newUserEmail, setNewUserEmail] = useState('')
   const [newUserRole, setNewUserRole] = useState<Role>('user')
