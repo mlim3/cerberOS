@@ -193,6 +193,7 @@ type SubtaskState struct {
 	SubtaskID            string          `json:"subtask_id"`
 	PlanID               string          `json:"plan_id"`
 	TaskID               string          `json:"task_id"`
+	UserID               string          `json:"user_id"`                         // MT-4 (#185) — owning tenant, propagated from parent TaskState.UserID.
 	OrchestratorTaskRef  string          `json:"orchestrator_task_ref,omitempty"` // Set at dispatch; used to route task_result back
 	State                string          `json:"state"`
 	AgentID              string          `json:"agent_id,omitempty"`

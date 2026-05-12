@@ -18,6 +18,7 @@ type OrchestratorHandler struct {
 }
 
 type WriteOrchestratorRecordRequest struct {
+	UserID              string          `json:"user_id"`
 	OrchestratorTaskRef string          `json:"orchestrator_task_ref"`
 	TaskID              string          `json:"task_id"`
 	PlanID              string          `json:"plan_id,omitempty"`
@@ -31,6 +32,7 @@ type WriteOrchestratorRecordRequest struct {
 
 type OrchestratorRecordResponse struct {
 	ID                  string      `json:"id,omitempty"`
+	UserID              string      `json:"user_id"`
 	OrchestratorTaskRef string      `json:"orchestrator_task_ref"`
 	TaskID              string      `json:"task_id"`
 	PlanID              *string     `json:"plan_id,omitempty"`
@@ -64,8 +66,8 @@ func (h *OrchestratorHandler) HandleWriteRecord(w http.ResponseWriter, r *http.R
 		writeJSONError(w, http.StatusBadRequest, "invalid_argument", "invalid request body", nil)
 		return
 	}
-	if stringsBlank(req.OrchestratorTaskRef) || stringsBlank(req.TaskID) || stringsBlank(req.DataType) || stringsBlank(req.Timestamp) || len(req.Payload) == 0 {
-		writeJSONError(w, http.StatusBadRequest, "invalid_argument", "orchestrator_task_ref, task_id, data_type, timestamp, and payload are required", nil)
+	if stringsBlank(req.UserID) || stringsBlank(req.OrchestratorTaskRef) || stringsBlank(req.TaskID) || stringsBlank(req.DataType) || stringsBlank(req.Timestamp) || len(req.Payload) == 0 {
+		writeJSONError(w, http.StatusBadRequest, "invalid_argument", "user_id, orchestrator_task_ref, task_id, data_type, timestamp, and payload are required", nil)
 		return
 	}
 	if len(req.Payload) > maxOrchestratorPayloadBytes {
@@ -83,6 +85,7 @@ func (h *OrchestratorHandler) HandleWriteRecord(w http.ResponseWriter, r *http.R
 	}
 
 	record, err := h.repo.WriteRecord(r.Context(), storage.WriteOrchestratorRecordParams{
+		UserID:              req.UserID,
 		OrchestratorTaskRef: req.OrchestratorTaskRef,
 		TaskID:              req.TaskID,
 		PlanID:              req.PlanID,
@@ -97,7 +100,8 @@ func (h *OrchestratorHandler) HandleWriteRecord(w http.ResponseWriter, r *http.R
 		switch {
 		case errors.Is(err, storage.ErrUnknownOrchestratorDataType),
 			errors.Is(err, storage.ErrMissingPlanID),
-			errors.Is(err, storage.ErrMissingSubtaskID):
+			errors.Is(err, storage.ErrMissingSubtaskID),
+			errors.Is(err, storage.ErrMissingUserID):
 			writeJSONError(w, http.StatusBadRequest, "invalid_argument", err.Error(), nil)
 		default:
 			writeJSONError(w, http.StatusInternalServerError, "internal", "failed to write orchestrator record", err.Error())
@@ -129,10 +133,15 @@ func (h *OrchestratorHandler) HandleWriteRecord(w http.ResponseWriter, r *http.R
 // @Failure 500 {object} map[string]interface{} "Internal Server Error"
 // @Router /api/v1/orchestrator/records [get]
 func (h *OrchestratorHandler) HandleQueryRecords(w http.ResponseWriter, r *http.Request) {
+	userID := r.URL.Query().Get("user_id")
 	dataType := r.URL.Query().Get("data_type")
 	taskID := r.URL.Query().Get("task_id")
 	orchRef := r.URL.Query().Get("orchestrator_task_ref")
 	stateFilter := r.URL.Query().Get("state_filter")
+	if stringsBlank(userID) {
+		writeJSONError(w, http.StatusBadRequest, "invalid_argument", "user_id is required", nil)
+		return
+	}
 	if stringsBlank(dataType) {
 		writeJSONError(w, http.StatusBadRequest, "invalid_argument", "data_type is required", nil)
 		return
@@ -170,6 +179,7 @@ func (h *OrchestratorHandler) HandleQueryRecords(w http.ResponseWriter, r *http.
 	}
 
 	records, err := h.repo.QueryRecords(r.Context(), storage.QueryOrchestratorRecordsParams{
+		UserID:              userID,
 		DataType:            dataType,
 		TaskID:              taskID,
 		OrchestratorTaskRef: orchRef,
@@ -178,8 +188,12 @@ func (h *OrchestratorHandler) HandleQueryRecords(w http.ResponseWriter, r *http.
 		StateFilter:         stateFilter,
 	})
 	if err != nil {
-		if errors.Is(err, storage.ErrUnknownOrchestratorDataType) {
+		switch {
+		case errors.Is(err, storage.ErrUnknownOrchestratorDataType):
 			writeJSONError(w, http.StatusBadRequest, "invalid_argument", "invalid data_type", nil)
+			return
+		case errors.Is(err, storage.ErrMissingUserID):
+			writeJSONError(w, http.StatusBadRequest, "invalid_argument", err.Error(), nil)
 			return
 		}
 		writeJSONError(w, http.StatusInternalServerError, "internal", "failed to query orchestrator records", err.Error())
@@ -208,10 +222,11 @@ func (h *OrchestratorHandler) HandleQueryRecords(w http.ResponseWriter, r *http.
 // @Failure 500 {object} map[string]interface{} "Internal Server Error"
 // @Router /api/v1/orchestrator/records/latest [get]
 func (h *OrchestratorHandler) HandleReadLatest(w http.ResponseWriter, r *http.Request) {
+	userID := r.URL.Query().Get("user_id")
 	taskID := r.URL.Query().Get("task_id")
 	dataType := r.URL.Query().Get("data_type")
-	if stringsBlank(taskID) || stringsBlank(dataType) {
-		writeJSONError(w, http.StatusBadRequest, "invalid_argument", "task_id and data_type are required", nil)
+	if stringsBlank(userID) || stringsBlank(taskID) || stringsBlank(dataType) {
+		writeJSONError(w, http.StatusBadRequest, "invalid_argument", "user_id, task_id and data_type are required", nil)
 		return
 	}
 	if !storage.ValidOrchestratorDataType(dataType) {
@@ -219,11 +234,12 @@ func (h *OrchestratorHandler) HandleReadLatest(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	record, err := h.repo.ReadLatest(r.Context(), taskID, dataType)
+	record, err := h.repo.ReadLatest(r.Context(), userID, taskID, dataType)
 	if err != nil {
 		switch {
-		case errors.Is(err, storage.ErrUnknownOrchestratorDataType):
-			writeJSONError(w, http.StatusBadRequest, "invalid_argument", "invalid data_type", nil)
+		case errors.Is(err, storage.ErrUnknownOrchestratorDataType),
+			errors.Is(err, storage.ErrMissingUserID):
+			writeJSONError(w, http.StatusBadRequest, "invalid_argument", err.Error(), nil)
 		case errors.Is(err, storage.ErrOrchestratorRecordNotFound):
 			writeJSONError(w, http.StatusNotFound, "not_found", "record not found", nil)
 		default:
@@ -255,6 +271,7 @@ func orchestratorRecordResponse(rec storage.OrchestratorRecord, includeID bool) 
 		traceID = &v
 	}
 	resp := OrchestratorRecordResponse{
+		UserID:              uuid.UUID(rec.UserID.Bytes).String(),
 		OrchestratorTaskRef: rec.OrchestratorTaskRef,
 		TaskID:              rec.TaskID,
 		PlanID:              planID,

@@ -178,6 +178,7 @@ CREATE TABLE IF NOT EXISTS orchestrator_schema.orchestrator_records (
     id UUID PRIMARY KEY,
     orchestrator_task_ref TEXT NOT NULL,
     task_id TEXT NOT NULL,
+    user_id UUID NOT NULL REFERENCES identity_schema.users(id),
     plan_id TEXT,
     subtask_id TEXT,
     trace_id VARCHAR(64),
@@ -188,21 +189,23 @@ CREATE TABLE IF NOT EXISTS orchestrator_schema.orchestrator_records (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_orch_records_task_id_type
-    ON orchestrator_schema.orchestrator_records (task_id, data_type, timestamp DESC);
-CREATE INDEX IF NOT EXISTS idx_orch_records_orch_ref_type
-    ON orchestrator_schema.orchestrator_records (orchestrator_task_ref, data_type, timestamp DESC);
-CREATE INDEX IF NOT EXISTS idx_orch_records_type_timestamp
-    ON orchestrator_schema.orchestrator_records (data_type, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_orch_records_user_task
+    ON orchestrator_schema.orchestrator_records (user_id, task_id);
+CREATE INDEX IF NOT EXISTS idx_orch_records_user_task_type
+    ON orchestrator_schema.orchestrator_records (user_id, task_id, data_type, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_orch_records_user_orch_ref_type
+    ON orchestrator_schema.orchestrator_records (user_id, orchestrator_task_ref, data_type, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_orch_records_user_type_timestamp
+    ON orchestrator_schema.orchestrator_records (user_id, data_type, timestamp DESC);
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_orch_records_task_state_upsert
-    ON orchestrator_schema.orchestrator_records (task_id, data_type)
+    ON orchestrator_schema.orchestrator_records (user_id, task_id, data_type)
     WHERE data_type = 'task_state';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_orch_records_plan_state_upsert
-    ON orchestrator_schema.orchestrator_records (task_id, plan_id, data_type)
+    ON orchestrator_schema.orchestrator_records (user_id, task_id, plan_id, data_type)
     WHERE data_type = 'plan_state';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_orch_records_subtask_state_upsert
-    ON orchestrator_schema.orchestrator_records (task_id, subtask_id, data_type)
+    ON orchestrator_schema.orchestrator_records (user_id, task_id, subtask_id, data_type)
     WHERE data_type = 'subtask_state';
 
 CREATE OR REPLACE FUNCTION orchestrator_schema.reject_append_only_mutation()

@@ -49,13 +49,12 @@ func (m *Monitor) RehydrateFromMemory() error {
 	log := observability.LogFromContext(observability.WithModule(context.Background(), "task_monitor"))
 	log.Info("task monitor rehydration started")
 
-	records, err := m.memory.Read(types.MemoryQuery{
-		DataType: types.DataTypeTaskState,
-		Filter:   map[string]string{"state": "not_terminal"},
-	})
-	if err != nil {
-		return fmt.Errorf("rehydrate task states: %w", err)
-	}
+	// TODO(#189 / MT-14): rehydrate is not yet tenant-aware. Memory reads are now
+	// scoped to user_id (MT-4 #185), so a global, unfiltered rehydrate is no
+	// longer supported. Until MT-14 wires per-tenant rehydrate, we skip and rely
+	// on tasks naturally resuming via their next inbound signal. This is an
+	// accepted regression for MT-4 (see #185 "Out of scope").
+	var records []types.MemoryRecord
 
 	latestByTask := make(map[string]*types.TaskState)
 	for _, record := range records {
@@ -159,6 +158,7 @@ func (m *Monitor) StateTransition(_ context.Context, taskID, newState, reason st
 		return fmt.Errorf("marshal task state transition for task %s: %w", taskID, err)
 	}
 	if err := m.memory.Write(types.OrchestratorMemoryWritePayload{
+		UserID:              ts.UserID,
 		OrchestratorTaskRef: ts.OrchestratorTaskRef,
 		TaskID:              ts.TaskID,
 		DataType:            types.DataTypeTaskState,
