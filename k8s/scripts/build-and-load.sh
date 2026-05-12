@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Build all service images locally and load them into the kind cluster.
 # Use this instead of a registry during local development.
-# Usage: ./deploy/scripts/build-and-load.sh [cluster-name]
+# Usage: ./k8s/scripts/build-and-load.sh [cluster-name]
 set -euo pipefail
 
 for arg in "$@"; do
   case $arg in
     -h|--help)
-      echo "Usage: ./deploy/scripts/build-and-load.sh [CLUSTER_NAME]"
+      echo "Usage: ./k8s/scripts/build-and-load.sh [CLUSTER_NAME]"
       echo ""
       echo "Build all service Docker images and load them into a kind cluster."
       echo ""
@@ -18,8 +18,8 @@ for arg in "$@"; do
       echo "  -h, --help  Show this help message"
       echo ""
       echo "Examples:"
-      echo "  ./deploy/scripts/build-and-load.sh            # load into 'cerberos' cluster"
-      echo "  ./deploy/scripts/build-and-load.sh my-cluster # load into 'my-cluster'"
+      echo "  ./k8s/scripts/build-and-load.sh            # load into 'cerberos' cluster"
+      echo "  ./k8s/scripts/build-and-load.sh my-cluster # load into 'my-cluster'"
       exit 0
       ;;
   esac

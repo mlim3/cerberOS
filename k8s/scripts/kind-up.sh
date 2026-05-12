@@ -179,13 +179,13 @@ if [ "$SKIP_INSTALL" = false ]; then
   # the umbrella's helm dependency update, otherwise the observability
   # sub-chart gets packaged without its own dependencies and none of the
   # monitoring pods ever deploy.
-  for chart in "${REPO_ROOT}"/deploy/helm/charts/*/; do
+  for chart in "${REPO_ROOT}"/k8s/helm/charts/*/; do
     if grep -q "^dependencies:" "$chart/Chart.yaml" 2>/dev/null; then
       echo "    Resolving deps for $(basename "$chart") ..."
       helm dependency update "$chart" >/dev/null
     fi
   done
-  helm dependency update "${REPO_ROOT}/deploy/helm/cerberos" >/dev/null
+  helm dependency update "${REPO_ROOT}/k8s/helm/cerberos" >/dev/null
   HELM_SET_ARGS=()
   if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
     HELM_SET_ARGS+=(--set "aegis-agents.anthropicApiKey=${ANTHROPIC_API_KEY}")
@@ -203,9 +203,9 @@ if [ "$SKIP_INSTALL" = false ]; then
   # Bash with `set -u` treats "${HELM_SET_ARGS[@]}" as an error when the array is empty
   # on some versions; temporarily allow unset for this invocation.
   set +u
-  helm upgrade --install cerberos "${REPO_ROOT}/deploy/helm/cerberos" \
+  helm upgrade --install cerberos "${REPO_ROOT}/k8s/helm/cerberos" \
     --namespace "${NAMESPACE}" \
-    --values "${REPO_ROOT}/deploy/helm/cerberos/values-dev.yaml" \
+    --values "${REPO_ROOT}/k8s/helm/cerberos/values-dev.yaml" \
     "${HELM_SET_ARGS[@]}"
   set -u
 
@@ -247,7 +247,7 @@ echo "  OpenBao (dev):  kubectl port-forward -n ${NAMESPACE} svc/openbao 8200:82
 echo "                  root token: root"
 echo ""
 echo "  All pods:       kubectl get pods -n ${NAMESPACE} -o wide"
-echo "  Tear down:      ./deploy/scripts/kind-down.sh"
+echo "  Tear down:      ./k8s/scripts/kind-down.sh"
 echo ""
 echo "  Embeddings:"
 echo "    Model:        ${EMBEDDING_MODEL}"
@@ -273,7 +273,7 @@ else
   echo "    ANTHROPIC_API_KEY  ✗ not set"
   echo "      How to inject:"
   echo "        Live cluster:  kubectl set env deployment/aegis-agents ANTHROPIC_API_KEY=<key> -n ${NAMESPACE}"
-  echo "        Fresh start:   export ANTHROPIC_API_KEY=<key> && ./deploy/scripts/kind-up.sh --skip-build"
+  echo "        Fresh start:   export ANTHROPIC_API_KEY=<key> && ./k8s/scripts/kind-up.sh --skip-build"
 fi
 if [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
   echo "    ANTHROPIC_BASE_URL ✓ injected: ${ANTHROPIC_BASE_URL}"
@@ -281,6 +281,6 @@ else
   echo "    ANTHROPIC_BASE_URL ✗ not set (using Anthropic default endpoint)"
   echo "      How to inject:"
   echo "        Live cluster:  kubectl set env deployment/aegis-agents ANTHROPIC_BASE_URL=<url> -n ${NAMESPACE}"
-  echo "        Fresh start:   export ANTHROPIC_BASE_URL=<url> && ./deploy/scripts/kind-up.sh --skip-build"
+  echo "        Fresh start:   export ANTHROPIC_BASE_URL=<url> && ./k8s/scripts/kind-up.sh --skip-build"
 fi
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

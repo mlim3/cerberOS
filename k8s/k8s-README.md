@@ -19,7 +19,7 @@ Each service runs in its own pod, distributed across nodes, orchestrated via Hel
 
 ```bash
 # 1. Create the kind cluster, build & load images, install the umbrella chart
-./deploy/scripts/kind-up.sh
+./k8s/scripts/kind-up.sh
 
 # 2. Open the web UI
 open http://localhost:3001
@@ -89,13 +89,13 @@ Important:
 
 ```bash
 # Create cluster only
-kind create cluster --name cerberos --config deploy/kind/cluster.yaml
+kind create cluster --name cerberos --config k8s/kind/cluster.yaml
 
 # Create namespace
 kubectl create namespace cerberos
 
 # Build & load images
-./deploy/scripts/build-and-load.sh
+./k8s/scripts/build-and-load.sh
 
 # Add required Helm repos
 helm repo add nats https://nats-io.github.io/k8s/helm/charts
@@ -104,12 +104,12 @@ helm repo add prometheus-community https://prometheus-community.github.io/helm-c
 helm repo update
 
 # Resolve umbrella dependencies
-helm dependency update deploy/helm/cerberos
+helm dependency update k8s/helm/cerberos
 
 # Install (substitute your real secrets)
-helm upgrade --install cerberos deploy/helm/cerberos \
+helm upgrade --install cerberos k8s/helm/cerberos \
   --namespace cerberos \
-  -f deploy/helm/cerberos/values-dev.yaml \
+  -f k8s/helm/cerberos/values-dev.yaml \
   --set aegis-agents.anthropicApiKey=$ANTHROPIC_API_KEY \
   --set memory-api.vaultMasterKey=$VAULT_MASTER_KEY \
   --set memory-api.internalVaultApiKey=$INTERNAL_VAULT_API_KEY \
@@ -153,11 +153,11 @@ kubectl port-forward -n cerberos svc/openbao 8200:8200
 kubectl port-forward -n cerberos svc/grafana 3000:80
 
 # Re-install after a code change
-./deploy/scripts/build-and-load.sh
-helm upgrade cerberos deploy/helm/cerberos -n cerberos -f deploy/helm/cerberos/values-dev.yaml
+./k8s/scripts/build-and-load.sh
+helm upgrade cerberos k8s/helm/cerberos -n cerberos -f k8s/helm/cerberos/values-dev.yaml
 
 # Tear down
-./deploy/scripts/kind-down.sh
+./k8s/scripts/kind-down.sh
 ```
 
 ---
@@ -249,8 +249,8 @@ Provision a tainted node pool with `/dev/kvm` access first.
 ### Scale to managed cloud (EKS/GKE/AKS)
 1. Provision a cluster (any method — eksctl, gcloud, az aks).
 2. Point `kubectl` at it.
-3. `helm dependency update deploy/helm/cerberos`
-4. `helm upgrade --install cerberos deploy/helm/cerberos -f deploy/helm/cerberos/values-prod.yaml --set ...secrets...`
+3. `helm dependency update k8s/helm/cerberos`
+4. `helm upgrade --install cerberos k8s/helm/cerberos -f k8s/helm/cerberos/values-prod.yaml --set ...secrets...`
 5. Update `storageClass` in `values-prod.yaml` to match your cloud's provisioner.
 
 ---
@@ -283,7 +283,7 @@ Direct HTTP calls are restricted to the paths shown above (and enforced by Netwo
 ## Directory layout
 
 ```
-deploy/
+k8s/
   helm/
     charts/
       nats/               # Wrapper around nats-io/nats upstream chart

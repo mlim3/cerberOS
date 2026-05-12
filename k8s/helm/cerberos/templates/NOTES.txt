@@ -32,5 +32,5 @@ cerberOS has been installed in namespace {{ .Release.Namespace }}.
 
   Dev mode is ON by default (in-memory storage, auto-unsealed).
   For persistent storage set openbao.devMode=false and provide
-  a BAO_TOKEN after init:  see deploy/k8s-README.md for the
+  a BAO_TOKEN after init:  see k8s/k8s-README.md for the
   unseal runbook.

@@ -2,7 +2,7 @@
 # values-dev.yaml — kind local cluster overrides
 # =============================================================================
 # Usage:
-#   ./deploy/scripts/kind-up.sh
+#   ./k8s/scripts/kind-up.sh
 #
 #   ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL are picked up by kind-up.sh from the
 #   shell or from repo-root `.env` (shell wins if both define a key).
@@ -60,7 +60,7 @@ memory-api:
     password: password
   vaultMasterKey: "00000000000000000000000000000000"
   internalVaultApiKey: "dev-internal-key"
-  # Applies default schedules from deploy/helm/charts/memory-api/values.yaml
+  # Applies default schedules from k8s/helm/charts/memory-api/values.yaml
   systemMaintenanceCron:
     enabled: true
 

@@ -2,8 +2,8 @@
 
 Two mechanisms run **system-level** schedules in cerberOS:
 
-1. **Memory API** — `POST /api/v1/system/maintenance/run` (`X-Internal-API-Key`) runs deterministic **`jobType`** steps (scheduled sweeps, DB ping, inventories, stubs). Helm: `deploy/helm/charts/memory-api` (`systemMaintenanceCron`).
-2. **Orchestrator** — `POST /v1/cron/wake` (`X-Aegis-Cron-Secret`) enqueues a **planner** user task when `CRON_WAKE_SECRET` is set. Helm: `deploy/helm/charts/orchestrator` (`systemCronWake`).
+1. **Memory API** — `POST /api/v1/system/maintenance/run` (`X-Internal-API-Key`) runs deterministic **`jobType`** steps (scheduled sweeps, DB ping, inventories, stubs). Helm: `k8s/helm/charts/memory-api` (`systemMaintenanceCron`).
+2. **Orchestrator** — `POST /v1/cron/wake` (`X-Aegis-Cron-Secret`) enqueues a **planner** user task when `CRON_WAKE_SECRET` is set. Helm: `k8s/helm/charts/orchestrator` (`systemCronWake`).
 
 The in-process Memory **RunDue ticker** (~1 minute) continues to dispatch due `scheduled_jobs`; CronJobs mainly add jitter-free visibility, cross-replica redundancy, or explicit planner passes.
 
@@ -29,7 +29,7 @@ The in-process Memory **RunDue ticker** (~1 minute) continues to dispatch due `s
 
 ## Default schedules (`memory-api` chart)
 
-Defined in **`deploy/helm/charts/memory-api/values.yaml`** under **`systemMaintenanceCron.jobs`**. CronJobs exist only when **`systemMaintenanceCron.enabled`** is true (kind dev: **`deploy/helm/cerberos/values-dev.yaml`** sets this on).
+Defined in **`k8s/helm/charts/memory-api/values.yaml`** under **`systemMaintenanceCron.jobs`**. CronJobs exist only when **`systemMaintenanceCron.enabled`** is true (kind dev: **`k8s/helm/cerberos/values-dev.yaml`** sets this on).
 
 | Job (name) | Cron (cluster TZ, usually UTC) | `jobType` |
 |------------|--------------------------------|------------|
