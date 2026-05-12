@@ -1,8 +1,9 @@
 import { useState, useRef, useEffect, useMemo, type ReactNode } from 'react'
 import { marked } from 'marked'
-import type { Task, CredentialRequest, CredentialRequestStatus, ChatMessage } from '@cerberos/io-core'
+import type { Task, CredentialRequest, CredentialRequestStatus, ChatMessage, SkillCreated } from '@cerberos/io-core'
 import type { UISettings } from './SettingsPanel'
 import CredentialRequestCard from './CredentialRequestCard'
+import SkillCreatedCard from './SkillCreatedCard'
 import ProgressIndicator from './ProgressIndicator'
 import { VoiceRecorder } from './VoiceRecorder'
 import { CerberOsLogo } from './icons/CerberOsLogo'
@@ -69,6 +70,9 @@ interface ChatWindowProps {
   composerDisabledHint?: string
   inputPlaceholder?: string
   pulseMessageKey?: string
+  /** When set, renders an inline SkillCreatedCard inside the message list. */
+  skillCreatedCard?: SkillCreated | null
+  onDismissSkillCreated?: () => void
 }
 
 const SUGGESTION_CHIPS = [
@@ -137,6 +141,8 @@ function ChatWindow({
   composerDisabledHint,
   inputPlaceholder,
   pulseMessageKey,
+  skillCreatedCard,
+  onDismissSkillCreated,
 }: ChatWindowProps) {
   const [inputValue, setInputValue] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
@@ -237,6 +243,13 @@ function ChatWindow({
           </div>
           )
         })}
+
+        {skillCreatedCard && onDismissSkillCreated && (
+          <SkillCreatedCard
+            skill={skillCreatedCard}
+            onDismiss={onDismissSkillCreated}
+          />
+        )}
 
         {credentialRequest && credentialStatus && onProvideCredential && (
           <CredentialRequestCard

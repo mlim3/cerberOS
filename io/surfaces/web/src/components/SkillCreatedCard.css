@@ -1,0 +1,226 @@
+/* ── SkillCreatedCard ─────────────────────────────────────────────────────── */
+/*
+ * Inline card rendered in the chat message stream when the agent successfully
+ * creates a new skill via create_skill_from_nl. Appears like a message from
+ * the assistant, styled in success-green to feel celebratory.
+ */
+
+.sc-card {
+  margin: var(--sp-3) clamp(var(--sp-5), 3vw, var(--sp-7)) 0;
+  padding: var(--sp-4);
+  border-radius: var(--radius-sm);
+  background: rgba(100, 230, 173, 0.07);
+  border: 1px solid rgba(100, 230, 173, 0.22);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  flex-shrink: 0;
+  animation: sc-slide-in 0.32s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@keyframes sc-slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* ── Header ─────────────────────────────────────────────────────────────── */
+
+.sc-header {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.sc-sparkle {
+  flex-shrink: 0;
+  font-size: 0.9rem;
+  color: var(--success);
+  line-height: 1;
+  /* subtle pulse animation to draw attention */
+  animation: sc-pulse 2.6s ease-in-out 0.3s 2;
+}
+
+@keyframes sc-pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.55; }
+}
+
+.sc-headline {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--font-sm);
+  font-weight: 600;
+  color: var(--success);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sc-dismiss {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 1.15rem;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: var(--radius-xs);
+  transition: color 0.15s ease, background-color 0.15s ease;
+  padding: 0;
+}
+
+.sc-dismiss:hover {
+  color: var(--text-primary);
+  background: var(--surface-hover);
+}
+
+.sc-dismiss:focus { outline: none; }
+.sc-dismiss:focus-visible { box-shadow: var(--focus-ring); }
+
+/* ── Body ────────────────────────────────────────────────────────────────── */
+
+.sc-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.sc-name-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.sc-domain-badge {
+  flex-shrink: 0;
+  padding: 2px 10px;
+  border-radius: 20px;
+  background: rgba(100, 230, 173, 0.12);
+  border: 1px solid rgba(100, 230, 173, 0.28);
+  color: var(--success);
+  font-size: var(--font-xs);
+  font-weight: 600;
+  letter-spacing: 0.025em;
+  line-height: 1.6;
+}
+
+.sc-name {
+  font-size: var(--font-md);
+  font-weight: 700;
+  color: var(--text-primary);
+  word-break: break-word;
+  line-height: var(--leading-tight);
+}
+
+.sc-id {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: var(--font-xs);
+  color: var(--text-muted);
+  background: var(--code-inline-bg);
+  padding: 1px 5px;
+  border-radius: var(--radius-xs);
+  align-self: flex-start;
+}
+
+.sc-description {
+  font-size: var(--font-sm);
+  color: var(--text-secondary);
+  line-height: var(--leading-normal);
+  margin: 0;
+}
+
+.sc-chips {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  flex-wrap: wrap;
+  margin-top: 2px;
+}
+
+.sc-chip {
+  font-size: var(--font-xs);
+  color: var(--text-muted);
+}
+
+.sc-chip-sep {
+  font-size: var(--font-xs);
+  color: var(--text-muted);
+  opacity: 0.45;
+}
+
+/* ── Recipe (collapsible) ──────────────────────────────────────────────── */
+
+.sc-recipe-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  border-top: 1px solid rgba(100, 230, 173, 0.13);
+  padding-top: var(--sp-2);
+}
+
+.sc-recipe-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  background: transparent;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-size: var(--font-xs);
+  color: var(--text-muted);
+  cursor: pointer;
+  text-align: left;
+  border-radius: var(--radius-xs);
+  transition: color 0.15s ease;
+  user-select: none;
+}
+
+.sc-recipe-toggle:hover {
+  color: var(--success);
+}
+
+.sc-recipe-toggle:focus { outline: none; }
+.sc-recipe-toggle:focus-visible { box-shadow: var(--focus-ring); }
+
+.sc-chevron {
+  display: inline-block;
+  width: 0.42em;
+  height: 0.42em;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 0.18s cubic-bezier(0.33, 1, 0.68, 1);
+  margin-top: 1px;
+}
+
+.sc-recipe-toggle[aria-expanded='true'] .sc-chevron {
+  transform: rotate(45deg);
+  margin-top: 0;
+}
+
+.sc-recipe-body {
+  font-family: 'SF Mono', 'Fira Code', 'Fira Mono', monospace;
+  font-size: var(--font-xs);
+  color: var(--text-secondary);
+  background: var(--code-block-bg);
+  border: var(--border-subtle);
+  border-radius: var(--radius-xs);
+  padding: var(--sp-3);
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.55;
+  margin: 0;
+}

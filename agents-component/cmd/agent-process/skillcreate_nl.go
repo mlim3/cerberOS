@@ -148,7 +148,7 @@ func executeCreateSkillFromNL(ctx context.Context, client *anthropic.Client, sl 
 		return ToolResult{Content: fmt.Sprintf("created skill %s in domain %s, but live reload signal failed: %v. It should be available after restart.", generated.Node.Name, domain, err)}
 	}
 	if ve != nil {
-		ve.EmitSkillSynthesized(domain, generated.Node.Name)
+		ve.EmitSkillCreated(domain, generated.Node, generated.Mode)
 	}
 	return ToolResult{Content: fmt.Sprintf("Created skill %s in domain %s using %s generation. It was persisted, reload was signaled, and it is scoped to this user.", generated.Node.Name, domain, generated.Mode)}
 }

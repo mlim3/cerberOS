@@ -128,6 +128,12 @@ type PlanDecisionHandler func(ctx context.Context, decision types.PlanDecision) 
 // or when the event itself is a skill_synthesized creation event (outcome == "synthesized").
 type SkillActivityHandler func(agentID, taskID, domain, command, outcome string, elapsedMS int64, vaultDelegated, synthesized bool)
 
+// SkillCreatedHandler is called when a skill_created audit event arrives from an
+// agent that successfully persisted a skill via create_skill_from_nl. It carries
+// the full SkillNode details so the UI can display a rich "skill created" card.
+// Implementations must be non-blocking (called on the NATS subscription goroutine).
+type SkillCreatedHandler func(agentID, taskID, domain, skillName, label, description, recipe, mode, scope string)
+
 // VaultExecuteHandler is called when an agent publishes a vault.execute.request.
 // The handler resolves user_id from task state and forwards to the vault engine.
 // Returns the VaultExecuteResult to publish back to the agent.
@@ -150,6 +156,7 @@ type Gateway struct {
 	credentialRequestHandler CredentialRequestHandler
 	planDecisionHandler      PlanDecisionHandler
 	skillActivityHandler     SkillActivityHandler
+	skillCreatedHandler      SkillCreatedHandler
 	vaultExecuteHandler      VaultExecuteHandler
 	agentSpawnRequestHandler AgentSpawnRequestHandler
 
@@ -251,6 +258,13 @@ func (g *Gateway) RegisterPlanDecisionHandler(h PlanDecisionHandler) {
 // The notability filter is applied before invoking the handler.
 func (g *Gateway) RegisterSkillActivityHandler(h SkillActivityHandler) {
 	g.skillActivityHandler = h
+}
+
+// RegisterSkillCreatedHandler registers the callback invoked when a skill_created
+// audit event arrives from an agent. The handler receives the full skill details
+// so the IO Component can push a rich "skill created" SSE event to the UI.
+func (g *Gateway) RegisterSkillCreatedHandler(h SkillCreatedHandler) {
+	g.skillCreatedHandler = h
 }
 
 // RegisterVaultExecuteHandler registers the callback for vault.execute.request messages.
@@ -615,6 +629,11 @@ func (g *Gateway) handleRawCredentialRequest(subject string, data []byte) error 
 	// agent's credential broker unblocks; revoke is fire-and-forget.
 	if payload.Operation == "authorize" {
 		ctx := extractOrCreateCtx(envelope, "comms_gateway")
+		observability.LogFromContext(ctx).Info("credential.request authorize received — granting",
+			"request_id", payload.RequestID,
+			"agent_id", payload.AgentID,
+			"task_id", payload.TaskID,
+		)
 		resp := map[string]any{
 			"request_id":       payload.RequestID,
 			"agent_id":         payload.AgentID,
@@ -622,7 +641,18 @@ func (g *Gateway) handleRawCredentialRequest(subject string, data []byte) error 
 			"permission_token": "orch-perm-" + payload.RequestID,
 			"expires_at":       time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
 		}
-		return g.publishEnvelope(ctx, TopicAgentCredentialResponse, "credential.response", payload.RequestID, resp)
+		if err := g.publishEnvelope(ctx, TopicAgentCredentialResponse, "credential.response", payload.RequestID, resp); err != nil {
+			observability.LogFromContext(ctx).Error("credential.response publish failed",
+				"request_id", payload.RequestID,
+				"error", err,
+			)
+			return err
+		}
+		observability.LogFromContext(ctx).Info("credential.response granted and published",
+			"request_id", payload.RequestID,
+			"agent_id", payload.AgentID,
+		)
+		return nil
 	}
 	if payload.Operation == "revoke" {
 		return nil
@@ -1557,6 +1587,24 @@ func (g *Gateway) handleRawAgentAuditEvent(subject string, data []byte) error {
 	h := g.skillActivityHandler
 
 	switch event.EventType {
+	case "skill_created":
+		// A new skill was persisted via create_skill_from_nl. Route to the
+		// skillCreatedHandler with full SkillNode details for UI display.
+		if g.skillCreatedHandler == nil {
+			return nil
+		}
+		g.skillCreatedHandler(
+			event.AgentID, event.TaskID,
+			event.Details["domain"],
+			event.Details["skill_name"],
+			event.Details["label"],
+			event.Details["description"],
+			event.Details["recipe"],
+			event.Details["mode"],
+			event.Details["scope"],
+		)
+		return nil
+
 	case "skill_synthesized":
 		// A new skill was just created. Always route — no notability filter.
 		if h == nil {

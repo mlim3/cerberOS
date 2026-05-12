@@ -1868,7 +1868,12 @@ app.post('/api/credential', async (c) => {
 // =============================================================================
 
 app.get('/api/events/:taskId', (c) => {
-  const userId = activeUserId(c)
+  // EventSource cannot send custom headers, so we accept userId as a query
+  // parameter as a fallback specifically for this SSE endpoint.
+  const UUID_RE_LOCAL = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+  const headerUserId = activeUserId(c)
+  const queryUserId = c.req.query('userId')?.trim().toLowerCase() ?? null
+  const userId = headerUserId ?? (queryUserId && UUID_RE_LOCAL.test(queryUserId) ? queryUserId : null)
   if (!userId) return userIdRequired(c)
   const taskId = c.req.param('taskId');
   c.set('taskId', taskId)
