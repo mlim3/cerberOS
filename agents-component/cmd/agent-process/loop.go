@@ -213,6 +213,13 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 	if err := registry.Register(skillLoadTool(registry, sl, spawnCtx.SkillLoadAllowed)); err != nil {
 		log.Warn("skill_load tool registration failed", "error", err)
 	}
+	existingForNLCreate := make(map[string]bool)
+	for _, t := range registry.Tools() {
+		existingForNLCreate[t.Definition.Name] = true
+	}
+	if err := registry.Register(createSkillFromNLTool(client, sl, ve, spawnCtx, existingForNLCreate)); err != nil {
+		log.Warn("create_skill_from_nl tool registration failed", "error", err)
+	}
 
 	// Pre-populate the registry with external skills persisted by skill_load in
 	// prior sessions. Each record carries the serialised externalSkillManifest in

@@ -127,6 +127,8 @@ type SkillNode struct {
 	// Static skills loaded from config carry Origin "" (zero value).
 	Origin        string     `json:"origin,omitempty"`         // "static" | "synthesized"
 	SynthesizedAt *time.Time `json:"synthesized_at,omitempty"` // non-nil when Origin == "synthesized"
+	OwnerUserID   string     `json:"owner_user_id,omitempty"`
+	Scope         string     `json:"scope,omitempty"`
 
 	// Recipe is set only on synthesized command nodes. It is a step-by-step
 	// procedure extracted from the session history, with {{param_name}}
@@ -148,6 +150,8 @@ type SynthesizedSkillRecord struct {
 	Description string     `json:"description"`
 	Recipe      string     `json:"recipe"`
 	Spec        *SkillSpec `json:"spec,omitempty"`
+	OwnerUserID string     `json:"owner_user_id,omitempty"`
+	Scope       string     `json:"scope,omitempty"`
 }
 
 // MemoryWrite is the tagged payload sent to the Memory Component.
