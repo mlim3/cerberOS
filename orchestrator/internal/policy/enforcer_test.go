@@ -517,3 +517,61 @@ func testConfig() *config.OrchestratorConfig {
 		NodeID:              "test-node",
 	}
 }
+
+// ── skill_load permission tests ───────────────────────────────────────────────
+
+func TestSkillLoadAllowed_NoEnvVarAllowsAll(t *testing.T) {
+	t.Setenv("SKILL_LOAD_ALLOWED_USERS", "")
+	enforcer := New(testConfig(), &mocks.VaultMock{}, mocks.NewMemoryMock())
+	if !enforcer.skillLoadAllowed("any-user") {
+		t.Error("expected all users allowed when SKILL_LOAD_ALLOWED_USERS is unset")
+	}
+}
+
+func TestSkillLoadAllowed_WildcardAllowsAll(t *testing.T) {
+	t.Setenv("SKILL_LOAD_ALLOWED_USERS", "*")
+	enforcer := New(testConfig(), &mocks.VaultMock{}, mocks.NewMemoryMock())
+	if !enforcer.skillLoadAllowed("any-user") {
+		t.Error("expected all users allowed when SKILL_LOAD_ALLOWED_USERS=*")
+	}
+}
+
+func TestSkillLoadAllowed_ListAllowsMatchingUser(t *testing.T) {
+	t.Setenv("SKILL_LOAD_ALLOWED_USERS", "alice, bob, carol")
+	enforcer := New(testConfig(), &mocks.VaultMock{}, mocks.NewMemoryMock())
+	if !enforcer.skillLoadAllowed("bob") {
+		t.Error("expected bob to be allowed")
+	}
+}
+
+func TestSkillLoadAllowed_ListBlocksNonMatchingUser(t *testing.T) {
+	t.Setenv("SKILL_LOAD_ALLOWED_USERS", "alice,bob")
+	enforcer := New(testConfig(), &mocks.VaultMock{}, mocks.NewMemoryMock())
+	if enforcer.skillLoadAllowed("eve") {
+		t.Error("expected eve to be denied")
+	}
+}
+
+func TestValidateAndScope_StampsSkillLoadAllowedTrue(t *testing.T) {
+	t.Setenv("SKILL_LOAD_ALLOWED_USERS", "") // unset = all allowed
+	enforcer := New(testConfig(), &mocks.VaultMock{}, mocks.NewMemoryMock())
+	scope, err := enforcer.ValidateAndScope(context.Background(), "t1", "o1", "user-1", []string{"web"}, 60)
+	if err != nil {
+		t.Fatalf("ValidateAndScope() error = %v", err)
+	}
+	if v := scope.Metadata["skill_load_allowed"]; v != "true" {
+		t.Errorf("scope.Metadata[skill_load_allowed] = %q, want \"true\"", v)
+	}
+}
+
+func TestValidateAndScope_StampsSkillLoadAllowedFalseWhenDenied(t *testing.T) {
+	t.Setenv("SKILL_LOAD_ALLOWED_USERS", "allowed-user")
+	enforcer := New(testConfig(), &mocks.VaultMock{}, mocks.NewMemoryMock())
+	scope, err := enforcer.ValidateAndScope(context.Background(), "t2", "o2", "other-user", []string{"web"}, 60)
+	if err != nil {
+		t.Fatalf("ValidateAndScope() error = %v", err)
+	}
+	if v := scope.Metadata["skill_load_allowed"]; v != "false" {
+		t.Errorf("scope.Metadata[skill_load_allowed] = %q, want \"false\"", v)
+	}
+}

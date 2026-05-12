@@ -64,6 +64,14 @@ memory-api:
   systemMaintenanceCron:
     enabled: true
 
+embedding-api:
+  image:
+    repository: cerberos-embedding-api
+    tag: local
+    pullPolicy: Never
+  auth:
+    hfToken: ""
+
 orchestrator:
   image:
     repository: cerberos-orchestrator
@@ -81,12 +89,6 @@ io:
 aegis-databus:
   image:
     repository: cerberos-aegis-databus
-    tag: local
-    pullPolicy: Never
-
-simulator:
-  image:
-    repository: cerberos-aegis-agents
     tag: local
     pullPolicy: Never
 

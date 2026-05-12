@@ -27,6 +27,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/cerberOS/agents-component/internal/comms"
+	"github.com/cerberOS/agents-component/internal/logfields"
 	"github.com/cerberOS/agents-component/pkg/types"
 	nats "github.com/nats-io/nats.go"
 )
@@ -44,6 +45,12 @@ const (
 // sessionReadTimeout is the maximum time ReadSession waits for a
 // state.read.response before giving up.
 const sessionReadTimeout = 5 * time.Second
+
+// clarificationTimeout is the maximum time SendClarification waits for a
+// clarification.response from the Orchestrator (and therefore the user).
+// It is intentionally long — the user must have time to read the question
+// and decide before the agent gives up and treats the request as denied.
+const clarificationTimeout = 120 * time.Second
 
 // logsReadTimeout is the maximum time ReadSystemLogs waits for a
 // state.read.response before giving up. Slightly longer than sessionReadTimeout
@@ -237,6 +244,53 @@ func (sl *SessionLog) PersistSkillWithScope(domain string, node *types.SkillNode
 	}
 	sl.log.Info("session log: skill persisted",
 		"domain", domain, "skill_name", node.Name)
+	return nil
+}
+
+// PersistExternalSkill writes an externally loaded skill manifest to the Memory
+// Component as data_type "skill_cache" with origin "external". The manifest JSON
+// is stored in the Recipe field of a SynthesizedSkillRecord so Factory.loadExternalSkills
+// can reconstruct the SkillTool at the next agent spawn without hitting GitHub again.
+//
+// PersistExternalSkill is a no-op and returns nil when sl is nil.
+func (sl *SessionLog) PersistExternalSkill(name, description, manifestJSON string) error {
+	if sl == nil {
+		return nil
+	}
+	record := types.SynthesizedSkillRecord{
+		Name:        name,
+		Description: description,
+		Recipe:      manifestJSON,
+	}
+	tags := map[string]string{
+		"origin":     "external",
+		"skill_name": name,
+	}
+	mw := types.MemoryWrite{
+		AgentID:   sl.agentID,
+		SessionID: sl.taskID,
+		DataType:  "skill_cache",
+		TTLHint:   0,
+		Payload:   record,
+		Tags:      tags,
+	}
+	env := agentEnvelope{
+		MessageID:       newUUID(),
+		MessageType:     comms.MsgTypeStateWrite,
+		SourceComponent: "agents",
+		CorrelationID:   name,
+		Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
+		SchemaVersion:   "1.0",
+		Payload:         mw,
+	}
+	data, err := json.Marshal(env)
+	if err != nil {
+		return fmt.Errorf("session log: persist external skill: marshal: %w", err)
+	}
+	if _, err := sl.js.Publish(comms.SubjectStateWrite, data); err != nil {
+		return fmt.Errorf("session log: persist external skill: publish: %w", err)
+	}
+	sl.log.Info("session log: external skill persisted", "skill_name", name)
 	return nil
 }
 
@@ -671,6 +725,280 @@ func (sl *SessionLog) ReadSystemLogs(contextTag string, queryParams json.RawMess
 
 	sl.log.Warn("logs read: timed out", "context_tag", contextTag, "timeout", logsReadTimeout)
 	return "(logs query timed out — the Memory Component did not respond in time)"
+}
+
+// SearchSkills issues a semantic state.read.request for skill_cache records and
+// returns the top matching skills. When NATS is unavailable or the request times
+// out, an empty slice is returned so the caller can report a graceful failure.
+//
+// SearchSkills is safe to call when sl is nil; it returns nil.
+func (sl *SessionLog) SearchSkills(query string, topK int) []types.SkillSearchResult {
+	if sl == nil {
+		return nil
+	}
+	if topK <= 0 {
+		topK = 3
+	}
+
+	requestTraceID := newUUID()
+
+	sub, err := sl.js.SubscribeSync(
+		comms.SubjectStateReadResponse,
+		nats.DeliverNew(),
+		nats.AckNone(),
+	)
+	if err != nil {
+		sl.log.Warn("skills search: subscribe to state.read.response failed", "error", err)
+		return nil
+	}
+	defer func() { _ = sub.Unsubscribe() }()
+	sl.log.Info("skills search: subscribed to state.read.response",
+		"request_trace_id", requestTraceID,
+		"agent_id", sl.agentID,
+		"top_k", topK,
+		"query_preview", logfields.PreviewWords(query, 20, 180),
+	)
+
+	req := types.MemoryReadRequest{
+		AgentID:       sl.agentID,
+		DataType:      "skill_cache",
+		TraceID:       requestTraceID,
+		SemanticQuery: query,
+		MaxResults:    topK,
+	}
+	env := agentEnvelope{
+		MessageID:       newUUID(),
+		MessageType:     comms.MsgTypeStateReadRequest,
+		SourceComponent: "agents",
+		CorrelationID:   sl.taskID,
+		TraceID:         requestTraceID,
+		Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
+		SchemaVersion:   "1.0",
+		Payload:         req,
+	}
+	data, err := json.Marshal(env)
+	if err != nil {
+		sl.log.Warn("skills search: marshal state.read.request failed", "error", err)
+		return nil
+	}
+	if _, err := sl.js.Publish(comms.SubjectStateReadRequest, data); err != nil {
+		sl.log.Warn("skills search: publish state.read.request failed", "error", err)
+		return nil
+	}
+	sl.log.Info("skills search: published semantic query to orchestrator",
+		"request_trace_id", requestTraceID,
+		"data_type", "skill_cache",
+		"semantic_query_preview", logfields.PreviewWords(query, 20, 180),
+		"max_results", topK,
+	)
+
+	messagesReceived := 0
+	deadline := time.Now().Add(sessionReadTimeout)
+	for time.Now().Before(deadline) {
+		msg, err := sub.NextMsg(time.Until(deadline))
+		if err != nil {
+			sl.log.Info("skills search: done waiting for responses",
+				"messages_received", messagesReceived,
+				"err", err,
+			)
+			break
+		}
+		messagesReceived++
+		_ = msg.Ack()
+
+		var envelope struct {
+			Payload json.RawMessage `json:"payload"`
+		}
+		if err := json.Unmarshal(msg.Data, &envelope); err != nil {
+			sl.log.Warn("skills search: unmarshal envelope failed",
+				"message_index", messagesReceived,
+				"error", err,
+			)
+			continue
+		}
+		var resp struct {
+			AgentID string            `json:"agent_id"`
+			Records []json.RawMessage `json:"records"`
+			TraceID string            `json:"trace_id"`
+		}
+		if err := json.Unmarshal(envelope.Payload, &resp); err != nil {
+			sl.log.Warn("skills search: unmarshal response payload failed",
+				"message_index", messagesReceived,
+				"error", err,
+			)
+			continue
+		}
+		matched := resp.AgentID == sl.agentID && resp.TraceID == requestTraceID
+		sl.log.Info("skills search: received response message",
+			"message_index", messagesReceived,
+			"resp_agent_id", resp.AgentID,
+			"want_agent_id", sl.agentID,
+			"resp_trace_id", resp.TraceID,
+			"want_trace_id", requestTraceID,
+			"matched", matched,
+			"record_count", len(resp.Records),
+		)
+		if !matched {
+			continue
+		}
+
+		results := make([]types.SkillSearchResult, 0, len(resp.Records))
+		for _, raw := range resp.Records {
+			var r types.SkillSearchResult
+			if err := json.Unmarshal(raw, &r); err == nil && r.Name != "" {
+				results = append(results, r)
+			}
+		}
+		sl.log.Info("skills search: matched response parsed",
+			"raw_record_count", len(resp.Records),
+			"parsed_skill_count", len(results),
+		)
+		if len(results) > 0 {
+			top := results[0]
+			sl.log.Info("skills search: top result",
+				"domain", top.Domain,
+				"name", top.Name,
+				"score", top.Score,
+				"description_preview", logfields.PreviewWords(top.Description, 20, 180),
+			)
+		}
+		return results
+	}
+
+	sl.log.Warn("skills search: timed out waiting for state.read.response",
+		"messages_received", messagesReceived,
+		"timeout", sessionReadTimeout,
+		"query_preview", logfields.PreviewWords(query, 20, 180),
+	)
+	return nil
+}
+
+// SendClarification publishes a clarification.request to the Orchestrator and
+// blocks until a matching clarification.response arrives or clarificationTimeout
+// elapses. It follows the subscribe-before-publish pattern used by SearchSkills
+// to avoid missing the response if the Orchestrator is fast.
+//
+// AgentID and TaskID are populated from sl's session context if not already set
+// on req. The caller (tools_skills_search.go) sets RequestID, SkillName,
+// SkillDomain, Question, and Reason before calling.
+//
+// SendClarification is nil-safe; when sl is nil it returns an error immediately
+// so callers receive a graceful "clarification unavailable" failure.
+func (sl *SessionLog) SendClarification(req types.ClarificationRequest) (types.ClarificationResponse, error) {
+	if sl == nil {
+		return types.ClarificationResponse{}, fmt.Errorf("clarification unavailable (session log is nil)")
+	}
+
+	// Fill session-scoped fields if not set by the caller.
+	if req.AgentID == "" {
+		req.AgentID = sl.agentID
+	}
+	if req.TaskID == "" {
+		req.TaskID = sl.taskID
+	}
+	if req.RequestID == "" {
+		req.RequestID = newUUID()
+	}
+
+	// Subscribe to clarification.response BEFORE publishing the request to
+	// avoid the race where the Orchestrator replies faster than we subscribe.
+	sub, err := sl.js.SubscribeSync(
+		comms.SubjectClarificationResponse,
+		nats.DeliverNew(),
+		nats.AckNone(),
+	)
+	if err != nil {
+		sl.log.Warn("clarification: subscribe to clarification.response failed",
+			"request_id", req.RequestID,
+			"error", err,
+		)
+		return types.ClarificationResponse{}, fmt.Errorf("clarification: subscribe failed: %w", err)
+	}
+	defer func() { _ = sub.Unsubscribe() }()
+
+	// Publish the clarification.request to the Orchestrator.
+	env := agentEnvelope{
+		MessageID:       newUUID(),
+		MessageType:     comms.MsgTypeClarificationRequest,
+		SourceComponent: "agents",
+		CorrelationID:   req.RequestID,
+		TraceID:         req.RequestID,
+		Timestamp:       time.Now().UTC().Format(time.RFC3339Nano),
+		SchemaVersion:   "1.0",
+		Payload:         req,
+	}
+	data, err := json.Marshal(env)
+	if err != nil {
+		return types.ClarificationResponse{}, fmt.Errorf("clarification: marshal request failed: %w", err)
+	}
+	if _, err := sl.js.Publish(comms.SubjectClarificationRequest, data); err != nil {
+		return types.ClarificationResponse{}, fmt.Errorf("clarification: publish failed: %w", err)
+	}
+
+	sl.log.Info("clarification: request published; waiting for user response",
+		"request_id", req.RequestID,
+		"skill_name", req.SkillName,
+		"skill_domain", req.SkillDomain,
+		"timeout", clarificationTimeout,
+	)
+
+	// Wait for a matching clarification.response.
+	messagesReceived := 0
+	deadline := time.Now().Add(clarificationTimeout)
+	for time.Now().Before(deadline) {
+		msg, err := sub.NextMsg(time.Until(deadline))
+		if err != nil {
+			sl.log.Info("clarification: done waiting for response",
+				"request_id", req.RequestID,
+				"messages_received", messagesReceived,
+				"error", err,
+			)
+			break
+		}
+		messagesReceived++
+
+		var envelope struct {
+			Payload json.RawMessage `json:"payload"`
+		}
+		if err := json.Unmarshal(msg.Data, &envelope); err != nil {
+			sl.log.Warn("clarification: unmarshal envelope failed",
+				"request_id", req.RequestID,
+				"error", err,
+			)
+			continue
+		}
+
+		var resp types.ClarificationResponse
+		if err := json.Unmarshal(envelope.Payload, &resp); err != nil {
+			sl.log.Warn("clarification: unmarshal response payload failed",
+				"request_id", req.RequestID,
+				"error", err,
+			)
+			continue
+		}
+
+		// Filter: only our own request's response.
+		if resp.RequestID != req.RequestID {
+			sl.log.Info("clarification: received response for different request; skipping",
+				"want_request_id", req.RequestID,
+				"got_request_id", resp.RequestID,
+			)
+			continue
+		}
+
+		sl.log.Info("clarification: response received",
+			"request_id", req.RequestID,
+			"approved", resp.Approved,
+		)
+		return resp, nil
+	}
+
+	sl.log.Warn("clarification: timed out waiting for user response",
+		"request_id", req.RequestID,
+		"messages_received", messagesReceived,
+		"timeout", clarificationTimeout,
+	)
+	return types.ClarificationResponse{}, fmt.Errorf("clarification: timed out waiting for user response")
 }
 
 // extractSessionEntries unpacks MemoryWrite.Payload into SessionEntry values.

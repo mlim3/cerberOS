@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"testing"
 
 	"github.com/google/uuid"
@@ -35,11 +36,20 @@ func (d *deterministicTestEmbedder) Embed(ctx context.Context, text string) (pgv
 	_, _ = h.Write([]byte(text))
 	seed := h.Sum64()
 
-	v := make([]float32, 1536)
+	dim, err := strconv.Atoi(getEnvOrDefault("EMBEDDING_DIM", "640"))
+	if err != nil || dim <= 0 {
+		dim = 640
+	}
+
+	v := make([]float32, dim)
 	for i := range v {
 		v[i] = float32((seed+uint64(i*97))%1000) / 1000.0
 	}
 	return pgvector.NewVector(v), nil
+}
+
+func (d *deterministicTestEmbedder) ModelVersion() string {
+	return "test-model"
 }
 
 func TestMain(m *testing.M) {
@@ -100,54 +110,17 @@ func TestMain(m *testing.M) {
 	testEmbedder := &deterministicTestEmbedder{}
 	piProcessor := logic.NewProcessor(piRepo, testEmbedder)
 
-	chatHandler := api.NewChatHandler(chatRepo)
-	orchestratorHandler := api.NewOrchestratorHandler(orchestratorRepo)
-	logHandler := api.NewSystemLogHandler(logRepo)
-	piHandler := api.NewPersonalInfoHandler(piProcessor, piRepo)
-	vaultHandler := api.NewVaultHandler(vaultRepo, vaultManager, logRepo)
-	agentHandler := api.NewAgentHandler(agentLogsRepo)
-	scheduledJobsHandler := api.NewScheduledJobsHandler(scheduledJobsRepo, nil)
-
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /api/v1/conversations", chatHandler.HandleListConversations)
-	mux.HandleFunc("POST /api/v1/conversations", chatHandler.HandleCreateConversation)
-	mux.HandleFunc("POST /api/v1/tasks", chatHandler.HandleCreateTask)
-	mux.HandleFunc("GET /api/v1/tasks/{taskId}", chatHandler.HandleGetTask)
-	mux.HandleFunc("POST /api/v1/chat/{conversationId}/messages", chatHandler.HandleCreateMessage)
-	mux.HandleFunc("GET /api/v1/chat/{conversationId}/messages", chatHandler.HandleListMessages)
-	mux.HandleFunc("GET /api/v1/chat/{conversationId}/history", chatHandler.HandleGetSessionHistory)
-	orchestratorMux := http.NewServeMux()
-	orchestratorMux.HandleFunc("POST /api/v1/orchestrator/records", orchestratorHandler.HandleWriteRecord)
-	orchestratorMux.HandleFunc("GET /api/v1/orchestrator/records", orchestratorHandler.HandleQueryRecords)
-	orchestratorMux.HandleFunc("GET /api/v1/orchestrator/records/latest", orchestratorHandler.HandleReadLatest)
-	mux.Handle("/api/v1/orchestrator/", http.StripPrefix("", api.RequireVaultKey(orchestratorMux)))
-	mux.HandleFunc("POST /api/v1/personal_info/{userId}/save", piHandler.Save)
-	mux.HandleFunc("POST /api/v1/personal_info/{userId}/query", piHandler.Query)
-	mux.HandleFunc("GET /api/v1/personal_info/{userId}/all", piHandler.GetAll)
-	mux.HandleFunc("PUT /api/v1/personal_info/{userId}/facts/{factId}", piHandler.UpdateFact)
-	mux.HandleFunc("DELETE /api/v1/personal_info/{userId}/facts/{factId}", piHandler.DeleteFact)
-	mux.HandleFunc("POST /api/v1/personal_info/{userId}/facts/{factId}/archive", piHandler.ArchiveFact)
-	mux.HandleFunc("POST /api/v1/personal_info/{userId}/facts/{factId}/supersede", piHandler.SupersedeFact)
-	mux.HandleFunc("POST /api/v1/system/events", logHandler.HandleCreateSystemEvent)
-	mux.HandleFunc("GET /api/v1/system/events", logHandler.HandleListSystemEvents)
-	mux.Handle("POST /api/v1/scheduled_jobs", api.RequireVaultKey(http.HandlerFunc(scheduledJobsHandler.HandleCreateScheduledJob)))
-	mux.Handle("POST /api/v1/scheduled_jobs/run_due", api.RequireVaultKey(http.HandlerFunc(scheduledJobsHandler.HandleRunDueJobs)))
-	mux.Handle("GET /api/v1/scheduled_jobs/{jobId}/runs", api.RequireVaultKey(http.HandlerFunc(scheduledJobsHandler.HandleListScheduledJobRuns)))
-	mux.Handle("GET /api/v1/user_crons", api.RequireVaultKey(http.HandlerFunc(scheduledJobsHandler.HandleListUserCrons)))
-	mux.Handle("DELETE /api/v1/scheduled_jobs/{jobId}", api.RequireVaultKey(http.HandlerFunc(scheduledJobsHandler.HandleDeleteUserCron)))
-	mux.Handle("POST /api/v1/system/maintenance/run", api.RequireVaultKey(http.HandlerFunc(scheduledJobsHandler.HandleRunSystemMaintenance)))
-
-	vaultMux := http.NewServeMux()
-	vaultMux.HandleFunc("POST /api/v1/vault/{userId}/secrets", vaultHandler.HandleSaveSecret)
-	vaultMux.HandleFunc("PUT /api/v1/vault/{userId}/secrets/{keyName}", vaultHandler.HandleUpdateSecret)
-	vaultMux.HandleFunc("GET /api/v1/vault/{userId}/secrets", vaultHandler.HandleGetSecret)
-	vaultMux.HandleFunc("DELETE /api/v1/vault/{userId}/secrets/{keyName}", vaultHandler.HandleDeleteSecret)
-	mux.Handle("/api/v1/vault/", http.StripPrefix("", api.RequireVaultKey(vaultMux)))
-
-	mux.HandleFunc("POST /api/v1/agent/{taskId}/executions", agentHandler.HandleCreateTaskExecution)
-	mux.HandleFunc("GET /api/v1/agent/{taskId}/executions", agentHandler.HandleGetExecutions)
-	mux.HandleFunc("POST /api/v1/agents/tasks/{taskId}/executions", agentHandler.HandleCreateTaskExecution)
-	mux.HandleFunc("GET /api/v1/agents/tasks/{taskId}/executions", agentHandler.HandleGetExecutions)
+	api.RegisterRoutes(mux, api.AppHandlers{
+		Chat:          api.NewChatHandler(chatRepo),
+		Orchestrator:  api.NewOrchestratorHandler(orchestratorRepo),
+		SystemLog:     api.NewSystemLogHandler(logRepo),
+		PersonalInfo:  api.NewPersonalInfoHandler(piProcessor, piRepo),
+		Vault:         api.NewVaultHandler(vaultRepo, vaultManager, logRepo),
+		Agent:         api.NewAgentHandler(agentLogsRepo),
+		ScheduledJobs: api.NewScheduledJobsHandler(scheduledJobsRepo, nil),
+		Users:         api.NewUsersHandler(piRepo, logger),
+	})
 
 	handler := api.TraceIDMiddleware(logger, logRepo, mux)
 	testServer = httptest.NewServer(handler)

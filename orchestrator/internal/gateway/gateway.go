@@ -33,6 +33,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -66,6 +67,7 @@ const (
 	TopicAgentSpawnRequest       = "aegis.orchestrator.agent.spawn.request"
 	TopicVaultExecuteRequest     = "aegis.orchestrator.vault.execute.request"
 	TopicAgentTasksInbound       = "aegis.agents.task.inbound"
+	TopicCredentialResponse      = "aegis.agents.credential.response"
 	TopicAgentSpawnResponse      = "aegis.agents.agent.spawn.response"
 	TopicCapabilityQuery         = "aegis.agents.capability.query"
 	TopicAgentTerminate          = "aegis.agents.lifecycle.terminate"
@@ -105,18 +107,15 @@ type AgentStatusHandler func(ctx context.Context, update types.AgentStatusUpdate
 // ctx carries the trace_id extracted from the inbound message envelope.
 type TaskResultHandler func(ctx context.Context, result types.TaskResult) error
 
-// CredentialRequestHandler is called when an agent publishes a credential.request
-// that requires user input (operation: "user_input"). Registered by main.go to
-// forward the request to the IO Component.
-type CredentialRequestHandler func(agentID, taskID, requestID, keyName, label, traceID string) error
+// CredentialRequestHandler is called when an agent publishes a credential.request.
+// Registered by main.go so the dispatcher can resolve the request against the
+// active task state and either answer it directly (authorize/revoke) or forward
+// it to IO (user_input).
+type CredentialRequestHandler func(ctx context.Context, req types.CredentialRequest) error
 
 // PlanDecisionHandler is called when User I/O forwards the user's approve/reject
 // decision for a proposed execution plan. Registered by main.go → Dispatcher.
 type PlanDecisionHandler func(ctx context.Context, decision types.PlanDecision) error
-
-// AgentSpawnHandler is called when a parent agent asks the Orchestrator to
-// route a child task through the normal Agents task.inbound path.
-type AgentSpawnHandler func(ctx context.Context, req types.AgentSpawnRequest) error
 
 // SkillActivityHandler is called for notable skill_invocation audit events received
 // from agent processes. The gateway applies the notability filter before invoking it.
@@ -134,6 +133,10 @@ type SkillActivityHandler func(agentID, taskID, domain, command, outcome string,
 // Returns the VaultExecuteResult to publish back to the agent.
 type VaultExecuteHandler func(ctx context.Context, req types.VaultExecuteRequest) (types.VaultExecuteResult, error)
 
+// AgentSpawnRequestHandler is called when an agent publishes an agent.spawn.request.
+// Registered by main.go → Dispatcher.
+type AgentSpawnRequestHandler func(ctx context.Context, req types.AgentSpawnRequest) error
+
 // ── Gateway ───────────────────────────────────────────────────────────────────
 
 // Gateway is M1: Communications Gateway.
@@ -146,9 +149,9 @@ type Gateway struct {
 	taskResultHandler        TaskResultHandler
 	credentialRequestHandler CredentialRequestHandler
 	planDecisionHandler      PlanDecisionHandler
-	agentSpawnHandler        AgentSpawnHandler
 	skillActivityHandler     SkillActivityHandler
 	vaultExecuteHandler      VaultExecuteHandler
+	agentSpawnRequestHandler AgentSpawnRequestHandler
 
 	// pendingCapabilityQueries tracks in-flight capability query requests.
 	// key: query_id, value: chan *types.CapabilityResponse
@@ -230,8 +233,7 @@ func (g *Gateway) RegisterTaskResultHandler(h TaskResultHandler) {
 }
 
 // RegisterCredentialRequestHandler registers the callback for agent credential
-// requests that need user input. Optional — if not registered, these messages
-// are logged and dropped.
+// requests. Optional — if not registered, these messages are logged and dropped.
 func (g *Gateway) RegisterCredentialRequestHandler(h CredentialRequestHandler) {
 	g.credentialRequestHandler = h
 }
@@ -244,12 +246,6 @@ func (g *Gateway) RegisterPlanDecisionHandler(h PlanDecisionHandler) {
 	g.planDecisionHandler = h
 }
 
-// RegisterAgentSpawnHandler registers the callback for parent-agent child-task
-// spawn requests. Optional; if unset, incoming requests are logged and dropped.
-func (g *Gateway) RegisterAgentSpawnHandler(h AgentSpawnHandler) {
-	g.agentSpawnHandler = h
-}
-
 // RegisterSkillActivityHandler registers the callback for notable skill_invocation
 // audit events. Optional — if unset, notable events are logged and dropped.
 // The notability filter is applied before invoking the handler.
@@ -260,6 +256,17 @@ func (g *Gateway) RegisterSkillActivityHandler(h SkillActivityHandler) {
 // RegisterVaultExecuteHandler registers the callback for vault.execute.request messages.
 func (g *Gateway) RegisterVaultExecuteHandler(h VaultExecuteHandler) {
 	g.vaultExecuteHandler = h
+}
+
+// RegisterAgentSpawnRequestHandler registers the callback for agent.spawn.request messages.
+func (g *Gateway) RegisterAgentSpawnRequestHandler(h AgentSpawnRequestHandler) {
+	g.agentSpawnRequestHandler = h
+}
+
+// RegisterAgentSpawnHandler is a backward-compatible alias retained for older
+// tests and callers that still use the pre-request-suffixed method name.
+func (g *Gateway) RegisterAgentSpawnHandler(h AgentSpawnRequestHandler) {
+	g.RegisterAgentSpawnRequestHandler(h)
 }
 
 // Start subscribes to all inbound NATS topics and begins message processing.
@@ -308,7 +315,7 @@ func (g *Gateway) Start() error {
 		return fmt.Errorf("subscribe %s: %w", TopicVaultExecuteRequest, err)
 	}
 	observability.LogFromContext(observability.WithModule(context.Background(), "comms_gateway")).
-		Info("orchestrator gateway started; subscribed to inbound nats topics (user_task, agent.status, capability.response, task.accepted, task.result, task.failed, credential.request, plan.decision, vault.execute)",
+		Info("orchestrator gateway started; subscribed to inbound nats topics (user_task, agent.status, capability.response, task.accepted, task.result, task.failed, credential.request, plan.decision, vault.execute, agent.spawn.request)",
 			"node_id", g.nodeID)
 	return nil
 }
@@ -590,9 +597,6 @@ func (g *Gateway) handleRawTaskFailed(subject string, data []byte) error {
 }
 
 // / handleRawCredentialRequest handles aegis.orchestrator.credential.request.
-// Vault pre-authorization requests (operation: "authorize"/"revoke") are routed
-// to the Vault via the orchestrator's policy flow — those are NOT forwarded to IO.
-// Requests with operation "user_input" ask the user to supply a secret via IO.
 func (g *Gateway) handleRawCredentialRequest(subject string, data []byte) error {
 	envelope, err := validateEnvelope(data)
 	if err != nil {
@@ -601,15 +605,7 @@ func (g *Gateway) handleRawCredentialRequest(subject string, data []byte) error 
 		return err
 	}
 
-	var payload struct {
-		RequestID   string `json:"request_id"`
-		AgentID     string `json:"agent_id"`
-		TaskID      string `json:"task_id"`
-		Operation   string `json:"operation"`
-		KeyName     string `json:"key_name"`
-		Label       string `json:"label"`
-		Description string `json:"description"`
-	}
+	var payload types.CredentialRequest
 	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
 		return fmt.Errorf("deserialize credential.request: %w", err)
 	}
@@ -639,9 +635,11 @@ func (g *Gateway) handleRawCredentialRequest(subject string, data []byte) error 
 
 	if g.credentialRequestHandler == nil {
 		ctx := extractOrCreateCtx(envelope, "comms_gateway")
-		observability.LogFromContext(ctx).Warn("agent requested credential from user but no io handler is registered; ignoring",
+		observability.LogFromContext(ctx).Warn("agent credential request arrived but no handler is registered; ignoring",
 			"task_id", payload.TaskID,
 			"agent_id", payload.AgentID,
+			"request_id", payload.RequestID,
+			"operation", payload.Operation,
 			"key_name", payload.KeyName)
 		return nil
 	}
@@ -649,16 +647,17 @@ func (g *Gateway) handleRawCredentialRequest(subject string, data []byte) error 
 	if payload.TaskID != "" {
 		ctx = observability.WithTaskID(ctx, payload.TaskID)
 	}
-	observability.LogFromContext(ctx).Info("agent requested credential from user; forwarding prompt to io",
+	observability.LogFromContext(ctx).Info("agent credential request received; routing to dispatcher",
 		"agent_id", payload.AgentID,
 		"request_id", payload.RequestID,
+		"operation", payload.Operation,
 		"key_name", payload.KeyName,
 		"label_preview", observability.PreviewWords(payload.Label, 20, 140),
 		"description_preview", observability.PreviewWords(payload.Description, 20, 140))
-	return g.credentialRequestHandler(
-		payload.AgentID, payload.TaskID, payload.RequestID, payload.KeyName, payload.Label,
-		envelope.TraceID,
-	)
+	if payload.TraceID == "" {
+		payload.TraceID = envelope.TraceID
+	}
+	return g.credentialRequestHandler(ctx, payload)
 }
 
 // handleRawPlanDecision handles aegis.orchestrator.plan.decision. User I/O
@@ -701,46 +700,6 @@ func (g *Gateway) handleRawPlanDecision(subject string, data []byte) error {
 	return g.planDecisionHandler(ctx, payload)
 }
 
-// handleRawAgentSpawnRequest handles aegis.orchestrator.agent.spawn.request.
-// Parent agents use this to ask the Orchestrator to route a child task to an
-// agent with a different skill domain. The Dispatcher validates parent context
-// and publishes the eventual AgentSpawnResponse.
-func (g *Gateway) handleRawAgentSpawnRequest(subject string, data []byte) error {
-	envelope, err := validateEnvelope(data)
-	if err != nil {
-		observability.LogFromContext(observability.WithModule(context.Background(), "comms_gateway")).
-			Warn("rejected malformed agent.spawn.request envelope", "error", err)
-		return err
-	}
-
-	var req types.AgentSpawnRequest
-	if err := json.Unmarshal(envelope.Payload, &req); err != nil {
-		ctx := extractOrCreateCtx(envelope, "comms_gateway")
-		observability.LogFromContext(ctx).Warn("failed to deserialize agent.spawn.request", "error", err)
-		return fmt.Errorf("deserialize agent.spawn.request: %w", err)
-	}
-	if req.TraceID == "" && strings.TrimSpace(envelope.TraceID) != "" {
-		req.TraceID = strings.TrimSpace(envelope.TraceID)
-	}
-	if req.RequestID == "" {
-		req.RequestID = envelope.CorrelationID
-	}
-
-	ctx := extractOrCreateCtx(envelope, "comms_gateway")
-	if req.ParentTaskID != "" {
-		ctx = observability.WithTaskID(ctx, req.ParentTaskID)
-	}
-
-	if g.agentSpawnHandler == nil {
-		observability.LogFromContext(ctx).Warn("agent.spawn.request received but no handler registered",
-			"request_id", req.RequestID,
-			"parent_agent_id", req.ParentAgentID,
-		)
-		return nil
-	}
-	return g.agentSpawnHandler(ctx, req)
-}
-
 func planDecisionVerb(approved bool) string {
 	if approved {
 		return "approved"
@@ -764,14 +723,31 @@ func (g *Gateway) handleRawStateWrite(subject string, data []byte) error {
 	// Keep a copy of the raw payload to return verbatim on reads.
 	raw := json.RawMessage(envelope.Payload)
 
-	// Peek at agentID and require_ack without full deserialization.
+	// Peek at full write metadata to detect skill_cache writes.
 	var peek struct {
-		AgentID    string `json:"agent_id"`
-		RequireAck bool   `json:"require_ack"`
-		RequestID  string `json:"request_id"`
+		AgentID    string            `json:"agent_id"`
+		DataType   string            `json:"data_type"`
+		RequireAck bool              `json:"require_ack"`
+		RequestID  string            `json:"request_id"`
+		Tags       map[string]string `json:"tags"`
+		Payload    json.RawMessage   `json:"payload"`
 	}
 	if err := json.Unmarshal(envelope.Payload, &peek); err != nil || peek.AgentID == "" {
 		return nil
+	}
+
+	// Forward skill_cache writes to the Memory API for vector indexing.
+	if peek.DataType == "skill_cache" {
+		ctx := extractOrCreateCtx(envelope, "comms_gateway")
+		observability.LogFromContext(ctx).Info("skill_cache write received from agents component",
+			"agent_id", peek.AgentID,
+			"domain", peek.Tags["domain"],
+			"skill_name", peek.Tags["skill_name"],
+			"memory_endpoint_set", g.memoryEndpoint != "",
+		)
+		if g.memoryEndpoint != "" {
+			go g.forwardSkillCacheWrite(peek.Tags, peek.Payload)
+		}
 	}
 
 	g.agentStoreMu.Lock()
@@ -806,11 +782,13 @@ func (g *Gateway) handleRawStateReadRequest(subject string, data []byte) error {
 	}
 
 	var req struct {
-		AgentID     string          `json:"agent_id"`
-		DataType    string          `json:"data_type"`
-		ContextTag  string          `json:"context_tag"`
-		TraceID     string          `json:"trace_id"`
-		QueryParams json.RawMessage `json:"query_params,omitempty"`
+		AgentID       string          `json:"agent_id"`
+		DataType      string          `json:"data_type"`
+		ContextTag    string          `json:"context_tag"`
+		TraceID       string          `json:"trace_id"`
+		SemanticQuery string          `json:"semantic_query,omitempty"`
+		MaxResults    int             `json:"max_results,omitempty"`
+		QueryParams   json.RawMessage `json:"query_params,omitempty"`
 	}
 	if err := json.Unmarshal(envelope.Payload, &req); err != nil {
 		return nil
@@ -818,6 +796,34 @@ func (g *Gateway) handleRawStateReadRequest(subject string, data []byte) error {
 
 	traceID := firstNonEmpty(req.TraceID, envelope.CorrelationID)
 	ctx := extractOrCreateCtx(envelope, "comms_gateway")
+
+	// Route skill_cache semantic queries to the Memory Component HTTP API.
+	if req.DataType == "skill_cache" && req.SemanticQuery != "" {
+		var skillRecords []json.RawMessage
+		if strings.HasPrefix(g.memoryEndpoint, "http://") || strings.HasPrefix(g.memoryEndpoint, "https://") {
+			var fetchErr error
+			skillRecords, fetchErr = g.fetchSkillSearch(ctx, req.SemanticQuery, "", req.MaxResults)
+			if fetchErr != nil {
+				observability.LogFromContext(ctx).Warn("skill search fetch failed",
+					"agent_id", req.AgentID, "error", fetchErr)
+				errRec, _ := json.Marshal(map[string]string{"error": fetchErr.Error()})
+				skillRecords = []json.RawMessage{errRec}
+			}
+		} else {
+			observability.LogFromContext(ctx).Warn("skill_cache read requested but memory endpoint not configured")
+		}
+
+		resp := struct {
+			AgentID string            `json:"agent_id"`
+			Records []json.RawMessage `json:"records"`
+			TraceID string            `json:"trace_id"`
+		}{AgentID: req.AgentID, Records: skillRecords, TraceID: traceID}
+		if resp.Records == nil {
+			resp.Records = []json.RawMessage{}
+		}
+		_ = g.publishEnvelope(ctx, TopicAgentStateReadResponse, "state.read.response", traceID, resp)
+		return nil
+	}
 
 	// Route system_log queries to the Memory Component HTTP API.
 	if req.DataType == "system_log" {
@@ -1104,6 +1110,196 @@ func (g *Gateway) fetchMemoryLogs(ctx context.Context, contextTag, agentID strin
 	return []json.RawMessage{wrapper.Data}, nil
 }
 
+// forwardSkillCacheWrite POSTs a skill_cache MemoryWrite payload to the Memory
+// API for vector indexing. Called asynchronously from handleRawStateWrite so it
+// never blocks the NATS handler.
+//
+// Retry behaviour: the Memory API may not be ready immediately at cluster startup
+// (e.g. embedding-api not yet accepting connections). The function retries up to
+// maxSkillCacheRetries times with exponential backoff so that initial static skill
+// seeds that fail at startup are eventually committed once the API is healthy.
+func (g *Gateway) forwardSkillCacheWrite(tags map[string]string, payload json.RawMessage) {
+	const maxSkillCacheRetries = 5
+	const baseBackoff = 2 * time.Second
+	const maxBackoff = 30 * time.Second
+
+	log := observability.LogFromContext(observability.WithModule(context.Background(), "comms_gateway"))
+	if g.memoryEndpoint == "" {
+		log.Warn("skill_cache write: memory endpoint not configured; skipping vector index write")
+		return
+	}
+
+	// The payload is a types.SkillNode. Extract the fields the Memory API needs.
+	var node struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+	}
+	_ = json.Unmarshal(payload, &node)
+
+	domain := tags["domain"]
+	origin := tags["origin"]
+	seedHash := tags["seed_hash"]
+	name := tags["skill_name"]
+	if name == "" {
+		name = node.Name
+	}
+	if domain == "" || name == "" {
+		log.Warn("skill_cache write: missing domain or name; skipping",
+			"domain", domain, "name", name, "origin", origin)
+		return
+	}
+
+	log.Info("skill_cache write: forwarding to Memory API",
+		"domain", domain, "name", name, "origin", origin,
+		"description_len", len(node.Description),
+		"has_description", node.Description != "",
+	)
+
+	body, err := json.Marshal(map[string]interface{}{
+		"domain":      domain,
+		"name":        name,
+		"origin":      origin,
+		"description": node.Description,
+		"payload":     payload,
+		"seed_hash":   seedHash,
+	})
+	if err != nil {
+		log.Warn("skill_cache write: marshal body failed", "domain", domain, "name", name, "error", err)
+		return
+	}
+
+	backoff := baseBackoff
+	for attempt := 1; attempt <= maxSkillCacheRetries; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		httpReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost,
+			g.memoryEndpoint+"/api/v1/skills/cache", bytes.NewReader(body))
+		if reqErr != nil {
+			cancel()
+			log.Warn("skill_cache write: build request failed", "domain", domain, "name", name, "error", reqErr)
+			return
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+
+		resp, doErr := http.DefaultClient.Do(httpReq)
+		cancel()
+		if doErr != nil {
+			log.Warn("skill_cache write: HTTP request failed",
+				"domain", domain, "name", name,
+				"attempt", attempt, "max_attempts", maxSkillCacheRetries,
+				"error", doErr,
+			)
+			if attempt < maxSkillCacheRetries {
+				log.Info("skill_cache write: retrying after backoff",
+					"domain", domain, "name", name,
+					"backoff_seconds", backoff.Seconds(),
+				)
+				time.Sleep(backoff)
+				backoff *= 2
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+			}
+			continue
+		}
+
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		resp.Body.Close()
+
+		if resp.StatusCode == http.StatusConflict {
+			// 409 = already indexed (idempotent seed re-send). Treat as success.
+			log.Info("skill_cache write: Memory API already has this record (idempotent)",
+				"domain", domain, "name", name, "status", resp.StatusCode)
+			return
+		}
+		if resp.StatusCode >= 400 {
+			log.Warn("skill_cache write: Memory API returned error",
+				"domain", domain, "name", name,
+				"status", resp.StatusCode,
+				"body", strings.TrimSpace(string(respBody)),
+				"attempt", attempt, "max_attempts", maxSkillCacheRetries,
+			)
+			// 4xx errors other than transient ones (e.g. 422 bad schema) are not
+			// worth retrying — the payload won't change.
+			if resp.StatusCode < 500 {
+				return
+			}
+			if attempt < maxSkillCacheRetries {
+				time.Sleep(backoff)
+				backoff *= 2
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+			}
+			continue
+		}
+
+		log.Info("skill_cache write: Memory API accepted",
+			"domain", domain, "name", name, "status", resp.StatusCode,
+			"attempt", attempt)
+		return
+	}
+
+	log.Warn("skill_cache write: all retry attempts exhausted; skill will not be indexed",
+		"domain", domain, "name", name, "max_attempts", maxSkillCacheRetries)
+}
+
+// fetchSkillSearch queries the Memory API for skill records semantically similar
+// to query. domain may be empty to search across all domains. topK <= 0 uses the
+// server default.
+func (g *Gateway) fetchSkillSearch(ctx context.Context, query, domain string, topK int) ([]json.RawMessage, error) {
+	log := observability.LogFromContext(observability.WithModule(ctx, "comms_gateway"))
+	log.Info("skill search: querying Memory API",
+		"query_preview", observability.PreviewHeadTail(query, 15, 10),
+		"domain", domain,
+		"top_k", topK,
+	)
+
+	body, err := json.Marshal(map[string]interface{}{
+		"query":  query,
+		"domain": domain,
+		"top_k":  topK,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("skill search: marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		g.memoryEndpoint+"/api/v1/skills/cache/search", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("skill search: build request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("skill search: HTTP request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("skill search: read response: %w", err)
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("skill search: Memory API returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+
+	// Response shape: {"status":"success","data":{"results":[...]}}
+	var wrapper struct {
+		Data struct {
+			Results []json.RawMessage `json:"results"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(respBody, &wrapper); err != nil {
+		return nil, fmt.Errorf("skill search: parse response: %w", err)
+	}
+	log.Info("skill search: Memory API responded",
+		"result_count", len(wrapper.Data.Results),
+		"query_preview", observability.PreviewHeadTail(query, 15, 10),
+	)
+	return wrapper.Data.Results, nil
+}
+
 // fetchLokiLogs queries Loki for log entries and returns them as raw JSON
 // records suitable for inclusion in a state.read.response payload.
 //
@@ -1227,7 +1423,7 @@ func (g *Gateway) PublishTaskResult(ctx context.Context, callbackTopic string, r
 // PublishTaskSpec dispatches a validated task.inbound request to the Agents
 // Component. The internal TaskSpec is adapted to the agents-component schema.
 func (g *Gateway) PublishTaskSpec(ctx context.Context, spec types.TaskSpec) error {
-	traceID := firstNonEmpty(observability.TraceIDFrom(ctx), spec.TraceID, spec.OrchestratorTaskRef)
+	traceID := firstNonEmpty(spec.TraceID, observability.TraceIDFrom(ctx), spec.OrchestratorTaskRef)
 	ctx = observability.WithTraceID(ctx, traceID)
 	wire := struct {
 		TaskID         string            `json:"task_id"`
@@ -1246,7 +1442,11 @@ func (g *Gateway) PublishTaskSpec(ctx context.Context, spec types.TaskSpec) erro
 		UserContextID:  spec.UserContextID,
 		ConversationID: spec.ConversationID,
 	}
-	return g.publishEnvelope(ctx, TopicAgentTasksInbound, "task.inbound", spec.OrchestratorTaskRef, wire)
+	publishCtx := ctx
+	if traceID != "" && traceID != observability.TraceIDFrom(ctx) {
+		publishCtx = observability.WithTraceID(ctx, traceID)
+	}
+	return g.publishEnvelope(publishCtx, TopicAgentTasksInbound, "task.inbound", spec.OrchestratorTaskRef, wire)
 }
 
 // PublishCapabilityQuery sends a capability query and waits for the response.
@@ -1310,6 +1510,13 @@ func buildAgentMetadata(spec types.TaskSpec) map[string]string {
 	}
 	for k, v := range spec.Metadata {
 		meta[k] = v
+	}
+	// Forward the skill_load permission decision from PolicyScope so the
+	// agents-component can gate the skill_load built-in without a second
+	// Vault call. PolicyScope is an internal orchestrator concern and is not
+	// sent on the wire in full — only this derived flag crosses the boundary.
+	if v, ok := spec.PolicyScope.Metadata["skill_load_allowed"]; ok {
+		meta["skill_load_allowed"] = v
 	}
 	return meta
 }
@@ -1464,6 +1671,17 @@ func (g *Gateway) PublishTaskCancel(ctx context.Context, cancel types.TaskCancel
 	return g.publishEnvelope(ctx, TopicTaskCancel, "task_cancel", cancel.OrchestratorTaskRef, cancel)
 }
 
+// PublishAgentSpawnResponse returns a child-agent result to the waiting parent agent.
+func (g *Gateway) PublishAgentSpawnResponse(ctx context.Context, resp types.AgentSpawnResponse) error {
+	return g.publishEnvelope(ctx, TopicAgentSpawnResponse, "agent.spawn.response", resp.RequestID, resp)
+}
+
+// PublishCredentialResponse relays the outcome of a credential.request back to
+// the agents component on aegis.agents.credential.response.
+func (g *Gateway) PublishCredentialResponse(ctx context.Context, resp types.CredentialResponse) error {
+	return g.publishEnvelope(ctx, TopicCredentialResponse, "credential.response", resp.RequestID, resp)
+}
+
 // ── Outbound: Observability ───────────────────────────────────────────────────
 
 // PublishMetrics emits structured metrics to aegis.orchestrator.metrics (§15.2).
@@ -1474,12 +1692,6 @@ func (g *Gateway) PublishMetrics(metrics types.MetricsPayload) error {
 // PublishAuditEvent emits an audit event to aegis.orchestrator.audit.events (§11.5).
 func (g *Gateway) PublishAuditEvent(ctx context.Context, event types.AuditEvent) error {
 	return g.publishEnvelope(ctx, TopicAuditEvents, "audit_event", event.OrchestratorTaskRef, event)
-}
-
-// PublishAgentSpawnResponse returns a completed child-agent result to the
-// requesting parent agent.
-func (g *Gateway) PublishAgentSpawnResponse(ctx context.Context, resp types.AgentSpawnResponse) error {
-	return g.publishEnvelope(ctx, TopicAgentSpawnResponse, "agent.spawn.response", resp.RequestID, resp)
 }
 
 // ── Vault Execute ─────────────────────────────────────────────────────────────
@@ -1518,6 +1730,33 @@ func (g *Gateway) handleRawVaultExecuteRequest(subject string, data []byte) erro
 	}
 
 	return g.publishEnvelope(ctx, TopicVaultExecuteResult, "vault.execute.result", req.RequestID, result)
+}
+
+// handleRawAgentSpawnRequest handles aegis.orchestrator.agent.spawn.request.
+func (g *Gateway) handleRawAgentSpawnRequest(subject string, data []byte) error {
+	envelope, err := validateEnvelope(data)
+	if err != nil {
+		observability.LogFromContext(context.Background()).
+			Warn("rejected malformed agent.spawn.request envelope", "error", err)
+		return nil
+	}
+
+	var req types.AgentSpawnRequest
+	if err := json.Unmarshal(envelope.Payload, &req); err != nil {
+		observability.LogFromContext(context.Background()).Warn("failed to deserialize agent.spawn.request", "error", err)
+		return nil
+	}
+	ctx := inboundObservabilityCtx(envelope, "comms_gateway", req.TraceID)
+	if req.TraceID == "" && strings.TrimSpace(envelope.TraceID) != "" {
+		req.TraceID = strings.TrimSpace(envelope.TraceID)
+	}
+
+	if g.agentSpawnRequestHandler == nil {
+		observability.LogFromContext(ctx).Warn("agent.spawn.request received but no handler registered")
+		return nil
+	}
+
+	return g.agentSpawnRequestHandler(ctx, req)
 }
 
 // ── Envelope Helpers ──────────────────────────────────────────────────────────

@@ -42,6 +42,9 @@ memory-api:
   # systemMaintenanceCron:
   #   enabled: true
 
+embedding-api:
+  replicaCount: 2
+
 orchestrator:
   replicaCount: 2
 

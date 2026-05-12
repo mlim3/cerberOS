@@ -144,6 +144,15 @@ type toolOutcome struct {
 // RunLoop returns the final task result, the final history slice (for the caller
 // to thread through the warm process-reuse loop), and any error.
 func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *VaultExecutor, steerer *Steerer, as *AgentSpawner, budget *skills.SpecBudget, priorTurns []anthropic.MessageParam, opts ...option.RequestOption) (string, []anthropic.MessageParam, error) {
+	// Fail fast when the task was pre-authorized with credentials but vault is
+	// unreachable. A non-empty PermissionToken means the Orchestrator issued a
+	// scoped token for this task — continuing without vault would silently drop
+	// all credentialed tools, leaving the agent unable to complete the task with
+	// no user-visible explanation.
+	if ve == nil && spawnCtx.PermissionToken != "" {
+		return "", nil, fmt.Errorf("vault unavailable: task was pre-authorized with credentials but the vault executor could not connect (NATS unreachable or env vars missing) — credentialed tools cannot be executed")
+	}
+
 	apiKey := os.Getenv("ANTHROPIC_API_KEY")
 	if apiKey == "" {
 		return "", nil, fmt.Errorf("ANTHROPIC_API_KEY environment variable is not set")
@@ -164,7 +173,7 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 	sl := NewSessionLog(ve, log)
 	ctx = WithSessionLog(ctx, sl)
 
-	tools := toolsForDomain(spawnCtx.SkillDomain, ve, as)
+	tools := toolsForDomain(spawnCtx.SkillDomain, ve, as, sl)
 	// Build dynamic SkillTools for skills synthesized in prior sessions.
 	// Each tool's Execute makes an inline LLM call using the stored recipe with
 	// caller parameters substituted in. Existing builtins take precedence: a
@@ -185,7 +194,54 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 	// entries if the ceiling is exceeded. Pinned tools (task_complete,
 	// spawn_agent) are never evicted.
 	tools = applySpecBudget(budget, spawnCtx.SkillDomain, tools, log)
-	toolDefs := toolDefinitions(tools)
+
+	// DynamicRegistry extends the static tool list at runtime. skill_load holds
+	// a reference to it so newly loaded skills become available on the next
+	// Reason phase without restarting the agent.
+	registry := newDynamicRegistry(tools)
+
+	// Upgrade skills_search with a registry-aware version that can:
+	//   1. Auto-register credential-free static tools discovered cross-domain.
+	//   2. Send a user clarification request for credentialed cross-domain tools.
+	// The plain version built by toolsForDomain had no registry reference because
+	// the registry did not exist yet (chicken-and-egg). Replace it now.
+	upgradedSearch := skillsSearchTool(sl, spawnCtx.SkillDomain, as != nil, registry, sl)
+	if err := registry.Replace("skills_search", upgradedSearch); err != nil {
+		log.Warn("skills_search upgrade failed; falling back to non-registry-aware version", "error", err)
+	}
+
+	if err := registry.Register(skillLoadTool(registry, sl, spawnCtx.SkillLoadAllowed)); err != nil {
+		log.Warn("skill_load tool registration failed", "error", err)
+	}
+
+	// Pre-populate the registry with external skills persisted by skill_load in
+	// prior sessions. Each record carries the serialised externalSkillManifest in
+	// its Recipe field; buildHTTPSkillTool reconstructs the full SkillTool from it.
+	for _, ext := range spawnCtx.ExternalSkills {
+		var m externalSkillManifest
+		if err := json.Unmarshal([]byte(ext.Recipe), &m); err != nil {
+			log.Warn("external skill hydration: unmarshal manifest failed; skipping",
+				"skill_name", ext.Name, "error", err)
+			continue
+		}
+		if err := registry.Register(buildHTTPSkillTool(&m)); err != nil {
+			log.Warn("external skill hydration: registration failed; skipping",
+				"skill_name", ext.Name, "error", err)
+		}
+	}
+
+	registeredTools := registry.Tools()
+	finalToolNames := make([]string, len(registeredTools))
+	for i, t := range registeredTools {
+		finalToolNames[i] = t.Definition.Name
+	}
+	log.Info("agent tools registered for task",
+		"skill_domain", spawnCtx.SkillDomain,
+		"tool_count", len(registeredTools),
+		"tool_names", finalToolNames,
+		"command_manifest_chars", len(spawnCtx.CommandManifest),
+	)
+
 	systemPrompt := buildSystemPrompt(spawnCtx.SkillDomain, spawnCtx.CommandManifest, spawnCtx.AgentMemory, spawnCtx.UserProfile)
 
 	// Build conversation history. When priorTurns is non-nil the turns from the
@@ -245,6 +301,9 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 		// LLM cache: lookup first, fall back to Anthropic on miss. Only
 		// end_turn responses are cached on write (see llmcache.go).
 		// --------------------------------------------------------------------
+		// Rebuild toolDefs each iteration so skills registered by skill_load
+		// during a previous Act phase are visible to the next Reason call.
+		toolDefs := toolDefinitions(registry.Tools())
 		reqParams := anthropic.MessageNewParams{
 			Model:     anthropic.ModelClaudeHaiku4_5,
 			MaxTokens: int64(maxOutputTokens),
@@ -436,7 +495,7 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 				// actParentID propagates to vault tools for session log linking (EDD §13.4).
 				toolCtx := WithParentEntryID(actCtx, actParentID)
 				start := time.Now()
-				result := dispatchTool(toolCtx, tools, c.name, c.input)
+				result := dispatchTool(toolCtx, registry.Tools(), c.name, c.input)
 				outcomes[idx] = toolOutcome{call: c, result: result, elapsedMS: time.Since(start).Milliseconds()}
 			}(i, call)
 		}

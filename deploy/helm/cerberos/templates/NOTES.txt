@@ -5,7 +5,7 @@ cerberOS has been installed in namespace {{ .Release.Namespace }}.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
   IO API / Web UI   →  http://localhost:3001
-  Orchestrator      →  http://localhost:8080/healthz
+  Orchestrator      →  http://localhost:8080/health
   Grafana           →  http://localhost:3000  (admin/admin)
   NATS              →  nats://localhost:4222
 

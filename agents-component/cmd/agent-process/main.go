@@ -96,6 +96,8 @@ type SpawnContext struct {
 	ConversationID    string                         `json:"conversation_id,omitempty"`    // non-empty when this task continues a prior conversation
 	PriorTurns        []anthropic.MessageParam       `json:"prior_turns,omitempty"`        // reconstructed history from factory; nil for standalone tasks
 	SynthesizedSkills []types.SynthesizedSkillRecord `json:"synthesized_skills,omitempty"` // skills created by prior synthesis; each gets a dynamic SkillTool with LLM-based execution
+	ExternalSkills    []types.SynthesizedSkillRecord `json:"external_skills,omitempty"`    // skills loaded via skill_load in prior sessions; Recipe holds the serialised externalSkillManifest JSON
+	SkillLoadAllowed  bool                           `json:"skill_load_allowed,omitempty"` // false = skill_load tool is disabled for this user; absent/true = allowed
 
 	// OriginalUserMessage is the user's literal input as typed in the chat surface.
 	// The orchestrator carries it through plan/subtask metadata so the user-facing

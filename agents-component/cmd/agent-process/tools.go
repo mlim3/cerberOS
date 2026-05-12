@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"sync"
@@ -96,15 +97,33 @@ func loadSkillsConfig() *skillsconfig.Config {
 //
 // ve may be nil (vault execution unavailable) — credentialed tools are omitted.
 // as may be nil (agent spawning unavailable) — spawn_agent tool is omitted.
-// task_complete is always included as the agent's terminal signal.
-func toolsForDomain(domain string, ve *VaultExecutor, as *AgentSpawner) []SkillTool {
-	base := []SkillTool{taskCompleteTool()}
+// sl may be nil (NATS unavailable) — skills_search returns an unavailable notice.
+// task_complete and skills_search are always included.
+func toolsForDomain(domain string, ve *VaultExecutor, as *AgentSpawner, sl SkillSearcher) []SkillTool {
+	log := slog.Default()
+	log.Info("tools: assembling registry for domain",
+		"domain", domain,
+		"vault_available", ve != nil,
+		"spawn_available", as != nil,
+		"skill_searcher_available", sl != nil,
+	)
+
+	// skills_search is built here with nil registry and cs. After the DynamicRegistry
+	// is created in loop.go, skills_search is replaced with a registry-aware version
+	// via registry.Replace("skills_search", ...) that enables cross-domain
+	// auto-registration and user clarification. The nil values here are intentional —
+	// they keep toolsForDomain free of the registry/cs dependency at construction time.
+	base := []SkillTool{taskCompleteTool(), skillsSearchTool(sl, domain, as != nil, nil, nil)}
 	if as != nil {
 		base = append(base, spawnAgentTool(as))
 	}
 
 	cfg := loadSkillsConfig()
 	if cfg == nil {
+		log.Warn("tools: skills config not loaded; only base tools available for domain",
+			"domain", domain,
+			"base_tool_count", len(base),
+		)
 		return base
 	}
 
@@ -116,18 +135,43 @@ func toolsForDomain(domain string, ve *VaultExecutor, as *AgentSpawner) []SkillT
 		for _, cmd := range d.Commands {
 			// Skip vault tools when vault execution is unavailable.
 			if len(cmd.RequiredCredentialTypes) > 0 && ve == nil {
+				log.Info("tools: skipping credentialed tool (vault unavailable)",
+					"domain", domain,
+					"implementation", cmd.Implementation,
+					"required_credential_types", cmd.RequiredCredentialTypes,
+				)
 				continue
 			}
 			factory, ok := builtinRegistry[cmd.Implementation]
 			if !ok {
-				continue // Unknown implementation — skip silently.
+				log.Warn("tools: unknown implementation in skills config; skipping",
+					"domain", domain,
+					"implementation", cmd.Implementation,
+				)
+				continue
 			}
-			domainTools = append(domainTools, factory(ve))
+			t := factory(ve)
+			log.Info("tools: registered domain tool", "domain", domain, "tool_name", t.Definition.Name)
+			domainTools = append(domainTools, t)
 		}
-		return append(domainTools, base...)
+		all := append(domainTools, base...)
+		names := make([]string, len(all))
+		for i, t := range all {
+			names[i] = t.Definition.Name
+		}
+		log.Info("tools: registry assembled for domain",
+			"domain", domain,
+			"tool_count", len(all),
+			"tool_names", names,
+		)
+		return all
 	}
 
 	// Domain not in config — return base tools only (task_complete + spawn_agent).
+	log.Warn("tools: domain not found in skills config; only base tools available",
+		"domain", domain,
+		"base_tool_count", len(base),
+	)
 	return base
 }
 
@@ -142,11 +186,11 @@ func spawnAgentTool(as *AgentSpawner) SkillTool {
 		Definition: anthropic.ToolParam{
 			Name: "spawn_agent",
 			Description: anthropic.String(
-				"Spawn a child agent to handle a self-contained sub-task. " +
-					"The child runs independently and returns its result when done. " +
-					"Use this when the sub-task requires a different skill domain or can run in parallel. " +
-					"Do NOT use for simple operations already available via other tools. " +
-					"Do NOT pass credential values or secrets in instructions."),
+				"Spawn a child agent for a sub-task requiring a different skill domain. " +
+					"Returns the child's result when done. " +
+					"To run sub-tasks in parallel, emit multiple spawn_agent calls in a single response. " +
+					"Do NOT use for operations your current tools can handle. " +
+					"Do NOT pass credentials in instructions."),
 			InputSchema: anthropic.ToolInputSchemaParam{
 				Properties: map[string]interface{}{
 					"instructions": map[string]interface{}{
@@ -225,7 +269,7 @@ func webFetchTool() SkillTool {
 				Properties: map[string]interface{}{
 					"url": map[string]interface{}{
 						"type":        "string",
-						"description": "The fully-qualified URL to fetch (must include scheme: https:// or http://).",
+						"description": "URL to fetch, including scheme (https:// or http://).",
 					},
 					"method": map[string]interface{}{
 						"type":        "string",
@@ -328,15 +372,15 @@ func vaultWebFetchTool(ve *VaultExecutor) SkillTool {
 		Definition: anthropic.ToolParam{
 			Name: "vault_web_fetch",
 			Description: anthropic.String(
-				"Fetch a URL using a stored API credential managed by the Vault. " +
-					"Use for authenticated HTTP requests (APIs requiring an API key). " +
+				"Fetch a URL via the Vault using a stored API credential. " +
+					"Use for authenticated HTTP requests requiring an API key. " +
 					"Do NOT use for public URLs — use web_fetch instead. " +
 					"Do NOT include credential values in any parameter."),
 			InputSchema: anthropic.ToolInputSchemaParam{
 				Properties: map[string]interface{}{
 					"url": map[string]interface{}{
 						"type":        "string",
-						"description": "The fully-qualified URL to fetch (must include scheme: https:// or http://).",
+						"description": "URL to fetch, including scheme (https:// or http://).",
 					},
 					"method": map[string]interface{}{
 						"type":        "string",
@@ -406,10 +450,9 @@ func vaultGoogleSearchTool(ve *VaultExecutor) SkillTool {
 		Definition: anthropic.ToolParam{
 			Name: "vault_google_search",
 			Description: anthropic.String(
-				"Search the web using Google Custom Search API via the Vault. " +
-					"Returns titles, URLs, and snippets for the top results. " +
+				"Search the web via the Vault and return titles, URLs, and snippets for top results. " +
 					"Use for current information, research, and fact-finding. " +
-					"Do NOT use for private or internal data — use vault_data_read for that. " +
+					"Do NOT use for private or internal data — use vault_data_read. " +
 					"Do NOT include credential values in any parameter."),
 			InputSchema: anthropic.ToolInputSchemaParam{
 				Properties: map[string]interface{}{
@@ -464,8 +507,8 @@ func vaultGitHubRequestTool(ve *VaultExecutor) SkillTool {
 			Name: "vault_github_request",
 			Description: anthropic.String(
 				"Make an authenticated request to the GitHub REST API via the Vault. " +
-					"Use for reading repos, issues, pull requests, code, and user data. " +
-					"Do NOT use for public unauthenticated GitHub data — use web_fetch instead. " +
+					"Use for repos, issues, pull requests, code, and user data — supports read and write. " +
+					"Do NOT use for public GitHub data — use web_fetch instead. " +
 					"Do NOT include credential values in any parameter."),
 			InputSchema: anthropic.ToolInputSchemaParam{
 				Properties: map[string]interface{}{
@@ -480,7 +523,7 @@ func vaultGitHubRequestTool(ve *VaultExecutor) SkillTool {
 					},
 					"body": map[string]interface{}{
 						"type":        "string",
-						"description": "Request body as a JSON-encoded string. Only used for POST and PATCH.",
+						"description": "JSON body for POST and PATCH requests.",
 					},
 				},
 				Required: []string{"path"},

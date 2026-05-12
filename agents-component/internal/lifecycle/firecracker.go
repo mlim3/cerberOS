@@ -421,8 +421,10 @@ func fcGuestEnv(config VMConfig) map[string]string {
 		"AEGIS_NATS_URL",
 		"AEGIS_AGENT_PROCESS_PATH", // in case the guest needs to respawn
 		"AEGIS_SKILL_SPEC_BUDGET",
-		"VOYAGE_API_KEY",
+		"AEGIS_EMBEDDING_API_URL",
 		"AEGIS_EMBEDDING_MODEL",
+		"AEGIS_EMBEDDING_DIM",
+		"AEGIS_EMBEDDING_PROMPT_STYLE",
 	} {
 		if v := os.Getenv(key); v != "" {
 			env[key] = v

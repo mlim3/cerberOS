@@ -142,6 +142,7 @@ func (c *Config) ToSkillNodes() []*types.SkillNode {
 				Description:             cmd.Description,
 				RequiredCredentialTypes: cmd.RequiredCredentialTypes,
 				TimeoutSeconds:          cmd.TimeoutSeconds,
+				Implementation:          cmd.Implementation,
 				Spec:                    spec,
 			}
 		}

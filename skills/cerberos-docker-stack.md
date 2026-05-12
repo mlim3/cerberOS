@@ -81,5 +81,5 @@ Check `docker compose ps` for port bindings. See `cerberos-service-ports.md` for
 | Profile         | Services added                                                                 | Use case                             |
 | --------------- | ------------------------------------------------------------------------------ | ------------------------------------ |
 | _(default)_     | nats-1, orchestrator, io, memory-db, memory-api, openbao, vault, aegis-databus | Full-stack dev                       |
-| `agents`        | simulator, aegis-agents                                                        | Agent lifecycle testing              |
+| `agents`        | aegis-agents                                                                   | Agent lifecycle testing              |
 | `observability` | nats-exporter, prometheus, grafana, loki, promtail                             | Monitoring dashboards + log pipeline |

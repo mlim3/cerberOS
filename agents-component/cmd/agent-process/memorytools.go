@@ -49,10 +49,9 @@ func memoryUpdateTool(sl *SessionLog, domain string) SkillTool {
 			Name: "memory_update",
 			Description: anthropic.String(
 				"Append a distilled, reusable fact to domain-scoped agent memory. " +
-					"Use only for observations that will help future agents working in this domain — " +
-					"not for task-specific details, raw tool outputs, or user personal data. " +
-					"Do NOT call this for every turn; call only when a genuinely novel and reusable " +
-					"fact is discovered. Maximum 500 characters."),
+					"Use only for observations that help future agents in this domain — " +
+					"not for task-specific details, raw outputs, or personal data. " +
+					"Call sparingly: only when a genuinely novel fact is discovered. Maximum 500 characters."),
 			InputSchema: anthropic.ToolInputSchemaParam{
 				Properties: map[string]interface{}{
 					"fact": map[string]interface{}{
@@ -133,10 +132,8 @@ func memorySearchTool(sl *SessionLog) SkillTool {
 		Definition: anthropic.ToolParam{
 			Name: "memory_search",
 			Description: anthropic.String(
-				"Full-text search across past session turns to recall specific prior results. " +
-					"Use when you need to reference something from an earlier step without re-running tools. " +
-					"Do NOT use as a substitute for reading fresh data from external systems. " +
-					"Returns up to 3 relevant excerpts by default; set max_results to override (max 10)."),
+				"Full-text search over past session turns to recall prior results without re-running tools. " +
+					"Do NOT use as a substitute for fresh data from external systems."),
 			InputSchema: anthropic.ToolInputSchemaParam{
 				Properties: map[string]interface{}{
 					"query": map[string]interface{}{

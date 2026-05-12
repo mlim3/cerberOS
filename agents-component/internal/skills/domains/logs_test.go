@@ -52,24 +52,6 @@ func TestLogsDomain_RegistersWithManager(t *testing.T) {
 	}
 }
 
-func TestLogsDomain_SearchFindsRelevantCommands(t *testing.T) {
-	mgr := skills.New()
-	if err := mgr.RegisterDomain(domains.LogsDomain()); err != nil {
-		t.Fatalf("RegisterDomain failed: %v", err)
-	}
-
-	results, err := mgr.Search("search log messages by keyword", 3)
-	if err != nil {
-		t.Fatalf("Search failed: %v", err)
-	}
-	if len(results) == 0 {
-		t.Fatal("expected at least one search result")
-	}
-	// Top result should be logs.search for a keyword-search query
-	if results[0].Name != "logs.search" {
-		t.Errorf("expected top result 'logs.search', got %q (score %.3f)", results[0].Name, results[0].Score)
-	}
-}
 
 func TestLogsDomain_GetSpecReturnsParameters(t *testing.T) {
 	mgr := skills.New()

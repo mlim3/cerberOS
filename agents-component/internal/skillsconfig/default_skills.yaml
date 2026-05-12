@@ -709,3 +709,26 @@ domains:
 
   - name: general
     commands: []
+
+
+  # ---------------------------------------------------------------------------
+  # e2e_test domain — FOR AUTOMATED TESTING ONLY.
+  # This domain exists solely to validate the skills_search → spawn_agent
+  # delegation path in e2e tests. The planner's domain guide does not mention
+  # "e2e_test", so the planner always assigns to "general", forcing the agent
+  # to discover skills in this domain via skills_search before calling
+  # spawn_agent. Do not add real skills here.
+  # ---------------------------------------------------------------------------
+  - name: e2e_test
+    commands:
+      - name: e2e_ping
+        label: 'E2E Test Ping'
+        description: 'Automated e2e connectivity probe for cross-domain skill discovery and delegation validation. Echoes a probe string to confirm the e2e_test domain is reachable via skills_search and spawn_agent. Do NOT use outside automated e2e testing.'
+        implementation: e2e_ping
+        required_credential_types: []
+        timeout_seconds: 5
+        parameters:
+          - name: probe
+            type: string
+            required: true
+            description: 'Probe identifier echoed back in the response (e.g. "skill-search-delegation"). Used to correlate test assertions.'

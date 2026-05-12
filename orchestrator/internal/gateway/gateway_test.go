@@ -122,6 +122,121 @@ func TestHandleTaskResult_UsesPayloadTraceIDWhenEnvelopeTraceIDEmpty(t *testing.
 	}
 }
 
+func TestHandleAgentSpawnRequest_RoutesToRegisteredHandler(t *testing.T) {
+	nats := mocks.NewNATSMock()
+	gw := gateway.New(nats, "test-node")
+
+	var got types.AgentSpawnRequest
+	gw.RegisterAgentSpawnRequestHandler(func(_ context.Context, req types.AgentSpawnRequest) error {
+		got = req
+		return nil
+	})
+	if err := gw.Start(); err != nil {
+		t.Fatalf("gateway.Start() error = %v", err)
+	}
+
+	req := types.AgentSpawnRequest{
+		RequestID:      "spawn-req-1",
+		ParentAgentID:  "agent-parent",
+		ParentTaskID:   "parent-task",
+		RequiredSkills: []string{"web"},
+		Instructions:   "Fetch a page",
+		TraceID:        "trace-123",
+	}
+	data := newEnvelopedMessage(t, "agent.spawn.request", req.RequestID, req)
+	if err := nats.Deliver(gateway.TopicAgentSpawnRequest, data); err != nil {
+		t.Fatalf("Deliver(agent.spawn.request) error = %v", err)
+	}
+
+	if got.RequestID != req.RequestID {
+		t.Fatalf("handler request_id = %q, want %q", got.RequestID, req.RequestID)
+	}
+	if len(got.RequiredSkills) != 1 || got.RequiredSkills[0] != "web" {
+		t.Fatalf("handler required_skills = %v, want [web]", got.RequiredSkills)
+	}
+}
+
+func TestHandleCredentialRequest_RoutesToRegisteredHandler(t *testing.T) {
+	nats := mocks.NewNATSMock()
+	gw := gateway.New(nats, "test-node")
+
+	var got types.CredentialRequest
+	var gotTrace string
+	gw.RegisterCredentialRequestHandler(func(ctx context.Context, req types.CredentialRequest) error {
+		got = req
+		gotTrace = observability.TraceIDFrom(ctx)
+		return nil
+	})
+	if err := gw.Start(); err != nil {
+		t.Fatalf("gateway.Start() error = %v", err)
+	}
+
+	req := types.CredentialRequest{
+		RequestID:    "cred-req-1",
+		AgentID:      "agent-123",
+		TaskID:       "orch-ref-123",
+		Operation:    "authorize",
+		SkillDomains: []string{"general"},
+	}
+	raw, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := types.MessageEnvelope{
+		MessageID:       "msg-cred-1",
+		MessageType:     "credential.request",
+		SourceComponent: "agents",
+		CorrelationID:   req.RequestID,
+		TraceID:         "0123456789abcdef0123456789abcdef",
+		Timestamp:       time.Now().UTC(),
+		SchemaVersion:   "1.0",
+		Payload:         raw,
+	}
+	data, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := nats.Deliver(gateway.TopicCredentialRequest, data); err != nil {
+		t.Fatalf("Deliver(credential.request) error = %v", err)
+	}
+	if got.RequestID != req.RequestID {
+		t.Fatalf("handler request_id = %q, want %q", got.RequestID, req.RequestID)
+	}
+	if got.Operation != "authorize" {
+		t.Fatalf("handler operation = %q, want authorize", got.Operation)
+	}
+	if len(got.SkillDomains) != 1 || got.SkillDomains[0] != "general" {
+		t.Fatalf("handler skill_domains = %v, want [general]", got.SkillDomains)
+	}
+	if got.TraceID != envelope.TraceID {
+		t.Fatalf("handler payload trace_id = %q, want %q", got.TraceID, envelope.TraceID)
+	}
+	if gotTrace != envelope.TraceID {
+		t.Fatalf("handler ctx trace_id = %q, want %q", gotTrace, envelope.TraceID)
+	}
+}
+
+func TestPublishAgentSpawnResponse_PublishesToAgentsTopic(t *testing.T) {
+	gw, nats := newGateway(t)
+
+	resp := types.AgentSpawnResponse{
+		RequestID:     "spawn-req-1",
+		ParentAgentID: "agent-parent",
+		ChildAgentID:  "agent-child",
+		Status:        "success",
+		Result:        `"Example Domain"`,
+	}
+	if err := gw.PublishAgentSpawnResponse(context.Background(), resp); err != nil {
+		t.Fatalf("PublishAgentSpawnResponse() error = %v", err)
+	}
+
+	msgs := nats.Published[gateway.TopicAgentSpawnResponse]
+	if len(msgs) != 1 {
+		t.Fatalf("published messages to agent spawn response topic = %d, want 1", len(msgs))
+	}
+}
+
 // ── Envelope Validation ───────────────────────────────────────────────────────
 
 func TestHandleInboundTask_MalformedEnvelope_DeadLettered(t *testing.T) {
@@ -494,6 +609,38 @@ func TestPublishTaskSpec_WirePrefersW3CTraceID(t *testing.T) {
 	}
 	if envelope.TraceID != "0123456789abcdef0123456789abcdef" {
 		t.Fatalf("envelope.TraceID = %q, want W3C trace on outer MessageEnvelope", envelope.TraceID)
+	}
+}
+
+func TestPublishTaskSpec_PrefersSpecTraceIDOverContextTraceID(t *testing.T) {
+	gw, nats := newGateway(t)
+
+	spec := types.TaskSpec{
+		OrchestratorTaskRef:  "orch-internal",
+		TaskID:               "task-1",
+		UserID:               "user-1",
+		RequiredSkillDomains: []string{"web"},
+		PolicyScope:          types.PolicyScope{Domains: []string{"web"}, TokenRef: "tok-1"},
+		TimeoutSeconds:       60,
+		CallbackTopic:        "aegis.user-io.results.task-1",
+		TraceID:              "0123456789abcdef0123456789abcdef",
+	}
+
+	specCtx := observability.WithTraceID(context.Background(), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	if err := gw.PublishTaskSpec(specCtx, spec); err != nil {
+		t.Fatalf("PublishTaskSpec() error = %v", err)
+	}
+
+	msgs := nats.Published[gateway.TopicAgentTasksInbound]
+	if len(msgs) != 1 {
+		t.Fatalf("published = %d, want 1", len(msgs))
+	}
+	var envelope types.MessageEnvelope
+	if err := json.Unmarshal(msgs[0], &envelope); err != nil {
+		t.Fatalf("invalid envelope: %v", err)
+	}
+	if envelope.TraceID != spec.TraceID {
+		t.Fatalf("envelope.TraceID = %q, want spec.TraceID %q", envelope.TraceID, spec.TraceID)
 	}
 }
 

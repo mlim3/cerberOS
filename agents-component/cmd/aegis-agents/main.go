@@ -45,6 +45,14 @@ func main() {
 		"component_id", cfg.ComponentID,
 		"nats_url", cfg.NATSURL,
 	)
+	if embeddingAPIURL := strings.TrimSpace(os.Getenv("AEGIS_EMBEDDING_API_URL")); embeddingAPIURL != "" {
+		log.Info("embedding: using shared embedding API",
+			"url", embeddingAPIURL,
+			"model", strings.TrimSpace(os.Getenv("AEGIS_EMBEDDING_MODEL")),
+			"dimensions", strings.TrimSpace(os.Getenv("AEGIS_EMBEDDING_DIM")),
+			"prompt_style", strings.TrimSpace(os.Getenv("AEGIS_EMBEDDING_PROMPT_STYLE")),
+		)
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -130,17 +138,7 @@ func main() {
 
 	reg := registry.New(registry.WithStateChangeHook(rec.ObserveStateChange))
 
-	// Wire the embedding model. If VOYAGE_API_KEY is present, use the Voyage AI
-	// production embedder (voyage-3-lite or a custom model from config). Otherwise
-	// fall back to the default feature-hashing embedder — sufficient for
-	// development and integration tests but not for production similarity quality.
 	skillOpts := []skills.Option{skills.WithGetSpecHook(rec.ObserveSkillInvocation)}
-	if voyageAPIKey := os.Getenv("VOYAGE_API_KEY"); voyageAPIKey != "" {
-		log.Info("embedding: using Voyage AI model", "model", cfg.EmbeddingModel)
-		skillOpts = append(skillOpts, skills.WithEmbedder(newVoyageEmbedder(voyageAPIKey, cfg.EmbeddingModel)))
-	} else {
-		log.Warn("embedding: VOYAGE_API_KEY not set — using hash embedder (not for production)")
-	}
 	skillMgr := skills.New(skillOpts...)
 	credBroker, err := credentials.NewNATSBroker(commsClient,
 		credentials.WithBrokerConfig(credentials.BrokerConfig{
@@ -232,7 +230,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	loadSkills(cfg.SkillsConfigPath, skillMgr, log)
+	if err := loadSkills(cfg.SkillsConfigPath, skillMgr, log); err != nil {
+		log.Error("skill loading failed", "error", err)
+		os.Exit(1)
+	}
 
 	// Start the SIGHUP hot-reload goroutine now that the skill manager is
 	// initialised and the initial skill tree is loaded.
@@ -298,6 +299,13 @@ func main() {
 	}
 
 	f.StartIdleSweep(ctx)
+
+	// Seed static skills to the Memory Component's pgvector index so they are
+	// discoverable via semantic search from agent-process microVMs. Runs before
+	// LoadSynthesizedSkills so only static commands are written here.
+	if err := f.SeedStaticSkills(ctx); err != nil {
+		log.Warn("static skills seed failed — skill semantic search may miss static skills", "error", err)
+	}
 
 	// Rehydrate any skills synthesized in prior sessions into the live skill
 	// tree. Must run after static skills are loaded (loadSkills above) because
@@ -538,18 +546,10 @@ func main() {
 // loadSkills loads skill definitions from configPath (YAML or JSON) and registers
 // every domain with the Skill Hierarchy Manager. When configPath is empty the
 // embedded default_skills.yaml is used automatically.
-//
-// Registration failures are logged as warnings rather than fatal errors so that
-// a single malformed command definition does not prevent all other domains from
-// being served.
-func loadSkills(configPath string, mgr skills.Manager, log *slog.Logger) {
+func loadSkills(configPath string, mgr skills.Manager, log *slog.Logger) error {
 	cfg, err := skillsconfig.Load(configPath)
 	if err != nil {
-		log.Error("skills config load failed — no skills registered",
-			"path", configPath,
-			"error", err,
-		)
-		return
+		return fmt.Errorf("skills config load failed for %q: %w", configPath, err)
 	}
 
 	source := "embedded default"
@@ -560,14 +560,14 @@ func loadSkills(configPath string, mgr skills.Manager, log *slog.Logger) {
 
 	for _, node := range cfg.ToSkillNodes() {
 		if err := mgr.RegisterDomain(node); err != nil {
-			log.Warn("skill domain registration failed", "domain", node.Name, "error", err)
-		} else {
-			log.Info("skill domain registered",
-				"domain", node.Name,
-				"commands", len(node.Children),
-			)
+			return fmt.Errorf("skill domain registration failed for %q: %w", node.Name, err)
 		}
+		log.Info("skill domain registered",
+			"domain", node.Name,
+			"commands", len(node.Children),
+		)
 	}
+	return nil
 }
 
 // reloadSkills hot-reloads the skill tree from configPath into mgr on SIGHUP.

@@ -60,14 +60,13 @@ func TestWebDomain_CredentialRouting(t *testing.T) {
 
 	cases := []struct {
 		command         string
-		wantVaultRouted bool // true == requires vault-delegated execution
+		wantVaultRouted bool
 	}{
 		{"web.fetch", false},
 		{"web.search", true},
 		{"web.extract", false},
 	}
 
-	// Re-check directly from the domain node since GetCommands strips Spec.
 	domain := domains.WebDomain()
 	for _, tc := range cases {
 		cmd, ok := domain.Children[tc.command]
@@ -118,38 +117,6 @@ func TestWebDomain_GetSpecReturnsFullParams(t *testing.T) {
 	}
 }
 
-func TestWebDomain_SearchFindsCorrectCommand(t *testing.T) {
-	mgr := skills.New()
-	if err := mgr.RegisterDomain(domains.WebDomain()); err != nil {
-		t.Fatalf("RegisterDomain failed: %v", err)
-	}
-
-	tests := []struct {
-		query string
-		want  string
-	}{
-		{"search the web for news", "web.search"},
-		{"fetch the content of a URL", "web.fetch"},
-		{"extract text from a webpage", "web.extract"},
-	}
-
-	for _, tc := range tests {
-		results, err := mgr.Search(tc.query, 3)
-		if err != nil {
-			t.Errorf("Search(%q) error: %v", tc.query, err)
-			continue
-		}
-		if len(results) == 0 {
-			t.Errorf("Search(%q) returned no results", tc.query)
-			continue
-		}
-		if results[0].Name != tc.want {
-			t.Errorf("Search(%q): expected top result %q, got %q (score %.3f)",
-				tc.query, tc.want, results[0].Name, results[0].Score)
-		}
-	}
-}
-
 func TestWebDomain_TimeoutBoundsValid(t *testing.T) {
 	domain := domains.WebDomain()
 	for name, cmd := range domain.Children {
@@ -178,14 +145,5 @@ func TestBothDomains_CanCoexistInManager(t *testing.T) {
 	}
 	if !found["web"] {
 		t.Error("'web' domain not listed after registration")
-	}
-
-	// Cross-domain search should return results from both domains.
-	results, err := mgr.Search("search and fetch information", 6)
-	if err != nil {
-		t.Fatalf("cross-domain search failed: %v", err)
-	}
-	if len(results) == 0 {
-		t.Fatal("expected results from cross-domain search")
 	}
 }

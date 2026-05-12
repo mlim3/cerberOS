@@ -37,7 +37,10 @@ func TestTaskExecutionLogs(t *testing.T) {
 
 			var createResp map[string]interface{}
 			parseResponse(t, resp, &createResp)
-			data := createResp["data"].(map[string]interface{})
+			data, ok := createResp["data"].(map[string]interface{})
+			if !ok {
+				t.Fatalf("Expected data object in response, got: %v", createResp)
+			}
 			if data["executionId"] == nil || data["createdAt"] == nil {
 				t.Fatalf("Expected executionId and createdAt in response")
 			}
@@ -50,15 +53,24 @@ func TestTaskExecutionLogs(t *testing.T) {
 
 		var result map[string]interface{}
 		parseResponse(t, resp, &result)
-		data := result["data"].(map[string]interface{})
-		executions := data["executions"].([]interface{})
+		data, ok := result["data"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("Expected data object in response, got: %v", result)
+		}
+		executions, ok := data["executions"].([]interface{})
+		if !ok {
+			t.Fatalf("Expected executions array in response, got: %v", data)
+		}
 
 		if len(executions) != 2 {
 			t.Fatalf("Expected 2 task executions due to limit, got %d", len(executions))
 		}
 
 		for i, execAny := range executions {
-			exec := execAny.(map[string]interface{})
+			exec, ok := execAny.(map[string]interface{})
+			if !ok {
+				t.Fatalf("Expected execution object at index %d, got: %v", i, execAny)
+			}
 			if exec["actionType"] != steps[i].ActionType {
 				t.Errorf("Step %d: expected actionType %s, got %v", i, steps[i].ActionType, exec["actionType"])
 			}

@@ -116,6 +116,13 @@ type SkillNode struct {
 	RequiredCredentialTypes []string `json:"required_credential_types,omitempty"` // empty = no vault execution needed
 	TimeoutSeconds          int      `json:"timeout_seconds,omitempty"`           // 0 = default (30s); hard max 300s
 
+	// Implementation is the builtinRegistry key used by the agent-process to
+	// look up the concrete SkillTool factory at runtime. Set only on command-level
+	// nodes for static skills; empty for synthesized skills that use an LLM recipe.
+	// Populated by skillsconfig.ToSkillNodes() and stored in the skill_cache payload
+	// so the agent can auto-register credential-free tools discovered via skills_search.
+	Implementation string `json:"implementation,omitempty"`
+
 	// Origin and SynthesizedAt are set by the skill synthesis pipeline.
 	// Static skills loaded from config carry Origin "" (zero value).
 	Origin        string     `json:"origin,omitempty"`         // "static" | "synthesized"
@@ -323,13 +330,14 @@ type CrashSnapshot struct {
 // When SearchQuery is set the Memory Component runs a full-text search across
 // matching records and returns the top MaxResults entries (0 = server default).
 type MemoryReadRequest struct {
-	AgentID     string          `json:"agent_id"`
-	DataType    string          `json:"data_type,omitempty"`
-	ContextTag  string          `json:"context_tag"`
-	TraceID     string          `json:"trace_id"`
-	SearchQuery string          `json:"search_query,omitempty"` // when set, triggers FTS search in the Memory Component
-	MaxResults  int             `json:"max_results,omitempty"`  // cap on search results; 0 = server default (3)
-	QueryParams json.RawMessage `json:"query_params,omitempty"` // structured filter params for log queries (DataType="system_log")
+	AgentID       string          `json:"agent_id"`
+	DataType      string          `json:"data_type,omitempty"`
+	ContextTag    string          `json:"context_tag"`
+	TraceID       string          `json:"trace_id"`
+	SearchQuery   string          `json:"search_query,omitempty"`   // when set, triggers FTS search in the Memory Component
+	SemanticQuery string          `json:"semantic_query,omitempty"` // when set with DataType="skill_cache", triggers vector search
+	MaxResults    int             `json:"max_results,omitempty"`    // cap on search results; 0 = server default (3)
+	QueryParams   json.RawMessage `json:"query_params,omitempty"`   // structured filter params for log queries (DataType="system_log")
 }
 
 // MemoryResponse is received from the Orchestrator carrying records returned
@@ -345,10 +353,40 @@ type MemoryResponse struct {
 // withheld per the progressive disclosure contract. Call GetSpec for the full
 // parameter schema of a specific command.
 type SkillSearchResult struct {
-	Domain      string  `json:"domain"`
-	Name        string  `json:"name"`
-	Description string  `json:"description"`
-	Score       float64 `json:"score"` // cosine similarity in [0, 1]; higher is more relevant
+	Domain         string  `json:"domain"`
+	Name           string  `json:"name"`
+	Description    string  `json:"description"`
+	Score          float64 `json:"score"`          // cosine similarity in [0, 1]; higher is more relevant
+	RequiresCred   bool    `json:"requires_cred"`  // true if the skill needs vault execution
+	Implementation string  `json:"implementation"` // builtinRegistry key; empty for synthesized skills
+	Origin         string  `json:"origin"`         // "static" | "synthesized"
+}
+
+// ClarificationRequest is sent by the agent process to the Orchestrator when it
+// discovers a credentialed skill outside its pre-authorized scope and needs the
+// user to approve expanding that scope before proceeding.
+//
+// The Orchestrator routes this to the user via the I/O component. The user's
+// response arrives as a ClarificationResponse on aegis.agents.clarification.response.
+type ClarificationRequest struct {
+	RequestID   string `json:"request_id"`             // UUID; correlates to ClarificationResponse
+	AgentID     string `json:"agent_id"`
+	TaskID      string `json:"task_id"`
+	Question    string `json:"question"`               // human-readable question shown to the user
+	SkillName   string `json:"skill_name"`             // e.g. "vault_gmail_send"
+	SkillDomain string `json:"skill_domain"`           // e.g. "google_workspace"
+	Reason      string `json:"reason"`                 // why the agent thinks this skill is needed
+}
+
+// ClarificationResponse is returned by the Orchestrator after the user has
+// responded to a ClarificationRequest. Approved=true means the Orchestrator
+// should authorize a child agent for SkillDomain and return the result.
+// Approved=false means the agent must find an alternative or fail gracefully.
+type ClarificationResponse struct {
+	RequestID   string `json:"request_id"`  // matches ClarificationRequest.RequestID
+	AgentID     string `json:"agent_id"`
+	Approved    bool   `json:"approved"`
+	UserMessage string `json:"user_message,omitempty"` // optional user note (e.g. reason for denial)
 }
 
 // SessionEntry is one node in the agent's append-only session log tree (EDD §13.1).

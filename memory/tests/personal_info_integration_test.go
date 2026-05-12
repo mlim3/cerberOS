@@ -55,11 +55,20 @@ func TestPersonalInfoAndConcurrency(t *testing.T) {
 		var result map[string]interface{}
 		parseResponse(t, resp, &result)
 
-		data := result["data"].(map[string]interface{})
-		resultChunks := data["results"].([]interface{})
+		data, ok := result["data"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("Expected data object in response, got: %v", result)
+		}
+		resultChunks, ok := data["results"].([]interface{})
+		if !ok {
+			t.Fatalf("Expected results array in response, got: %v", data)
+		}
 
 		if len(resultChunks) > 0 {
-			firstChunk := resultChunks[0].(map[string]interface{})
+			firstChunk, ok := resultChunks[0].(map[string]interface{})
+			if !ok {
+				t.Fatalf("Expected chunk object, got: %v", resultChunks[0])
+			}
 			if _, ok := firstChunk["similarityScore"]; !ok {
 				t.Log("Warning: similarityScore not present in response")
 			}
@@ -88,14 +97,26 @@ func TestPersonalInfoAndConcurrency(t *testing.T) {
 		var getResult map[string]interface{}
 		parseResponse(t, getResp, &getResult)
 
-		data := getResult["data"].(map[string]interface{})
-		facts := data["facts"].([]interface{})
+		data, ok := getResult["data"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("Expected data object in response, got: %v", getResult)
+		}
+		facts, ok := data["facts"].([]interface{})
+		if !ok {
+			t.Fatalf("Expected facts array in response, got: %v", data)
+		}
 		if len(facts) == 0 {
 			t.Fatalf("No facts found after save")
 		}
 
-		fact := facts[0].(map[string]interface{})
-		factID := fact["factId"].(string)
+		fact, ok := facts[0].(map[string]interface{})
+		if !ok {
+			t.Fatalf("Expected fact object, got: %v", facts[0])
+		}
+		factID, ok := fact["factId"].(string)
+		if !ok {
+			t.Fatalf("Expected factId string, got: %v", fact["factId"])
+		}
 		versionFloat, ok := fact["version"].(float64)
 		if !ok {
 			t.Fatalf("Version missing or not float64")
@@ -144,11 +165,22 @@ func TestPersonalInfoAndConcurrency(t *testing.T) {
 		getResp := doRequest(t, "GET", fmt.Sprintf("/api/v1/personal_info/%s/all", userID), nil, nil)
 		var getResult map[string]interface{}
 		parseResponse(t, getResp, &getResult)
-		facts := getResult["data"].(map[string]interface{})["facts"].([]interface{})
-		if len(facts) == 0 {
+		data, ok := getResult["data"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("Expected data object in response, got: %v", getResult)
+		}
+		facts, ok := data["facts"].([]interface{})
+		if !ok || len(facts) == 0 {
 			t.Fatalf("No facts found for delete test")
 		}
-		factID := facts[len(facts)-1].(map[string]interface{})["factId"].(string)
+		lastFact, ok := facts[len(facts)-1].(map[string]interface{})
+		if !ok {
+			t.Fatalf("Expected fact object, got: %v", facts[len(facts)-1])
+		}
+		factID, ok := lastFact["factId"].(string)
+		if !ok {
+			t.Fatalf("Expected factId string, got: %v", lastFact["factId"])
+		}
 
 		delResp := doRequest(t, "DELETE", fmt.Sprintf("/api/v1/personal_info/%s/facts/%s", userID, factID), nil, nil)
 		if delResp.StatusCode != http.StatusOK {
@@ -156,32 +188,44 @@ func TestPersonalInfoAndConcurrency(t *testing.T) {
 		}
 		var delResult map[string]interface{}
 		parseResponse(t, delResp, &delResult)
-		data := delResult["data"].(map[string]interface{})
-		if data["deleted"] != true {
-			t.Fatalf("Expected deleted=true, got %v", data["deleted"])
+		delData, ok := delResult["data"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("Expected data object in delete response, got: %v", delResult)
+		}
+		if delData["deleted"] != true {
+			t.Fatalf("Expected deleted=true, got %v", delData["deleted"])
 		}
 	})
 }
 
 func TestPersonalInfoRetrievalOrdering(t *testing.T) {
-	userID := uuid.New().String()
-	seedUser(t, userID)
-
 	ctx := context.Background()
-	var userUUID pgtype.UUID
-	if err := userUUID.Scan(userID); err != nil {
-		t.Fatalf("failed to scan user id: %v", err)
+	embedder := &deterministicTestEmbedder{}
+	queryEmbeddingText := func(query string) string {
+		return fmt.Sprintf("task: search result | query: %s", query)
+	}
+	newTestUser := func(t *testing.T) (string, pgtype.UUID) {
+		t.Helper()
+
+		userID := uuid.New().String()
+		seedUser(t, userID)
+
+		var userUUID pgtype.UUID
+		if err := userUUID.Scan(userID); err != nil {
+			t.Fatalf("failed to scan user id: %v", err)
+		}
+
+		return userID, userUUID
 	}
 
-	embedder := &deterministicTestEmbedder{}
-
 	t.Run("More Relevant Chunk Ranks Ahead", func(t *testing.T) {
+		userID, userUUID := newTestUser(t)
 		queryText := "ranking exact match query"
-		matchingEmbedding, err := embedder.Embed(ctx, queryText)
+		matchingEmbedding, err := embedder.Embed(ctx, queryEmbeddingText(queryText))
 		if err != nil {
 			t.Fatalf("failed to create matching embedding: %v", err)
 		}
-		otherEmbedding, err := embedder.Embed(ctx, "completely different query text")
+		otherEmbedding, err := embedder.Embed(ctx, queryEmbeddingText("completely different query text"))
 		if err != nil {
 			t.Fatalf("failed to create comparison embedding: %v", err)
 		}
@@ -220,20 +264,31 @@ func TestPersonalInfoRetrievalOrdering(t *testing.T) {
 		var result map[string]interface{}
 		parseResponse(t, resp, &result)
 
-		results := result["data"].(map[string]interface{})["results"].([]interface{})
+		data, ok := result["data"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("Expected data object in response, got: %v", result)
+		}
+		results, ok := data["results"].([]interface{})
+		if !ok {
+			t.Fatalf("Expected results array in response, got: %v", data)
+		}
 		if len(results) < 2 {
 			t.Fatalf("expected at least 2 results, got %d", len(results))
 		}
 
-		first := results[0].(map[string]interface{})
+		first, ok := results[0].(map[string]interface{})
+		if !ok {
+			t.Fatalf("Expected result object, got: %v", results[0])
+		}
 		if first["text"] != "matching chunk" {
 			t.Fatalf("expected matching chunk to rank first, got %v", first["text"])
 		}
 	})
 
 	t.Run("Tie Break Uses Most Recent Chunk", func(t *testing.T) {
+		userID, userUUID := newTestUser(t)
 		queryText := "tie break ranking query"
-		tiedEmbedding, err := embedder.Embed(ctx, queryText)
+		tiedEmbedding, err := embedder.Embed(ctx, queryEmbeddingText(queryText))
 		if err != nil {
 			t.Fatalf("failed to create tied embedding: %v", err)
 		}
@@ -287,13 +342,26 @@ func TestPersonalInfoRetrievalOrdering(t *testing.T) {
 		var result map[string]interface{}
 		parseResponse(t, resp, &result)
 
-		results := result["data"].(map[string]interface{})["results"].([]interface{})
+		data, ok := result["data"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("Expected data object in response, got: %v", result)
+		}
+		results, ok := data["results"].([]interface{})
+		if !ok {
+			t.Fatalf("Expected results array in response, got: %v", data)
+		}
 		if len(results) < 2 {
 			t.Fatalf("expected at least 2 results, got %d", len(results))
 		}
 
-		first := results[0].(map[string]interface{})
-		second := results[1].(map[string]interface{})
+		first, ok := results[0].(map[string]interface{})
+		if !ok {
+			t.Fatalf("Expected result object, got: %v", results[0])
+		}
+		second, ok := results[1].(map[string]interface{})
+		if !ok {
+			t.Fatalf("Expected result object, got: %v", results[1])
+		}
 		if first["text"] != "newer tied chunk" {
 			t.Fatalf("expected newer tied chunk first, got %v", first["text"])
 		}

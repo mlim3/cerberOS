@@ -8,7 +8,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/pgvector/pgvector-go"
-	"github.com/sashabaranov/go-openai"
 
 	"github.com/mlim3/cerberOS/memory/internal/storage"
 )
@@ -16,48 +15,33 @@ import (
 // Embedder represents a service that can generate vector embeddings
 type Embedder interface {
 	Embed(ctx context.Context, text string) (pgvector.Vector, error)
+	ModelVersion() string
 }
 
-// OpenAIEmbedder implements Embedder using the OpenAI API
-type OpenAIEmbedder struct {
-	client *openai.Client
-}
+type PromptFormatter func(string, string) string
+type QueryFormatter func(string) string
 
-func NewOpenAIEmbedder(apiKey string) *OpenAIEmbedder {
-	return &OpenAIEmbedder{
-		client: openai.NewClient(apiKey),
-	}
-}
-
-func (o *OpenAIEmbedder) Embed(ctx context.Context, text string) (pgvector.Vector, error) {
-	req := openai.EmbeddingRequest{
-		Input: []string{text},
-		Model: openai.SmallEmbedding3,
-	}
-
-	resp, err := o.client.CreateEmbeddings(ctx, req)
-	if err != nil {
-		return pgvector.Vector{}, fmt.Errorf("failed to create embeddings: %w", err)
-	}
-
-	if len(resp.Data) == 0 {
-		return pgvector.Vector{}, fmt.Errorf("no embeddings returned")
-	}
-
-	return pgvector.NewVector(resp.Data[0].Embedding), nil
-}
+type ProcessorOption func(*Processor)
 
 // Processor coordinates the logic for personal info storage and retrieval
 type Processor struct {
-	repo     storage.Repository
-	embedder Embedder
+	repo              storage.Repository
+	embedder          Embedder
+	documentFormatter PromptFormatter
+	queryFormatter    QueryFormatter
 }
 
-func NewProcessor(repo storage.Repository, embedder Embedder) *Processor {
-	return &Processor{
-		repo:     repo,
-		embedder: embedder,
+func NewProcessor(repo storage.Repository, embedder Embedder, opts ...ProcessorOption) *Processor {
+	p := &Processor{
+		repo:              repo,
+		embedder:          embedder,
+		documentFormatter: embeddingGemmaDocumentText,
+		queryFormatter:    embeddingGemmaQueryText,
 	}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
 }
 
 // simpleChunker splits text into chunks of roughly 500 chars with 50 char overlap
@@ -104,6 +88,52 @@ type SaveResponse struct {
 	SourceReferenceIDs []string
 }
 
+func embeddingGemmaDocumentText(title, content string) string {
+	if title == "" {
+		title = "none"
+	}
+	return fmt.Sprintf("title: %s | text: %s", title, content)
+}
+
+func embeddingGemmaQueryText(query string) string {
+	return fmt.Sprintf("task: search result | query: %s", query)
+}
+
+func harrierDocumentText(_ string, content string) string {
+	return content
+}
+
+func harrierQueryText(query string) string {
+	return "Instruct: Retrieve semantically similar text\nQuery: " + query
+}
+
+func plainDocumentText(_ string, content string) string {
+	return content
+}
+
+func plainQueryText(query string) string {
+	return query
+}
+
+func WithPromptStyle(style string) ProcessorOption {
+	return func(p *Processor) {
+		switch style {
+		case "", "embeddinggemma":
+			p.documentFormatter = embeddingGemmaDocumentText
+			p.queryFormatter = embeddingGemmaQueryText
+		case "harrier":
+			p.documentFormatter = harrierDocumentText
+			p.queryFormatter = harrierQueryText
+		case "plain":
+			p.documentFormatter = plainDocumentText
+			p.queryFormatter = plainQueryText
+		default:
+			p.documentFormatter = embeddingGemmaDocumentText
+			p.queryFormatter = embeddingGemmaQueryText
+		}
+	}
+}
+
 // SavePersonalInfo processes and saves new information
 func (p *Processor) SavePersonalInfo(ctx context.Context, req SaveRequest) (*SaveResponse, error) {
 	var userUUID, sourceUUID pgtype.UUID
@@ -124,7 +154,7 @@ func (p *Processor) SavePersonalInfo(ctx context.Context, req SaveRequest) (*Sav
 	err := p.repo.WithTx(ctx, func(q *storage.Queries) error {
 		// 1. Process Chunks
 		for _, text := range chunks {
-			embedText := fmt.Sprintf("Type: %s | Content: %s", req.SourceType, text)
+			embedText := p.documentFormatter(req.SourceType, text)
 			embedding, err := p.embedder.Embed(ctx, embedText)
 			if err != nil {
 				return err
@@ -139,7 +169,7 @@ func (p *Processor) SavePersonalInfo(ctx context.Context, req SaveRequest) (*Sav
 				UserID:       userUUID,
 				RawText:      text,
 				Embedding:    embedding,
-				ModelVersion: "text-embedding-3-small",
+				ModelVersion: p.embedder.ModelVersion(),
 			})
 			if err != nil {
 				return err
@@ -237,7 +267,7 @@ func (p *Processor) SemanticQuery(ctx context.Context, userID, query string, top
 	}
 
 	// 1. Embed Query
-	embedding, err := p.embedder.Embed(ctx, query)
+	embedding, err := p.embedder.Embed(ctx, p.queryFormatter(query))
 	if err != nil {
 		return nil, err
 	}

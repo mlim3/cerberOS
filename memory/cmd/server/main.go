@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -156,15 +157,21 @@ func main() {
 	// Note: We'll implement a proper repository wrapper for Personal Info
 	piRepo := &storage.BaseRepository{Pool: pool}
 
-	var embedder logic.Embedder
-	if apiKey := os.Getenv("OPENAI_API_KEY"); apiKey != "" {
-		logger.Info("using OpenAI embedder")
-		embedder = logic.NewOpenAIEmbedder(apiKey)
-	} else {
-		logger.Warn("OPENAI_API_KEY not set, using local embedder")
-		embedder = &logic.LocalEmbedder{}
+	embeddingAPIURL := os.Getenv("EMBEDDING_API_URL")
+	embeddingModel := os.Getenv("EMBEDDING_MODEL")
+	embeddingPromptStyle := getEnvOrDefault("EMBEDDING_PROMPT_STYLE", "embeddinggemma")
+	embeddingDim, err := strconv.Atoi(getEnvOrDefault("EMBEDDING_DIM", "640"))
+	if err != nil {
+		logger.Error("invalid EMBEDDING_DIM", "value", os.Getenv("EMBEDDING_DIM"), "error", err)
+		os.Exit(1)
 	}
-	piProcessor := logic.NewProcessor(piRepo, embedder)
+	embedder, err := logic.NewTEIEmbedder(embeddingAPIURL, embeddingModel, embeddingDim)
+	if err != nil {
+		logger.Error("failed to initialize embedding client", "error", err)
+		os.Exit(1)
+	}
+	logger.Info("using embedding API", "url", embeddingAPIURL, "model", embeddingModel, "dimensions", embeddingDim, "prompt_style", embeddingPromptStyle)
+	piProcessor := logic.NewProcessor(piRepo, embedder, logic.WithPromptStyle(embeddingPromptStyle))
 
 	// NATS: single connection for heartbeat + user_cron → orchestrator (JetStream).
 	var userDispatch storage.UserCronDispatch
@@ -194,6 +201,14 @@ func main() {
 	}
 
 	// 3. Initialize the Handlers
+	skillCacheRepo := storage.NewSkillCacheRepository(pool)
+	if err := skillCacheRepo.EnsureSchema(ctx, embeddingDim); err != nil {
+		logger.Error("failed to ensure skill_cache schema", "error", err)
+		os.Exit(1)
+	}
+	logger.Info("skill_cache schema ready", "embedding_dim", embeddingDim)
+	skillCacheProc := logic.NewSkillCacheProcessor(skillCacheRepo, embedder)
+
 	chatHandler := api.NewChatHandler(chatRepo)
 	orchestratorHandler := api.NewOrchestratorHandler(orchestratorRepo)
 	logHandler := api.NewSystemLogHandler(logRepo)
@@ -202,6 +217,7 @@ func main() {
 	agentHandler := api.NewAgentHandler(agentLogsRepo)
 	scheduledJobsHandler := api.NewScheduledJobsHandler(scheduledJobsRepo, userDispatch)
 	usersHandler := api.NewUsersHandler(piRepo, logger)
+	skillCacheHandler := api.NewSkillCacheHandler(skillCacheProc)
 
 	// Set up the router using Go 1.22's enhanced mux
 	mux := http.NewServeMux()
@@ -212,75 +228,26 @@ func main() {
 	docs.SwaggerInfo.BasePath = "/"
 	docs.SwaggerInfo.Schemes = []string{"http"}
 
-	// Healthz endpoint
+	// Infrastructure-only endpoints (not included in RegisterRoutes because
+	// they depend on server-specific dependencies).
 	mux.HandleFunc("GET /api/v1/healthz", newHealthzHandler(db, logger))
-
-	// Users endpoint (demo-mode user switcher roster + first-run create)
-	mux.HandleFunc("GET /api/v1/users", usersHandler.HandleListUsers)
-	mux.HandleFunc("POST /api/v1/users", usersHandler.HandleCreateUser)
-
-	// Chat endpoints
-	mux.HandleFunc("GET /api/v1/conversations", chatHandler.HandleListConversations)
-	mux.HandleFunc("POST /api/v1/conversations", chatHandler.HandleCreateConversation)
-	mux.HandleFunc("DELETE /api/v1/conversations/{conversationId}", chatHandler.HandleDeleteConversation)
-	mux.HandleFunc("POST /api/v1/tasks", chatHandler.HandleCreateTask)
-	mux.HandleFunc("GET /api/v1/tasks/{taskId}", chatHandler.HandleGetTask)
-	mux.HandleFunc("POST /api/v1/chat/{conversationId}/messages", chatHandler.HandleCreateMessage)
-	mux.HandleFunc("GET /api/v1/chat/{conversationId}/messages", chatHandler.HandleListMessages)
-	mux.HandleFunc("GET /api/v1/chat/{conversationId}/history", chatHandler.HandleGetSessionHistory)
-
-	// Orchestrator persistence endpoints (Internal Only)
-	orchestratorMux := http.NewServeMux()
-	orchestratorMux.HandleFunc("POST /api/v1/orchestrator/records", orchestratorHandler.HandleWriteRecord)
-	orchestratorMux.HandleFunc("GET /api/v1/orchestrator/records", orchestratorHandler.HandleQueryRecords)
-	orchestratorMux.HandleFunc("GET /api/v1/orchestrator/records/latest", orchestratorHandler.HandleReadLatest)
-	mux.Handle("/api/v1/orchestrator/", http.StripPrefix("", api.RequireVaultKey(orchestratorMux)))
-
-	// Personal Info endpoints
-	mux.HandleFunc("POST /api/v1/personal_info/{userId}/save", piHandler.Save)
-	mux.HandleFunc("POST /api/v1/personal_info/{userId}/query", piHandler.Query)
-	mux.HandleFunc("GET /api/v1/personal_info/{userId}/all", piHandler.GetAll)
-	mux.HandleFunc("PUT /api/v1/personal_info/{userId}/facts/{factId}", piHandler.UpdateFact)
-	mux.HandleFunc("DELETE /api/v1/personal_info/{userId}/facts/{factId}", piHandler.DeleteFact)
-	mux.HandleFunc("POST /api/v1/personal_info/{userId}/facts/{factId}/archive", piHandler.ArchiveFact)
-	mux.HandleFunc("POST /api/v1/personal_info/{userId}/facts/{factId}/supersede", piHandler.SupersedeFact)
-
-	// System Log endpoints
-	mux.HandleFunc("POST /api/v1/system/events", logHandler.HandleCreateSystemEvent)
-	mux.HandleFunc("GET /api/v1/system/events", logHandler.HandleListSystemEvents)
-	mux.HandleFunc("GET /api/v1/system/events/search", logHandler.HandleSearchSystemEvents)
-
-	// Scheduled jobs (protected — use same internal API key as vault)
-	mux.Handle("POST /api/v1/scheduled_jobs", api.RequireVaultKey(http.HandlerFunc(scheduledJobsHandler.HandleCreateScheduledJob)))
-	mux.Handle("POST /api/v1/scheduled_jobs/run_due", api.RequireVaultKey(http.HandlerFunc(scheduledJobsHandler.HandleRunDueJobs)))
-	mux.Handle("GET /api/v1/scheduled_jobs/{jobId}/runs", api.RequireVaultKey(http.HandlerFunc(scheduledJobsHandler.HandleListScheduledJobRuns)))
-	mux.Handle("GET /api/v1/user_crons", api.RequireVaultKey(http.HandlerFunc(scheduledJobsHandler.HandleListUserCrons)))
-	mux.Handle("DELETE /api/v1/scheduled_jobs/{jobId}", api.RequireVaultKey(http.HandlerFunc(scheduledJobsHandler.HandleDeleteUserCron)))
-	mux.Handle("POST /api/v1/system/maintenance/run", api.RequireVaultKey(http.HandlerFunc(scheduledJobsHandler.HandleRunSystemMaintenance)))
-
-	// Vault endpoints (Internal Only)
-	vaultMux := http.NewServeMux()
-	vaultMux.HandleFunc("POST /api/v1/vault/{userId}/secrets", vaultHandler.HandleSaveSecret)
-	vaultMux.HandleFunc("PUT /api/v1/vault/{userId}/secrets/{keyName}", vaultHandler.HandleUpdateSecret)
-	vaultMux.HandleFunc("GET /api/v1/vault/{userId}/secrets", vaultHandler.HandleGetSecret)
-	vaultMux.HandleFunc("DELETE /api/v1/vault/{userId}/secrets/{keyName}", vaultHandler.HandleDeleteSecret)
-	mux.Handle("/api/v1/vault/", http.StripPrefix("", api.RequireVaultKey(vaultMux)))
-
-	// Agent Log endpoints
-	mux.HandleFunc("POST /api/v1/agent/{taskId}/executions", agentHandler.HandleCreateTaskExecution)
-	mux.HandleFunc("GET /api/v1/agent/{taskId}/executions", agentHandler.HandleGetExecutions)
-	mux.HandleFunc("GET /api/v1/agents/{agentId}/logs", agentHandler.HandleGetAgentLogs)
-	// Legacy routes retained temporarily for backward compatibility.
-	mux.HandleFunc("POST /api/v1/agents/tasks/{taskId}/executions", agentHandler.HandleCreateTaskExecution)
-	mux.HandleFunc("GET /api/v1/agents/tasks/{taskId}/executions", agentHandler.HandleGetExecutions)
-
-	// Metrics endpoint
 	mux.Handle("/internal/metrics", promhttp.Handler())
-
-	// Swagger UI endpoint
 	mux.Handle("/swagger/", httpSwagger.Handler(
-		httpSwagger.URL("/swagger/doc.json"), //The url pointing to API definition
+		httpSwagger.URL("/swagger/doc.json"),
 	))
+
+	// All application routes — shared with the integration test server.
+	api.RegisterRoutes(mux, api.AppHandlers{
+		Chat:          chatHandler,
+		Orchestrator:  orchestratorHandler,
+		SystemLog:     logHandler,
+		PersonalInfo:  piHandler,
+		Vault:         vaultHandler,
+		Agent:         agentHandler,
+		ScheduledJobs: scheduledJobsHandler,
+		Users:         usersHandler,
+		SkillCache:    skillCacheHandler,
+	})
 
 	// 4. Start the HTTP server. otelhttp.NewHandler is the outermost wrapper
 	// so server spans start before the trace-id middleware runs; the middleware

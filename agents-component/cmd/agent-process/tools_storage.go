@@ -28,7 +28,6 @@ func vaultStorageReadTool(ve *VaultExecutor) SkillTool {
 			Name: "vault_storage_read",
 			Description: anthropic.String(
 				"Read a file or object from authenticated cloud storage via the Vault. " +
-					"Specify bucket and object key. " +
 					"Do NOT use for public URLs — use web_fetch instead. " +
 					"Do NOT include credential values in any parameter."),
 			InputSchema: anthropic.ToolInputSchemaParam{
@@ -97,7 +96,7 @@ func vaultStorageWriteTool(ve *VaultExecutor) SkillTool {
 			Name: "vault_storage_write",
 			Description: anthropic.String(
 				"Write or overwrite an object in authenticated cloud storage via the Vault. " +
-					"Specify bucket, key, and content. " +
+					"Existing objects at the same key are overwritten without warning. " +
 					"Do NOT use for reading — use vault_storage_read. " +
 					"Do NOT include credential values in any parameter."),
 			InputSchema: anthropic.ToolInputSchemaParam{

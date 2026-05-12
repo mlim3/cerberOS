@@ -29,18 +29,29 @@ func TestSystemAndTracing(t *testing.T) {
 
 		var result map[string]interface{}
 		parseResponse(t, resp, &result)
-		_ = result["data"].(map[string]interface{})
+		if _, ok := result["data"].(map[string]interface{}); !ok {
+			t.Fatalf("Expected data object in response, got: %v", result)
+		}
 
 		eventsResp := doRequest(t, "GET", "/api/v1/system/events?serviceName=test-suite", nil, nil)
 		var eventsResult map[string]interface{}
 		parseResponse(t, eventsResp, &eventsResult)
 
-		eventsData := eventsResult["data"].(map[string]interface{})
-		events := eventsData["events"].([]interface{})
+		eventsData, ok := eventsResult["data"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("Expected data object in events response, got: %v", eventsResult)
+		}
+		events, ok := eventsData["events"].([]interface{})
+		if !ok {
+			t.Fatalf("Expected events array in response, got: %v", eventsData)
+		}
 
 		found := false
 		for _, e := range events {
-			event := e.(map[string]interface{})
+			event, ok := e.(map[string]interface{})
+			if !ok {
+				continue
+			}
 			if event["message"] == "Test tracing message" && event["traceId"] == customTraceID {
 				found = true
 				break

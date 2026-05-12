@@ -49,6 +49,7 @@ build_and_load() {
 build_and_load cerberos-orchestrator   "${REPO_ROOT}/orchestrator"
 build_and_load cerberos-io             "${REPO_ROOT}/io"
 build_and_load cerberos-memory-api     "${REPO_ROOT}/memory"
+build_and_load cerberos-embedding-api  "${REPO_ROOT}/embedding-api"
 build_and_load cerberos-vault-engine   "${REPO_ROOT}/vault/engine"
 build_and_load cerberos-aegis-agents   "${REPO_ROOT}/agents-component"
 build_and_load cerberos-aegis-databus  "${REPO_ROOT}/aegis-databus" aegis-databus

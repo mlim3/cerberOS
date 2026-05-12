@@ -29,10 +29,9 @@ func dataTransformTool() SkillTool {
 		Definition: anthropic.ToolParam{
 			Name: "data_transform",
 			Description: anthropic.String(
-				"Transform or inspect a local JSON value. " +
+				"Transform or inspect JSON data already in context. " +
 					"Use to extract fields, list object keys, or measure array length. " +
-					"Do NOT use when the data must be fetched from an authenticated source " +
-					"— use vault_data_read for that."),
+					"Do NOT use for data that must be fetched externally — use web_fetch or vault_data_read."),
 			InputSchema: anthropic.ToolInputSchemaParam{
 				Properties: map[string]interface{}{
 					"data": map[string]interface{}{
@@ -206,7 +205,7 @@ func vaultDataReadTool(ve *VaultExecutor) SkillTool {
 			Name: "vault_data_read",
 			Description: anthropic.String(
 				"Read records from an authenticated data store via the Vault. " +
-					"Provide a collection name and query expression. " +
+					"Returns matched rows or documents as JSON. " +
 					"Do NOT use for unauthenticated HTTP sources — use web_fetch. " +
 					"Do NOT include credential values in any parameter."),
 			InputSchema: anthropic.ToolInputSchemaParam{
@@ -274,7 +273,6 @@ func vaultDataWriteTool(ve *VaultExecutor) SkillTool {
 			Name: "vault_data_write",
 			Description: anthropic.String(
 				"Write or upsert a JSON record into an authenticated data store via the Vault. " +
-					"Provide a collection name and a JSON-encoded record object. " +
 					"Do NOT use for reading — use vault_data_read. " +
 					"Do NOT include credential values in any parameter."),
 			InputSchema: anthropic.ToolInputSchemaParam{
@@ -285,7 +283,7 @@ func vaultDataWriteTool(ve *VaultExecutor) SkillTool {
 					},
 					"record": map[string]interface{}{
 						"type":        "string",
-						"description": "The record to write, encoded as a JSON object string. Must be a valid JSON object.",
+						"description": "JSON object to write, encoded as a string.",
 					},
 				},
 				Required: []string{"collection", "record"},

@@ -166,12 +166,11 @@ func TestFCGuestEnv_ForwardsAPIKey(t *testing.T) {
 }
 
 func TestFCGuestEnv_OmitsUnsetKeys(t *testing.T) {
-	// Ensure VOYAGE_API_KEY is unset so the test is deterministic.
-	os.Unsetenv("VOYAGE_API_KEY")
+	os.Unsetenv("AEGIS_EMBEDDING_API_URL")
 	cfg := VMConfig{AgentID: "a", TaskID: "t", TraceID: "tr"}
 	env := fcGuestEnv(cfg)
-	if _, ok := env["VOYAGE_API_KEY"]; ok {
-		t.Error("unset VOYAGE_API_KEY must not appear in guest env")
+	if _, ok := env["AEGIS_EMBEDDING_API_URL"]; ok {
+		t.Error("unset AEGIS_EMBEDDING_API_URL must not appear in guest env")
 	}
 }
 

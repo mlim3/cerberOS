@@ -1,0 +1,511 @@
+// Package main — tools_skill_load.go implements the skill_load built-in tool.
+//
+// skill_load fetches an aegis-skill.yaml manifest from a public GitHub
+// repository and registers the described skill into the running agent's
+// DynamicRegistry so it is available immediately on the next Reason phase.
+//
+// v1 constraints:
+//   - Only http_call execution type is supported (no credentialed operations).
+//   - The repo reference must include a full 40-character commit SHA — branch
+//     names are rejected to prevent supply-chain drift.
+//   - The manifest is fetched from raw.githubusercontent.com; no GitHub token
+//     is used, so only public repositories are accessible.
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/anthropics/anthropic-sdk-go"
+	"go.yaml.in/yaml/v2"
+)
+
+// Tool Contract limits (mirrors skills.ValidateCommandContract — EDD §13.2).
+const (
+	externalMaxNameLen = 64
+	externalMaxDescLen = 300
+	externalMaxTimeout = 300
+)
+
+// shaPattern matches a full 40-character lowercase hex SHA.
+// Branch names, tags, and short SHAs are all rejected.
+var shaPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
+
+// rawGitHubBase is the base URL used by fetchManifest. Overridden in tests
+// to point at a local httptest server instead of raw.githubusercontent.com.
+var rawGitHubBase = "https://raw.githubusercontent.com"
+
+// errManifestNotFound is returned by fetchManifest when the remote file does
+// not exist (HTTP 404). executeSkillLoad uses errors.Is to distinguish a
+// missing file from other fetch failures so it can try fallback filenames.
+var errManifestNotFound = errors.New("manifest not found")
+
+// externalSkillManifest is the schema for an aegis-skill.yaml placed in a
+// GitHub repository. It defines everything needed to build and execute the skill.
+type externalSkillManifest struct {
+	Name           string             `yaml:"name"`
+	Label          string             `yaml:"label"`
+	Description    string             `yaml:"description"`
+	TimeoutSeconds int                `yaml:"timeout_seconds"`
+	Execution      externalExecution  `yaml:"execution"`
+	Parameters     []externalParamDef `yaml:"parameters"`
+}
+
+// externalExecution describes how the skill is executed.
+// Only type "http_call" is supported in v1.
+type externalExecution struct {
+	Type         string            `yaml:"type"`          // must be "http_call"
+	URLTemplate  string            `yaml:"url_template"`  // {{param}} placeholders substituted at call time
+	Method       string            `yaml:"method"`        // GET | POST; defaults to GET
+	Headers      map[string]string `yaml:"headers"`       // static or {{param}} header values
+	BodyTemplate string            `yaml:"body_template"` // POST body; {{param}} placeholders substituted at call time
+}
+
+// externalParamDef describes one parameter in the external skill's input schema.
+type externalParamDef struct {
+	Name        string `yaml:"name"`
+	Type        string `yaml:"type"`
+	Required    bool   `yaml:"required"`
+	Description string `yaml:"description"`
+}
+
+// skillLoadTool returns the skill_load SkillTool. The registry reference
+// allows the tool to register newly loaded skills without restarting the agent.
+// sl is used to persist the loaded manifest to the Memory Component so the skill
+// survives agent restarts; it may be nil (persistence is best-effort).
+// allowed is derived from the Orchestrator's policy scope (SKILL_LOAD_ALLOWED_USERS);
+// when false the tool is still registered (so the LLM can see it) but every
+// invocation returns a POLICY_VIOLATION error rather than hitting GitHub.
+func skillLoadTool(registry *DynamicRegistry, sl *SessionLog, allowed bool) SkillTool {
+	return SkillTool{
+		Label:                   "Skill Load",
+		RequiredCredentialTypes: nil,
+		TimeoutSeconds:          30,
+		Definition: anthropic.ToolParam{
+			Name: "skill_load",
+			Description: anthropic.String(
+				"Load a skill from a public GitHub repository and make it available immediately. " +
+					"Use when the user asks to load, install, or use a skill from GitHub. " +
+					"Do NOT use for skills already in your current domain. " +
+					"Do NOT pass credentials or secrets in any parameter. " +
+					"Only local-execution skills (no external credentials required) can be loaded in v1."),
+			InputSchema: anthropic.ToolInputSchemaParam{
+				Properties: map[string]interface{}{
+					"repo": map[string]interface{}{
+						"type":        "string",
+						"description": "GitHub repository and full commit SHA in the format \"owner/repo@<40-char-sha>\". A full commit SHA is required — branch names are not accepted.",
+					},
+					"path": map[string]interface{}{
+						"type":        "string",
+						"description": "Path to the aegis-skill.yaml manifest within the repository. Defaults to \"aegis-skill.yaml\" at the root when omitted.",
+					},
+				},
+				Required: []string{"repo"},
+			},
+		},
+		Execute: func(ctx context.Context, raw json.RawMessage) ToolResult {
+			if !allowed {
+				return ToolResult{
+					Content: "POLICY_VIOLATION: your account is not permitted to load external skills. Contact your administrator to request access.",
+					IsError: true,
+				}
+			}
+			return executeSkillLoad(ctx, registry, sl, raw)
+		},
+	}
+}
+
+func executeSkillLoad(ctx context.Context, registry *DynamicRegistry, sl *SessionLog, raw json.RawMessage) ToolResult {
+	var params struct {
+		Repo string `json:"repo"`
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return ToolResult{Content: fmt.Sprintf("invalid parameters: %v", err), IsError: true}
+	}
+	// When no path is specified, try standard filenames in order. Both
+	// "aegis-skill.yaml" and "cerber-skill.yaml" are accepted conventions.
+	var pathCandidates []string
+	if params.Path == "" {
+		pathCandidates = []string{"aegis-skill.yaml", "cerber-skill.yaml"}
+	} else {
+		pathCandidates = []string{params.Path}
+	}
+
+	owner, repo, sha, err := parseRepoRef(params.Repo)
+	if err != nil {
+		return ToolResult{Content: err.Error(), IsError: true}
+	}
+
+	if err := checkRepoPolicy(owner, repo); err != nil {
+		return ToolResult{
+			Content: fmt.Sprintf("skill load denied: %v", err),
+			IsError: true,
+			Details: map[string]interface{}{"repo": fmt.Sprintf("%s/%s", owner, repo)},
+		}
+	}
+
+	var manifest *externalSkillManifest
+	var fetchErr error
+	for _, candidate := range pathCandidates {
+		manifest, fetchErr = fetchManifest(ctx, owner, repo, sha, candidate)
+		if fetchErr == nil {
+			break
+		}
+		if !errors.Is(fetchErr, errManifestNotFound) {
+			break // non-404 error — no point trying other candidates
+		}
+	}
+	if fetchErr != nil {
+		return ToolResult{
+			Content: fmt.Sprintf("failed to fetch skill manifest: %v", fetchErr),
+			IsError: true,
+			Details: map[string]interface{}{"repo": fmt.Sprintf("%s/%s", owner, repo), "sha": sha},
+		}
+	}
+
+	if err := validateManifest(manifest); err != nil {
+		return ToolResult{
+			Content: fmt.Sprintf("invalid skill manifest: %v", err),
+			IsError: true,
+		}
+	}
+
+	tool := buildHTTPSkillTool(manifest)
+	if err := registry.Register(tool); err != nil {
+		return ToolResult{
+			Content: fmt.Sprintf("skill registration failed: %v", err),
+			IsError: true,
+		}
+	}
+
+	// Persist the manifest so the skill survives agent restarts. The manifest is
+	// serialised to JSON and stored in the Recipe field of a SynthesizedSkillRecord.
+	// Persistence is best-effort — a failure does not block the current session.
+	manifestJSON, merr := json.Marshal(manifest)
+	if merr == nil {
+		if perr := sl.PersistExternalSkill(manifest.Name, manifest.Description, string(manifestJSON)); perr != nil {
+			// Log but do not surface — the skill is already usable in this session.
+			_ = perr
+		}
+	}
+
+	return ToolResult{
+		Content: fmt.Sprintf(
+			"Skill %q loaded from %s/%s@%.8s. It is now available as a tool — call it by name.",
+			manifest.Name, owner, repo, sha,
+		),
+		Details: map[string]interface{}{
+			"skill_name": manifest.Name,
+			"repo":       fmt.Sprintf("%s/%s", owner, repo),
+			"sha":        sha,
+		},
+	}
+}
+
+// parseRepoRef parses "owner/repo@<sha>" into its components.
+// Returns an error if the format is invalid or the SHA is not 40 hex chars.
+func parseRepoRef(ref string) (owner, repo, sha string, err error) {
+	atIdx := strings.LastIndex(ref, "@")
+	if atIdx < 0 {
+		return "", "", "", fmt.Errorf("repo must include a commit SHA in the format \"owner/repo@<40-char-sha>\"")
+	}
+	repoPath := ref[:atIdx]
+	sha = ref[atIdx+1:]
+
+	if !shaPattern.MatchString(sha) {
+		return "", "", "", fmt.Errorf(
+			"commit SHA must be a 40-character lowercase hex string; got %q — use a full commit SHA, not a branch name",
+			sha,
+		)
+	}
+
+	parts := strings.SplitN(repoPath, "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", "", fmt.Errorf("repo must be in the format \"owner/repo@sha\", got %q", ref)
+	}
+	return parts[0], parts[1], sha, nil
+}
+
+// checkRepoPolicy enforces the allowlist/denylist configured via environment
+// variables. Rules are evaluated in this order:
+//
+//  1. If SKILL_LOAD_DENYLIST matches → rejected.
+//  2. If SKILL_LOAD_ALLOWLIST is non-empty and no entry matches → rejected.
+//  3. Otherwise → permitted.
+//
+// Pattern syntax: "owner/repo" for an exact match, "owner/*" for all repos
+// under that org. Patterns are case-sensitive.
+//
+// Example docker-compose configuration:
+//
+//	SKILL_LOAD_ALLOWLIST=myorg/*,trustedorg/specific-repo
+//	SKILL_LOAD_DENYLIST=myorg/dangerous-repo
+func checkRepoPolicy(owner, repo string) error {
+	denyList := parseRepoPatterns(os.Getenv("SKILL_LOAD_DENYLIST"))
+	allowList := parseRepoPatterns(os.Getenv("SKILL_LOAD_ALLOWLIST"))
+
+	for _, pattern := range denyList {
+		if matchRepoPattern(pattern, owner, repo) {
+			return fmt.Errorf("repository %q/%q is on the skill load denylist", owner, repo)
+		}
+	}
+
+	if len(allowList) > 0 {
+		for _, pattern := range allowList {
+			if matchRepoPattern(pattern, owner, repo) {
+				return nil
+			}
+		}
+		return fmt.Errorf("repository %q/%q is not on the skill load allowlist", owner, repo)
+	}
+
+	return nil
+}
+
+// parseRepoPatterns splits a comma-separated env var value into trimmed, non-empty patterns.
+func parseRepoPatterns(env string) []string {
+	if env == "" {
+		return nil
+	}
+	parts := strings.Split(env, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// matchRepoPattern returns true when owner/repo satisfies pattern.
+// "owner/*" matches any repository under that org; "owner/repo" is an exact match.
+func matchRepoPattern(pattern, owner, repo string) bool {
+	if strings.HasSuffix(pattern, "/*") {
+		return strings.TrimSuffix(pattern, "/*") == owner
+	}
+	return pattern == owner+"/"+repo
+}
+
+// fetchManifest downloads and parses the aegis-skill.yaml from GitHub raw content.
+// The URL is always constructed from the validated owner/repo/sha components so
+// it is guaranteed to point to raw.githubusercontent.com.
+func fetchManifest(ctx context.Context, owner, repo, sha, path string) (*externalSkillManifest, error) {
+	rawURL := fmt.Sprintf("%s/%s/%s/%s/%s", rawGitHubBase, owner, repo, sha, path)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("User-Agent", "aegis-agent/1.0")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("%w at %s/%s@%.8s (path: %s)", errManifestNotFound, owner, repo, sha, path)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected HTTP %d fetching manifest", resp.StatusCode)
+	}
+
+	// Cap manifest size at 64KB — manifests should be tiny; large ones indicate
+	// something unexpected and we should not parse unbounded remote content.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if err != nil {
+		return nil, fmt.Errorf("read body: %w", err)
+	}
+
+	var m externalSkillManifest
+	if err := yaml.Unmarshal(body, &m); err != nil {
+		return nil, fmt.Errorf("parse YAML: %w", err)
+	}
+	return &m, nil
+}
+
+// validateManifest enforces the Tool Contract (EDD §13.2) on an external skill.
+// v1 also rejects any skill that declares credential requirements.
+func validateManifest(m *externalSkillManifest) error {
+	if m.Name == "" {
+		return fmt.Errorf("name is required")
+	}
+	if len(m.Name) > externalMaxNameLen {
+		return fmt.Errorf("name %q exceeds %d characters", m.Name, externalMaxNameLen)
+	}
+	if m.Label == "" {
+		return fmt.Errorf("label is required")
+	}
+	if m.Description == "" {
+		return fmt.Errorf("description is required")
+	}
+	if len(m.Description) > externalMaxDescLen {
+		return fmt.Errorf("description for %q exceeds %d characters", m.Name, externalMaxDescLen)
+	}
+	if m.TimeoutSeconds < 0 || m.TimeoutSeconds > externalMaxTimeout {
+		return fmt.Errorf("timeout_seconds must be 0–%d, got %d", externalMaxTimeout, m.TimeoutSeconds)
+	}
+	if m.Execution.Type != "http_call" {
+		return fmt.Errorf("execution.type %q is not supported — only \"http_call\" is supported in v1", m.Execution.Type)
+	}
+	if m.Execution.URLTemplate == "" {
+		return fmt.Errorf("execution.url_template is required for http_call")
+	}
+	method := strings.ToUpper(m.Execution.Method)
+	if method != "" && method != "GET" && method != "POST" {
+		return fmt.Errorf("execution.method must be GET or POST, got %q", m.Execution.Method)
+	}
+	for _, p := range m.Parameters {
+		if p.Name == "" {
+			return fmt.Errorf("every parameter must have a name")
+		}
+		if p.Description == "" {
+			return fmt.Errorf("parameter %q has no description", p.Name)
+		}
+	}
+	return nil
+}
+
+// buildHTTPSkillTool converts a validated external manifest into a SkillTool
+// whose Execute performs the declared http_call with parameter substitution.
+func buildHTTPSkillTool(m *externalSkillManifest) SkillTool {
+	timeout := m.TimeoutSeconds
+	if timeout == 0 {
+		timeout = 30
+	}
+
+	props := make(map[string]interface{}, len(m.Parameters))
+	var required []string
+	for _, p := range m.Parameters {
+		props[p.Name] = map[string]interface{}{
+			"type":        p.Type,
+			"description": p.Description,
+		}
+		if p.Required {
+			required = append(required, p.Name)
+		}
+	}
+
+	manifest := *m // copy so the closure does not hold the pointer from the caller
+	return SkillTool{
+		Label:                   manifest.Label,
+		RequiredCredentialTypes: nil, // v1: credentialed external skills are not supported
+		TimeoutSeconds:          timeout,
+		Definition: anthropic.ToolParam{
+			Name:        manifest.Name,
+			Description: anthropic.String(manifest.Description),
+			InputSchema: anthropic.ToolInputSchemaParam{
+				Properties: props,
+				Required:   required,
+			},
+		},
+		Execute: func(ctx context.Context, raw json.RawMessage) ToolResult {
+			return executeHTTPSkill(ctx, &manifest, raw)
+		},
+	}
+}
+
+// executeHTTPSkill performs the http_call described by the manifest.
+// Parameter values are substituted into the URL, headers, and body templates.
+func executeHTTPSkill(ctx context.Context, m *externalSkillManifest, raw json.RawMessage) ToolResult {
+	var params map[string]interface{}
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return ToolResult{Content: fmt.Sprintf("invalid parameters: %v", err), IsError: true}
+	}
+
+	url := substituteTemplate(m.Execution.URLTemplate, params, true)
+	method := strings.ToUpper(m.Execution.Method)
+	if method == "" {
+		method = "GET"
+	}
+
+	var bodyReader io.Reader
+	if method == "POST" && m.Execution.BodyTemplate != "" {
+		bodyReader = strings.NewReader(substituteTemplate(m.Execution.BodyTemplate, params, false))
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
+	if err != nil {
+		return ToolResult{Content: fmt.Sprintf("failed to build request: %v", err), IsError: true}
+	}
+	req.Header.Set("User-Agent", "aegis-agent/1.0")
+	for k, v := range m.Execution.Headers {
+		req.Header.Set(k, substituteTemplate(v, params, false))
+	}
+	// Default Content-Type for POST requests with a body, unless the manifest
+	// already set one explicitly via the headers map.
+	if bodyReader != nil && req.Header.Get("Content-Type") == "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	start := time.Now()
+	resp, err := http.DefaultClient.Do(req)
+	elapsed := time.Since(start)
+	if err != nil {
+		content := fmt.Sprintf("HTTP request failed: %v", err)
+		if ctx.Err() == context.DeadlineExceeded {
+			content = fmt.Sprintf("TOOL_TIMEOUT: %s did not complete within the allowed time", m.Name)
+		}
+		return ToolResult{
+			Content: content,
+			IsError: true,
+			Details: map[string]interface{}{"url": url, "elapsed_ms": elapsed.Milliseconds()},
+		}
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxContentBytes))
+	if err != nil {
+		return ToolResult{Content: fmt.Sprintf("failed to read response: %v", err), IsError: true}
+	}
+
+	truncated := len(body) == maxContentBytes
+	content := fmt.Sprintf("HTTP %d\n\n%s", resp.StatusCode, string(body))
+	if truncated {
+		content += "\n[CONTENT TRUNCATED — response exceeded 16KB limit]"
+	}
+
+	return ToolResult{
+		Content: content,
+		IsError: resp.StatusCode >= 400,
+		Details: map[string]interface{}{
+			"skill":       m.Name,
+			"url":         url,
+			"status_code": resp.StatusCode,
+			"elapsed_ms":  elapsed.Milliseconds(),
+			"truncated":   truncated,
+		},
+	}
+}
+
+// substituteTemplate replaces {{key}} placeholders in template with the
+// corresponding values from params. Non-string values are JSON-encoded.
+// When escapeURL is true, string values are percent-encoded with url.PathEscape
+// so they are safe to embed in a URL path segment.
+func substituteTemplate(template string, params map[string]interface{}, escapeURL bool) string {
+	result := template
+	for k, v := range params {
+		var s string
+		if str, ok := v.(string); ok {
+			s = str
+		} else {
+			b, _ := json.Marshal(v)
+			s = string(b)
+		}
+		if escapeURL {
+			s = url.PathEscape(s)
+		}
+		result = strings.ReplaceAll(result, "{{"+k+"}}", s)
+	}
+	return result
+}

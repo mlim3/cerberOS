@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"log/slog"
 	"strings"
 	"testing"
 )
@@ -195,5 +197,56 @@ func TestBuildSystemPrompt_General_WithMemory_SectionsAppended(t *testing.T) {
 	}
 	if !strings.Contains(got, "## Knowledge from past tasks") {
 		t.Error("general domain with agentMemory must still include knowledge section")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// RunLoop — vault fast-fail guard
+// ---------------------------------------------------------------------------
+
+// TestRunLoop_VaultUnavailableWithToken verifies that RunLoop returns an error
+// immediately when ve is nil but SpawnContext carries a non-empty PermissionToken.
+// A non-empty token means the Orchestrator pre-authorized credentials for this
+// task; running without vault would silently drop all credentialed tools with
+// no user-visible explanation.
+func TestRunLoop_VaultUnavailableWithToken(t *testing.T) {
+	spawnCtx := &SpawnContext{
+		TaskID:          "task-vault-fail",
+		SkillDomain:     "web",
+		PermissionToken: "tok_abc123",
+		Instructions:    "do something credentialed",
+	}
+	_, _, err := RunLoop(context.Background(), slog.Default(), spawnCtx, nil, nil, nil, nil, nil)
+	if err == nil {
+		t.Fatal("expected error when vault is nil but PermissionToken is set, got nil")
+	}
+	if !strings.Contains(err.Error(), "vault unavailable") {
+		t.Errorf("error should mention 'vault unavailable'; got: %v", err)
+	}
+}
+
+// TestRunLoop_VaultNilNoToken verifies that RunLoop does NOT fail fast when
+// ve is nil and PermissionToken is empty — vault was never part of the task
+// contract, so nil is legitimate (dev/test environments without NATS).
+// The function will fail on the missing ANTHROPIC_API_KEY, not on the vault
+// check, confirming the vault guard was not triggered.
+func TestRunLoop_VaultNilNoToken(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "") // ensure no stray key from the environment
+	spawnCtx := &SpawnContext{
+		TaskID:          "task-no-vault",
+		SkillDomain:     "web",
+		PermissionToken: "", // no credentials expected
+		Instructions:    "do something local",
+	}
+	_, _, err := RunLoop(context.Background(), slog.Default(), spawnCtx, nil, nil, nil, nil, nil)
+	if err == nil {
+		t.Fatal("expected error from missing ANTHROPIC_API_KEY, got nil")
+	}
+	// Must fail on API key, not on vault.
+	if strings.Contains(err.Error(), "vault unavailable") {
+		t.Errorf("vault guard must not fire when PermissionToken is empty; got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "ANTHROPIC_API_KEY") {
+		t.Errorf("expected ANTHROPIC_API_KEY error; got: %v", err)
 	}
 }

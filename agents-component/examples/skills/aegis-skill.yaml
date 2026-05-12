@@ -1,0 +1,94 @@
+# aegis-skill.yaml — sample external skill manifest
+#
+# Place this file in the root of any public GitHub repository.
+# An agent can load and immediately use the skill with:
+#
+#   "Load the skill at owner/repo@<40-char-commit-sha> and then use it."
+#
+# The commit SHA must be a full 40-character hex string — branch names are
+# not accepted. Get it with: git rev-parse HEAD
+
+# ── Access Control ────────────────────────────────────────────────────────────
+#
+# The skill_load tool enforces an allowlist/denylist controlled by two
+# environment variables on the agent-process container (or .env file):
+#
+#   SKILL_LOAD_ALLOWLIST=myorg/*,trustedorg/specific-repo
+#   SKILL_LOAD_DENYLIST=myorg/dangerous-repo
+#
+# Pattern syntax:
+#   owner/*       — permits all repositories under that GitHub organisation
+#   owner/repo    — permits only that exact repository
+#
+# Evaluation order:
+#   1. Denylist matched first — rejected immediately if matched.
+#   2. Allowlist checked next — rejected if set and no entry matches.
+#   3. No config (both unset or empty) — all public repositories are permitted.
+#
+# Example: lock down to a single trusted org while blocking one bad repo:
+#   SKILL_LOAD_ALLOWLIST=myorg/*
+#   SKILL_LOAD_DENYLIST=myorg/dangerous-repo
+
+# ── Identity ──────────────────────────────────────────────────────────────────
+
+# name: snake_case identifier the LLM uses when calling the tool.
+# Max 64 characters. Must be unique within the agent's current session.
+name: weather_fetch
+
+# label: human-readable display name used in logs and monitoring only.
+# Never shown to the LLM.
+label: Weather Fetch
+
+# description: what the tool does and — critically — when NOT to use it.
+# Max 300 characters. The "Do NOT use for" guidance is the most important part:
+# it prevents the LLM from calling this tool in the wrong situations.
+description: >-
+  Fetch the current weather and temperature for any city using wttr.in.
+  Use when the user asks about weather, temperature, or conditions in a location.
+  Do NOT use for forecasts, historical data, or non-weather queries.
+
+# ── Execution ─────────────────────────────────────────────────────────────────
+
+# execution: how the skill is run. Only type "http_call" is supported in v1.
+# No code is executed — the agent binary contains the HTTP interpreter and
+# the manifest only provides the configuration.
+execution:
+  type: http_call
+
+  # url_template: the endpoint to call. {{param_name}} placeholders are
+  # substituted with the caller's parameter values at invocation time.
+  url_template: "https://wttr.in/{{city}}?format=3"
+
+  # method: GET or POST. Defaults to GET when omitted.
+  method: GET
+
+  # headers: optional static or parameterised request headers.
+  # Uncomment and adapt if the API requires a header (e.g. Accept, X-Api-Key).
+  # headers:
+  #   Accept: "application/json"
+  #   X-Custom-Header: "{{my_param}}"
+
+  # body_template: optional POST body with {{param}} substitution.
+  # Only relevant when method is POST. Content-Type defaults to
+  # application/json unless overridden in headers above.
+  # body_template: '{"location": "{{city}}", "units": "metric"}'
+  #
+  # Example POST skill that queries a hypothetical search API:
+  #
+  # execution:
+  #   type: http_call
+  #   url_template: "https://api.example.com/search"
+  #   method: POST
+  #   body_template: '{"query": "{{query}}", "limit": {{limit}}}'
+
+# ── Parameters ────────────────────────────────────────────────────────────────
+
+# parameters: the input schema for the tool. Every parameter must have a
+# description — parameters without descriptions cause LLM hallucination.
+parameters:
+  - name: city
+    type: string
+    required: true
+    description: >-
+      The city or location to fetch weather for (e.g. "London", "Tokyo",
+      "New York"). Use the common English name of the city.

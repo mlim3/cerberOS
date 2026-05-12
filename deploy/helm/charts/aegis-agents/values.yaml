@@ -17,6 +17,12 @@ agentProcessPath: "/app/agent-process"
 anthropicApiKey: ""
 anthropicBaseUrl: ""
 
+embedding:
+  apiUrl: "http://embedding-api/v1/embeddings"
+  model: "microsoft/harrier-oss-v1-270m"
+  dimensions: "640"
+  promptStyle: "harrier"
+
 maxConcurrentTasks: "8"
 idleSuspendTimeout: "10m"
 

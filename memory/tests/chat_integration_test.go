@@ -85,8 +85,14 @@ func TestChatAndIdempotency(t *testing.T) {
 		var getResult map[string]interface{}
 		parseResponse(t, getResp, &getResult)
 
-		getData := getResult["data"].(map[string]interface{})
-		messages := getData["messages"].([]interface{})
+		getData, ok := getResult["data"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("Expected data object in response, got: %v", getResult)
+		}
+		messages, ok := getData["messages"].([]interface{})
+		if !ok {
+			t.Fatalf("Expected messages array in response, got: %v", getData)
+		}
 
 		if len(messages) != 1 {
 			t.Errorf("Expected 1 message (idempotency should prevent duplicate), got %d", len(messages))
@@ -108,7 +114,10 @@ func TestChatAndIdempotency(t *testing.T) {
 
 		var result map[string]interface{}
 		parseResponse(t, resp, &result)
-		errObj := result["error"].(map[string]interface{})
+		errObj, ok := result["error"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("Expected error object in response, got: %v", result)
+		}
 		if errObj["code"] != "conflict" {
 			t.Fatalf("Expected conflict error code, got %v", errObj["code"])
 		}
@@ -129,12 +138,18 @@ func TestChatAndIdempotency(t *testing.T) {
 
 		var result map[string]interface{}
 		parseResponse(t, resp, &result)
-		data := result["data"].(map[string]interface{})
+		data, ok := result["data"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("Expected data object in response, got: %v", result)
+		}
 		conversations, ok := data["conversations"].([]interface{})
 		if !ok || len(conversations) == 0 {
 			t.Fatalf("Expected conversations array in response")
 		}
-		first := conversations[0].(map[string]interface{})
+		first, ok := conversations[0].(map[string]interface{})
+		if !ok {
+			t.Fatalf("Expected conversation object, got: %v", conversations[0])
+		}
 		if first["conversationId"] != conversationID {
 			t.Fatalf("Expected conversationId %s, got %v", conversationID, first["conversationId"])
 		}
@@ -155,8 +170,14 @@ func TestChatAndIdempotency(t *testing.T) {
 
 		var result map[string]interface{}
 		parseResponse(t, resp, &result)
-		data := result["data"].(map[string]interface{})
-		task := data["task"].(map[string]interface{})
+		data, ok := result["data"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("Expected data object in response, got: %v", result)
+		}
+		task, ok := data["task"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("Expected task object in response, got: %v", data)
+		}
 		taskID, ok := task["taskId"].(string)
 		if !ok || taskID == "" {
 			t.Fatalf("Expected taskId in response")
@@ -177,13 +198,19 @@ func TestChatAndIdempotency(t *testing.T) {
 		var result map[string]interface{}
 		parseResponse(t, resp, &result)
 
-		data := result["data"].(map[string]interface{})
+		data, ok := result["data"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("Expected data object in response, got: %v", result)
+		}
 		conversations, ok := data["conversations"].([]interface{})
 		if !ok || len(conversations) == 0 {
 			t.Fatalf("Expected conversations array in response")
 		}
 
-		first := conversations[0].(map[string]interface{})
+		first, ok := conversations[0].(map[string]interface{})
+		if !ok {
+			t.Fatalf("Expected conversation object, got: %v", conversations[0])
+		}
 		if first["title"] != "Follow up on the prior request" {
 			t.Fatalf("Expected persisted title, got %v", first["title"])
 		}

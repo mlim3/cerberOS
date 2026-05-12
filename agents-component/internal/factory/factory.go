@@ -247,6 +247,14 @@ func (f *Factory) LoadSynthesizedSkills(ctx context.Context) error {
 
 	loaded := 0
 	for _, record := range records {
+		// External skills (origin: "external") are not SkillNodes — they carry a
+		// serialised externalSkillManifest in their Recipe field and are hydrated
+		// directly into the DynamicRegistry by cmd/agent-process at spawn time.
+		// Skip them here so RegisterCommand does not attempt to parse them as nodes.
+		if record.Tags["origin"] == "external" {
+			continue
+		}
+
 		domain, ok := record.Tags["domain"]
 		if !ok || domain == "" {
 			f.log.Warn("factory: synthesized skill record missing domain tag; skipping",
@@ -282,6 +290,64 @@ func (f *Factory) LoadSynthesizedSkills(ctx context.Context) error {
 
 	f.log.Info("factory: synthesized skill load complete",
 		"loaded", loaded, "found", len(records))
+	return nil
+}
+
+// SeedStaticSkills enumerates every command registered in the Skill Hierarchy
+// Manager and writes each one to the Memory Component as a skill_cache record.
+// The Orchestrator gateway intercepts these writes and forwards them to the
+// Memory API for pgvector indexing, making static skills discoverable via
+// semantic search from agent-process microVMs.
+//
+// Call SeedStaticSkills once at startup, after loadSkills has populated the
+// Manager but before LoadSynthesizedSkills, so only static skills are seeded
+// here (synthesized skills were already written via PersistSkill at creation
+// time and are forwarded by the gateway automatically).
+//
+// Individual write failures are logged and skipped; they do not abort the
+// startup sequence. Upserts on the Memory API side are idempotent, so
+// SeedStaticSkills is safe to call on every restart.
+func (f *Factory) SeedStaticSkills(ctx context.Context) error {
+	domains := f.skills.ListDomains()
+	seeded := 0
+	for _, domainName := range domains {
+		cmds, err := f.skills.GetCommands(domainName)
+		if err != nil {
+			f.log.Warn("factory: seed static skills: get commands failed",
+				"domain", domainName, "error", err)
+			continue
+		}
+		for _, node := range cmds {
+			f.log.Info("factory: seeding static skill",
+				"domain", domainName,
+				"skill_name", node.Name,
+				"description_len", len(node.Description),
+				"has_description", node.Description != "",
+			)
+			if err := f.memory.Write(&types.MemoryWrite{
+				AgentID:  "static-skills",
+				DataType: "skill_cache",
+				Tags: map[string]string{
+					"domain":     domainName,
+					"origin":     "static",
+					"skill_name": node.Name,
+				},
+				Payload: node,
+			}); err != nil {
+				f.log.Warn("factory: seed static skill write failed",
+					"domain", domainName, "skill_name", node.Name, "error", err)
+				continue
+			}
+			seeded++
+		}
+		select {
+		case <-ctx.Done():
+			f.log.Info("factory: static skills seed interrupted", "seeded", seeded)
+			return nil
+		default:
+		}
+	}
+	f.log.Info("factory: static skills seeded to Memory Component", "count", seeded)
 	return nil
 }
 
@@ -369,9 +435,25 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 
 	// Step 1: Resolve entry-point skill domain (first required domain).
 	entryDomain := spec.RequiredSkills[0]
+	f.log.Info("factory: provision step 1 — resolving entry-point skill domain",
+		"agent_id", agentID,
+		"task_id", spec.TaskID,
+		"entry_domain", entryDomain,
+		"all_required_skills", spec.RequiredSkills,
+	)
 	if _, err := f.skills.GetDomain(entryDomain); err != nil {
+		f.log.Warn("factory: provision failed — entry domain not registered",
+			"agent_id", agentID,
+			"task_id", spec.TaskID,
+			"entry_domain", entryDomain,
+			"error", err,
+		)
 		return fmt.Errorf("factory: skills.GetDomain %q: %w", entryDomain, err)
 	}
+	f.log.Info("factory: provision step 1 — entry domain resolved",
+		"agent_id", agentID,
+		"entry_domain", entryDomain,
+	)
 
 	// Step 1a: Build the command manifest for the entry domain. GetCommands
 	// returns command-level nodes (name + description only, no parameter specs)
@@ -383,6 +465,17 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 		return fmt.Errorf("factory: skills.GetCommands %q: %w", entryDomain, err)
 	}
 	manifest := buildManifestText(commands)
+	cmdNames := make([]string, len(commands))
+	for i, c := range commands {
+		cmdNames[i] = c.Name
+	}
+	f.log.Info("factory: provision step 1a — command manifest built for spawned agent",
+		"agent_id", agentID,
+		"entry_domain", entryDomain,
+		"command_count", len(commands),
+		"command_names", cmdNames,
+		"manifest_chars", len(manifest),
+	)
 
 	// Step 1b: Enforce spawn context token budget (EDD §13.3, PRD FR-FAC-05).
 	// Counted components: system prompt (including manifest) + task instructions
@@ -404,10 +497,26 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 		}
 	}
 
+	f.log.Info("factory: provision step 2 — resolving permissions",
+		"agent_id", agentID,
+		"task_id", spec.TaskID,
+		"required_skills", spec.RequiredSkills,
+		"policy_configured", f.policy != nil,
+	)
 	permSet, err := f.resolvePermissions(spec.RequiredSkills, spec.TaskID, spec.TraceID, agentID)
 	if err != nil {
+		f.log.Warn("factory: provision failed — permission resolution error",
+			"agent_id", agentID,
+			"task_id", spec.TaskID,
+			"required_skills", spec.RequiredSkills,
+			"error", err,
+		)
 		return err
 	}
+	f.log.Info("factory: provision step 2 — permissions resolved",
+		"agent_id", agentID,
+		"perm_set", permSet,
+	)
 
 	// Allocate a VM ID now so it can be stored in the registry entry before the
 	// VM is launched. vm_id changes on respawn (same agent_id, new vm_id).
@@ -488,6 +597,7 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 	userProfile := f.fetchUserProfile(spec.UserContextID, spec.TraceID)
 	priorTurns, _ := f.fetchPriorTurns(spec.ConversationID, spec.TraceID)
 	originalUserMessage, userFacing := extractConversationMetadata(spec)
+	skillLoadAllowed := extractSkillLoadAllowed(spec)
 
 	// Step 6: Spawn agent process.
 	vmCfg := lifecycle.VMConfig{
@@ -505,8 +615,10 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 		ConversationID:      spec.ConversationID,
 		PriorTurns:          priorTurns,
 		SynthesizedSkills:   f.synthesizedSkillsForDomain(entryDomain),
+		ExternalSkills:      f.loadExternalSkills(),
 		OriginalUserMessage: originalUserMessage,
 		UserFacing:          userFacing,
+		SkillLoadAllowed:    skillLoadAllowed,
 		OnComplete:          f.processCompletionHandler(agentID),
 	}
 	if err := f.lifecycle.Spawn(vmCfg); err != nil {
@@ -610,6 +722,7 @@ func (f *Factory) assignTask(agentID string, spec *types.TaskSpec) error {
 	userProfile := f.fetchUserProfile(spec.UserContextID, spec.TraceID)
 	priorTurns, _ := f.fetchPriorTurns(spec.ConversationID, spec.TraceID)
 	originalUserMessage, userFacing := extractConversationMetadata(spec)
+	skillLoadAllowed := extractSkillLoadAllowed(spec)
 
 	vmCfg := lifecycle.VMConfig{
 		AgentID:             agentID,
@@ -625,8 +738,10 @@ func (f *Factory) assignTask(agentID string, spec *types.TaskSpec) error {
 		ConversationID:      spec.ConversationID,
 		PriorTurns:          priorTurns,
 		SynthesizedSkills:   f.synthesizedSkillsForDomain(entryDomain),
+		ExternalSkills:      f.loadExternalSkills(),
 		OriginalUserMessage: originalUserMessage,
 		UserFacing:          userFacing,
+		SkillLoadAllowed:    skillLoadAllowed,
 		OnComplete:          f.processCompletionHandler(agentID),
 	}
 
@@ -1347,6 +1462,40 @@ func (f *Factory) synthesizedSkillsForDomain(domain string) []types.SynthesizedS
 	return records
 }
 
+// loadExternalSkills returns all skill_cache records that were persisted by
+// skill_load (origin: "external"). Each record carries the serialised
+// externalSkillManifest JSON in its Recipe field; cmd/agent-process reconstructs
+// the full SkillTool from it at spawn time without hitting GitHub again.
+// Errors are logged and treated as an empty list — a missing external skill
+// does not block agent spawn.
+func (f *Factory) loadExternalSkills() []types.SynthesizedSkillRecord {
+	records, err := f.memory.ReadAllByType("skill_cache", "")
+	if err != nil {
+		f.log.Warn("factory: loadExternalSkills: memory read failed; spawning without external skills", "error", err)
+		return nil
+	}
+	var out []types.SynthesizedSkillRecord
+	for _, record := range records {
+		if record.Tags["origin"] != "external" {
+			continue
+		}
+		raw, err := json.Marshal(record.Payload)
+		if err != nil {
+			f.log.Warn("factory: loadExternalSkills: marshal payload failed; skipping",
+				"skill_name", record.Tags["skill_name"], "error", err)
+			continue
+		}
+		var rec types.SynthesizedSkillRecord
+		if err := json.Unmarshal(raw, &rec); err != nil {
+			f.log.Warn("factory: loadExternalSkills: unmarshal SynthesizedSkillRecord failed; skipping",
+				"skill_name", record.Tags["skill_name"], "error", err)
+			continue
+		}
+		out = append(out, rec)
+	}
+	return out
+}
+
 // spawnSystemPrompt returns the domain-scoped system prompt (including command
 // manifest) that will be used at spawn time for token-budget enforcement.
 // Must stay in sync with buildSystemPrompt in cmd/agent-process/loop.go.
@@ -1419,6 +1568,22 @@ func extractConversationMetadata(spec *types.TaskSpec) (string, bool) {
 	original := spec.Metadata["original_user_message"]
 	userFacing := spec.Metadata["user_facing"] == "true"
 	return original, userFacing
+}
+
+// extractSkillLoadAllowed reads the orchestrator-stamped skill_load_allowed flag
+// from the TaskSpec metadata. Absent key defaults to true so that agents not
+// routed through the Orchestrator policy check (e.g. unit tests, standalone use)
+// retain the ability to load external skills. An explicit "false" is the only
+// value that disables the tool.
+func extractSkillLoadAllowed(spec *types.TaskSpec) bool {
+	if spec == nil || spec.Metadata == nil {
+		return true
+	}
+	v, ok := spec.Metadata["skill_load_allowed"]
+	if !ok {
+		return true // absent = allowed (backward-compatible default)
+	}
+	return v != "false"
 }
 
 // fetchPriorTurns retrieves the latest ConversationSnapshot for conversationID
@@ -1775,6 +1940,7 @@ func (f *Factory) wakeAgent(agentID string, spec *types.TaskSpec) error {
 	userProfile := f.fetchUserProfile(spec.UserContextID, spec.TraceID)
 	priorTurns, _ := f.fetchPriorTurns(spec.ConversationID, spec.TraceID)
 	originalUserMessage, userFacing := extractConversationMetadata(spec)
+	skillLoadAllowed := extractSkillLoadAllowed(spec)
 	vmCfg := lifecycle.VMConfig{
 		AgentID:             agentID,
 		VMID:                newVMID,
@@ -1790,8 +1956,10 @@ func (f *Factory) wakeAgent(agentID string, spec *types.TaskSpec) error {
 		ConversationID:      spec.ConversationID,
 		PriorTurns:          priorTurns,
 		SynthesizedSkills:   f.synthesizedSkillsForDomain(entryDomain),
+		ExternalSkills:      f.loadExternalSkills(),
 		OriginalUserMessage: originalUserMessage,
 		UserFacing:          userFacing,
+		SkillLoadAllowed:    skillLoadAllowed,
 		OnComplete:          f.processCompletionHandler(agentID),
 	}
 	if err := f.lifecycle.Spawn(vmCfg); err != nil {
