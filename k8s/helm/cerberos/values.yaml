@@ -7,6 +7,13 @@
 #   helm install cerberos . -f values-dev.yaml \
 #     --set memory-api.vaultMasterKey=<32chars> \
 #     --set memory-api.internalVaultApiKey=<key> \
+#     --set memory-api.openaiApiKey=<key> \
+#     --set io.openaiApiKey=<key> \
+#     --set vault-engine.baoToken=<token> \
+#     --set vault-engine.tavilyApiKey=<key> \
+#     --set vault-engine.openaiApiKey=<key> \
+#     --set vault-engine.gmailDemoEmail=<addr> \
+#     --set-string vault-engine.gmailDemoAppPassword='<app password>' \
 #     --set aegis-agents.anthropicApiKey=<key> \
 #     --set postgres.auth.password=<pw>
 # =============================================================================
@@ -39,6 +46,10 @@ global:
 
 vault-engine:
   baoToken: ""
+  tavilyApiKey: ""
+  openaiApiKey: ""
+  gmailDemoEmail: ""
+  gmailDemoAppPassword: ""
 
 memory-api:
   db:
@@ -58,7 +69,8 @@ embedding-api: {}
 
 orchestrator: {}
 
-io: {}
+io:
+  openaiApiKey: ""
 
 aegis-databus: {}
 

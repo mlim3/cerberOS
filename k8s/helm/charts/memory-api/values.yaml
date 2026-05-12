@@ -23,6 +23,9 @@ vaultMasterKey: "CHANGE_ME_32_ASCII_CHARS_EXACTLY!"
 # Internal API key for vault↔memory auth
 internalVaultApiKey: "CHANGE_ME_INTERNAL_VAULT_KEY"
 
+# Optional — memory embedder (see root .env.example). Empty uses local embedder.
+openaiApiKey: ""
+
 observability:
   otlpEndpoint: "http://tempo:4318"
   serviceName: "memory-api"

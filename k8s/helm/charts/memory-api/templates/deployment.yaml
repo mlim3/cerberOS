@@ -83,6 +83,11 @@ spec:
                 secretKeyRef:
                   name: memory-api-secrets
                   key: INTERNAL_VAULT_API_KEY
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: memory-api-secrets
+                  key: OPENAI_API_KEY
           securityContext:
             allowPrivilegeEscalation: false
             seccompProfile:

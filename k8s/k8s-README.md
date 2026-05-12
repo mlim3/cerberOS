@@ -106,14 +106,18 @@ helm repo update
 # Resolve umbrella dependencies
 helm dependency update k8s/helm/cerberos
 
-# Install (substitute your real secrets)
+# Install (substitute your real secrets — see Secrets reference)
 helm upgrade --install cerberos k8s/helm/cerberos \
   --namespace cerberos \
   -f k8s/helm/cerberos/values-dev.yaml \
   --set aegis-agents.anthropicApiKey=$ANTHROPIC_API_KEY \
   --set memory-api.vaultMasterKey=$VAULT_MASTER_KEY \
   --set memory-api.internalVaultApiKey=$INTERNAL_VAULT_API_KEY \
+  --set io.internalVaultApiKey=$INTERNAL_VAULT_API_KEY \
   --wait --timeout 10m
+
+# Optional keys from root `.env.example` (Tavily, OpenAI, Gmail) are documented
+# in the Secrets reference table; `./k8s/scripts/kind-up.sh` forwards them when set.
 ```
 
 ---
@@ -167,11 +171,18 @@ helm upgrade cerberos k8s/helm/cerberos -n cerberos -f k8s/helm/cerberos/values-
 | Key | Who uses it | How to supply |
 |---|---|---|
 | `memory-api.vaultMasterKey` | memory-api | `--set memory-api.vaultMasterKey=<32 ASCII chars>` |
-| `memory-api.internalVaultApiKey` | memory-api, vault-engine | `--set memory-api.internalVaultApiKey=<key>` |
+| `memory-api.internalVaultApiKey` | memory-api, io | `--set memory-api.internalVaultApiKey=<key>` (must match `io.internalVaultApiKey`) |
+| `memory-api.openaiApiKey` | memory-api | optional; `--set memory-api.openaiApiKey=<key>` (embedder / OpenAI) |
 | `memory-api.db.password` | memory-api | `--set memory-api.db.password=<pw>` (must match `postgres.auth.password`) |
 | `postgres.auth.password` | memory-db | `--set postgres.auth.password=<pw>` |
-| `openbao.baoToken` | vault-engine | set after openbao init (see unseal section below) |
-| `vault-engine.baoToken` | vault-engine | same as above |
+| `postgres.auth.user` / `database` | memory-db | match root `.env.example` (`POSTGRES_*`) |
+| `openbao.baoToken` | openbao (optional env) | `--set openbao.baoToken=<token>` when needed |
+| `vault-engine.baoToken` | vault-engine | same as OpenBao client token |
+| `vault-engine.tavilyApiKey` | vault-engine → OpenBao seed | optional; mirrors `TAVILY_API_KEY` in `.env.example` |
+| `vault-engine.openaiApiKey` | vault-engine → OpenBao seed | optional; mirrors `OPENAI_API_KEY` for admin KV |
+| `vault-engine.gmailDemoEmail` / `gmailDemoAppPassword` | vault-engine → OpenBao seed | optional; Gmail app password must be 16 chars after removing spaces |
+| `io.openaiApiKey` | io | optional; cloud STT / OpenAI paths |
+| `io.internalVaultApiKey` | io | same as `memory-api.internalVaultApiKey` |
 | `aegis-agents.anthropicApiKey` | aegis-agents | `--set aegis-agents.anthropicApiKey=$ANTHROPIC_API_KEY` |
 
 **Extension hook — External Secrets Operator:** set `externalSecrets.enabled: true` in values (stub in `_helpers.tpl`) to create `ExternalSecret` CRs pointing at AWS Secrets Manager / Vault / GCP SM instead of K8s `Secret` objects.

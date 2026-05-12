@@ -42,6 +42,19 @@ spec:
               value: {{ .Values.googleOAuth.clientId | quote }}
             - name: GOOGLE_CLIENT_SECRET
               value: {{ .Values.googleOAuth.clientSecret | quote }}
+            {{- if .Values.tavilyApiKey }}
+            - name: TAVILY_API_KEY
+              value: {{ .Values.tavilyApiKey | quote }}
+            {{- end }}
+            {{- if .Values.openaiApiKey }}
+            - name: OPENAI_API_KEY
+              value: {{ .Values.openaiApiKey | quote }}
+            {{- end }}
+            {{- if and .Values.gmailDemoEmail .Values.gmailDemoAppPassword }}
+            - name: GMAIL_DEMO_EMAIL
+              value: {{ .Values.gmailDemoEmail | quote }}
+            - name: GMAIL_DEMO_APP_PASSWORD
+              value: {{ .Values.gmailDemoAppPassword | quote }}
             {{- end }}
           securityContext:
             runAsUser: 1001

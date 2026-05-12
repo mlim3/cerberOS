@@ -195,12 +195,50 @@ if [ "$SKIP_INSTALL" = false ]; then
     fi
   done
   helm dependency update "${REPO_ROOT}/k8s/helm/cerberos" >/dev/null
+
+  # Optional: load repo-root .env, then restore any variable already set in the
+  # invoking shell so exported values win over the file.
+  _env_file="${REPO_ROOT}/.env"
+  if [[ -f "${_env_file}" ]]; then
+    echo "    Loading optional overrides from ${_env_file} (exported shell values win) ..."
+    _saved_ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY-}"
+    _saved_ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL-}"
+    _saved_TAVILY_API_KEY="${TAVILY_API_KEY-}"
+    _saved_OPENAI_API_KEY="${OPENAI_API_KEY-}"
+    _saved_GMAIL_DEMO_EMAIL="${GMAIL_DEMO_EMAIL-}"
+    _saved_GMAIL_DEMO_APP_PASSWORD="${GMAIL_DEMO_APP_PASSWORD-}"
+    set -a
+    # shellcheck disable=SC1090
+    source "${_env_file}"
+    set +a
+    [[ -n "${_saved_ANTHROPIC_API_KEY}" ]] && export ANTHROPIC_API_KEY="${_saved_ANTHROPIC_API_KEY}"
+    [[ -n "${_saved_ANTHROPIC_BASE_URL}" ]] && export ANTHROPIC_BASE_URL="${_saved_ANTHROPIC_BASE_URL}"
+    [[ -n "${_saved_TAVILY_API_KEY}" ]] && export TAVILY_API_KEY="${_saved_TAVILY_API_KEY}"
+    [[ -n "${_saved_OPENAI_API_KEY}" ]] && export OPENAI_API_KEY="${_saved_OPENAI_API_KEY}"
+    [[ -n "${_saved_GMAIL_DEMO_EMAIL}" ]] && export GMAIL_DEMO_EMAIL="${_saved_GMAIL_DEMO_EMAIL}"
+    [[ -n "${_saved_GMAIL_DEMO_APP_PASSWORD}" ]] && export GMAIL_DEMO_APP_PASSWORD="${_saved_GMAIL_DEMO_APP_PASSWORD}"
+    unset _saved_ANTHROPIC_API_KEY _saved_ANTHROPIC_BASE_URL _saved_TAVILY_API_KEY \
+      _saved_OPENAI_API_KEY _saved_GMAIL_DEMO_EMAIL _saved_GMAIL_DEMO_APP_PASSWORD
+  fi
+
   HELM_SET_ARGS=()
   if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-    HELM_SET_ARGS+=(--set "aegis-agents.anthropicApiKey=${ANTHROPIC_API_KEY}")
+    HELM_SET_ARGS+=(--set-string "aegis-agents.anthropicApiKey=${ANTHROPIC_API_KEY}")
   fi
   if [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
-    HELM_SET_ARGS+=(--set "aegis-agents.anthropicBaseUrl=${ANTHROPIC_BASE_URL}")
+    HELM_SET_ARGS+=(--set-string "aegis-agents.anthropicBaseUrl=${ANTHROPIC_BASE_URL}")
+  fi
+  if [ -n "${TAVILY_API_KEY:-}" ]; then
+    HELM_SET_ARGS+=(--set-string "vault-engine.tavilyApiKey=${TAVILY_API_KEY}")
+  fi
+  if [ -n "${OPENAI_API_KEY:-}" ]; then
+    HELM_SET_ARGS+=(--set-string "memory-api.openaiApiKey=${OPENAI_API_KEY}")
+    HELM_SET_ARGS+=(--set-string "io.openaiApiKey=${OPENAI_API_KEY}")
+    HELM_SET_ARGS+=(--set-string "vault-engine.openaiApiKey=${OPENAI_API_KEY}")
+  fi
+  if [ -n "${GMAIL_DEMO_EMAIL:-}" ] && [ -n "${GMAIL_DEMO_APP_PASSWORD:-}" ]; then
+    HELM_SET_ARGS+=(--set-string "vault-engine.gmailDemoEmail=${GMAIL_DEMO_EMAIL}")
+    HELM_SET_ARGS+=(--set-string "vault-engine.gmailDemoAppPassword=${GMAIL_DEMO_APP_PASSWORD}")
   fi
   HELM_SET_ARGS+=(--set "global.embedding.model=${EMBEDDING_MODEL}")
   HELM_SET_ARGS+=(--set "global.embedding.dimensions=${EMBEDDING_DIM}")

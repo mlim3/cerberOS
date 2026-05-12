@@ -4,8 +4,12 @@
 # Usage:
 #   ./k8s/scripts/kind-up.sh
 #
-#   ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL are picked up by kind-up.sh from the
-#   shell or from repo-root `.env` (shell wins if both define a key).
+# Optional secrets: set in the shell and/or in repo-root `.env` (same keys as
+# root `.env.example`). kind-up.sh sources `.env` before Helm but restores any
+# value you already exported in the parent shell so the shell wins.
+#
+# Keys wired into Helm when non-empty: ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL,
+# TAVILY_API_KEY, OPENAI_API_KEY, GMAIL_DEMO_EMAIL, GMAIL_DEMO_APP_PASSWORD.
 # =============================================================================
 
 # Use locally-built images (loaded via kind load docker-image)

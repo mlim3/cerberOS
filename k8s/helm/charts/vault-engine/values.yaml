@@ -9,7 +9,7 @@ service:
   port: 8000
 
 # baoToken is provided at runtime after openbao is unsealed.
-# Supply via --set vaultEngine.baoToken=<token> or a sealed-secret.
+# Supply via --set vault-engine.baoToken=<token> or a sealed-secret.
 baoToken: ""
 
 # Google OAuth credentials for token auto-refresh.
@@ -18,6 +18,12 @@ baoToken: ""
 googleOAuth:
   clientId: ""
   clientSecret: ""
+# Optional operator secrets (repo .env.example). When non-empty, the vault
+# engine seeds them into OpenBao on startup (idempotent — skips if present).
+tavilyApiKey: ""
+openaiApiKey: ""
+gmailDemoEmail: ""
+gmailDemoAppPassword: ""
 
 resources:
   requests:

@@ -59,6 +59,10 @@ spec:
             - name: MEMORY_API_KEY
               value: {{ .Values.internalVaultApiKey | quote }}
             {{- end }}
+            {{- if .Values.openaiApiKey }}
+            - name: OPENAI_API_KEY
+              value: {{ .Values.openaiApiKey | quote }}
+            {{- end }}
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: {{ .Values.observability.otlpEndpoint | quote }}
             - name: OTEL_SERVICE_NAME

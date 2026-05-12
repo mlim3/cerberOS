@@ -22,6 +22,9 @@ memoryApiBase: "http://memory-api:8081"
 # Same secret memory-api expects as INTERNAL_VAULT_API_KEY (vault/orchestrator BFF routes).
 # Required for POST/GET /api/user-crons and other Memory proxies in io/api.
 internalVaultApiKey: ""
+
+# Optional — cloud STT / OpenAI paths (see root .env.example).
+openaiApiKey: ""
 logLevel: "info"
 demoMode: "false"
 sttProvider: "disabled"
