@@ -292,7 +292,7 @@ plan_preview_seen="false"
 approve_resp=""
 info "Sending /api/chat request with required_skill_domains=[general,e2e_test]"
 info "Subscribing to /api/events/${task_id} for plan previews and status updates (probe=${E2E_PROBE})"
-curl -N -sS "${base_url}/api/events/${task_id}" >"${event_stream_file}" 2>/dev/null &
+curl -N -sS -H "X-Active-User: ${TEST_USER_ID}" "${base_url}/api/events/${task_id}" >"${event_stream_file}" 2>/dev/null &
 EVENT_STREAM_PID=$!
 
 curl -N -sS --max-time "${CHAT_TIMEOUT_SECONDS}" \

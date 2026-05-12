@@ -107,14 +107,60 @@ submit_and_wait() {
   local message="$1"
   local timeout="${2:-${CHAT_TIMEOUT_SECONDS}}"
 
+  local task_id conversation_id
+  task_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+  conversation_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+
+  local payload
+  payload="$(jq -nc \
+    --arg taskId "${task_id}" \
+    --arg conversationId "${conversation_id}" \
+    --arg userId "${TEST_USER_ID}" \
+    --arg content "${message}" \
+    '{taskId:$taskId, conversationId:$conversationId, userId:$userId, content:$content}')"
+
+  # Subscribe to event stream for plan-preview auto-approval (background).
+  local event_file
+  event_file="$(mktemp /tmp/cerberos-cdsk-events.XXXXXX)"
+  curl -N -sS \
+    -H "X-Active-User: ${TEST_USER_ID}" \
+    "http://localhost:${IO_LOCAL_PORT}/api/events/${task_id}" \
+    >"${event_file}" 2>/dev/null &
+  local event_pid=$!
+
+  # Submit chat request.
   local response
-  response=$(curl -sf \
+  response="$(curl -sf \
+    --max-time "${timeout}" \
     -X POST \
     -H "Content-Type: application/json" \
-    -H "X-User-ID: ${TEST_USER_ID}" \
-    -d "{\"message\": $(echo "${message}" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip()))')}" \
-    "http://localhost:${IO_LOCAL_PORT}/api/v1/chat")
+    -H "X-Active-User: ${TEST_USER_ID}" \
+    -H "X-Surface-Key: cli" \
+    -d "${payload}" \
+    "http://localhost:${IO_LOCAL_PORT}/api/chat" 2>/dev/null || true)"
 
+  # Poll for plan preview and auto-approve (up to 30s).
+  local deadline=$(( $(date +%s) + 30 ))
+  while [[ $(date +%s) -lt ${deadline} ]]; do
+    local orch_ref
+    orch_ref="$(grep -o '"orchestratorTaskRef":"[^"]*"' "${event_file}" 2>/dev/null | tail -1 | grep -o '"[^"]*"$' | tr -d '"' || true)"
+    if [[ -n "${orch_ref}" && "${orch_ref}" != "null" ]]; then
+      local approve_payload
+      approve_payload="$(jq -nc --arg taskId "${task_id}" --arg ref "${orch_ref}" \
+        '{taskId:$taskId, orchestratorTaskRef:$ref, approved:true}')"
+      curl -fsS \
+        -H "Content-Type: application/json" \
+        -H "X-Active-User: ${TEST_USER_ID}" \
+        -H "X-Surface-Key: cli" \
+        -X POST "http://localhost:${IO_LOCAL_PORT}/api/orchestrator/plan-decision" \
+        -d "${approve_payload}" >/dev/null 2>&1 || true
+      break
+    fi
+    sleep 2
+  done
+
+  kill "${event_pid}" 2>/dev/null || true
+  rm -f "${event_file}"
   echo "${response}"
 }
 
