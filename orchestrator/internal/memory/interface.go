@@ -98,9 +98,15 @@ func (i *Interface) Write(payload types.OrchestratorMemoryWritePayload) error {
 }
 
 // Read retrieves all matching records ordered by timestamp ascending (§11.4).
+//
+// Tenant scoping (MT-4 #185 / MT-14 #189): every read MUST be scoped by
+// query.UserID. The single exception is the orchestrator startup rehydrate
+// path, which sets query.AllTenants = true to opt explicitly into a
+// cross-tenant snapshot of non-terminal task states. The rehydrate caller is
+// responsible for audit-logging each rehydrated task's user_id.
 func (i *Interface) Read(query types.MemoryQuery) ([]types.MemoryRecord, error) {
-	if query.UserID == "" {
-		return nil, fmt.Errorf("user_id is required")
+	if !query.AllTenants && query.UserID == "" {
+		return nil, fmt.Errorf("user_id is required (or AllTenants=true)")
 	}
 	if !isValidDataType(query.DataType) {
 		return nil, fmt.Errorf("invalid data_type: %q", query.DataType)

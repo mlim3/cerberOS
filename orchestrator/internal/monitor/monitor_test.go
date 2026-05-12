@@ -120,23 +120,73 @@ func seedTaskState(t *testing.T, mem *mocks.MemoryMock, ts *types.TaskState) {
 
 // ── Rehydrate ────────────────────────────────────────────────────────────────
 //
-// MT-4 (#185): RehydrateFromMemory is intentionally a no-op until MT-14
-// (#189) wires per-tenant rehydrate. The tests below now assert the temporary
-// "loads nothing" contract; once #189 lands they should be restored to their
-// previous shape (loading newest-per-task, skipping terminal states).
+// MT-14 (#189): rehydrate is intentionally cross-tenant in single-host demo
+// mode; the test below covers the AC scenario (two users' active tasks both
+// loaded under their own user_id) and the basic "newer wins, terminal skipped"
+// invariants from the pre-MT-4 shape.
 
-func TestRehydrateFromMemory_IsNoOpUntilMT14(t *testing.T) {
+func TestRehydrateFromMemory_LoadsLatestNonTerminalTasksAcrossTenants(t *testing.T) {
 	m, mem, _ := newMonitor(t)
 
-	ts1 := makeTaskState("task-1", types.StateRunning)
-	seedTaskState(t, mem, ts1)
+	const userA = "user-A"
+	const userB = "user-B"
+
+	taskAOld := makeTaskState("task-A", types.StateDispatchPending)
+	taskAOld.UserID = userA
+	taskAOld.OrchestratorTaskRef = "orch-A-old"
+
+	taskANew := makeTaskState("task-A", types.StateRunning)
+	taskANew.UserID = userA
+	taskANew.OrchestratorTaskRef = "orch-A-new"
+	taskANew.StateHistory = append(taskANew.StateHistory, types.StateEvent{
+		State:     types.StateRunning,
+		Timestamp: time.Now().UTC().Add(1 * time.Second),
+		NodeID:    "test-node",
+	})
+
+	taskB := makeTaskState("task-B", types.StateDispatched)
+	taskB.UserID = userB
+	taskB.OrchestratorTaskRef = "orch-B"
+
+	taskTerminal := makeTaskState("task-C", types.StateCompleted)
+	taskTerminal.UserID = userA
+	now := time.Now().UTC()
+	taskTerminal.CompletedAt = &now
+
+	seedTaskState(t, mem, taskAOld)
+	seedTaskState(t, mem, taskANew)
+	seedTaskState(t, mem, taskB)
+	seedTaskState(t, mem, taskTerminal)
 
 	if err := m.RehydrateFromMemory(); err != nil {
 		t.Fatalf("RehydrateFromMemory() error = %v", err)
 	}
 
-	if got := m.GetActiveTaskCount(); got != 0 {
-		t.Fatalf("GetActiveTaskCount() = %d, want 0 (rehydrate is a no-op pending #189)", got)
+	// Two non-terminal tasks across two users; the duplicate task-A row is
+	// deduplicated to the newer RUNNING state, and the terminal task-C is
+	// skipped via the not_terminal filter.
+	if got := m.GetActiveTaskCount(); got != 2 {
+		t.Fatalf("GetActiveTaskCount() = %d, want 2 (task-A user-A, task-B user-B)", got)
+	}
+}
+
+func TestRehydrateFromMemory_ReturnsErrorOnBadPayload(t *testing.T) {
+	m, mem, _ := newMonitor(t)
+
+	if err := mem.Write(types.OrchestratorMemoryWritePayload{
+		UserID:              "user-bad",
+		OrchestratorTaskRef: "orch-bad",
+		TaskID:              "task-bad",
+		DataType:            types.DataTypeTaskState,
+		Timestamp:           time.Now().UTC(),
+		Payload:             json.RawMessage(`{"state":`), // malformed json
+	}); err != nil {
+		t.Fatalf("memory.Write() error = %v", err)
+	}
+
+	err := m.RehydrateFromMemory()
+	if err == nil {
+		t.Fatal("RehydrateFromMemory() error = nil, want non-nil")
 	}
 }
 
@@ -463,11 +513,9 @@ func TestMonitorDemoFlow(t *testing.T) {
 	t.Log("demo setup: created recoveryMock as the mock Recovery Manager")
 	t.Log("demo setup: created monitor.Monitor as the orchestrator-side M4 monitor")
 
-	// Step 1: simulate startup tracking.
-	// MT-4 (#185): RehydrateFromMemory is a no-op until MT-14 (#189) wires
-	// per-tenant rehydrate. For now we exercise TrackTask directly so the rest
-	// of the demo (agent status update → state transition → persist) still runs.
-	t.Log("step 1: seeding Memory and tracking a non-terminal DISPATCHED task")
+	// Step 1: simulate startup rehydration from Memory.
+	// We seed one non-terminal DISPATCHED task so the monitor can load it.
+	t.Log("step 1: seeding Memory with a non-terminal DISPATCHED task for startup rehydration")
 
 	dispatchedTask := makeTaskState("task-demo-1", types.StateDispatched)
 	dispatchedTask.TimeoutAt = ptrTime(time.Now().UTC().Add(2 * time.Minute))
@@ -476,11 +524,10 @@ func TestMonitorDemoFlow(t *testing.T) {
 	if err := m.RehydrateFromMemory(); err != nil {
 		t.Fatalf("RehydrateFromMemory() error = %v", err)
 	}
-	m.TrackTask(dispatchedTask)
 	if got := m.GetActiveTaskCount(); got != 1 {
-		t.Fatalf("GetActiveTaskCount() after track = %d, want 1", got)
+		t.Fatalf("GetActiveTaskCount() after rehydrate = %d, want 1", got)
 	}
-	t.Logf("step 1 complete: monitor tracking %d active task", m.GetActiveTaskCount())
+	t.Logf("step 1 complete: monitor rehydrated %d active task", m.GetActiveTaskCount())
 
 	// Step 2: agent reports ACTIVE.
 	// This should move the task from DISPATCHED -> RUNNING and persist the new state.

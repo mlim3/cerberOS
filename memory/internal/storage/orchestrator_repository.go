@@ -83,6 +83,12 @@ type QueryOrchestratorRecordsParams struct {
 	FromTimestamp       *time.Time
 	ToTimestamp         *time.Time
 	StateFilter         string
+	// AllTenants is the cross-tenant read opt-in (MT-14, #189). When true,
+	// QueryRecords skips the user_id WHERE clause. Only the orchestrator's
+	// startup rehydrate path is meant to set this; the HTTP handler accepts
+	// the corresponding ?all_tenants=true query parameter only because the
+	// orchestrator endpoint is already gated by the internal vault API key.
+	AllTenants bool
 }
 
 func NewOrchestratorRepository(pool *pgxpool.Pool) *OrchestratorRepository {
@@ -296,22 +302,32 @@ RETURNING id, user_id, orchestrator_task_ref, task_id, plan_id, subtask_id, trac
 }
 
 func (r *OrchestratorRepository) QueryRecords(ctx context.Context, params QueryOrchestratorRecordsParams) ([]OrchestratorRecord, error) {
-	if isBlank(params.UserID) {
+	if !params.AllTenants && isBlank(params.UserID) {
 		return nil, ErrMissingUserID
 	}
 	if !ValidOrchestratorDataType(params.DataType) {
 		return nil, ErrUnknownOrchestratorDataType
 	}
-	userUUID, err := parseUUID(params.UserID)
-	if err != nil {
-		return nil, fmt.Errorf("user_id: %w", err)
-	}
 
-	args := []any{userUUID, params.DataType}
-	q := `
+	var args []any
+	var q string
+	if params.AllTenants {
+		args = []any{params.DataType}
+		q = `
+SELECT id, user_id, orchestrator_task_ref, task_id, plan_id, subtask_id, trace_id, data_type, timestamp, payload, ttl_seconds, created_at
+FROM orchestrator_schema.orchestrator_records
+WHERE data_type = $1`
+	} else {
+		userUUID, err := parseUUID(params.UserID)
+		if err != nil {
+			return nil, fmt.Errorf("user_id: %w", err)
+		}
+		args = []any{userUUID, params.DataType}
+		q = `
 SELECT id, user_id, orchestrator_task_ref, task_id, plan_id, subtask_id, trace_id, data_type, timestamp, payload, ttl_seconds, created_at
 FROM orchestrator_schema.orchestrator_records
 WHERE user_id = $1 AND data_type = $2`
+	}
 
 	if params.TaskID != "" {
 		args = append(args, params.TaskID)
