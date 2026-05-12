@@ -14,33 +14,8 @@ EMBEDDING_DIM=""
 EMBEDDING_PROMPT_STYLE=""
 EMBEDDING_HF_TOKEN="${HF_TOKEN:-}"
 
-print_deployment_debug() {
-  local deploy="$1"
-  local label_name="$2"
-
-  echo ""
-  echo "    Debug for deployment/${deploy}:"
-  kubectl get pods -n "${NAMESPACE}" -l "app.kubernetes.io/name=${label_name}" -o wide || true
-
-  local pod_name=""
-  pod_name="$(kubectl get pods -n "${NAMESPACE}" -l "app.kubernetes.io/name=${label_name}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
-  if [ -n "${pod_name}" ]; then
-    echo ""
-    echo "    describe pod/${pod_name}"
-    kubectl describe pod -n "${NAMESPACE}" "${pod_name}" || true
-
-    echo ""
-    echo "    recent logs for pod/${pod_name}"
-    kubectl logs -n "${NAMESPACE}" "${pod_name}" --all-containers=true --tail=200 || true
-
-    echo ""
-    echo "    previous logs for pod/${pod_name}"
-    kubectl logs -n "${NAMESPACE}" "${pod_name}" --all-containers=true --previous --tail=200 || true
-  fi
-}
-
 print_help() {
-  echo "Usage: ./deploy/scripts/kind-up.sh [OPTIONS]"
+  echo "Usage: ./k8s/scripts/kind-up.sh [OPTIONS]"
   echo ""
   echo "Create the kind cluster, build & load images, and install the cerberOS Helm chart."
   echo ""
@@ -61,10 +36,10 @@ print_help() {
   echo "  HF_TOKEN            Hugging Face token for gated embedding models"
   echo ""
   echo "Examples:"
-  echo "  ./deploy/scripts/kind-up.sh"
-  echo "  ./deploy/scripts/kind-up.sh --skip-build --embedding-model harrier"
-  echo "  HF_TOKEN=<token> ./deploy/scripts/kind-up.sh --embedding-model embeddinggemma"
-  echo "  ./deploy/scripts/kind-up.sh --embedding-model BAAI/bge-small-en-v1.5 --embedding-dim 384 --embedding-prompt-style plain"
+  echo "  ./k8s/scripts/kind-up.sh"
+  echo "  ./k8s/scripts/kind-up.sh --skip-build --embedding-model harrier"
+  echo "  HF_TOKEN=<token> ./k8s/scripts/kind-up.sh --embedding-model embeddinggemma"
+  echo "  ./k8s/scripts/kind-up.sh --embedding-model BAAI/bge-small-en-v1.5 --embedding-dim 384 --embedding-prompt-style plain"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -122,6 +97,38 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+check_dependencies() {
+  if ! kind help >/dev/null 2>&1; then
+  echo "    kind not found, please install it: https://kind.sigs.k8s.io/docs/user/quick-start#installation"
+  exit 1
+  fi
+  if ! kubectl version --client >/dev/null 2>&1; then
+    echo "    kubectl not found, please install it: https://kubernetes.io/docs/tasks/tools/install-kubectl/"
+    exit 1
+  fi
+  if ! helm version >/dev/null 2>&1; then
+    echo "    helm not found, please install it: https://helm.sh/docs/intro/install/"
+    exit 1
+  fi
+}
+
+for arg in "$@"; do
+  case $arg in
+    --skip-build) SKIP_BUILD=true ;;
+    --skip-install) SKIP_INSTALL=true ;;
+    -h|--help)
+      print_help
+      exit 0
+      ;;
+    *)
+      echo "error: unknown option '$1'" >&2
+      echo "" >&2
+      print_help >&2
+      exit 1
+      ;;
+  esac
+done
+
 case "${EMBEDDING_MODEL}" in
   embeddinggemma)
     EMBEDDING_MODEL="google/embeddinggemma-300m"
@@ -144,6 +151,8 @@ esac
 
 echo "==> Syncing memory schema to embedding dimension ${EMBEDDING_DIM} ..."
 bash "${REPO_ROOT}/memory/scripts/set-embedding-dimension.sh" "${EMBEDDING_DIM}"
+echo "==> [0/5] Checking if dependencies are installed ..."
+check_dependencies
 
 echo "==> [1/5] Creating kind cluster '${CLUSTER}' ..."
 if kind get clusters 2>/dev/null | grep -q "^${CLUSTER}$"; then
