@@ -98,6 +98,20 @@
   color: var(--text-muted);
 }
 
+.message-sender--agent {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2em;
+}
+
+.message-sender-logo {
+  flex-shrink: 0;
+  width: 1rem;
+  height: 1rem;
+  display: block;
+  opacity: 0.88;
+}
+
 .message-time {
   color: var(--text-muted);
   opacity: 0.6;

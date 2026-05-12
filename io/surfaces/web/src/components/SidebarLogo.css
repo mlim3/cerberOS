@@ -12,11 +12,32 @@
   border-bottom: var(--border);
 }
 
+.sidebar-logo-brand {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  min-width: 0;
+  color: #ffffff;
+}
+
+.sidebar-logo-image {
+  flex-shrink: 0;
+  width: 2.875rem;
+  height: 2.875rem;
+  display: block;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  overflow: visible;
+}
+
 .sidebar-logo-mark {
   color: #ffffff;
   font-size: clamp(1.75rem, 1.4rem + 1.1vw, 2.35rem);
   font-weight: 850;
   letter-spacing: -0.06em;
   line-height: 1;
+  margin-inline-start: -0.2rem;
   text-shadow: 0 12px 34px oklch(0.02 0.03 260 / 0.44);
 }

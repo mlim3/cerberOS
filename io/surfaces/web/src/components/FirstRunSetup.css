@@ -28,6 +28,30 @@
   letter-spacing: -0.02em;
 }
 
+.first-run-title-brand {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  color: var(--text-primary);
+}
+
+.first-run-logo {
+  flex-shrink: 0;
+  width: 2.25rem;
+  height: 2.25rem;
+  display: block;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  overflow: visible;
+}
+
+.first-run-title-text {
+  margin-inline-start: -0.15rem;
+  min-width: 0;
+}
+
 .first-run-subtitle {
   margin: 0 0 var(--sp-5);
   color: var(--text-secondary);
