@@ -152,8 +152,8 @@ type executorMock struct {
 		Plan types.ExecutionPlan
 		TS   *types.TaskState
 	}
-	ResultCalls  []types.TaskResult
-	ExecuteError error
+	ResultCalls   []types.TaskResult
+	ExecuteError  error
 	SubtaskStates map[string]*types.TaskState
 }
 
@@ -571,9 +571,9 @@ func TestHandleCredentialRequest_AuthorizeGrantedForSpawnedChildContext(t *testi
 				IssuedAt:  time.Now().UTC(),
 				ExpiresAt: time.Now().UTC().Add(1 * time.Hour),
 			},
-			CallbackTopic:   "cb.topic",
-			UserContextID:   "user-context-1",
-			ConversationID:  "conversation-1",
+			CallbackTopic:  "cb.topic",
+			UserContextID:  "user-context-1",
+			ConversationID: "conversation-1",
 		},
 	}
 

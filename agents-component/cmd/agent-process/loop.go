@@ -173,13 +173,21 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 	sl := NewSessionLog(ve, log)
 	ctx = WithSessionLog(ctx, sl)
 
-	tools := toolsForDomain(spawnCtx.SkillDomain, ve, as, sl)
+	leafWorker := spawnCtx.LeafWorker
+	toolSpawner := as
+	if leafWorker {
+		toolSpawner = nil
+	}
+	tools := toolsForDomain(spawnCtx.SkillDomain, ve, toolSpawner, sl)
+	if leafWorker {
+		tools = withoutTools(tools, "skills_search")
+	}
 	// Build dynamic SkillTools for skills synthesized in prior sessions.
 	// Each tool's Execute makes an inline LLM call using the stored recipe with
 	// caller parameters substituted in. Existing builtins take precedence: a
 	// synthesized name that matches a builtin is skipped (the builtin is more
 	// reliable than the LLM-executed recipe for that operation).
-	if len(spawnCtx.SynthesizedSkills) > 0 {
+	if !leafWorker && len(spawnCtx.SynthesizedSkills) > 0 {
 		existingNames := make(map[string]bool, len(tools))
 		for _, t := range tools {
 			existingNames[t.Definition.Name] = true
@@ -189,7 +197,9 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 	}
 	// Memory tools (memory_update, profile_update, memory_search) are available
 	// in every domain — they are not domain-specific skills.
-	tools = append(tools, memoryTools(sl, spawnCtx.SkillDomain, spawnCtx.UserContextID)...)
+	if !leafWorker {
+		tools = append(tools, memoryTools(sl, spawnCtx.SkillDomain, spawnCtx.UserContextID)...)
+	}
 	// Apply spec budget: register each tool's definition cost and evict LRU
 	// entries if the ceiling is exceeded. Pinned tools (task_complete,
 	// spawn_agent) are never evicted.
@@ -205,13 +215,17 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 	//   2. Send a user clarification request for credentialed cross-domain tools.
 	// The plain version built by toolsForDomain had no registry reference because
 	// the registry did not exist yet (chicken-and-egg). Replace it now.
-	upgradedSearch := skillsSearchTool(sl, spawnCtx.SkillDomain, as != nil, registry, sl)
-	if err := registry.Replace("skills_search", upgradedSearch); err != nil {
-		log.Warn("skills_search upgrade failed; falling back to non-registry-aware version", "error", err)
+	if !leafWorker {
+		upgradedSearch := skillsSearchTool(sl, spawnCtx.SkillDomain, as != nil, registry, sl)
+		if err := registry.Replace("skills_search", upgradedSearch); err != nil {
+			log.Warn("skills_search upgrade failed; falling back to non-registry-aware version", "error", err)
+		}
 	}
 
-	if err := registry.Register(skillLoadTool(registry, sl, spawnCtx.SkillLoadAllowed)); err != nil {
-		log.Warn("skill_load tool registration failed", "error", err)
+	if !leafWorker {
+		if err := registry.Register(skillLoadTool(registry, sl, spawnCtx.SkillLoadAllowed)); err != nil {
+			log.Warn("skill_load tool registration failed", "error", err)
+		}
 	}
 	if err := registry.Register(createSkillFromNLTool(client, sl, ve, spawnCtx, registry)); err != nil {
 		log.Warn("create_skill_from_nl tool registration failed", "error", err)
@@ -220,16 +234,18 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 	// Pre-populate the registry with external skills persisted by skill_load in
 	// prior sessions. Each record carries the serialised externalSkillManifest in
 	// its Recipe field; buildHTTPSkillTool reconstructs the full SkillTool from it.
-	for _, ext := range spawnCtx.ExternalSkills {
-		var m externalSkillManifest
-		if err := json.Unmarshal([]byte(ext.Recipe), &m); err != nil {
-			log.Warn("external skill hydration: unmarshal manifest failed; skipping",
-				"skill_name", ext.Name, "error", err)
-			continue
-		}
-		if err := registry.Register(buildHTTPSkillTool(&m)); err != nil {
-			log.Warn("external skill hydration: registration failed; skipping",
-				"skill_name", ext.Name, "error", err)
+	if !leafWorker {
+		for _, ext := range spawnCtx.ExternalSkills {
+			var m externalSkillManifest
+			if err := json.Unmarshal([]byte(ext.Recipe), &m); err != nil {
+				log.Warn("external skill hydration: unmarshal manifest failed; skipping",
+					"skill_name", ext.Name, "error", err)
+				continue
+			}
+			if err := registry.Register(buildHTTPSkillTool(&m)); err != nil {
+				log.Warn("external skill hydration: registration failed; skipping",
+					"skill_name", ext.Name, "error", err)
+			}
 		}
 	}
 
@@ -245,7 +261,7 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 		"command_manifest_chars", len(spawnCtx.CommandManifest),
 	)
 
-	systemPrompt := buildSystemPrompt(spawnCtx.SkillDomain, spawnCtx.CommandManifest, spawnCtx.AgentMemory, spawnCtx.UserProfile)
+	systemPrompt := buildSystemPromptForAgent(spawnCtx.SkillDomain, spawnCtx.CommandManifest, spawnCtx.AgentMemory, spawnCtx.UserProfile, !leafWorker)
 
 	// Build conversation history. When priorTurns is non-nil the turns from the
 	// previous task in this conversation are prepended so the LLM sees the full
@@ -722,6 +738,28 @@ func contextWindowAction(totalTokens int64) contextAction {
 // non-empty. They are excluded from the spawn context token budget because they
 // are system overhead, not task payload.
 func buildSystemPrompt(skillDomain, manifest, agentMemory, userProfile string) string {
+	return buildSystemPromptForAgent(skillDomain, manifest, agentMemory, userProfile, true)
+}
+
+func withoutTools(tools []SkillTool, names ...string) []SkillTool {
+	if len(names) == 0 {
+		return tools
+	}
+	blocked := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		blocked[name] = struct{}{}
+	}
+	filtered := tools[:0]
+	for _, tool := range tools {
+		if _, drop := blocked[tool.Definition.Name]; drop {
+			continue
+		}
+		filtered = append(filtered, tool)
+	}
+	return filtered
+}
+
+func buildSystemPromptForAgent(skillDomain, manifest, agentMemory, userProfile string, allowDelegation bool) string {
 	// Prepend an explicit 7-day weekday→date lookup table so the LLM doesn't
 	// have to do its own date arithmetic. Models frequently mis-map weekdays
 	// to dates near their training cutoff (e.g. labelling May 13 2026 as
@@ -768,6 +806,14 @@ func buildSystemPrompt(skillDomain, manifest, agentMemory, userProfile string) s
 		if manifest != "" {
 			base += "\n\nAvailable commands:\n" + manifest
 		}
+	}
+	if allowDelegation {
+		base += "\n\n## Delegation and parallel work\n" +
+			"If spawn_agent is available and the task requires the same independent operation across a discovered bounded list of items, use a coordinator pattern even when the children use the same skill domain as you: first discover the exact requested item list with your own tools, then emit one spawn_agent call per item in a single assistant response so the child agents run in parallel. Give each child complete, self-contained instructions for exactly one item, including the item name, the user's original goal, the requested output count or fields, and the required skill domain. After all spawn_agent results return, aggregate them and call task_complete. Do not call task_complete after only listing the discovered items; the final result must satisfy every user-requested deliverable, including any per-item findings, comparison, ranking, recommendation, and rationale. Do not use spawn_agent for work that is not independent per item, and never include credential values in child instructions."
+	}
+	if !allowDelegation {
+		base += "\n\n## Worker mode\n" +
+			"Complete only the assigned item-level task. Keep tool calls and final output compact. Do not delegate further work. Prefer the minimum useful number of tool calls. For web/search work, use exactly one web_search call with max_results no higher than 5 unless the first result set is unusable; avoid web_fetch or web_extract unless search results lack enough evidence. If the child task asks for a fixed number of findings, return exactly that number when evidence is available; otherwise return the best available findings and briefly mark what was missing. Return compact JSON or compact structured text only."
 	}
 	if agentMemory != "" {
 		base += "\n\n## Knowledge from past tasks\n" + agentMemory

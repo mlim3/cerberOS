@@ -186,16 +186,19 @@ func spawnAgentTool(as *AgentSpawner) SkillTool {
 		Definition: anthropic.ToolParam{
 			Name: "spawn_agent",
 			Description: anthropic.String(
-				"Spawn a child agent for a sub-task requiring a different skill domain. " +
+				"Spawn a child agent for a sub-task requiring a different skill domain or one independent parallel work unit. " +
 					"Returns the child's result when done. " +
 					"To run sub-tasks in parallel, emit multiple spawn_agent calls in a single response. " +
-					"Do NOT use for operations your current tools can handle. " +
+					"Child instructions must be complete, narrow, and compact; assign exactly one independent item or work unit per child. " +
+					"For search/research children, include the item name, requested output count or fields, original user goal, minimal tool use, and compact structured output. " +
+					"Use this for list-then-per-item parallel research even when children use your same skill domain. " +
+					"Do NOT use for work that is not independent per item. " +
 					"Do NOT pass credentials in instructions."),
 			InputSchema: anthropic.ToolInputSchemaParam{
 				Properties: map[string]interface{}{
 					"instructions": map[string]interface{}{
 						"type":        "string",
-						"description": "Complete, self-contained task description for the child agent. Must include all context needed — the child has no access to this agent's history.",
+						"description": "Complete, self-contained task description for exactly one child work unit. Include only the context needed by that child, request minimal tool use, and ask for compact structured output.",
 					},
 					"required_skills": map[string]interface{}{
 						"type": "array",

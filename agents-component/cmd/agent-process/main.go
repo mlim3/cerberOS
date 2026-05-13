@@ -98,6 +98,9 @@ type SpawnContext struct {
 	SynthesizedSkills []types.SynthesizedSkillRecord `json:"synthesized_skills,omitempty"` // skills created by prior synthesis; each gets a dynamic SkillTool with LLM-based execution
 	ExternalSkills    []types.SynthesizedSkillRecord `json:"external_skills,omitempty"`    // skills loaded via skill_load in prior sessions; Recipe holds the serialised externalSkillManifest JSON
 	SkillLoadAllowed  bool                           `json:"skill_load_allowed,omitempty"` // false = skill_load tool is disabled for this user; absent/true = allowed
+	TaskKind          string                         `json:"task_kind,omitempty"`          // orchestrator task kind metadata
+	SpawnDepth        int                            `json:"spawn_depth,omitempty"`        // depth in an agent_spawn chain; 0 for root/planner-created tasks
+	LeafWorker        bool                           `json:"leaf_worker,omitempty"`        // true for slim child agents that should avoid delegation/history bloat
 
 	// OriginalUserMessage is the user's literal input as typed in the chat surface.
 	// The orchestrator carries it through plan/subtask metadata so the user-facing
