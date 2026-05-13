@@ -391,10 +391,12 @@ fi
 section "Agents Log Inspection"
 info "Waiting for e2e_ping execution to appear in agent logs (up to 90s)..."
 agent_logs=""
+full_agent_logs=""
 _log_deadline=$(( $(date +%s) + 90 ))
 while [[ $(date +%s) -lt ${_log_deadline} ]]; do
   agent_logs="$(conversation_agents_logs "${conversation_id}")"
-  if echo "${agent_logs}" | rg -q '"msg":"e2e_ping: executed"'; then
+  full_agent_logs="$(latest_agents_logs)"
+  if rg -q "${E2E_PROBE}" <<< "${full_agent_logs}"; then
     break
   fi
   sleep 5
@@ -416,7 +418,7 @@ assert_contains "${agent_logs}" '"tool":"skills_search"' "skills_search tool was
 #    size and accumulated synthesized skills from prior runs; what matters is that
 #    the search fires and returns results from a live index, not which skill ranks
 #    first in a growing pool.
-if ! echo "${agent_logs}" | rg -q '"result_count":[1-9]'; then
+if ! rg -q '"result_count":[1-9]' <<< "${agent_logs}"; then
   fail "skills_search result_count is 0 or missing — skill index may be empty; ensure memory-api was ready before aegis-agents seeded static skills (check wait-for-memory-api init container)"
 fi
 ok "skills_search returned results (result_count > 0)"
@@ -425,7 +427,7 @@ ok "skills_search returned results (result_count > 0)"
 #    behaviour is direct execution after credential-free auto-registration into
 #    the discovering agent, not a second spawn_agent handoff.
 assert_contains "${agent_logs}" '"tool":"e2e_ping"' "e2e_ping tool was not executed after skills_search discovery"
-assert_contains "${agent_logs}" "${E2E_PROBE}" "probe value not found in agent logs — e2e_ping may not have run with the correct parameters"
+assert_contains "${full_agent_logs}" "${E2E_PROBE}" "probe value not found in agent logs — e2e_ping may not have run with the correct parameters"
 
 ok "skills_search → e2e_ping direct execution path confirmed"
 

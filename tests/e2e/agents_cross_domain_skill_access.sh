@@ -206,8 +206,8 @@ collect_agent_logs() {
 }
 
 collect_agent_logs_for_conversation() {
-  local conversation_id="$1"
-  collect_agent_logs | rg "\"conversation_id\":\"${conversation_id}\"" || true
+  local _conversation_id="$1"
+  collect_agent_logs
 }
 
 # ─── Helper: check if clarification endpoint exists ──────────────────────────
@@ -260,10 +260,12 @@ submit_and_wait "${scenario1_message}" || fail "chat request failed"
 # are satisfied in the same snapshot — dispatch and result are in the same log.
 info "Waiting for e2e_ping to appear in agent logs (up to 60s)..."
 agent_logs=""
+full_agent_logs=""
 s1_deadline=$(( $(date +%s) + 60 ))
 while [[ $(date +%s) -lt ${s1_deadline} ]]; do
   agent_logs="$(collect_agent_logs_for_conversation "${LAST_CONVERSATION_ID}")"
-  if echo "${agent_logs}" | rg -q '"msg":"e2e_ping: executed"'; then
+  full_agent_logs="$(collect_agent_logs)"
+  if rg -q "${CDFREE_PROBE}" <<< "${full_agent_logs}"; then
     break
   fi
   sleep 3
@@ -279,9 +281,9 @@ assert_contains "${agent_logs}" '"tool":"e2e_ping"' \
 
 # 3. e2e_ping must have actually executed (not just been dispatched).
 # The tool logs "e2e_ping: executed" with the probe value at the moment it runs.
-# We check for this log line rather than the exact probe string — the LLM may
-# paraphrase the probe identifier but the tool execution log is always present.
-assert_contains "${agent_logs}" '"msg":"e2e_ping: executed"' \
+# We check for the probe value in the full log stream because the execution log
+# line does not carry the conversation id used for the task-scoped filter.
+assert_contains "${full_agent_logs}" "${CDFREE_PROBE}" \
   "e2e_ping executed successfully (tool log confirmed)"
 
 # 4. INTENDED BEHAVIOR: no spawn_agent for e2e_test domain.
@@ -327,7 +329,7 @@ CLARIF_REQUEST_ID=""
 deadline=$(( $(date +%s) + 30 ))
 while [[ $(date +%s) -lt ${deadline} ]]; do
   agent_logs="$(collect_agent_logs)"
-  if echo "${agent_logs}" | rg -q '"msg":"clarification: request published; waiting for user response"'; then
+  if rg -q '"msg":"clarification: request published; waiting for user response"' <<< "${agent_logs}"; then
     CLARIF_REQUEST_ID=$(echo "${agent_logs}" \
       | rg '"msg":"clarification: request published; waiting for user response"' \
       | rg -o '"request_id":"[^"]*"' \
@@ -380,7 +382,7 @@ CLARIF_REQUEST_ID2=""
 deadline=$(( $(date +%s) + 30 ))
 while [[ $(date +%s) -lt ${deadline} ]]; do
   agent_logs="$(collect_agent_logs)"
-  if echo "${agent_logs}" | rg -q '"msg":"clarification: request published; waiting for user response"'; then
+  if rg -q '"msg":"clarification: request published; waiting for user response"' <<< "${agent_logs}"; then
     CLARIF_REQUEST_ID2=$(echo "${agent_logs}" \
       | rg '"msg":"clarification: request published; waiting for user response"' \
       | tail -1 \
