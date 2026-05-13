@@ -1761,10 +1761,25 @@ function App() {
 
         const topTaskId = credRequest.taskId
         if (result.ok) {
-          setCredentialRequests(prev => ({
-            ...prev,
-            [reqId]: { ...prev[reqId], status: 'submitted' },
-          }))
+          // Mark this card submitted AND collapse any duplicate cards for the
+          // same (taskId, keyName) — multiple agents can independently request
+          // the same credential type; once one is stored the others will pick
+          // it up on their next poll, so the duplicate UI cards can be cleared.
+          setCredentialRequests(prev => {
+            const updated = { ...prev }
+            Object.keys(updated).forEach(id => {
+              const entry = updated[id]
+              if (
+                entry.status === 'pending' &&
+                entry.request.taskId === topTaskId &&
+                entry.request.keyName === credRequest.keyName
+              ) {
+                updated[id] = { ...entry, status: 'submitted' }
+              }
+            })
+            updated[reqId] = { ...updated[reqId], status: 'submitted' }
+            return updated
+          })
 
           const sysMsg: ChatMessage = {
             id: nextId(),
