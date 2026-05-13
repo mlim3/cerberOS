@@ -10,20 +10,19 @@ service:
 
 # baoToken is provided at runtime after openbao is unsealed.
 # Supply via --set vault-engine.baoToken=<token> or a sealed-secret.
+# In dev (openbao.devMode=true) this is the fixed root token "root".
 baoToken: ""
 
-# Google OAuth credentials for token auto-refresh.
-# Required for long-running sessions where the access token expires (~1hr).
-# Supply via --set or values-dev.yaml — do not commit real secrets here.
-googleOAuth:
-  clientId: ""
-  clientSecret: ""
-# Optional operator secrets (repo .env.example). When non-empty, the vault
-# engine seeds them into OpenBao on startup (idempotent — skips if present).
+# Per-chart secrets rendered into Secret/vault-engine-secrets. The vault
+# engine seeds the optional ones (TAVILY_API_KEY, GMAIL_*) into OpenBao on
+# startup (idempotent — skips if already present).
 tavilyApiKey: ""
-openaiApiKey: ""
 gmailDemoEmail: ""
 gmailDemoAppPassword: ""
+
+# Cross-chart secrets (OPENAI_API_KEY, GOOGLE_CLIENT_*) live in the umbrella
+# Secret. Override only if the umbrella chart was customized to rename it.
+sharedSecretName: "cerberos-shared-secrets"
 
 resources:
   requests:
