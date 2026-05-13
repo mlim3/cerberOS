@@ -77,12 +77,6 @@ type VaultExecutor struct {
 	cfg             VaultExecConfig
 	log             *slog.Logger
 
-	// cancelCtx is the task-level context (above per-tool timeouts).
-	// The credential poll loop selects on cancelCtx.Done() so it responds to
-	// steering interrupts and task cancellation but NOT to per-tool deadlines
-	// (e.g. vault_github_request timeout_seconds:40).
-	cancelCtx context.Context
-
 	mu                sync.Mutex
 	pending           map[string]chan types.VaultOperationResult    // requestID → result channel
 	progressCallbacks map[string]func(types.VaultOperationProgress) // requestID → onUpdate; at-most-once
@@ -120,7 +114,7 @@ type agentEnvelope struct {
 //	AEGIS_AGENT_ID  — this agent's identity (injected by Lifecycle Manager)
 //
 // Returns nil (non-fatal) if either env var is absent or NATS is unreachable.
-func NewVaultExecutor(log *slog.Logger, cancelCtx context.Context, taskID, permissionToken, traceID string) *VaultExecutor {
+func NewVaultExecutor(log *slog.Logger, taskID, permissionToken, traceID string) *VaultExecutor {
 	natsURL := os.Getenv("AEGIS_NATS_URL")
 	agentID := os.Getenv("AEGIS_AGENT_ID")
 	if natsURL == "" || agentID == "" {
@@ -159,7 +153,6 @@ func NewVaultExecutor(log *slog.Logger, cancelCtx context.Context, taskID, permi
 		permissionToken:   permissionToken,
 		cfg:               cfg,
 		log:               log,
-		cancelCtx:         cancelCtx,
 		pending:           make(map[string]chan types.VaultOperationResult),
 		progressCallbacks: make(map[string]func(types.VaultOperationProgress)),
 		credPending:       make(map[string]chan struct{}),
@@ -597,6 +590,35 @@ const (
 	credentialPollInterval   = 8 * time.Second
 )
 
+// credentialCancelCtxKey carries the Act-phase context through the tool context
+// chain so the credential poll loop can respond to steering interrupts without
+// being affected by per-tool timeouts.
+//
+// Usage:
+//
+//	loop.go (before dispatchTool):
+//	  toolCtx = WithCredentialCancelCtx(toolCtx, actCtx)
+//
+//	requestCredentialAndRetry:
+//	  cancelCtx := credentialCancelCtxFrom(ctx)  // extracts actCtx
+type credentialCancelCtxKey struct{}
+
+// WithCredentialCancelCtx embeds cancelCtx as a context value so vault code
+// can retrieve it even after dispatchTool wraps ctx with a per-tool deadline.
+func WithCredentialCancelCtx(ctx, cancelCtx context.Context) context.Context {
+	return context.WithValue(ctx, credentialCancelCtxKey{}, cancelCtx)
+}
+
+// credentialCancelCtxFrom extracts the Act-phase cancel context embedded by
+// WithCredentialCancelCtx. Falls back to ctx itself if no value is present
+// (e.g. in tests or non-credentialed paths).
+func credentialCancelCtxFrom(ctx context.Context) context.Context {
+	if c, ok := ctx.Value(credentialCancelCtxKey{}).(context.Context); ok && c != nil {
+		return c
+	}
+	return ctx
+}
+
 // credentialRetryKey is the context key that marks a vault execute call as
 // originating from inside requestCredentialAndRetry. Execute() skips the
 // MISSING_CREDENTIAL retry path when this key is present, preventing infinite
@@ -684,7 +706,7 @@ func (ve *VaultExecutor) requestCredentialAndRetry(
 		case <-doneCh:
 			retried := ve.Execute(withCredentialRetryCtx(ctx), operationType, credentialType, operationParams, timeoutSeconds, onUpdate)
 			return &retried
-		case <-ve.cancelCtx.Done(): // task cancelled or steering interrupt only
+		case <-credentialCancelCtxFrom(ctx).Done(): // Act-phase cancel (steering interrupt)
 			return nil
 		case <-timer.C:
 			r := ToolResult{
@@ -744,31 +766,28 @@ func (ve *VaultExecutor) requestCredentialAndRetry(
 	)
 
 	// Poll vault with withCredentialRetryCtx so Execute() does not re-enter this
-	// function. Two contexts are used deliberately:
+	// function. Three contexts cooperate:
 	//
-	//   credWaitCtx — derived from context.Background(), NOT from ctx.
-	//     This gives the poll loop its own 8-minute budget that outlives the
-	//     per-tool timeout (e.g. vault_github_request timeout_seconds:35).
-	//     retryCtx is derived from credWaitCtx so each poll Execute() call
-	//     also survives the tool deadline.
+	//   cancelCtx  — the Act-phase context extracted from the tool context value
+	//     chain via credentialCancelCtxFrom. Embedded by loop.go before calling
+	//     dispatchTool so it survives the per-tool WithTimeout wrapper. Cancelled
+	//     only by steering interrupts, not by per-tool timeouts.
 	//
-	//   ctx (original task/Act context) — still selected in the poll loop.
-	//     This ensures steering interrupts and task cancellation are honoured
-	//     immediately, even though the budget context ignores them.
-	//     Note: cancellation is only detected between polls (not mid-HTTP call),
-	//     so there may be up to one credentialPollInterval + vault round-trip of
-	//     delay after cancellation — acceptable given the user-paced nature of
-	//     this flow.
-	credWaitCtx, credWaitCancel := context.WithTimeout(context.Background(), credentialRequestTimeout)
+	//   credWaitCtx — timeout budget for the credential wait. Derived from
+	//     context.WithoutCancel(ctx) so it preserves session/trace values from
+	//     ctx but is not cancelled by the per-tool deadline.
+	//
+	//   retryCtx — passed to each poll Execute() call; carries the retry marker
+	//     (prevents re-entry) and the credential wait budget.
+	cancelCtx := credentialCancelCtxFrom(ctx)
+	credWaitBase := context.WithoutCancel(ctx)
+	credWaitCtx, credWaitCancel := context.WithTimeout(credWaitBase, credentialRequestTimeout)
 	defer credWaitCancel()
 	retryCtx := withCredentialRetryCtx(credWaitCtx)
 	deadline := time.Now().Add(credentialRequestTimeout)
 	for time.Now().Before(deadline) {
 		select {
-		case <-ve.cancelCtx.Done(): // task cancelled or steering interrupt — stop immediately
-			// ve.cancelCtx is the task-level context above per-tool timeouts,
-			// so this fires only on steering directives or explicit cancellation,
-			// not on the per-tool deadline (e.g. vault_github_request 40s).
+		case <-cancelCtx.Done(): // Act-phase cancelled (steering interrupt) — stop immediately
 			return nil
 		case <-credWaitCtx.Done(): // 3-minute credential wait budget exhausted
 			return nil
