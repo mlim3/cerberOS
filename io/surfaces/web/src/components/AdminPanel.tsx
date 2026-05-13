@@ -470,7 +470,7 @@ function AdminPanel({ onClose }: AdminPanelProps): React.ReactElement {
                 <span>Make available to all users</span>
               </label>
               <div className="admin-button-row">
-                <button type="submit" className="admin-submit">Import skill</button>
+                <button type="submit" className="admin-submit">Import repo skills</button>
                 <button type="button" className="admin-secondary" onClick={handleInstallSuperpowers}>
                   Install Superpowers (all users)
                 </button>
