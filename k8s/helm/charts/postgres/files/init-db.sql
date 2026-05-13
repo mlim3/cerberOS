@@ -320,7 +320,7 @@ CREATE TABLE IF NOT EXISTS scheduling_schema.scheduled_jobs (
     interval_seconds INT,
     name VARCHAR(255) NOT NULL,
     payload JSONB,
-    user_id VARCHAR(64) NOT NULL DEFAULT '',
+    user_id UUID NOT NULL REFERENCES identity_schema.users(id),
     time_zone VARCHAR(64) NOT NULL DEFAULT 'UTC',
     cron_expression TEXT NOT NULL DEFAULT '',
     next_run_at TIMESTAMPTZ NOT NULL,
@@ -331,6 +331,13 @@ CREATE TABLE IF NOT EXISTS scheduling_schema.scheduled_jobs (
 CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_next_run
     ON scheduling_schema.scheduled_jobs (next_run_at)
     WHERE status = 'active';
+-- MT-5 (#186): scheduler poll grouping — when a future change wants per-tenant
+-- polling, this index supports both `status = 'active'` filtering and per-user
+-- scoping. Today's poll is intentionally cross-tenant (one global ticker
+-- dispatches to every user's NATS subject) but every dispatched row still
+-- carries the owning user_id from the job record.
+CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_status_user_next_run
+    ON scheduling_schema.scheduled_jobs (status, user_id, next_run_at);
 
 CREATE TABLE IF NOT EXISTS scheduling_schema.scheduled_job_runs (
     id UUID PRIMARY KEY,

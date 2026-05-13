@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { activeUserId, assertNoUserIdOverride, userIdRequired } from './identity'
+import { activeUserId, assertNoUserIdOverride, resolveSseUserId, userIdRequired } from './identity'
 
 const VALID_UUID = '11111111-1111-1111-1111-111111111111'
 const OTHER_UUID = '22222222-2222-2222-2222-222222222222'
@@ -69,6 +69,28 @@ describe('userIdRequired — 400 response shape', () => {
     const res = userIdRequired(ctx)
     const body = await res.json() as { error: string }
     expect(body.error).toContain('X-Active-User')
+  })
+})
+
+describe('resolveSseUserId — EventSource query-param fallback', () => {
+  test('header still wins when both are present', () => {
+    const ctx = fakeCtx({ 'X-Active-User': VALID_UUID }, { userId: OTHER_UUID })
+    expect(resolveSseUserId(ctx)).toBe(VALID_UUID)
+  })
+
+  test('valid query param is accepted when header is absent', () => {
+    const ctx = fakeCtx({}, { userId: VALID_UUID.toUpperCase() })
+    expect(resolveSseUserId(ctx)).toBe(VALID_UUID)
+  })
+
+  test('invalid query param is rejected', () => {
+    const ctx = fakeCtx({}, { userId: 'not-a-uuid' })
+    expect(resolveSseUserId(ctx)).toBeNull()
+  })
+
+  test('missing header and query both return null', () => {
+    const ctx = fakeCtx({})
+    expect(resolveSseUserId(ctx)).toBeNull()
   })
 })
 
