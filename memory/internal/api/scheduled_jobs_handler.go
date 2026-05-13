@@ -33,18 +33,18 @@ func NewScheduledJobsHandler(repo *storage.ScheduledJobsRepository, userCron sto
 }
 
 type createScheduledJobRequest struct {
-	JobType          string         `json:"jobType"`
-	TargetKind       string         `json:"targetKind"`
-	TargetService    string         `json:"targetService"`
-	Status           string         `json:"status"`
-	ScheduleKind     string         `json:"scheduleKind"`
-	IntervalSeconds  *float64       `json:"intervalSeconds,omitempty"`
-	Name             string         `json:"name"`
-	Payload          map[string]any `json:"payload"`
-	NextRunAt        string         `json:"nextRunAt"`
-	UserID           string         `json:"userId"`
-	TimeZone         string         `json:"timeZone"`
-	CronExpression   string         `json:"cronExpression"`
+	JobType         string         `json:"jobType"`
+	TargetKind      string         `json:"targetKind"`
+	TargetService   string         `json:"targetService"`
+	Status          string         `json:"status"`
+	ScheduleKind    string         `json:"scheduleKind"`
+	IntervalSeconds *float64       `json:"intervalSeconds,omitempty"`
+	Name            string         `json:"name"`
+	Payload         map[string]any `json:"payload"`
+	NextRunAt       string         `json:"nextRunAt"`
+	UserID          string         `json:"userId"`
+	TimeZone        string         `json:"timeZone"`
+	CronExpression  string         `json:"cronExpression"`
 }
 
 // RunDue executes the same processing as POST /api/v1/scheduled_jobs/run_due (used by memory-server ticker).
@@ -97,6 +97,15 @@ func (h *ScheduledJobsHandler) HandleCreateScheduledJob(w http.ResponseWriter, r
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "jobType, targetKind, targetService, and name are required", nil))
+		return
+	}
+	// MT-5 (#186): every scheduled_jobs row carries a real owning user_id.
+	// The handler rejects the request before the repository so the 400 cites
+	// the right field; the repo would also reject via ErrScheduledJobMissingUserID.
+	if req.UserID == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "userId is required", nil))
 		return
 	}
 	if req.Status == "" {
@@ -527,7 +536,7 @@ func (h *ScheduledJobsHandler) execInternalMaintenance(ctx context.Context, jobT
 			"jobType": jobType,
 			"signals": map[string]any{
 				"memoryInternalVaultAuthConfigured": internalKey,
-				"natsUrlConfigured":               strings.TrimSpace(os.Getenv("NATS_URL")) != "",
+				"natsUrlConfigured":                 strings.TrimSpace(os.Getenv("NATS_URL")) != "",
 				"orchestratorScheduledWebhookConfigured": strings.TrimSpace(os.Getenv(
 					"ORCHESTRATOR_SCHEDULED_JOB_URL")) != "",
 			},
@@ -548,9 +557,9 @@ func (h *ScheduledJobsHandler) execInternalMaintenance(ctx context.Context, jobT
 
 	case "journal_queue_audit":
 		return map[string]any{
-			"jobType": jobType,
+			"jobType":           jobType,
 			"natsUrlConfigured": strings.TrimSpace(os.Getenv("NATS_URL")) != "",
-			"note": "JetStream / consumer lag is visible on NATS monitoring (e.g. :8222/conz). Replay DLQ via databus/orchestrator policy.",
+			"note":              "JetStream / consumer lag is visible on NATS monitoring (e.g. :8222/conz). Replay DLQ via databus/orchestrator policy.",
 		}, "completed"
 
 	case "disaster_recovery_coordination":
@@ -566,9 +575,9 @@ func (h *ScheduledJobsHandler) execInternalMaintenance(ctx context.Context, jobT
 			return map[string]any{"jobType": jobType, "error": err.Error()}, "failed"
 		}
 		return map[string]any{
-			"jobType":                  jobType,
-			"dbReachablePingMsApprox":  float64(latency.Nanoseconds()) / 1e6,
-			"note":                     "Full restore drills are operator-owned; this only checks live DB connectivity.",
+			"jobType":                 jobType,
+			"dbReachablePingMsApprox": float64(latency.Nanoseconds()) / 1e6,
+			"note":                    "Full restore drills are operator-owned; this only checks live DB connectivity.",
 		}, "completed"
 
 	default:
@@ -632,6 +641,12 @@ func (h *ScheduledJobsHandler) HandleListUserCrons(w http.ResponseWriter, r *htt
 		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "userId is required", nil))
 		return
 	}
+	if _, err := uuid.Parse(userID); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "invalid userId format", nil))
+		return
+	}
 
 	jobs, err := h.repo.ListUserCrons(r.Context(), userID)
 	if err != nil {
@@ -670,6 +685,12 @@ func (h *ScheduledJobsHandler) HandleDeleteUserCron(w http.ResponseWriter, r *ht
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "userId is required", nil))
+		return
+	}
+	if _, err := uuid.Parse(userID); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "invalid userId format", nil))
 		return
 	}
 

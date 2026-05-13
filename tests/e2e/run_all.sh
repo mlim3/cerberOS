@@ -29,14 +29,14 @@ done
 
 # ── colour helpers ─────────────────────────────────────────────────────────────
 if [[ -t 1 ]]; then
-  GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[0;33m'
-  BOLD='\033[1m'; RESET='\033[0m'
+  GREEN=$'\033[0;32m'; RED=$'\033[0;31m'; YELLOW=$'\033[0;33m'
+  BOLD=$'\033[1m'; RESET=$'\033[0m'
 else
   GREEN=''; RED=''; YELLOW=''; BOLD=''; RESET=''
 fi
 
-pass_line() { printf "${GREEN}  PASS${RESET}  %s  ${YELLOW}(%ds)${RESET}\n" "$1" "$2"; }
-fail_line() { printf "${RED}  FAIL${RESET}  %s  ${YELLOW}(%ds)${RESET}\n" "$1" "$2"; }
+pass_line() { printf '%b  PASS%b  %s  %b(%ds)%b\n' "${GREEN}" "${RESET}" "$1" "${YELLOW}" "$2" "${RESET}"; }
+fail_line() { printf '%b  FAIL%b  %s  %b(%ds)%b\n' "${RED}" "${RESET}" "$1" "${YELLOW}" "$2" "${RESET}"; }
 
 # ── discover tests ─────────────────────────────────────────────────────────────
 TESTS=()
@@ -171,9 +171,9 @@ total="${#TESTS[@]}"
 passed=$(( total - FAILURES ))
 
 if [[ "$FAILURES" -eq 0 ]]; then
-  printf "${BOLD}${GREEN}All %d test(s) passed.${RESET}\n\n" "$total"
+  printf '%b%bAll %d test(s) passed.%b\n\n' "${BOLD}" "${GREEN}" "$total" "${RESET}"
   exit 0
 else
-  printf "${BOLD}${RED}%d/%d test(s) failed.${RESET}\n\n" "$FAILURES" "$total"
+  printf '%b%b%d/%d test(s) failed.%b\n\n' "${BOLD}" "${RED}" "$FAILURES" "$total" "${RESET}"
   exit 1
 fi

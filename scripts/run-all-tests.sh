@@ -30,10 +30,10 @@ for arg in "$@"; do
 done
 
 if [[ -t 1 ]]; then
-  BOLD='\033[1m'
-  GREEN='\033[0;32m'
-  RED='\033[0;31m'
-  RESET='\033[0m'
+  BOLD=$'\033[1m'
+  GREEN=$'\033[0;32m'
+  RED=$'\033[0;31m'
+  RESET=$'\033[0m'
 else
   BOLD=''
   GREEN=''
@@ -42,7 +42,7 @@ else
 fi
 
 section() {
-  printf '\n%s%s%s\n' "${BOLD}" "$*" "${RESET}"
+  printf '\n%b%s%b\n' "${BOLD}" "$*" "${RESET}"
 }
 
 info() {
@@ -50,11 +50,11 @@ info() {
 }
 
 pass() {
-  printf '%s✔ %s%s\n' "${GREEN}" "$*" "${RESET}"
+  printf '%b✔ %s%b\n' "${GREEN}" "$*" "${RESET}"
 }
 
 fail() {
-  printf '%s✖ %s%s\n' "${RED}" "$*" "${RESET}" >&2
+  printf '%b✖ %s%b\n' "${RED}" "$*" "${RESET}" >&2
   exit 1
 }
 
@@ -258,7 +258,7 @@ main() {
   run_bun_package_tests
   run_repo_e2e
 
-  printf '\n%sAll discovered repo tests passed.%s\n' "${GREEN}" "${RESET}"
+  printf '\n%bAll discovered repo tests passed.%b\n' "${GREEN}" "${RESET}"
 }
 
 main

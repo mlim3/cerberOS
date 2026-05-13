@@ -1,0 +1,86 @@
+# =============================================================================
+# cerberOS Umbrella Chart — default values
+# =============================================================================
+# All component sub-charts are namespaced by their chart name.
+# Override in values-dev.yaml or values-prod.yaml as needed.
+# Secrets (passwords, tokens, API keys) MUST be overridden at install time:
+#   helm install cerberos . -f values-dev.yaml \
+#     --set memory-api.vaultMasterKey=<32chars> \
+#     --set memory-api.internalVaultApiKey=<key> \
+#     --set memory-api.openaiApiKey=<key> \
+#     --set io.openaiApiKey=<key> \
+#     --set vault-engine.baoToken=<token> \
+#     --set vault-engine.tavilyApiKey=<key> \
+#     --set vault-engine.openaiApiKey=<key> \
+#     --set vault-engine.gmailDemoEmail=<addr> \
+#     --set-string vault-engine.gmailDemoAppPassword='<app password>' \
+#     --set aegis-agents.anthropicApiKey=<key> \
+#     --set postgres.auth.password=<pw>
+# =============================================================================
+
+# ── Messaging ────────────────────────────────────────────────────────────────
+nats: {}   # All defaults from charts/nats/values.yaml
+
+# ── Data plane ───────────────────────────────────────────────────────────────
+postgres:
+  auth:
+    user: user
+    password: changeme
+    database: memory_db
+
+openbao:
+  postgres:
+    user: user
+    password: changeme
+  devMode: false
+  baoToken: ""
+
+# ── Application services ─────────────────────────────────────────────────────
+global:
+  embedding:
+    apiUrl: "http://embedding-api/v1/embeddings"
+    model: "microsoft/harrier-oss-v1-270m"
+    dimensions: "640"
+    promptStyle: "harrier"
+    hfToken: ""
+
+vault-engine:
+  baoToken: ""
+  tavilyApiKey: ""
+  openaiApiKey: ""
+  gmailDemoEmail: ""
+  gmailDemoAppPassword: ""
+
+memory-api:
+  db:
+    user: user
+    password: changeme
+    name: memory_db
+  vaultMasterKey: "CHANGE_ME_32_ASCII_CHARS_EXACTLY!"
+  internalVaultApiKey: "CHANGE_ME_INTERNAL_VAULT_KEY"
+  embedding:
+    provider: tei
+    apiUrl: "http://embedding-api/v1/embeddings"
+    model: "microsoft/harrier-oss-v1-270m"
+    dimensions: "640"
+    promptStyle: "harrier"
+
+embedding-api: {}
+
+orchestrator: {}
+
+io:
+  openaiApiKey: ""
+
+aegis-databus: {}
+
+aegis-agents:
+  anthropicApiKey: ""
+
+# ── Observability ─────────────────────────────────────────────────────────────
+observability:
+  enabled: true
+
+# ── Networking (opt-in) ───────────────────────────────────────────────────────
+network-policies:
+  enabled: false

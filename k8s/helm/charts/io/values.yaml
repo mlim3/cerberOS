@@ -1,0 +1,74 @@
+image:
+  repository: ghcr.io/mlim3/cerberos-io
+  tag: latest
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+# How long the Deployment controller waits for a new revision to become available
+# (must exceed worst-case image pull + startupProbe budget on small kind nodes).
+progressDeadlineSeconds: 900
+
+# HTTP listen address inside the container (required for K8s probes to reach the pod IP).
+listenHost: "0.0.0.0"
+
+service:
+  port: 3001
+  # NodePort for kind extraPortMappings (30001 → host 3001)
+  nodePort: 30001
+
+natsUrl: "nats://nats:4222"
+memoryApiBase: "http://memory-api:8081"
+# Same secret memory-api expects as INTERNAL_VAULT_API_KEY (vault/orchestrator BFF routes).
+# Required for POST/GET /api/user-crons and other Memory proxies in io/api.
+internalVaultApiKey: ""
+
+# Optional — cloud STT / OpenAI paths (see root .env.example).
+openaiApiKey: ""
+
+# Google OAuth credentials for the Admin UI "Connect Google Account" flow
+# (gmail_search, gmail_get_message, calendar_list_events skills). Mirrors
+# .env.example GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET/GOOGLE_REDIRECT_URI.
+googleOAuth:
+  clientId: ""
+  clientSecret: ""
+  redirectUri: "http://localhost:3001/api/admin/google-oauth/callback"
+
+logLevel: "info"
+demoMode: "false"
+sttProvider: "disabled"
+
+observability:
+  otlpEndpoint: "http://tempo:4318"
+  serviceName: "io-api"
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 768Mi
+
+# ---------------------------------------------------------------------------
+# Extension hook: Ingress (off by default)
+# Enable in values-prod.yaml with a real host and TLS secret.
+#
+# ingress:
+#   enabled: true
+#   className: nginx
+#   host: cerberos.example.com
+#   tls:
+#     enabled: true
+#     secretName: cerberos-tls
+#   annotations:
+#     cert-manager.io/cluster-issuer: letsencrypt-prod
+# ---------------------------------------------------------------------------
+ingress:
+  enabled: false
+  className: ""
+  host: ""
+  tls:
+    enabled: false
+    secretName: ""
+  annotations: {}

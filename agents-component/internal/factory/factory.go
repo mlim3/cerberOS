@@ -614,7 +614,7 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 		UserContextID:       spec.UserContextID,
 		ConversationID:      spec.ConversationID,
 		PriorTurns:          priorTurns,
-		SynthesizedSkills:   f.synthesizedSkillsForDomain(entryDomain),
+		SynthesizedSkills:   f.synthesizedSkillsForDomain(entryDomain, spec.UserContextID),
 		ExternalSkills:      f.loadExternalSkills(),
 		OriginalUserMessage: originalUserMessage,
 		UserFacing:          userFacing,
@@ -737,7 +737,7 @@ func (f *Factory) assignTask(agentID string, spec *types.TaskSpec) error {
 		UserContextID:       spec.UserContextID,
 		ConversationID:      spec.ConversationID,
 		PriorTurns:          priorTurns,
-		SynthesizedSkills:   f.synthesizedSkillsForDomain(entryDomain),
+		SynthesizedSkills:   f.synthesizedSkillsForDomain(entryDomain, spec.UserContextID),
 		ExternalSkills:      f.loadExternalSkills(),
 		OriginalUserMessage: originalUserMessage,
 		UserFacing:          userFacing,
@@ -1447,9 +1447,14 @@ func buildManifestText(commands []*types.SkillNode) string {
 }
 
 // synthesizedSkillsForDomain returns the SynthesizedSkillRecord slice for all
-// synthesized commands in the given domain. Errors are logged and treated as an
-// empty list — a missing synthesized skill does not block agent spawn.
-func (f *Factory) synthesizedSkillsForDomain(domain string) []types.SynthesizedSkillRecord {
+// synthesized commands in the given domain that are visible to userContextID.
+// Visibility rules:
+//   - scope == "global" or OwnerUserID == "": visible to everyone (legacy + explicit global).
+//   - scope == "user": only visible when OwnerUserID == userContextID.
+//
+// Errors are logged and treated as an empty list — a missing synthesized skill
+// does not block agent spawn.
+func (f *Factory) synthesizedSkillsForDomain(domain, userContextID string) []types.SynthesizedSkillRecord {
 	if domain == "" {
 		return nil
 	}
@@ -1459,7 +1464,17 @@ func (f *Factory) synthesizedSkillsForDomain(domain string) []types.SynthesizedS
 			"domain", domain, "error", err)
 		return nil
 	}
-	return records
+	if userContextID == "" {
+		return records
+	}
+	filtered := records[:0:0]
+	for _, r := range records {
+		if r.Scope == "user" && r.OwnerUserID != "" && r.OwnerUserID != userContextID {
+			continue
+		}
+		filtered = append(filtered, r)
+	}
+	return filtered
 }
 
 // loadExternalSkills returns all skill_cache records that were persisted by
@@ -1955,7 +1970,7 @@ func (f *Factory) wakeAgent(agentID string, spec *types.TaskSpec) error {
 		UserContextID:       spec.UserContextID,
 		ConversationID:      spec.ConversationID,
 		PriorTurns:          priorTurns,
-		SynthesizedSkills:   f.synthesizedSkillsForDomain(entryDomain),
+		SynthesizedSkills:   f.synthesizedSkillsForDomain(entryDomain, spec.UserContextID),
 		ExternalSkills:      f.loadExternalSkills(),
 		OriginalUserMessage: originalUserMessage,
 		UserFacing:          userFacing,
