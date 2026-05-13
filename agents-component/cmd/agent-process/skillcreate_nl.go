@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -47,11 +46,6 @@ type generatedSkill struct {
 	DraftHash  string
 }
 
-func nlSkillCreateEnabled() bool {
-	v := strings.ToLower(strings.TrimSpace(os.Getenv("AEGIS_NL_SKILL_CREATE_ENABLED")))
-	return v == "1" || v == "true" || v == "yes" || v == "on"
-}
-
 func createSkillFromNLTool(client *anthropic.Client, sl *SessionLog, ve *VaultExecutor, spawnCtx *SpawnContext, registry *DynamicRegistry) SkillTool {
 	return SkillTool{
 		Label: "Create Skill From Natural Language",
@@ -86,9 +80,6 @@ func executeCreateSkillFromNL(ctx context.Context, client *anthropic.Client, sl 
 		for _, t := range registry.Tools() {
 			existingNames[t.Definition.Name] = true
 		}
-	}
-	if !nlSkillCreateEnabled() {
-		return ToolResult{Content: "Natural-language skill creation is disabled by AEGIS_NL_SKILL_CREATE_ENABLED.", IsError: true}
 	}
 	var input nlSkillCreateInput
 	if err := json.Unmarshal(raw, &input); err != nil {
@@ -152,9 +143,11 @@ func executeCreateSkillFromNL(ctx context.Context, client *anthropic.Client, sl 
 	if err := sl.PersistSkillWithScope(domain, generated.Node, generated.Node.OwnerUserID, scope); err != nil {
 		return ToolResult{Content: fmt.Sprintf("skill persistence failed: %v", err), IsError: true}
 	}
+	slog.Info("skill persisted", "skill_name", generated.Node.Name, "domain", domain, "mode", generated.Mode, "scope", scope)
 	if err := sl.PublishSkillReload(domain, generated.Node.Name, scope); err != nil {
 		return ToolResult{Content: fmt.Sprintf("created skill %s in domain %s, but live reload signal failed: %v. It should be available after restart.", generated.Node.Name, domain, err)}
 	}
+	slog.Info("session log: skill reload signaled", "skill_name", generated.Node.Name, "domain", domain)
 	if ve != nil {
 		ve.EmitSkillCreated(domain, generated.Node, generated.Mode)
 	}

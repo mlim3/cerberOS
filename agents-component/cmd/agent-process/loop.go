@@ -751,7 +751,10 @@ func buildSystemPrompt(skillDomain, manifest, agentMemory, userProfile string) s
 	var base string
 	if skillDomain == "general" {
 		base = `You are an Aegis OS general-purpose reasoning agent. ` +
-			`Answer questions and complete tasks using your own knowledge and reasoning. ` +
+			`Answer questions and complete tasks. ` +
+			`When you need a specialized capability that is not in your current tool set, ` +
+			`use skills_search to discover available domain-specific tools, then use spawn_agent to delegate to the appropriate domain. ` +
+			`Never call create_skill_from_nl to execute a task — only call it when the user explicitly asks you to create, save, define, or teach a new reusable skill. ` +
 			`When the task is complete, call task_complete with the final result. ` +
 			`Be concise and factual.`
 	} else {

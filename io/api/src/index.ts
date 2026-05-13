@@ -1882,14 +1882,28 @@ app.get('/api/events/:taskId', (c) => {
   // doesn't reveal whether the taskId exists for another user. The demo task
   // (id '13', DEMO_MODE only) is the one exception: it has no real owner and
   // is intended as a fixed-id reference stream for the mock UI.
+  //
+  // Pre-subscription race: the /api/chat handler calls recordTaskOwnership
+  // synchronously but the SSE subscriber may arrive at the server before the
+  // chat POST is processed (both are started concurrently by the caller). We
+  // therefore only reject when the task is *known* to belong to a different
+  // user — if the task is simply not yet registered we allow the connection.
+  // Event routing always goes through ownerUserId, so a pre-subscriber under
+  // the wrong userId receives nothing even if the slot is held open.
   const isDemoFixedTask = DEMO_MODE && taskId === '13'
   if (!isDemoFixedTask) {
     const owner = ownerOfTask(taskId)
-    if (!owner || owner !== userId.toLowerCase()) {
-      logFromContext(c, 'debug', 'http', 'ui requested sse for unknown or unowned task; returning 404', {
+    if (owner && owner !== userId.toLowerCase()) {
+      logFromContext(c, 'debug', 'http', 'ui requested sse for task owned by a different user; returning 404', {
         user_id: userId,
       })
       return c.json({ error: 'Task not found' }, 404)
+    }
+    if (!owner) {
+      logFromContext(c, 'debug', 'http', 'ui pre-subscribed to event stream before task was registered; holding connection open', {
+        user_id: userId,
+        task_id: taskId,
+      })
     }
   }
   logFromContext(c, 'debug', 'http', 'ui opened sse connection for task event stream')

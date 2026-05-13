@@ -336,49 +336,9 @@ func TestGenerateSkillFromNL_NilClientFallback(t *testing.T) {
 	}
 }
 
-// ─── nlSkillCreateEnabled ─────────────────────────────────────────────────────
-
-func TestNLSkillCreateEnabled_Default(t *testing.T) {
-	t.Setenv("AEGIS_NL_SKILL_CREATE_ENABLED", "")
-	if nlSkillCreateEnabled() {
-		t.Error("must be disabled when env var is empty")
-	}
-}
-
-func TestNLSkillCreateEnabled_True(t *testing.T) {
-	for _, v := range []string{"1", "true", "yes", "on", "TRUE", "YES"} {
-		t.Setenv("AEGIS_NL_SKILL_CREATE_ENABLED", v)
-		if !nlSkillCreateEnabled() {
-			t.Errorf("must be enabled for value %q", v)
-		}
-	}
-}
-
-func TestNLSkillCreateEnabled_False(t *testing.T) {
-	for _, v := range []string{"0", "false", "no", "off", "FALSE"} {
-		t.Setenv("AEGIS_NL_SKILL_CREATE_ENABLED", v)
-		if nlSkillCreateEnabled() {
-			t.Errorf("must be disabled for value %q", v)
-		}
-	}
-}
-
-// ─── executeCreateSkillFromNL — feature-flag gate ─────────────────────────────
-
-func TestExecuteCreateSkillFromNL_Disabled(t *testing.T) {
-	t.Setenv("AEGIS_NL_SKILL_CREATE_ENABLED", "false")
-	raw, _ := json.Marshal(nlSkillCreateInput{Description: "does something"})
-	res := executeCreateSkillFromNL(nil, nil, nil, nil, nil, nil, raw)
-	if !res.IsError {
-		t.Error("disabled flag must return an error ToolResult")
-	}
-	if !strings.Contains(res.Content, "AEGIS_NL_SKILL_CREATE_ENABLED") {
-		t.Errorf("error must mention the env flag; got %q", res.Content)
-	}
-}
+// ─── executeCreateSkillFromNL ─────────────────────────────────────────────────
 
 func TestExecuteCreateSkillFromNL_NilSessionLog_PersistFails(t *testing.T) {
-	t.Setenv("AEGIS_NL_SKILL_CREATE_ENABLED", "true")
 	// Provide a safe low-risk draft so we reach the persistence step.
 	n := goodNode()
 	raw, _ := json.Marshal(nlSkillCreateInput{
@@ -393,7 +353,7 @@ func TestExecuteCreateSkillFromNL_NilSessionLog_PersistFails(t *testing.T) {
 }
 
 func TestExecuteCreateSkillFromNL_CredentialInDescription(t *testing.T) {
-	t.Setenv("AEGIS_NL_SKILL_CREATE_ENABLED", "true")
+
 	raw, _ := json.Marshal(nlSkillCreateInput{Description: "Use sk-abc1234567890xyz token to call API"})
 	res := executeCreateSkillFromNL(nil, nil, nil, nil, nil, nil, raw)
 	if !res.IsError {
@@ -402,7 +362,7 @@ func TestExecuteCreateSkillFromNL_CredentialInDescription(t *testing.T) {
 }
 
 func TestExecuteCreateSkillFromNL_GlobalScopeRejected(t *testing.T) {
-	t.Setenv("AEGIS_NL_SKILL_CREATE_ENABLED", "true")
+
 	raw, _ := json.Marshal(nlSkillCreateInput{Description: "does something safe", Scope: "global"})
 	res := executeCreateSkillFromNL(nil, nil, nil, nil, nil, nil, raw)
 	if !res.IsError {
@@ -411,7 +371,7 @@ func TestExecuteCreateSkillFromNL_GlobalScopeRejected(t *testing.T) {
 }
 
 func TestExecuteCreateSkillFromNL_InvalidScope(t *testing.T) {
-	t.Setenv("AEGIS_NL_SKILL_CREATE_ENABLED", "true")
+
 	raw, _ := json.Marshal(nlSkillCreateInput{Description: "does something", Scope: "team"})
 	res := executeCreateSkillFromNL(nil, nil, nil, nil, nil, nil, raw)
 	if !res.IsError {
@@ -420,7 +380,7 @@ func TestExecuteCreateSkillFromNL_InvalidScope(t *testing.T) {
 }
 
 func TestExecuteCreateSkillFromNL_RiskySkillReturnsPreview(t *testing.T) {
-	t.Setenv("AEGIS_NL_SKILL_CREATE_ENABLED", "true")
+
 	// Use a draft so we bypass LLM but have a valid node with risky content.
 	n := goodNode()
 	n.Description = "Sends an email every Monday. Do NOT use for other comms."
@@ -443,7 +403,7 @@ func TestExecuteCreateSkillFromNL_RiskySkillReturnsPreview(t *testing.T) {
 }
 
 func TestExecuteCreateSkillFromNL_ConfirmWithWrongHash(t *testing.T) {
-	t.Setenv("AEGIS_NL_SKILL_CREATE_ENABLED", "true")
+
 	n := goodNode()
 	n.Description = "Sends an email. Do NOT use for other comms."
 	n.Recipe = "1. Send email. 2. Done."
@@ -460,7 +420,7 @@ func TestExecuteCreateSkillFromNL_ConfirmWithWrongHash(t *testing.T) {
 }
 
 func TestExecuteCreateSkillFromNL_ConfirmWithoutHash(t *testing.T) {
-	t.Setenv("AEGIS_NL_SKILL_CREATE_ENABLED", "true")
+
 	n := goodNode()
 	n.Description = "Sends an email. Do NOT use for other comms."
 	n.Recipe = "1. Send email. 2. Done."

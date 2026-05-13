@@ -59,7 +59,10 @@ require_cmd() {
 
 assert_contains() {
   local haystack="$1" needle="$2" label="$3"
-  if ! echo "${haystack}" | rg -q "${needle}"; then
+  # Use herestring to avoid the echo→rg pipe: rg -q exits after the first match
+  # which closes the read end, causing echo to receive SIGPIPE. With set -o pipefail
+  # that makes the pipeline non-zero even though the needle was found.
+  if ! rg -q "${needle}" <<< "${haystack}"; then
     fail "${label}: expected to find '${needle}'"
   fi
   ok "${label}"
@@ -67,7 +70,7 @@ assert_contains() {
 
 assert_not_contains() {
   local haystack="$1" needle="$2" label="$3"
-  if echo "${haystack}" | rg -q "${needle}"; then
+  if rg -q "${needle}" <<< "${haystack}"; then
     fail "${label}: expected NOT to find '${needle}'"
   fi
   ok "${label}"

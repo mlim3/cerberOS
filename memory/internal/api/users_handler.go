@@ -108,7 +108,24 @@ func (h *UsersHandler) HandleCreateUser(w http.ResponseWriter, r *http.Request) 
 			writeJSONError(w, http.StatusBadRequest, "bad_request", "invalid id", err.Error())
 			return
 		}
-		userID = pgtype.UUID{Bytes: parsed, Valid: true}
+		// First-run signup claims the seed UUID, but a real teammate may already
+		// have a row under this email (e.g. from a prior demo or seed import).
+		// In that bootstrap case, reuse the existing row's UUID and promote it
+		// instead of colliding with the unique email constraint and surfacing 500.
+		existing, found, err := h.repo.GetUserByEmail(r.Context(), req.Email)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "internal", "lookup by email failed", err.Error())
+			return
+		}
+		if found {
+			if existing.ID.Bytes != parsed && req.Role != "root" {
+				writeJSONError(w, http.StatusConflict, "conflict", "email already belongs to another user", "")
+				return
+			}
+			userID = existing.ID
+		} else {
+			userID = pgtype.UUID{Bytes: parsed, Valid: true}
+		}
 	} else if existing, found, err := h.repo.GetUserByEmail(r.Context(), req.Email); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "internal", "lookup by email failed", err.Error())
 		return

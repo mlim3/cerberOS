@@ -282,7 +282,7 @@ chat_payload="$(
     --arg conversationId "${conversation_id}" \
     --arg userId "${TEST_USER_ID}" \
     --arg content "${chat_prompt}" \
-    '{taskId:$taskId, conversationId:$conversationId, userId:$userId, content:$content, required_skill_domains:["general","e2e_test"]}'
+    '{taskId:$taskId, conversationId:$conversationId, userId:$userId, content:$content}'
 )"
 
 stream_file="$(mktemp /tmp/cerberos-agents-sse.XXXXXX)"
@@ -290,7 +290,7 @@ event_stream_file="$(mktemp /tmp/cerberos-agent-events.XXXXXX)"
 plan_auto_approved="false"
 plan_preview_seen="false"
 approve_resp=""
-info "Sending /api/chat request with required_skill_domains=[general,e2e_test]"
+info "Sending /api/chat request (no required_skill_domains — agent must discover e2e_test via skills_search)"
 info "Subscribing to /api/events/${task_id} for plan previews and status updates (probe=${E2E_PROBE})"
 curl -N -sS -H "X-Active-User: ${TEST_USER_ID}" "${base_url}/api/events/${task_id}" >"${event_stream_file}" 2>/dev/null &
 EVENT_STREAM_PID=$!
