@@ -65,6 +65,7 @@ type TaskSpec struct {
 	OrchestratorTaskRef  string            `json:"orchestrator_task_ref"`
 	TaskID               string            `json:"task_id"`
 	UserID               string            `json:"user_id"`
+	UserRole             string            `json:"user_role,omitempty"`
 	RequiredSkillDomains []string          `json:"required_skill_domains"`
 	PolicyScope          PolicyScope       `json:"policy_scope"` // Immutable. Agent cannot exceed this scope.
 	TimeoutSeconds       int               `json:"timeout_seconds"`

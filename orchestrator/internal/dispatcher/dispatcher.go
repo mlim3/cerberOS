@@ -373,6 +373,7 @@ func (d *Dispatcher) HandleInboundTask(ctx context.Context, task types.UserTask)
 		OrchestratorTaskRef:  orchRef,
 		TaskID:               orchRef,
 		UserID:               task.UserID,
+		UserRole:             task.UserRole,
 		RequiredSkillDomains: []string{"general"},
 		PolicyScope:          scope,
 		TimeoutSeconds:       minInt(task.TimeoutSeconds, d.cfg.DecompositionTimeoutSeconds),

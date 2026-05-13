@@ -85,6 +85,7 @@ type mmdsPayload struct {
 type SpawnContext struct {
 	TaskID            string                         `json:"task_id"`
 	SkillDomain       string                         `json:"skill_domain"`
+	UserRole          string                         `json:"user_role,omitempty"`
 	PermissionToken   string                         `json:"permission_token"` // opaque credential ref — never a raw credential value
 	Instructions      string                         `json:"instructions"`
 	CommandManifest   string                         `json:"command_manifest,omitempty"`  // "- name: description" list built by factory; injected into system prompt
