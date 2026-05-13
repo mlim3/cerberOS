@@ -1,0 +1,34 @@
+image:
+  repository: ghcr.io/mlim3/cerberos-vault-engine
+  tag: latest
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+service:
+  port: 8000
+
+# baoToken is provided at runtime after openbao is unsealed.
+# Supply via --set vault-engine.baoToken=<token> or a sealed-secret.
+baoToken: ""
+
+# Google OAuth credentials for token auto-refresh.
+# Required for long-running sessions where the access token expires (~1hr).
+# Supply via --set or values-dev.yaml — do not commit real secrets here.
+googleOAuth:
+  clientId: ""
+  clientSecret: ""
+# Optional operator secrets (repo .env.example). When non-empty, the vault
+# engine seeds them into OpenBao on startup (idempotent — skips if present).
+tavilyApiKey: ""
+openaiApiKey: ""
+gmailDemoEmail: ""
+gmailDemoAppPassword: ""
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi

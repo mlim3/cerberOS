@@ -53,14 +53,26 @@ function MarkdownContent({ content }: { content: string }) {
   )
 }
 
+interface PendingCredential {
+  request: CredentialRequest
+  status: CredentialRequestStatus
+  onProvide: () => void
+  onSubmitInline?: (requestId: string, value: string) => void | Promise<void>
+}
+
 interface ChatWindowProps {
   task: Task
   onSendMessage: (taskId: string, content: string) => void | Promise<void>
   isStreaming: boolean
   streamingContent: string
   settings: UISettings
+  /** All pending credentials for this task — each gets its own inline card. */
+  pendingCredentials?: PendingCredential[]
+  /** @deprecated use pendingCredentials */
   credentialRequest?: CredentialRequest | null
+  /** @deprecated use pendingCredentials */
   credentialStatus?: CredentialRequestStatus
+  /** @deprecated use pendingCredentials */
   onProvideCredential?: () => void
   /** Rendered below the transcript, above the composer (e.g. recurring schedule panel). */
   belowMessages?: ReactNode
@@ -129,6 +141,7 @@ function ChatWindow({
   isStreaming,
   streamingContent,
   settings,
+  pendingCredentials = [],
   credentialRequest,
   credentialStatus,
   onProvideCredential,
@@ -138,6 +151,12 @@ function ChatWindow({
   inputPlaceholder,
   pulseMessageKey,
 }: ChatWindowProps) {
+  // Merge legacy single-credential prop into the array for backwards compat.
+  const allCredentials: PendingCredential[] = pendingCredentials.length > 0
+    ? pendingCredentials
+    : (credentialRequest && credentialStatus && onProvideCredential
+        ? [{ request: credentialRequest, status: credentialStatus, onProvide: onProvideCredential }]
+        : [])
   const [inputValue, setInputValue] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -238,14 +257,6 @@ function ChatWindow({
           )
         })}
 
-        {credentialRequest && credentialStatus && onProvideCredential && (
-          <CredentialRequestCard
-            request={credentialRequest}
-            status={credentialStatus}
-            onProvide={onProvideCredential}
-          />
-        )}
-
         {isStreaming && (
           <div className="message agent streaming message-lane-thinking">
             <div className="message-avatar"><span className="avatar-glyph">C</span></div>
@@ -271,6 +282,20 @@ function ChatWindow({
       </div>
 
       {belowMessages}
+
+      {allCredentials.length > 0 && (
+        <div className="credential-panel">
+          {allCredentials.map(c => (
+            <CredentialRequestCard
+              key={c.request.requestId}
+              request={c.request}
+              status={c.status}
+              onProvide={c.onProvide}
+              onSubmitInline={c.onSubmitInline}
+            />
+          ))}
+        </div>
+      )}
 
       <div className="chat-input-area">
         {settings.demoMode && !isStreaming && !composerDisabled && !(task.title === 'New Task' && task.messages.length === 0) && (

@@ -581,11 +581,57 @@ func (ve *VaultExecutor) Execute(ctx context.Context, operationType, credentialT
 }
 
 // credentialRequestTimeout is how long requestCredentialAndRetry polls for the
-// user to enter a missing API key via the IO credential modal before giving up.
+// user to enter a missing API key before giving up. The subtask context
+// (timeout_seconds: 300 from the planner) minus ~60s of agent startup gives
+// roughly 4 minutes of actual input window, so 3 minutes here is the
+// intentional user-facing budget.
 const (
-	credentialRequestTimeout = 5 * time.Minute
+	credentialRequestTimeout = 3 * time.Minute
 	credentialPollInterval   = 8 * time.Second
 )
+
+// credentialCancelCtxKey carries the Act-phase context through the tool context
+// chain so the credential poll loop can respond to steering interrupts without
+// being affected by per-tool timeouts.
+//
+// Usage:
+//
+//	loop.go (before dispatchTool):
+//	  toolCtx = WithCredentialCancelCtx(toolCtx, actCtx)
+//
+//	requestCredentialAndRetry:
+//	  cancelCtx := credentialCancelCtxFrom(ctx)  // extracts actCtx
+type credentialCancelCtxKey struct{}
+
+// WithCredentialCancelCtx embeds cancelCtx as a context value so vault code
+// can retrieve it even after dispatchTool wraps ctx with a per-tool deadline.
+func WithCredentialCancelCtx(ctx, cancelCtx context.Context) context.Context {
+	return context.WithValue(ctx, credentialCancelCtxKey{}, cancelCtx)
+}
+
+// credentialCancelCtxFrom extracts the Act-phase cancel context embedded by
+// WithCredentialCancelCtx. Falls back to ctx itself if no value is present
+// (e.g. in tests or non-credentialed paths).
+func credentialCancelCtxFrom(ctx context.Context) context.Context {
+	if c, ok := ctx.Value(credentialCancelCtxKey{}).(context.Context); ok && c != nil {
+		return c
+	}
+	return ctx
+}
+
+// buildCredentialCtxs constructs the two contexts needed for any credential
+// wait — both the owner poll loop and the duplicate waiter branch use the same
+// pair so neither can be cut short by the per-tool deadline.
+//
+//   cancelCtx — the Act-phase context for steering-interrupt detection.
+//   waitCtx   — timeout budget derived from context.WithoutCancel(ctx) so the
+//               per-tool deadline is stripped while session/trace values are
+//               preserved. Caller must call waitCancel when done.
+func buildCredentialCtxs(ctx context.Context) (cancelCtx, waitCtx context.Context, waitCancel context.CancelFunc) {
+	cancelCtx = credentialCancelCtxFrom(ctx)
+	waitCtx, waitCancel = context.WithTimeout(context.WithoutCancel(ctx), credentialRequestTimeout)
+	return
+}
 
 // credentialRetryKey is the context key that marks a vault execute call as
 // originating from inside requestCredentialAndRetry. Execute() skips the
@@ -665,18 +711,27 @@ func (ve *VaultExecutor) requestCredentialAndRetry(
 
 	if alreadyPending {
 		// Another goroutine owns the modal — wait for it to finish, then retry.
+		// Use the same context pair as the owner so the per-tool deadline cannot
+		// cut the wait short: cancelCtx for steering interrupts, waitCtx for the
+		// credential budget.
 		ve.log.Info("vault execute: credential request already in progress — waiting",
 			"credential_type", credentialType,
 		)
-		timer := time.NewTimer(credentialRequestTimeout)
-		defer timer.Stop()
+		cancelCtx, waitCtx, waitCancel := buildCredentialCtxs(ctx)
+		defer waitCancel()
 		select {
 		case <-doneCh:
-			retried := ve.Execute(withCredentialRetryCtx(ctx), operationType, credentialType, operationParams, timeoutSeconds, onUpdate)
+			// Owner finished. Check for steering cancellation before retrying.
+			select {
+			case <-cancelCtx.Done():
+				return nil
+			default:
+			}
+			retried := ve.Execute(withCredentialRetryCtx(waitCtx), operationType, credentialType, operationParams, timeoutSeconds, onUpdate)
 			return &retried
-		case <-ctx.Done():
+		case <-cancelCtx.Done(): // Act-phase cancel (steering interrupt)
 			return nil
-		case <-timer.C:
+		case <-waitCtx.Done(): // budget exhausted while waiting for owner
 			r := ToolResult{
 				Content:        fmt.Sprintf("No %s was provided within %s. Add your API key in Settings and try again.", credentialType, credentialRequestTimeout),
 				IsError:        true,
@@ -733,13 +788,19 @@ func (ve *VaultExecutor) requestCredentialAndRetry(
 		"timeout", credentialRequestTimeout,
 	)
 
-	// Poll vault_google_search with withCredentialRetryCtx so Execute() does not
-	// re-enter this function. The poll succeeds as soon as the user stores the key.
+	// Poll vault with withCredentialRetryCtx so Execute() does not re-enter this
+	// function. buildCredentialCtxs provides:
+	//   cancelCtx   — Act-phase context for steering-interrupt detection
+	//   credWaitCtx — 3-minute budget, per-tool deadline stripped, values kept
+	cancelCtx, credWaitCtx, credWaitCancel := buildCredentialCtxs(ctx)
+	defer credWaitCancel()
+	retryCtx := withCredentialRetryCtx(credWaitCtx)
 	deadline := time.Now().Add(credentialRequestTimeout)
-	retryCtx := withCredentialRetryCtx(ctx)
 	for time.Now().Before(deadline) {
 		select {
-		case <-ctx.Done():
+		case <-cancelCtx.Done(): // Act-phase cancelled (steering interrupt) — stop immediately
+			return nil
+		case <-credWaitCtx.Done(): // 3-minute credential wait budget exhausted
 			return nil
 		case <-time.After(credentialPollInterval):
 		}

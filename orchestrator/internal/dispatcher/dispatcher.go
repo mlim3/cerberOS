@@ -1693,12 +1693,13 @@ func buildDecompositionInstructionsWithFacts(taskID, rawInput string, scope type
 		"Decompose the user's task into a JSON execution plan for downstream agents.\n"+
 			"Return JSON only. Do not wrap the result in markdown fences. Do not include commentary.\n"+
 			"The JSON schema is:\n"+
-			"{\"plan_id\":\"string\",\"parent_task_id\":\"%s\",\"created_at\":\"RFC3339 timestamp\",\"subtasks\":[{\"subtask_id\":\"string\",\"required_skill_domains\":[\"domain\"],\"action\":\"string\",\"instructions\":\"string\",\"params\":{},\"depends_on\":[\"subtask_id\"],\"timeout_seconds\":30}]}\n"+
+			"{\"plan_id\":\"string\",\"parent_task_id\":\"%s\",\"created_at\":\"RFC3339 timestamp\",\"subtasks\":[{\"subtask_id\":\"string\",\"required_skill_domains\":[\"domain\"],\"action\":\"string\",\"instructions\":\"string\",\"params\":{},\"depends_on\":[\"subtask_id\"],\"timeout_seconds\":300}]}\n"+
 			"Rules:\n"+
 			"- parent_task_id must equal %q\n"+
 			"- required_skill_domains for every subtask must be a subset of %s\n"+
 			"- Do not invent new skill domain names outside the allowed list\n"+
 			"- Use an empty array for depends_on when a subtask has no dependencies\n"+
+			"- timeout_seconds MUST be 300 for every subtask — never use a lower value\n"+
 			"- Keep the plan concise and executable\n"+
 			"Skill domain guide: use \"web\" for fetch/parse/extract of known URLs AND for AI web search (web.web_search via Tavily, no Google account needed), \"data\" for transforms/reads/writes, \"comms\" for messaging, \"storage\" for file operations, \"logs\" for log queries, \"google_search\" for explicitly Google-API-backed search, \"github\" for GitHub API calls, \"local_files\" for reading/writing files in the user's home (notes, journal, etc. — paths starting with ~/ map to per-user storage), \"google_workspace\" for Gmail search/read (gmail_search, gmail_get_message) and Google Calendar access (calendar_list_events) — requires the user to have connected their Google account via OAuth, \"general\" for reasoning/summarization with no external tools.\n"+
 			"- For ANY task that requires real-world or current information (events this weekend, weather, news, prices, hours, addresses, etc.), include AT LEAST one subtask in the \"web\" domain — web.web_search composes well across topics.\n"+

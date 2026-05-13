@@ -4,12 +4,12 @@ on:
   pull_request:
     branches: ["main"]
     paths:
-      - "deploy/helm/**"
+      - "k8s/helm/**"
       - ".github/workflows/helm-lint.yaml"
   push:
     branches: ["main"]
     paths:
-      - "deploy/helm/**"
+      - "k8s/helm/**"
 
 jobs:
   lint:
@@ -37,7 +37,7 @@ jobs:
           # Any component chart that declares `dependencies:` needs its sub-charts
           # fetched before `helm lint --strict` will pass (strict mode treats
           # missing dependencies as errors).
-          for chart in deploy/helm/charts/*/; do
+          for chart in k8s/helm/charts/*/; do
             if grep -q "^dependencies:" "$chart/Chart.yaml" 2>/dev/null; then
               echo "==> Resolving deps for $chart"
               helm dependency update "$chart"
@@ -46,21 +46,21 @@ jobs:
 
       - name: Lint all component charts
         run: |
-          for chart in deploy/helm/charts/*/; do
+          for chart in k8s/helm/charts/*/; do
             echo "==> Linting $chart"
             helm lint "$chart" --strict
           done
 
       - name: Update umbrella dependencies
-        run: helm dependency update deploy/helm/cerberos
+        run: helm dependency update k8s/helm/cerberos
 
       - name: Lint umbrella chart
-        run: helm lint deploy/helm/cerberos --strict -f deploy/helm/cerberos/values-dev.yaml
+        run: helm lint k8s/helm/cerberos --strict -f k8s/helm/cerberos/values-dev.yaml
 
       - name: Template umbrella chart (dry-run)
         run: |
-          helm template cerberos deploy/helm/cerberos \
-            -f deploy/helm/cerberos/values-dev.yaml \
+          helm template cerberos k8s/helm/cerberos \
+            -f k8s/helm/cerberos/values-dev.yaml \
             --namespace cerberos \
             > /dev/null
           echo "Template rendered successfully."
