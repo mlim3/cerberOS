@@ -268,6 +268,7 @@ func (m *Manager) attemptRecovery(ctx context.Context, ts *types.TaskState, reas
 		UserContextID:        recoveredState.UserContextID,
 		ProgressSummary:      fmt.Sprintf("Recovery attempt %d", recoveredState.RetryCount),
 		TraceID:              recoveredState.TraceID,
+		UserTimezone:         recoveredState.UserTimezone,
 	}
 
 	if err := m.gateway.PublishTaskSpec(ctx, spec); err != nil {

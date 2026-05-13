@@ -488,6 +488,7 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 	userProfile := f.fetchUserProfile(spec.UserContextID, spec.TraceID)
 	priorTurns, _ := f.fetchPriorTurns(spec.ConversationID, spec.TraceID)
 	originalUserMessage, userFacing := extractConversationMetadata(spec)
+	userTimezone := extractUserTimezone(spec)
 
 	// Step 6: Spawn agent process.
 	vmCfg := lifecycle.VMConfig{
@@ -507,6 +508,7 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 		SynthesizedSkills:   f.synthesizedSkillsForDomain(entryDomain),
 		OriginalUserMessage: originalUserMessage,
 		UserFacing:          userFacing,
+		UserTimezone:        userTimezone,
 		OnComplete:          f.processCompletionHandler(agentID),
 	}
 	if err := f.lifecycle.Spawn(vmCfg); err != nil {
@@ -610,6 +612,7 @@ func (f *Factory) assignTask(agentID string, spec *types.TaskSpec) error {
 	userProfile := f.fetchUserProfile(spec.UserContextID, spec.TraceID)
 	priorTurns, _ := f.fetchPriorTurns(spec.ConversationID, spec.TraceID)
 	originalUserMessage, userFacing := extractConversationMetadata(spec)
+	userTimezone := extractUserTimezone(spec)
 
 	vmCfg := lifecycle.VMConfig{
 		AgentID:             agentID,
@@ -627,6 +630,7 @@ func (f *Factory) assignTask(agentID string, spec *types.TaskSpec) error {
 		SynthesizedSkills:   f.synthesizedSkillsForDomain(entryDomain),
 		OriginalUserMessage: originalUserMessage,
 		UserFacing:          userFacing,
+		UserTimezone:        userTimezone,
 		OnComplete:          f.processCompletionHandler(agentID),
 	}
 
@@ -1421,6 +1425,18 @@ func extractConversationMetadata(spec *types.TaskSpec) (string, bool) {
 	return original, userFacing
 }
 
+// extractUserTimezone pulls the orchestrator-provided IANA tz out of the
+// TaskSpec metadata map. The io component detects it from the browser
+// (Intl.DateTimeFormat().resolvedOptions().timeZone) and the orchestrator
+// threads it through every task.inbound. Empty when the request was made
+// before the io frontend supported tz detection, or when detection failed.
+func extractUserTimezone(spec *types.TaskSpec) string {
+	if spec == nil || spec.Metadata == nil {
+		return ""
+	}
+	return spec.Metadata["user_timezone"]
+}
+
 // fetchPriorTurns retrieves the latest ConversationSnapshot for conversationID
 // from the Memory Component and returns the prior turns and their recorded token
 // count. Returns nil, 0 when conversationID is empty, no snapshot exists, or the
@@ -1775,6 +1791,7 @@ func (f *Factory) wakeAgent(agentID string, spec *types.TaskSpec) error {
 	userProfile := f.fetchUserProfile(spec.UserContextID, spec.TraceID)
 	priorTurns, _ := f.fetchPriorTurns(spec.ConversationID, spec.TraceID)
 	originalUserMessage, userFacing := extractConversationMetadata(spec)
+	userTimezone := extractUserTimezone(spec)
 	vmCfg := lifecycle.VMConfig{
 		AgentID:             agentID,
 		VMID:                newVMID,
@@ -1792,6 +1809,7 @@ func (f *Factory) wakeAgent(agentID string, spec *types.TaskSpec) error {
 		SynthesizedSkills:   f.synthesizedSkillsForDomain(entryDomain),
 		OriginalUserMessage: originalUserMessage,
 		UserFacing:          userFacing,
+		UserTimezone:        userTimezone,
 		OnComplete:          f.processCompletionHandler(agentID),
 	}
 	if err := f.lifecycle.Spawn(vmCfg); err != nil {

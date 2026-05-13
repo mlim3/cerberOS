@@ -66,6 +66,11 @@ export interface UserTaskPayload {
   conversation_id?: string
   /** W3C trace_id (32 hex) — forwarded on the wire envelope for orchestrator logs */
   trace_id?: string
+  /** IANA tz from the user's browser (Intl.DateTimeFormat().resolvedOptions().timeZone).
+   *  Threaded by the orchestrator into every subtask spawn so the agent's
+   *  buildSystemPrompt can localise the wall-clock and instruct the LLM to
+   *  report times in the user's tz instead of UTC. */
+  user_timezone?: string
 }
 
 export interface IONatsClient {
@@ -247,6 +252,7 @@ export function createNatsClient(config: NatsConfig): IONatsClient | null {
         callback_topic: task.callback_topic ?? callbackTopicForTask(task.task_id),
         user_context_id: task.user_context_id,
         ...(task.conversation_id ? { conversation_id: task.conversation_id } : {}),
+        ...(task.user_timezone ? { user_timezone: task.user_timezone } : {}),
       }
       const envelope = buildEnvelope('user_task', task.task_id, natsPayload, task.trace_id)
       const data = new TextEncoder().encode(JSON.stringify(envelope))

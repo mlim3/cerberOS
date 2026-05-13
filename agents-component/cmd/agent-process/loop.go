@@ -185,7 +185,7 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 	// spawn_agent) are never evicted.
 	tools = applySpecBudget(budget, spawnCtx.SkillDomain, tools, log)
 	toolDefs := toolDefinitions(tools)
-	systemPrompt := buildSystemPrompt(spawnCtx.SkillDomain, spawnCtx.CommandManifest, spawnCtx.AgentMemory, spawnCtx.UserProfile)
+	systemPrompt := buildSystemPrompt(spawnCtx.SkillDomain, spawnCtx.CommandManifest, spawnCtx.AgentMemory, spawnCtx.UserProfile, spawnCtx.UserTimezone)
 
 	// Build conversation history. When priorTurns is non-nil the turns from the
 	// previous task in this conversation are prepended so the LLM sees the full
@@ -653,21 +653,56 @@ func contextWindowAction(totalTokens int64) contextAction {
 // agentMemory and userProfile are injected as read-only context sections when
 // non-empty. They are excluded from the spawn context token budget because they
 // are system overhead, not task payload.
-func buildSystemPrompt(skillDomain, manifest, agentMemory, userProfile string) string {
+func buildSystemPrompt(skillDomain, manifest, agentMemory, userProfile, userTimezone string) string {
 	// Prepend today's date so the LLM resolves relative phrases ("tomorrow",
 	// "next Monday", "this weekend") against the host's wall-clock instead of
 	// its own training-cutoff prior. Without this, models silently default to
 	// dates near their cutoff (e.g. early 2025) when the user actually means
 	// something in 2026 — most visibly in calendar invites and scheduling.
-	now := time.Now()
+	//
+	// userTimezone is the IANA tz name from the user's browser (e.g.
+	// "America/Los_Angeles"). If empty or unparseable, fall back to UTC. Both
+	// the wall-clock and the explicit "report times in this tz" instruction
+	// keep the LLM from defaulting to UTC in user-facing replies (the iCal
+	// feed and most internal timestamps are UTC).
+	now := time.Now().UTC()
+	loc := time.UTC
+	tzLabel := "UTC"
+	if userTimezone != "" {
+		if parsed, err := time.LoadLocation(userTimezone); err == nil {
+			loc = parsed
+			tzLabel = userTimezone
+		}
+	}
+	localNow := now.In(loc)
+	// Build a worked example so the LLM knows EXACTLY what conversion + format
+	// is expected. Without an example the model tends to echo the raw ISO
+	// timestamp it gets back from tool results (calendar feeds, vault ops)
+	// instead of converting and humanising.
+	exampleUTC := time.Date(2026, 1, 15, 22, 30, 0, 0, time.UTC)
+	exampleLocal := exampleUTC.In(loc)
 	header := fmt.Sprintf(
-		"Today's date is %s (%s). The current local time is %s. "+
-			"Resolve any relative date or time references in the user's request "+
-			"(\"tomorrow\", \"next week\", \"in two hours\") against this clock — "+
-			"never against your training cutoff.\n\n",
-		now.Format("Monday, January 2, 2006"),
-		now.Format("2006-01-02"),
-		now.Format("15:04 MST"),
+		"Today's date is %s (%s). The current time is %s (%s UTC). "+
+			"User timezone: %s.\n\n"+
+			"TIME HANDLING RULES (MANDATORY):\n"+
+			"1. Resolve relative time references in the user's request "+
+			"(\"tomorrow\", \"next week\", \"in two hours\") against the clock above — "+
+			"never against your training cutoff.\n"+
+			"2. Tool results often contain ISO 8601 UTC timestamps (e.g. \"2026-05-13T05:32:00Z\"). "+
+			"You MUST convert those to %s before showing them to the user. "+
+			"Never echo a raw \"...Z\" timestamp in a user-facing reply.\n"+
+			"3. Format converted times as a human-friendly string with the tz abbreviation, "+
+			"e.g. \"%s\" — NOT as an ISO string.\n"+
+			"4. Worked example: a tool returns \"%s\". You report it as \"%s\".\n\n",
+		localNow.Format("Monday, January 2, 2006"),
+		localNow.Format("2006-01-02"),
+		localNow.Format("15:04 MST"),
+		now.Format("15:04"),
+		tzLabel,
+		tzLabel,
+		localNow.Format("Monday, January 2 at 3:04 PM MST"),
+		exampleUTC.Format("2006-01-02T15:04:05Z"),
+		exampleLocal.Format("Thursday, January 15 at 3:04 PM MST"),
 	)
 
 	var base string

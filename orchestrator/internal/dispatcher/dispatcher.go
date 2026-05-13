@@ -302,6 +302,7 @@ func (d *Dispatcher) HandleInboundTask(ctx context.Context, task types.UserTask)
 		UserContextID:        task.UserContextID,
 		ConversationID:       task.ConversationID,
 		IdempotencyWindow:    idempotencyWindow,
+		UserTimezone:         task.UserTimezone,
 		Payload:              task.Payload,
 		StateHistory: []types.StateEvent{
 			{State: types.StateReceived, Timestamp: now, NodeID: d.cfg.NodeID},
@@ -391,6 +392,7 @@ func (d *Dispatcher) HandleInboundTask(ctx context.Context, task types.UserTask)
 		ConversationID:  task.ConversationID,
 		ProgressSummary: "Generating execution plan",
 		TraceID:         ts.TraceID,
+		UserTimezone:    task.UserTimezone,
 	}
 
 	{
@@ -710,6 +712,7 @@ type agentSpawnContext struct {
 	UserContextID  string
 	ConversationID string
 	TraceID        string
+	UserTimezone   string
 	Depth          int
 }
 
@@ -789,6 +792,7 @@ func (d *Dispatcher) HandleAgentSpawnRequest(ctx context.Context, req types.Agen
 		ConversationID:  childCtx.ConversationID,
 		ProgressSummary: "Running delegated child agent task",
 		TraceID:         childCtx.TraceID,
+		UserTimezone:    childCtx.UserTimezone,
 	}
 	if spec.TraceID == "" {
 		spec.TraceID = observability.TraceIDFrom(ctx)
@@ -865,6 +869,7 @@ func agentSpawnContextFromTaskState(ts *types.TaskState, depth int) agentSpawnCo
 		UserContextID:  ts.UserContextID,
 		ConversationID: ts.ConversationID,
 		TraceID:        ts.TraceID,
+		UserTimezone:   ts.UserTimezone,
 		Depth:          depth,
 	}
 }
