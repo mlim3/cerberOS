@@ -258,21 +258,21 @@ if [ "$SKIP_INSTALL" = false ]; then
 
   echo ""
   echo "    Waiting for core workloads to be ready (up to 5 min) ..."
+  ROLLOUT_FAILED=false
   # StatefulSets: use rollout status (handles the case where the pod
   # hasn't been created yet when we start waiting).
   for sts in memory-db openbao nats; do
-    kubectl rollout status statefulset "${sts}" -n "${NAMESPACE}" --timeout=5m \
-      || echo "    (warning: statefulset/${sts} did not become ready in time)"
+    if ! kubectl rollout status statefulset "${sts}" -n "${NAMESPACE}" --timeout=5m; then
+      echo "    (warning: statefulset/${sts} did not become ready in time)"
+      ROLLOUT_FAILED=true
+    fi
   done
-  # Deployments: wait on the deployment condition directly.
-  for deploy in memory-api orchestrator io; do
+  # Deployments: wait on the deployment condition directly. Note that the
+  # vault-engine chart names its Deployment 'vault' (not 'vault-engine').
+  for deploy in vault memory-api orchestrator io aegis-databus aegis-agents simulator; do
     if ! kubectl rollout status deployment "${deploy}" -n "${NAMESPACE}" --timeout=5m; then
       echo "    (warning: deployment/${deploy} did not become ready in time)"
-      if [ "${deploy}" = "memory-api" ]; then
-        echo "    memory-api depends on embedding-api and postgres. Printing startup diagnostics..."
-        print_deployment_debug "embedding-api" "embedding-api"
-      fi
-      print_deployment_debug "${deploy}" "${deploy}"
+      ROLLOUT_FAILED=true
     fi
   done
 else
@@ -281,6 +281,11 @@ else
 fi
 
 echo ""
+if [ "${ROLLOUT_FAILED:-false}" = true ]; then
+  echo "  ⚠  Some workloads did not become ready in time."
+  echo "     Check status with: kubectl get pods -n ${NAMESPACE}"
+  echo ""
+fi
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  cerberOS is up!"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

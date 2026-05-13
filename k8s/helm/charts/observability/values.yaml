@@ -63,17 +63,27 @@ grafana:
   datasources:
     datasources.yaml:
       apiVersion: 1
+      # uid values must match the dashboards' hard-coded "uid" references in
+      # k8s/helm/charts/observability/templates/grafana-dashboards-configmap.yaml.
+      # The same uids are used by the docker-compose provisioning files at
+      # aegis-databus/config/grafana/provisioning/datasources/ — keep them aligned.
       datasources:
         - name: Prometheus
+          uid: prometheus
           type: prometheus
+          access: proxy
           url: http://prometheus:9090
           isDefault: true
         - name: Loki
+          uid: loki
           type: loki
+          access: proxy
           url: http://cerberos-loki:3100
         - name: Tempo
+          uid: tempo
           type: tempo
-          url: http://tempo:3100
+          access: proxy
+          url: http://tempo:3200
   dashboardProviders:
     dashboardproviders.yaml:
       apiVersion: 1

@@ -97,8 +97,7 @@ kubectl create namespace cerberos
 # Build & load images
 ./k8s/scripts/build-and-load.sh
 
-# Add required Helm repos
-helm repo add nats https://nats-io.github.io/k8s/helm/charts
+# Add required Helm repos (NATS is vendored as a local sub-chart, no repo needed)
 helm repo add grafana https://grafana.github.io/helm-charts
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 helm repo update
