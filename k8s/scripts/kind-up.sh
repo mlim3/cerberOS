@@ -279,34 +279,47 @@ if [ "$SKIP_INSTALL" = false ]; then
   embed_pod=""
   echo ""
   echo "    [warmup] Waiting for embedding-api to load the model (cold boot can take 10-20 min on slow HF links) ..."
+  # The warmup loop intentionally tolerates every transient kubectl failure
+  # (pod missing, container not yet exec-able, exec returning empty output).
+  # Disable `set -e` for the loop body so a single bad exec doesn't abort
+  # the entire kind-up.sh run, and re-enable it at the end.
+  set +e
   while [ "$(date +%s)" -lt "${EMBED_WARMUP_DEADLINE}" ]; do
-    embed_pod="$(kubectl get pod -n "${NAMESPACE}" -l app.kubernetes.io/name=embedding-api -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+    embed_pod="$(kubectl get pod -n "${NAMESPACE}" -l app.kubernetes.io/name=embedding-api -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
     if [ -z "${embed_pod}" ]; then
-      sleep 5
+      sleep 10
       continue
     fi
-    ready="$(kubectl get pod -n "${NAMESPACE}" "${embed_pod}" -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null || echo false)"
+    ready="$(kubectl get pod -n "${NAMESPACE}" "${embed_pod}" -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null)"
     if [ "${ready}" = "true" ]; then
       echo "    [warmup] embedding-api is ready."
       break
     fi
     cache_size="$(kubectl exec -n "${NAMESPACE}" "${embed_pod}" -- du -sh /root/.cache/huggingface 2>/dev/null | awk '{print $1}')"
-    incomplete="$(kubectl exec -n "${NAMESPACE}" "${embed_pod}" -- sh -c 'ls /root/.cache/huggingface/hub/*/blobs/*.incomplete 2>/dev/null | wc -l' 2>/dev/null | tr -d '[:space:]')"
+    incomplete_raw="$(kubectl exec -n "${NAMESPACE}" "${embed_pod}" -- sh -c 'ls /root/.cache/huggingface/hub/*/blobs/*.incomplete 2>/dev/null | wc -l' 2>/dev/null | tr -d '[:space:]')"
+    # Force a numeric default so the -gt comparison can never error.
+    case "${incomplete_raw}" in
+      ''|*[!0-9]*) incomplete=0 ;;
+      *)           incomplete="${incomplete_raw}" ;;
+    esac
     if [ -n "${cache_size}" ]; then
-      if [ "${incomplete:-0}" -gt 0 ] 2>/dev/null; then
+      if [ "${incomplete}" -gt 0 ]; then
         echo "    [warmup] downloading model weights ... cache=${cache_size}, ${incomplete} file(s) still incomplete"
       else
         echo "    [warmup] cache=${cache_size}, loading model into RAM ..."
       fi
+    else
+      echo "    [warmup] pod ${embed_pod} not yet exec-able, waiting ..."
     fi
     sleep 20
   done
-  if [ "${embed_pod}" != "" ]; then
-    final_ready="$(kubectl get pod -n "${NAMESPACE}" "${embed_pod}" -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null || echo false)"
+  if [ -n "${embed_pod}" ]; then
+    final_ready="$(kubectl get pod -n "${NAMESPACE}" "${embed_pod}" -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null)"
     if [ "${final_ready}" != "true" ]; then
       echo "    [warmup] (warning: embedding-api still not ready after ${EMBED_WARMUP_BUDGET_SEC}s; downstream waits will likely fail)"
     fi
   fi
+  set -e
   echo ""
 
   wait_for() {
