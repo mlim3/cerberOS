@@ -19,20 +19,11 @@ service:
 
 natsUrl: "nats://nats:4222"
 memoryApiBase: "http://memory-api:8081"
-# Same secret memory-api expects as INTERNAL_VAULT_API_KEY (vault/orchestrator BFF routes).
-# Required for POST/GET /api/user-crons and other Memory proxies in io/api.
-internalVaultApiKey: ""
 
-# Optional — cloud STT / OpenAI paths (see root .env.example).
-openaiApiKey: ""
-
-# Google OAuth credentials for the Admin UI "Connect Google Account" flow
-# (gmail_search, gmail_get_message, calendar_list_events skills). Mirrors
-# .env.example GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET/GOOGLE_REDIRECT_URI.
-googleOAuth:
-  clientId: ""
-  clientSecret: ""
-  redirectUri: "http://localhost:3001/api/admin/google-oauth/callback"
+# Name of the umbrella-rendered Secret holding cross-chart values
+# (INTERNAL_VAULT_API_KEY, OPENAI_API_KEY, GOOGLE_CLIENT_*). Override only if
+# the umbrella chart was customized to use a different name.
+sharedSecretName: "cerberos-shared-secrets"
 
 logLevel: "info"
 demoMode: "false"

@@ -97,6 +97,26 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+# Idempotent .env writer: replaces or appends KEY=VALUE in a dotenv file.
+# Ported from bootstrap.sh so kind-up and bootstrap stay in sync on
+# generated-secret persistence (VAULT_MASTER_KEY, INTERNAL_VAULT_API_KEY, ...).
+upsert_env_var() {
+  local file="$1" key="$2" val="$3"
+  if [[ ! -f "$file" ]]; then
+    printf '%s=%s\n' "$key" "$val" > "$file"
+    return
+  fi
+  local tmp
+  tmp="$(mktemp)"
+  if grep -q "^${key}=" "$file" 2>/dev/null; then
+    grep -v "^${key}=" "$file" > "$tmp" || true
+  else
+    cp "$file" "$tmp"
+  fi
+  printf '%s=%s\n' "$key" "$val" >> "$tmp"
+  mv "$tmp" "$file"
+}
+
 check_dependencies() {
   if ! kind help >/dev/null 2>&1; then
   echo "    kind not found, please install it: https://kind.sigs.k8s.io/docs/user/quick-start#installation"
@@ -204,6 +224,13 @@ if [ "$SKIP_INSTALL" = false ]; then
     _saved_GOOGLE_CLIENT_ID="${GOOGLE_CLIENT_ID-}"
     _saved_GOOGLE_CLIENT_SECRET="${GOOGLE_CLIENT_SECRET-}"
     _saved_GOOGLE_REDIRECT_URI="${GOOGLE_REDIRECT_URI-}"
+    _saved_POSTGRES_PASSWORD="${POSTGRES_PASSWORD-}"
+    _saved_VAULT_MASTER_KEY="${VAULT_MASTER_KEY-}"
+    _saved_INTERNAL_VAULT_API_KEY="${INTERNAL_VAULT_API_KEY-}"
+    _saved_BAO_TOKEN="${BAO_TOKEN-}"
+    _saved_CRON_WAKE_SECRET="${CRON_WAKE_SECRET-}"
+    _saved_PLAN_APPROVAL_MODE="${PLAN_APPROVAL_MODE-}"
+    _saved_SKILL_LOAD_ALLOWED_USERS="${SKILL_LOAD_ALLOWED_USERS-}"
     set -a
     # shellcheck disable=SC1090
     source "${_env_file}"
@@ -217,9 +244,42 @@ if [ "$SKIP_INSTALL" = false ]; then
     [[ -n "${_saved_GOOGLE_CLIENT_ID}" ]] && export GOOGLE_CLIENT_ID="${_saved_GOOGLE_CLIENT_ID}"
     [[ -n "${_saved_GOOGLE_CLIENT_SECRET}" ]] && export GOOGLE_CLIENT_SECRET="${_saved_GOOGLE_CLIENT_SECRET}"
     [[ -n "${_saved_GOOGLE_REDIRECT_URI}" ]] && export GOOGLE_REDIRECT_URI="${_saved_GOOGLE_REDIRECT_URI}"
+    [[ -n "${_saved_POSTGRES_PASSWORD}" ]] && export POSTGRES_PASSWORD="${_saved_POSTGRES_PASSWORD}"
+    [[ -n "${_saved_VAULT_MASTER_KEY}" ]] && export VAULT_MASTER_KEY="${_saved_VAULT_MASTER_KEY}"
+    [[ -n "${_saved_INTERNAL_VAULT_API_KEY}" ]] && export INTERNAL_VAULT_API_KEY="${_saved_INTERNAL_VAULT_API_KEY}"
+    [[ -n "${_saved_BAO_TOKEN}" ]] && export BAO_TOKEN="${_saved_BAO_TOKEN}"
+    [[ -n "${_saved_CRON_WAKE_SECRET}" ]] && export CRON_WAKE_SECRET="${_saved_CRON_WAKE_SECRET}"
+    [[ -n "${_saved_PLAN_APPROVAL_MODE}" ]] && export PLAN_APPROVAL_MODE="${_saved_PLAN_APPROVAL_MODE}"
+    [[ -n "${_saved_SKILL_LOAD_ALLOWED_USERS}" ]] && export SKILL_LOAD_ALLOWED_USERS="${_saved_SKILL_LOAD_ALLOWED_USERS}"
     unset _saved_ANTHROPIC_API_KEY _saved_ANTHROPIC_BASE_URL _saved_TAVILY_API_KEY \
       _saved_OPENAI_API_KEY _saved_GMAIL_DEMO_EMAIL _saved_GMAIL_DEMO_APP_PASSWORD \
-      _saved_GOOGLE_CLIENT_ID _saved_GOOGLE_CLIENT_SECRET _saved_GOOGLE_REDIRECT_URI
+      _saved_GOOGLE_CLIENT_ID _saved_GOOGLE_CLIENT_SECRET _saved_GOOGLE_REDIRECT_URI \
+      _saved_POSTGRES_PASSWORD _saved_VAULT_MASTER_KEY _saved_INTERNAL_VAULT_API_KEY \
+      _saved_BAO_TOKEN _saved_CRON_WAKE_SECRET _saved_PLAN_APPROVAL_MODE \
+      _saved_SKILL_LOAD_ALLOWED_USERS
+  fi
+
+  # Auto-generate the credential-broker secrets if neither the parent shell
+  # nor .env supplied them. Mirrors bootstrap.sh so docker-compose and kind
+  # converge on the same persisted-key model and a fresh kind-up.sh stops
+  # silently shipping the known-bad "00000000..." / "dev-internal-key"
+  # defaults. Both are persisted to repo-root .env so subsequent runs (and a
+  # parallel `bootstrap.sh up`) reuse the same values.
+  if [[ -z "${VAULT_MASTER_KEY:-}" ]]; then
+    v="$(openssl rand -base64 24 | head -c 32)"
+    upsert_env_var "${REPO_ROOT}/.env" "VAULT_MASTER_KEY" "$v"
+    export VAULT_MASTER_KEY="$v"
+    echo "    Generated VAULT_MASTER_KEY in ${REPO_ROOT}/.env"
+  fi
+  if [[ "${#VAULT_MASTER_KEY}" -ne 32 ]]; then
+    echo "error: VAULT_MASTER_KEY must be exactly 32 characters (got ${#VAULT_MASTER_KEY})" >&2
+    exit 1
+  fi
+  if [[ -z "${INTERNAL_VAULT_API_KEY:-}" ]]; then
+    v="$(openssl rand -hex 32)"
+    upsert_env_var "${REPO_ROOT}/.env" "INTERNAL_VAULT_API_KEY" "$v"
+    export INTERNAL_VAULT_API_KEY="$v"
+    echo "    Generated INTERNAL_VAULT_API_KEY in ${REPO_ROOT}/.env"
   fi
 
   HELM_SET_ARGS=()
@@ -232,25 +292,47 @@ if [ "$SKIP_INSTALL" = false ]; then
   if [ -n "${TAVILY_API_KEY:-}" ]; then
     HELM_SET_ARGS+=(--set-string "vault-engine.tavilyApiKey=${TAVILY_API_KEY}")
   fi
+  # Cross-chart shared secrets land in the umbrella `cerberos-shared-secrets`
+  # Secret (one value, all consumers read via secretKeyRef).
+  HELM_SET_ARGS+=(--set-string "global.sharedSecrets.INTERNAL_VAULT_API_KEY=${INTERNAL_VAULT_API_KEY}")
   if [ -n "${OPENAI_API_KEY:-}" ]; then
-    HELM_SET_ARGS+=(--set-string "memory-api.openaiApiKey=${OPENAI_API_KEY}")
-    HELM_SET_ARGS+=(--set-string "io.openaiApiKey=${OPENAI_API_KEY}")
-    HELM_SET_ARGS+=(--set-string "vault-engine.openaiApiKey=${OPENAI_API_KEY}")
+    HELM_SET_ARGS+=(--set-string "global.sharedSecrets.OPENAI_API_KEY=${OPENAI_API_KEY}")
   fi
   if [ -n "${GMAIL_DEMO_EMAIL:-}" ] && [ -n "${GMAIL_DEMO_APP_PASSWORD:-}" ]; then
     HELM_SET_ARGS+=(--set-string "vault-engine.gmailDemoEmail=${GMAIL_DEMO_EMAIL}")
     HELM_SET_ARGS+=(--set-string "vault-engine.gmailDemoAppPassword=${GMAIL_DEMO_APP_PASSWORD}")
   fi
   if [ -n "${GOOGLE_CLIENT_ID:-}" ] && [ -n "${GOOGLE_CLIENT_SECRET:-}" ]; then
-    # IO drives the Admin UI "Connect Google Account" flow; vault-engine uses
-    # the same client id/secret for token refresh on long-running sessions.
-    HELM_SET_ARGS+=(--set-string "io.googleOAuth.clientId=${GOOGLE_CLIENT_ID}")
-    HELM_SET_ARGS+=(--set-string "io.googleOAuth.clientSecret=${GOOGLE_CLIENT_SECRET}")
-    HELM_SET_ARGS+=(--set-string "vault-engine.googleOAuth.clientId=${GOOGLE_CLIENT_ID}")
-    HELM_SET_ARGS+=(--set-string "vault-engine.googleOAuth.clientSecret=${GOOGLE_CLIENT_SECRET}")
+    HELM_SET_ARGS+=(--set-string "global.sharedSecrets.GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}")
+    HELM_SET_ARGS+=(--set-string "global.sharedSecrets.GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}")
   fi
   if [ -n "${GOOGLE_REDIRECT_URI:-}" ]; then
-    HELM_SET_ARGS+=(--set-string "io.googleOAuth.redirectUri=${GOOGLE_REDIRECT_URI}")
+    HELM_SET_ARGS+=(--set-string "global.sharedSecrets.GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI}")
+  fi
+  # Per-chart single-owner secrets.
+  HELM_SET_ARGS+=(--set-string "memory-api.vaultMasterKey=${VAULT_MASTER_KEY}")
+  if [ -n "${POSTGRES_PASSWORD:-}" ]; then
+    HELM_SET_ARGS+=(--set-string "postgres.auth.password=${POSTGRES_PASSWORD}")
+    HELM_SET_ARGS+=(--set-string "memory-api.db.password=${POSTGRES_PASSWORD}")
+    HELM_SET_ARGS+=(--set-string "openbao.postgres.password=${POSTGRES_PASSWORD}")
+  fi
+  if [ -n "${BAO_TOKEN:-}" ]; then
+    HELM_SET_ARGS+=(--set-string "vault-engine.baoToken=${BAO_TOKEN}")
+  fi
+  if [ -n "${PLAN_APPROVAL_MODE:-}" ]; then
+    HELM_SET_ARGS+=(--set-string "orchestrator.planApprovalMode=${PLAN_APPROVAL_MODE}")
+  fi
+  if [ -n "${SKILL_LOAD_ALLOWED_USERS:-}" ]; then
+    HELM_SET_ARGS+=(--set-string "orchestrator.skillLoadAllowedUsers=${SKILL_LOAD_ALLOWED_USERS}")
+  fi
+  if [ -n "${CRON_WAKE_SECRET:-}" ]; then
+    # Pre-create the Secret out-of-band: the orchestrator chart references it
+    # via secretKeyRef and treats it as externally managed (no template).
+    kubectl create secret generic orchestrator-cron-wake \
+      --from-literal=CRON_WAKE_SECRET="${CRON_WAKE_SECRET}" \
+      -n "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+    HELM_SET_ARGS+=(--set-string "orchestrator.cronWake.secretName=orchestrator-cron-wake")
+    HELM_SET_ARGS+=(--set-string "orchestrator.cronWake.secretKey=CRON_WAKE_SECRET")
   fi
   HELM_SET_ARGS+=(--set "global.embedding.model=${EMBEDDING_MODEL}")
   HELM_SET_ARGS+=(--set "global.embedding.dimensions=${EMBEDDING_DIM}")

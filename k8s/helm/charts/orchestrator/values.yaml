@@ -12,10 +12,17 @@ service:
 
 natsUrl: "nats://nats:4222"
 vaultAddr: "http://openbao:8200"
+# Vault engine (broker, not OpenBao). docker-compose sets both
+# VAULT_ENGINE_ENDPOINT and VAULT_ENGINE_URL; we mirror that for parity.
+vaultEngineEndpoint: "http://vault:8000"
 memoryEndpoint: "http://memory-api:8081"
 ioApiBase: "http://io:3001"
 
 decompositionTimeoutSeconds: "120"
+# Plan approval gate (off | manager | admin). Mirrors docker-compose default.
+planApprovalMode: "off"
+# Comma-separated list of user ids allowed to invoke skill-load. Empty disables.
+skillLoadAllowedUsers: ""
 logLevel: "info"
 logFormat: "json"
 

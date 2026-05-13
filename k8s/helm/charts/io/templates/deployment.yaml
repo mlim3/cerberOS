@@ -53,26 +53,39 @@ spec:
               value: {{ .Values.sttProvider | quote }}
             - name: MEMORY_API_BASE
               value: {{ .Values.memoryApiBase | quote }}
-            {{- if .Values.internalVaultApiKey }}
+            # Cross-chart secrets sourced from the umbrella `cerberos-shared-secrets`
+            # Secret. MEMORY_API_KEY mirrors INTERNAL_VAULT_API_KEY because the
+            # io/api uses it to authenticate proxied calls to memory-api.
             - name: INTERNAL_VAULT_API_KEY
-              value: {{ .Values.internalVaultApiKey | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.sharedSecretName | quote }}
+                  key: INTERNAL_VAULT_API_KEY
             - name: MEMORY_API_KEY
-              value: {{ .Values.internalVaultApiKey | quote }}
-            {{- end }}
-            {{- if .Values.openaiApiKey }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.sharedSecretName | quote }}
+                  key: INTERNAL_VAULT_API_KEY
             - name: OPENAI_API_KEY
-              value: {{ .Values.openaiApiKey | quote }}
-            {{- end }}
-            {{- if .Values.googleOAuth.clientId }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.sharedSecretName | quote }}
+                  key: OPENAI_API_KEY
             - name: GOOGLE_CLIENT_ID
-              value: {{ .Values.googleOAuth.clientId | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.sharedSecretName | quote }}
+                  key: GOOGLE_CLIENT_ID
             - name: GOOGLE_CLIENT_SECRET
-              value: {{ .Values.googleOAuth.clientSecret | quote }}
-            {{- end }}
-            {{- if .Values.googleOAuth.redirectUri }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.sharedSecretName | quote }}
+                  key: GOOGLE_CLIENT_SECRET
             - name: GOOGLE_REDIRECT_URI
-              value: {{ .Values.googleOAuth.redirectUri | quote }}
-            {{- end }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.sharedSecretName | quote }}
+                  key: GOOGLE_REDIRECT_URI
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: {{ .Values.observability.otlpEndpoint | quote }}
             - name: OTEL_SERVICE_NAME
