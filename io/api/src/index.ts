@@ -37,7 +37,7 @@ import { ioLog, logFromContext, previewHeadTail, previewWords } from './logger'
 import { startHeartbeatEmitter } from './heartbeat'
 import { mirrorMemoryConfigured, persistOrchestratorOutcomeToMemory } from './scheduled-run-mirror'
 import { messageLooksLikeUserCronScheduling } from './scheduling-language'
-import { activeUserId, userIdRequired, requireRole, assertNoUserIdOverride } from './identity'
+import { activeUserId, resolveSseUserId, userIdRequired, requireRole, assertNoUserIdOverride } from './identity'
 import {
   broadcastStatus,
   broadcastStreamEvent,
@@ -1868,7 +1868,8 @@ app.post('/api/credential', async (c) => {
 // =============================================================================
 
 app.get('/api/events/:taskId', (c) => {
-  const userId = activeUserId(c)
+  // EventSource cannot send custom headers, so accept userId from query param as fallback.
+  const userId = resolveSseUserId(c)
   if (!userId) return userIdRequired(c)
   const taskId = c.req.param('taskId');
   c.set('taskId', taskId)

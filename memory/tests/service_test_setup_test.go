@@ -80,6 +80,11 @@ func TestMain(m *testing.M) {
 	defer db.Close()
 	dbPool = db.GetPool()
 
+	if _, err := dbPool.Exec(ctx, identitySchemaMigrationsDDL); err != nil {
+		logger.Error("failed to apply identity_schema migrations (for integration tests against older DB volumes)", "error", err)
+		os.Exit(1)
+	}
+
 	if _, err := dbPool.Exec(ctx, schedulingSchemaDDL); err != nil {
 		logger.Error("failed to ensure scheduling_schema (for integration tests against older DB volumes)", "error", err)
 		os.Exit(1)
@@ -99,6 +104,10 @@ func TestMain(m *testing.M) {
 	vaultRepo := storage.NewVaultRepository(dbPool)
 	agentLogsRepo := storage.NewAgentLogsRepository(dbPool)
 	scheduledJobsRepo := storage.NewScheduledJobsRepository(dbPool)
+	if err := scheduledJobsRepo.EnsureSchema(ctx); err != nil {
+		logger.Error("failed to ensure scheduling schema for testing", "error", err)
+		os.Exit(1)
+	}
 
 	vaultManager, err := logic.NewVaultManager()
 	if err != nil {
@@ -180,6 +189,30 @@ func parseResponse(t *testing.T, resp *http.Response, target interface{}) {
 		t.Fatalf("Failed to decode response: %v", err)
 	}
 }
+
+// identitySchemaMigrationsDDL applies column additions to identity_schema.users that were
+// introduced after the initial DB volume was created. Docker only runs init-db.sql on a
+// fresh volume, so re-running against an older volume skips these migrations. Each
+// statement here must be idempotent (ADD COLUMN IF NOT EXISTS / DO-EXCEPTION pattern).
+const identitySchemaMigrationsDDL = `
+-- Role column (added after initial release)
+ALTER TABLE identity_schema.users
+    ADD COLUMN IF NOT EXISTS role VARCHAR(20) NOT NULL DEFAULT 'user';
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.table_constraints
+        WHERE constraint_schema = 'identity_schema'
+          AND table_name = 'users'
+          AND constraint_name = 'users_role_check'
+    ) THEN
+        ALTER TABLE identity_schema.users
+            ADD CONSTRAINT users_role_check
+            CHECK (role IN ('root','manager','user'));
+    END IF;
+END$$;
+`
 
 // schedulingSchemaDDL matches memory/scripts/init-db.sql so tests pass if Postgres was created before scheduling landed.
 const schedulingSchemaDDL = `

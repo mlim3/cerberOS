@@ -1,0 +1,34 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+# 1 control-plane + 2 workers so pods actually spread across nodes,
+# demonstrating distributed deployment as required.
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      # io API — accessible from the host at http://localhost:3001
+      - containerPort: 30001
+        hostPort: 3001
+        protocol: TCP
+      # orchestrator health
+      - containerPort: 30080
+        hostPort: 8080
+        protocol: TCP
+      # NATS client
+      - containerPort: 30222
+        hostPort: 4222
+        protocol: TCP
+      # Grafana
+      - containerPort: 30300
+        hostPort: 3000
+        protocol: TCP
+  - role: worker
+    extraMounts:
+      # Persist the HuggingFace model cache across kind-down/kind-up cycles.
+      # kind-up.sh substitutes __HF_CACHE__ with $HOME/.cache/huggingface
+      # before passing this file to `kind create cluster`.
+      - hostPath: __HF_CACHE__
+        containerPath: /mnt/hf-cache
+  - role: worker
+    extraMounts:
+      - hostPath: __HF_CACHE__
+        containerPath: /mnt/hf-cache

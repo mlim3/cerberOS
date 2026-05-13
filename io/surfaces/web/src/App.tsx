@@ -780,7 +780,7 @@ function App() {
       onTransportError: () => {
         if (!cancelled) setUseMockHeartbeat(true)
       },
-    })
+    }, UI_USER_ID)
 
     return () => {
       cancelled = true

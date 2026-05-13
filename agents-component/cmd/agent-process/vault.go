@@ -332,6 +332,35 @@ func (ve *VaultExecutor) EmitSkillSynthesized(domain, skillName string) {
 	})
 }
 
+// EmitSkillCreated publishes a skill_created audit event after a successful
+// create_skill_from_nl persist. Unlike EmitSkillSynthesized it carries the
+// full SkillNode details (description, recipe, label, mode, scope) so the
+// orchestrator can forward them to IO for a rich UI "skill created" card.
+//
+// EmitSkillCreated is nil-safe — a no-op when ve is nil (NATS absent).
+func (ve *VaultExecutor) EmitSkillCreated(domain string, node *types.SkillNode, mode string) {
+	if ve == nil || node == nil {
+		return
+	}
+	recipe := node.Recipe
+	if len(recipe) > 300 {
+		recipe = recipe[:297] + "..."
+	}
+	label := node.Label
+	if label == "" {
+		label = node.Name
+	}
+	ve.emitAudit(types.AuditEventSkillCreated, map[string]string{
+		"domain":      domain,
+		"skill_name":  node.Name,
+		"label":       label,
+		"description": node.Description,
+		"recipe":      recipe,
+		"mode":        mode,
+		"scope":       node.Scope,
+	})
+}
+
 // emitAudit publishes an audit event to aegis.orchestrator.audit.event in a
 // background goroutine. Failures are logged and never propagated — audit
 // emission must not affect the vault execute flow.

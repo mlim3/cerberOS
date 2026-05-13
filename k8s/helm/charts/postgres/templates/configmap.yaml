@@ -1,0 +1,25 @@
+{{- if not .Values.operator.enabled }}
+{{- /*
+  Schema is loaded from files/init-db.sql in this chart.
+
+  IMPORTANT: this file is a copy of memory/scripts/init-db.sql (which
+  docker-compose bind-mounts directly). Both files MUST stay in sync —
+  if you edit one, edit the other. See the header comment in
+  files/init-db.sql for details.
+*/ -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "postgres.name" . }}-initdb
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "postgres.labels" . | nindent 4 }}
+data:
+  01-init-db.sql: |
+{{ .Files.Get "files/init-db.sql" | indent 4 }}
+
+  02-init-openbao-db.sql: |
+    -- Create the openbao database for OpenBao storage backend.
+    SELECT 'CREATE DATABASE openbao'
+    WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'openbao')\gexec
+{{- end }}

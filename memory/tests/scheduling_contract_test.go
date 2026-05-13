@@ -38,6 +38,7 @@ func TestScheduledJobsContract_BlackBox(t *testing.T) {
 			"scheduleKind":    "interval",
 			"intervalSeconds": 21600,
 			"name":            jobName,
+			"userId":          testUserID,
 			"payload": map[string]any{
 				"batchSize": 100,
 			},
@@ -63,6 +64,7 @@ func TestScheduledJobsContract_BlackBox(t *testing.T) {
 			"scheduleKind":    "interval",
 			"intervalSeconds": 300,
 			"name":            "orchestrator-dispatch",
+			"userId":          testUserID,
 			"payload": map[string]any{
 				"eventType": "memory.job_due",
 				"taskId":    uuid.NewString(),
@@ -121,6 +123,7 @@ func TestScheduledJobsContract_BlackBox(t *testing.T) {
 			"scheduleKind":    "interval",
 			"intervalSeconds": 600,
 			"name":            "future-job",
+			"userId":          testUserID,
 			"payload":         map[string]any{},
 			"nextRunAt":       futureRunAt,
 		}, internalAPIKeyHeaders())

@@ -26,6 +26,27 @@ export function activeUserId(c: { req: { header: (name: string) => string | unde
   return v
 }
 
+/**
+ * SSE-only identity resolution.
+ *
+ * EventSource cannot set custom headers, so the SSE route accepts userId as a
+ * query parameter fallback. Header still wins when present so fetch/XHR
+ * callers keep the same path as the rest of the API.
+ */
+export function resolveSseUserId(c: {
+  req: {
+    header: (name: string) => string | undefined
+    query: (name: string) => string | undefined
+  }
+}): string | null {
+  const headerUserId = activeUserId(c)
+  if (headerUserId) return headerUserId
+
+  const queryUserId = c.req.query('userId')?.trim().toLowerCase() ?? null
+  if (!queryUserId || !UUID_RE.test(queryUserId)) return null
+  return queryUserId
+}
+
 export function userIdRequired(c: { json: (obj: unknown, status: 400) => Response }): Response {
   return c.json({ error: 'X-Active-User header is required (UUID)' }, 400)
 }
