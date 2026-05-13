@@ -97,26 +97,6 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-# Idempotent .env writer: replaces or appends KEY=VALUE in a dotenv file.
-# Ported from bootstrap.sh so kind-up and bootstrap stay in sync on
-# generated-secret persistence (VAULT_MASTER_KEY, INTERNAL_VAULT_API_KEY, ...).
-upsert_env_var() {
-  local file="$1" key="$2" val="$3"
-  if [[ ! -f "$file" ]]; then
-    printf '%s=%s\n' "$key" "$val" > "$file"
-    return
-  fi
-  local tmp
-  tmp="$(mktemp)"
-  if grep -q "^${key}=" "$file" 2>/dev/null; then
-    grep -v "^${key}=" "$file" > "$tmp" || true
-  else
-    cp "$file" "$tmp"
-  fi
-  printf '%s=%s\n' "$key" "$val" >> "$tmp"
-  mv "$tmp" "$file"
-}
-
 check_dependencies() {
   if ! kind help >/dev/null 2>&1; then
   echo "    kind not found, please install it: https://kind.sigs.k8s.io/docs/user/quick-start#installation"
@@ -259,27 +239,21 @@ if [ "$SKIP_INSTALL" = false ]; then
       _saved_SKILL_LOAD_ALLOWED_USERS
   fi
 
-  # Auto-generate the credential-broker secrets if neither the parent shell
-  # nor .env supplied them. Mirrors bootstrap.sh so docker-compose and kind
-  # converge on the same persisted-key model and a fresh kind-up.sh stops
-  # silently shipping the known-bad "00000000..." / "dev-internal-key"
-  # defaults. Both are persisted to repo-root .env so subsequent runs (and a
-  # parallel `bootstrap.sh up`) reuse the same values.
+  # Credential-broker secrets must be supplied by the operator via the parent
+  # shell or repo-root .env (cp .env.example .env and fill them in). We don't
+  # auto-generate or persist them here — keeping kind-up.sh strictly read-only
+  # for secrets avoids surprising .env mutations.
   if [[ -z "${VAULT_MASTER_KEY:-}" ]]; then
-    v="$(openssl rand -base64 24 | head -c 32)"
-    upsert_env_var "${REPO_ROOT}/.env" "VAULT_MASTER_KEY" "$v"
-    export VAULT_MASTER_KEY="$v"
-    echo "    Generated VAULT_MASTER_KEY in ${REPO_ROOT}/.env"
+    echo "error: VAULT_MASTER_KEY is not set. Add it to ${REPO_ROOT}/.env (cp .env.example .env) or export it before running." >&2
+    exit 1
   fi
   if [[ "${#VAULT_MASTER_KEY}" -ne 32 ]]; then
     echo "error: VAULT_MASTER_KEY must be exactly 32 characters (got ${#VAULT_MASTER_KEY})" >&2
     exit 1
   fi
   if [[ -z "${INTERNAL_VAULT_API_KEY:-}" ]]; then
-    v="$(openssl rand -hex 32)"
-    upsert_env_var "${REPO_ROOT}/.env" "INTERNAL_VAULT_API_KEY" "$v"
-    export INTERNAL_VAULT_API_KEY="$v"
-    echo "    Generated INTERNAL_VAULT_API_KEY in ${REPO_ROOT}/.env"
+    echo "error: INTERNAL_VAULT_API_KEY is not set. Add it to ${REPO_ROOT}/.env (cp .env.example .env) or export it before running." >&2
+    exit 1
   fi
 
   HELM_SET_ARGS=()
@@ -486,9 +460,99 @@ if [ "$SKIP_INSTALL" = false ]; then
       ROLLOUT_FAILED=true
     fi
   done
+
 else
   echo ""
   echo "==> [5/5] Skipping Helm install (--skip-install)."
+fi
+
+# ── OpenBao post-install: KV mount + shared-secret seeding ────────────────
+# Dev-mode OpenBao auto-mounts a KV-v2 engine at `secret/`, but the
+# vault-engine code hardcodes `KvMount = "kv"` (vault/engine/secretmanager
+# /openbao/openbao_defs.go), so every credential lookup would 404 without
+# this step. We also seed system-shared credentials (gmail_app_password,
+# TAVILY_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY) here — mirrors what
+# bootstrap.sh does for docker-compose so the two stacks stay in sync.
+# All commands are idempotent: re-running kind-up.sh just overwrites.
+# Runs even with --skip-install so the seed can be reapplied to a live
+# cluster without a full helm round-trip.
+GMAIL_SEED_STATUS="not configured"
+BAO_POD="$(kubectl get pod -n "${NAMESPACE}" -l app.kubernetes.io/name=openbao -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+if [ -n "${BAO_POD}" ]; then
+  echo ""
+  echo "==> Configuring OpenBao (kv mount + shared secrets) ..."
+  # Wait briefly for the pod to be Ready in case we beat the rollout.
+  BAO_READY="$(kubectl get pod -n "${NAMESPACE}" "${BAO_POD}" -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null || echo false)"
+  if [ "${BAO_READY}" != "true" ]; then
+    kubectl wait --for=condition=Ready -n "${NAMESPACE}" "pod/${BAO_POD}" --timeout=60s >/dev/null 2>&1 || true
+  fi
+
+  # Enable KV-v2 at kv/. `bao secrets enable` returns non-zero with a
+  # specific "path is already in use" error when re-run; treat that as
+  # success so kind-up.sh stays idempotent.
+  _enable_out="$(kubectl exec -n "${NAMESPACE}" "${BAO_POD}" -- env BAO_TOKEN=root \
+    bao secrets enable -path=kv -version=2 kv 2>&1 || true)"
+  case "${_enable_out}" in
+    *"path is already in use"*|*"Success"*) ;;
+    *)
+      echo "    (warning: enabling kv mount returned unexpected output)"
+      echo "    ${_enable_out}" | sed 's/^/      /'
+      ;;
+  esac
+
+  # Helper: write one kv key whose JSON has a single field named after
+  # the key. Reads the value from $BLOB inside the pod so it never lands
+  # in process args / shell history on the host.
+  bao_put_field() {
+    local key="$1" value="$2"
+    kubectl exec -n "${NAMESPACE}" "${BAO_POD}" -- env BAO_TOKEN=root BLOB="${value}" \
+      sh -c "bao kv put kv/${key} ${key}=\"\$BLOB\"" >/dev/null
+  }
+
+  if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+    if bao_put_field "ANTHROPIC_API_KEY" "${ANTHROPIC_API_KEY}"; then
+      echo "    Seeded ANTHROPIC_API_KEY"
+    else
+      echo "    (warning: seeding ANTHROPIC_API_KEY failed)"
+    fi
+  fi
+  if [ -n "${TAVILY_API_KEY:-}" ]; then
+    if bao_put_field "TAVILY_API_KEY" "${TAVILY_API_KEY}"; then
+      echo "    Seeded TAVILY_API_KEY"
+    else
+      echo "    (warning: seeding TAVILY_API_KEY failed)"
+    fi
+  fi
+  if [ -n "${OPENAI_API_KEY:-}" ]; then
+    if bao_put_field "OPENAI_API_KEY" "${OPENAI_API_KEY}"; then
+      echo "    Seeded OPENAI_API_KEY"
+    else
+      echo "    (warning: seeding OPENAI_API_KEY failed)"
+    fi
+  fi
+
+  # Gmail demo: store {email, app_password} as a single JSON blob under
+  # the key `gmail_app_password`. The vault engine parses it via
+  # parseGmailCredential (ops_gmail.go) and expects a 16-char app
+  # password. We strip spaces (Google displays them grouped as
+  # "xxxx xxxx xxxx xxxx") to match bootstrap.sh's behaviour.
+  if [ -n "${GMAIL_DEMO_EMAIL:-}" ] && [ -n "${GMAIL_DEMO_APP_PASSWORD:-}" ]; then
+    _pw_clean="${GMAIL_DEMO_APP_PASSWORD// /}"
+    if [ "${#_pw_clean}" -ne 16 ]; then
+      echo "    (warning: GMAIL_DEMO_APP_PASSWORD is ${#_pw_clean} chars after stripping spaces, expected 16; skipping seed)"
+      GMAIL_SEED_STATUS="invalid (${#_pw_clean} chars, expected 16)"
+    else
+      _gmail_blob="$(printf '{"email":"%s","app_password":"%s"}' "${GMAIL_DEMO_EMAIL}" "${_pw_clean}")"
+      if bao_put_field "gmail_app_password" "${_gmail_blob}"; then
+        echo "    Seeded gmail_app_password (${GMAIL_DEMO_EMAIL})"
+        GMAIL_SEED_STATUS="seeded (${GMAIL_DEMO_EMAIL})"
+      else
+        echo "    (warning: seeding gmail_app_password failed)"
+        GMAIL_SEED_STATUS="seed failed"
+      fi
+      unset _pw_clean _gmail_blob
+    fi
+  fi
 fi
 
 echo ""
@@ -528,6 +592,9 @@ fi
 echo "    Change model:"
 echo "      Fresh start:   ./k8s/scripts/kind-down.sh && ./k8s/scripts/kind-up.sh --embedding-model harrier"
 echo "      Custom model:  ./k8s/scripts/kind-down.sh && ./k8s/scripts/kind-up.sh --embedding-model <hf-model-id> --embedding-dim <n> --embedding-prompt-style <style>"
+echo ""
+echo "  Gmail demo (vault-engine):"
+echo "    gmail_app_password ${GMAIL_SEED_STATUS:-not configured}"
 echo ""
 echo "  Anthropic (aegis-agents):"
 if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
