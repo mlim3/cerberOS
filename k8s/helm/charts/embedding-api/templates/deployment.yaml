@@ -75,3 +75,13 @@ spec:
             failureThreshold: {{ .Values.startupProbe.failureThreshold | default 240 }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /root/.cache/huggingface
+      volumes:
+        - name: hf-cache
+          hostPath:
+            # Populated by kind-up.sh via extraMounts from $HOME/.cache/huggingface
+            # on the host. Model weights survive kind-down/kind-up cycles.
+            path: /mnt/hf-cache
+            type: DirectoryOrCreate

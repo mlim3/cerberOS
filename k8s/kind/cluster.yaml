@@ -22,4 +22,13 @@ nodes:
         hostPort: 3000
         protocol: TCP
   - role: worker
+    extraMounts:
+      # Persist the HuggingFace model cache across kind-down/kind-up cycles.
+      # kind-up.sh substitutes __HF_CACHE__ with $HOME/.cache/huggingface
+      # before passing this file to `kind create cluster`.
+      - hostPath: __HF_CACHE__
+        containerPath: /mnt/hf-cache
   - role: worker
+    extraMounts:
+      - hostPath: __HF_CACHE__
+        containerPath: /mnt/hf-cache
