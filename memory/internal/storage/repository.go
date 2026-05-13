@@ -62,6 +62,47 @@ type BaseRepository struct {
 	Pool *pgxpool.Pool
 }
 
+// EnsureIdentitySchema upgrades legacy identity tables to the shape expected
+// by the current demo-mode user bootstrap and admin flows.
+func (r *BaseRepository) EnsureIdentitySchema(ctx context.Context) error {
+	statements := []string{
+		`CREATE SCHEMA IF NOT EXISTS identity_schema;`,
+		`CREATE TABLE IF NOT EXISTS identity_schema.users (
+    id UUID PRIMARY KEY,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    role VARCHAR(20) NOT NULL DEFAULT 'user',
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);`,
+		`ALTER TABLE identity_schema.users
+    ADD COLUMN IF NOT EXISTS role VARCHAR(20) NOT NULL DEFAULT 'user';`,
+		`ALTER TABLE identity_schema.users
+    ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();`,
+		`DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.table_constraints
+        WHERE constraint_schema = 'identity_schema'
+          AND table_name = 'users'
+          AND constraint_name = 'users_role_check'
+    ) THEN
+        ALTER TABLE identity_schema.users
+            ADD CONSTRAINT users_role_check
+            CHECK (role IN ('root','manager','user'));
+    END IF;
+END $$;`,
+		`INSERT INTO identity_schema.users (id, email, role)
+VALUES ('00000000-0000-0000-0000-000000000001', 'dev-default@example.com', 'user')
+ON CONFLICT (id) DO NOTHING;`,
+	}
+
+	for _, stmt := range statements {
+		if _, err := r.Pool.Exec(ctx, stmt); err != nil {
+			return fmt.Errorf("ensure identity schema: %w", err)
+		}
+	}
+	return nil
+}
+
 func (r *BaseRepository) Querier() *Queries {
 	return New(r.Pool)
 }

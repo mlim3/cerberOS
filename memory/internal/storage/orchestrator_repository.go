@@ -128,10 +128,24 @@ END $$;`,
     ttl_seconds INT NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );`,
+		// MT-4 migration for volumes that already had the table without user_id.
+		// The table was truncated above so NOT NULL is safe (no rows to violate).
+		// duplicate_column is caught so this is idempotent on fresh or updated DBs.
+		`DO $$ BEGIN
+    ALTER TABLE orchestrator_schema.orchestrator_records
+        ADD COLUMN user_id UUID NOT NULL REFERENCES identity_schema.users(id);
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;`,
 		// Drop pre-MT-4 indexes that lacked user_id leading column.
 		`DROP INDEX IF EXISTS orchestrator_schema.idx_orch_records_task_id_type;`,
 		`DROP INDEX IF EXISTS orchestrator_schema.idx_orch_records_orch_ref_type;`,
 		`DROP INDEX IF EXISTS orchestrator_schema.idx_orch_records_type_timestamp;`,
+		// The upsert unique indexes were also missing user_id on old volumes.
+		// CREATE INDEX IF NOT EXISTS is a no-op when the name exists, even if
+		// the column set is wrong — drop them so the correct definitions land.
+		`DROP INDEX IF EXISTS orchestrator_schema.idx_orch_records_task_state_upsert;`,
+		`DROP INDEX IF EXISTS orchestrator_schema.idx_orch_records_plan_state_upsert;`,
+		`DROP INDEX IF EXISTS orchestrator_schema.idx_orch_records_subtask_state_upsert;`,
 		`CREATE INDEX IF NOT EXISTS idx_orch_records_user_task
     ON orchestrator_schema.orchestrator_records (user_id, task_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_orch_records_user_task_type

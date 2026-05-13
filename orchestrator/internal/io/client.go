@@ -193,6 +193,39 @@ func (c *Client) PushSkillActivity(payload SkillActivityPayload) error {
 	return c.post(skillActivityEvent{Type: "skill_activity", Payload: payload}, "")
 }
 
+// SkillCreatedPayload carries the full details of a newly persisted skill so
+// the UI can render a rich "skill created" card. Matches the SkillCreated
+// interface in io/core/src/types.ts.
+type SkillCreatedPayload struct {
+	TaskID      string `json:"taskId"`
+	AgentID     string `json:"agentId"`
+	Domain      string `json:"domain"`
+	SkillName   string `json:"skillName"`
+	Label       string `json:"label"`
+	Description string `json:"description"`
+	Recipe      string `json:"recipe"`
+	Mode        string `json:"mode"`
+	Scope       string `json:"scope"`
+	Timestamp   int64  `json:"timestamp"` // Unix ms
+}
+
+// skillCreatedEvent is the envelope for a skill_created event pushed to IO.
+// Matches: { type: 'skill_created'; payload: SkillCreated } in io/core/src/types.ts
+type skillCreatedEvent struct {
+	Type    string              `json:"type"`
+	Payload SkillCreatedPayload `json:"payload"`
+}
+
+// PushSkillCreated notifies the IO Component that a new skill was persisted via
+// create_skill_from_nl so the UI can display a rich "skill created" card.
+// No-op when IO is disabled.
+func (c *Client) PushSkillCreated(payload SkillCreatedPayload) error {
+	if c.Disabled() {
+		return nil
+	}
+	return c.post(skillCreatedEvent{Type: "skill_created", Payload: payload}, "")
+}
+
 // post marshals body as JSON and POSTs it to the IO stream-events endpoint.
 func (c *Client) post(body any, traceID string) error {
 	data, err := json.Marshal(body)

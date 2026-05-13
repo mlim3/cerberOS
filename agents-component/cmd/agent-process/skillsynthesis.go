@@ -210,6 +210,50 @@ Rules:
   output exactly: {"name":"","label":"","description":""}`, domain, nameDirective)
 }
 
+// skillCreateNLSystemPrompt returns the system prompt for the explicit NL skill
+// creation path (create_skill_from_nl tool). Unlike skillSynthesisSystemPrompt it
+// has NO bail-out clause — when a user explicitly asks to create a skill the model
+// must always produce a complete definition, never an empty-name sentinel.
+func skillCreateNLSystemPrompt(domain, requestedName string) string {
+	nameDirective := ""
+	if requestedName != "" {
+		nameDirective = fmt.Sprintf(
+			"\n\nIMPORTANT — the user explicitly named this skill %q. "+
+				"Set name to exactly %q (snake_case). "+
+				"Override the snake_case-naming guidance below ONLY for the name field.",
+			requestedName, requestedName,
+		)
+	}
+	return fmt.Sprintf(`You are a skill creation assistant for the %q domain of an AI agent system.%s
+
+The user has explicitly requested creation of a reusable skill. You MUST output a complete skill definition — do not return an empty name or omit fields.
+
+Output ONLY a single JSON object with this exact schema:
+{
+  "name": "<snake_case identifier, max 64 chars — describe the general procedure, not the specific task data>",
+  "label": "<human-readable display name>",
+  "description": "<max 300 chars — what the skill does AND at least one explicit 'Do NOT use when...' clause>",
+  "recipe": "<numbered step-by-step execution procedure, max 500 chars — use {{param_name}} placeholders for every parameter defined in spec.parameters. Each step must be a concrete action.>",
+  "spec": {
+    "parameters": {
+      "<param_name>": {
+        "type": "<string|integer|boolean|array|object>",
+        "required": <true|false>,
+        "description": "<required — what this parameter controls>"
+      }
+    }
+  }
+}
+
+Rules:
+- name must be snake_case, max 64 characters.
+- description must contain negative guidance: at least one 'Do NOT use when' clause.
+- Every parameter in spec.parameters must have a non-empty description.
+- recipe must reference every parameter defined in spec.parameters using {{param_name}} syntax.
+- Generalise the procedure: replace task-specific values with named parameters.
+- You MUST always return a fully populated skill definition. Never return an empty name.`, domain, nameDirective)
+}
+
 // attemptSkillSynthesis is the top-level driver called at task completion.
 // It checks the threshold, calls synthesizeSkill, persists the result, and
 // emits a skill_synthesized audit event so the UI can toast the user.

@@ -106,7 +106,11 @@ charts/*.tgz
 
 # Claude Code
 .sidecar/
+.claude/
 CLAUDE.md
 todo/
 *.td*
 td.json
+
+# Local Bun workspace artifacts
+io/bun.lockb

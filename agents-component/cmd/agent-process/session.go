@@ -247,6 +247,31 @@ func (sl *SessionLog) PersistSkillWithScope(domain string, node *types.SkillNode
 	return nil
 }
 
+func (sl *SessionLog) PublishSkillReload(domain, skillName, scope string) error {
+	if sl == nil {
+		return nil
+	}
+	if sl.nc == nil {
+		return fmt.Errorf("nats connection unavailable")
+	}
+	payload := map[string]string{
+		"triggered_by": "agents",
+		"skill_name":   skillName,
+		"domain":       domain,
+		"scope":        scope,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("session log: skill reload: marshal: %w", err)
+	}
+	if err := sl.nc.Publish(comms.SubjectSkillReload, data); err != nil {
+		return fmt.Errorf("session log: skill reload: publish: %w", err)
+	}
+	sl.log.Info("session log: skill reload signaled",
+		"domain", domain, "skill_name", skillName, "scope", scope)
+	return nil
+}
+
 // PersistExternalSkill writes an externally loaded skill manifest to the Memory
 // Component as data_type "skill_cache" with origin "external". The manifest JSON
 // is stored in the Recipe field of a SynthesizedSkillRecord so Factory.loadExternalSkills

@@ -132,6 +132,11 @@ func main() {
 
 	// 2. Initialize the Repositories
 	pool := db.GetPool()
+	baseRepo := &storage.BaseRepository{Pool: pool}
+	if err := baseRepo.EnsureIdentitySchema(ctx); err != nil {
+		logger.Error("failed to ensure identity schema", "error", err)
+		os.Exit(1)
+	}
 	chatRepo := storage.NewChatRepository(pool)
 	if err := chatRepo.EnsureSchema(ctx); err != nil {
 		logger.Error("failed to ensure chat schema", "error", err)
@@ -162,7 +167,7 @@ func main() {
 	}
 
 	// Note: We'll implement a proper repository wrapper for Personal Info
-	piRepo := &storage.BaseRepository{Pool: pool}
+	piRepo := baseRepo
 
 	embeddingAPIURL := os.Getenv("EMBEDDING_API_URL")
 	embeddingModel := os.Getenv("EMBEDDING_MODEL")

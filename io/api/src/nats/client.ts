@@ -45,6 +45,15 @@ export interface PlanDecisionPayload {
   trace_id?: string
 }
 
+export interface ClarificationResponsePayload {
+  request_id: string
+  approved: boolean
+  user_message?: string
+  agent_id?: string
+  /** W3C trace_id (32 hex) — forwarded on the wire envelope for agent logs */
+  trace_id?: string
+}
+
 export interface NatsConfig {
   url: string
   credsPath?: string
@@ -72,6 +81,7 @@ export interface IONatsClient {
   connected: boolean
   publishUserTask(task: UserTaskPayload): Promise<void>
   publishPlanDecision(decision: PlanDecisionPayload): Promise<void>
+  publishClarificationResponse(response: ClarificationResponsePayload): Promise<void>
   /**
    * Publish a raw JSON-serializable object on a core NATS subject (no
    * JetStream, no envelope wrapping). Used by the heartbeat emitter — the
@@ -258,7 +268,7 @@ export function createNatsClient(config: NatsConfig): IONatsClient | null {
       await nc.flush()
     },
 
-    async publishPlanDecision(decision: PlanDecisionPayload) {
+  async publishPlanDecision(decision: PlanDecisionPayload) {
       if (!nc) throw new Error('NATS not connected')
       const payload = {
         orchestrator_task_ref: decision.orchestrator_task_ref,
@@ -274,6 +284,25 @@ export function createNatsClient(config: NatsConfig): IONatsClient | null {
       )
       const data = new TextEncoder().encode(JSON.stringify(envelope))
       nc.publish(SUBJECT_PLAN_DECISION, data)
+      await nc.flush()
+    },
+
+    async publishClarificationResponse(response: ClarificationResponsePayload) {
+      if (!nc) throw new Error('NATS not connected')
+      const payload = {
+        request_id: response.request_id,
+        agent_id: response.agent_id ?? '',
+        approved: response.approved,
+        user_message: response.user_message ?? '',
+      }
+      const envelope = buildEnvelope(
+        'clarification.response',
+        response.request_id,
+        payload,
+        response.trace_id,
+      )
+      const data = new TextEncoder().encode(JSON.stringify(envelope))
+      nc.publish('aegis.agents.clarification.response', data)
       await nc.flush()
     },
 

@@ -43,6 +43,10 @@ export function formatExpectedNextInput(minutes: number | null): string {
 /**
  * Subscribe to orchestrator→IO push events for one task (SSE).
  * Returns unsubscribe. Uses enveloped events per io-interfaces.md §1.0.
+ *
+ * `userId` is passed as a query parameter because the browser's native
+ * EventSource API cannot send custom headers (X-Active-User). The IO API
+ * SSE endpoint accepts the userId via query string as a fallback.
  */
 export function subscribeOrchestratorTaskStream(
   taskId: string,
@@ -51,8 +55,10 @@ export function subscribeOrchestratorTaskStream(
     onOpen?: () => void
     onTransportError?: () => void
   },
+  userId?: string,
 ): () => void {
-  const url = buildApiUrl(`/api/events/${encodeURIComponent(taskId)}`)
+  const base = buildApiUrl(`/api/events/${encodeURIComponent(taskId)}`)
+  const url = userId ? `${base}?userId=${encodeURIComponent(userId)}` : base
   const es = new EventSource(url)
 
   es.onopen = () => {

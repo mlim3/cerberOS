@@ -1,3 +1,3 @@
 # Compiled binaries (go build output)
-agent-process
-aegis-agents
+/agent-process
+/aegis-agents

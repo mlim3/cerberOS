@@ -141,7 +141,15 @@ echo "==> [1/5] Creating kind cluster '${CLUSTER}' ..."
 if kind get clusters 2>/dev/null | grep -q "^${CLUSTER}$"; then
   echo "    Cluster already exists, skipping creation."
 else
-  kind create cluster --name "${CLUSTER}" --config "${SCRIPT_DIR}/../kind/cluster.yaml"
+  # Substitute __HF_CACHE__ in the cluster template with the real host path so
+  # kind mounts it into every worker node. The model cache then survives
+  # kind-down/kind-up cycles — no re-download on every restart.
+  HF_CACHE="${HOME}/.cache/huggingface"
+  mkdir -p "${HF_CACHE}"
+  _cluster_cfg="$(mktemp /tmp/cerberos-cluster-XXXXXX.yaml)"
+  sed "s|__HF_CACHE__|${HF_CACHE}|g" "${SCRIPT_DIR}/../kind/cluster.yaml" > "${_cluster_cfg}"
+  kind create cluster --name "${CLUSTER}" --config "${_cluster_cfg}"
+  rm -f "${_cluster_cfg}"
 fi
 
 echo ""

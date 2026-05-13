@@ -52,11 +52,18 @@ build_and_load() {
 # and is the primary cause of "did not become ready in time" rollouts.
 prepull_and_load() {
   local image="$1"
+  local platform
+  local archive
   echo ""
   echo "--- Pre-pulling ${image} ---"
   docker pull "${image}"
+  platform="$(docker image inspect --format '{{.Os}}/{{.Architecture}}{{if .Variant}}/{{.Variant}}{{end}}' "${image}")"
+  archive="$(mktemp "/tmp/$(basename "${image%%:*}").XXXXXX.tar")"
+  trap 'rm -f "${archive}"' RETURN
+  echo "--- Saving ${image} for platform ${platform} ---"
+  docker save --platform "${platform}" "${image}" -o "${archive}"
   echo "--- Loading ${image} into kind ---"
-  kind load docker-image "${image}" --name "${CLUSTER}"
+  kind load image-archive "${archive}" --name "${CLUSTER}"
 }
 
 build_and_load cerberos-orchestrator   "${REPO_ROOT}/orchestrator"

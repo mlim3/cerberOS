@@ -721,6 +721,71 @@ app.post('/api/orchestrator/plan-decision', async (c) => {
   return c.json({ ok: true })
 })
 
+/**
+ * The UI posts the user's clarification response here.
+ * Body: { request_id, approved, user_message?, agent_id? }
+ * The decision is forwarded to the agents component over NATS on
+ * `aegis.agents.clarification.response`.
+ */
+app.post('/api/v1/clarification/respond', async (c) => {
+  type ClarificationResponseRequest = {
+    request_id?: string
+    approved?: boolean
+    user_message?: string
+    agent_id?: string
+  }
+  let body: ClarificationResponseRequest
+  try {
+    body = (await c.req.json()) as ClarificationResponseRequest
+  } catch {
+    return c.json({ error: 'invalid json' }, 400)
+  }
+
+  const requestId = typeof body.request_id === 'string' ? body.request_id : ''
+  const approved = body.approved === true
+  const userMessage = typeof body.user_message === 'string' ? body.user_message : ''
+  const agentId = typeof body.agent_id === 'string' ? body.agent_id : ''
+
+  if (!requestId) {
+    return c.json({ error: 'request_id is required' }, 400)
+  }
+
+  logFromContext(c, 'info', 'clarification-proxy', `user ${approved ? 'approved' : 'rejected'} a clarification request; forwarding response to agents`, {
+    request_id: requestId,
+    agent_id: agentId || undefined,
+    approved,
+    user_message_preview: userMessage ? previewWords(userMessage) : undefined,
+  })
+
+  if (!natsClient?.connected) {
+    logFromContext(c, 'error', 'clarification-proxy', 'cannot deliver clarification response: orchestrator nats connection is down', {
+      request_id: requestId,
+      approved,
+    })
+    return c.json(
+      { error: 'orchestrator not connected — cannot deliver clarification response' },
+      503,
+    )
+  }
+
+  try {
+    await natsClient.publishClarificationResponse({
+      request_id: requestId,
+      approved,
+      user_message: userMessage,
+      agent_id: agentId || undefined,
+      trace_id: c.get('traceId'),
+    })
+  } catch (err) {
+    logFromContext(c, 'error', 'nats', 'failed to publish clarification_response to agents on nats', {
+      err: String(err),
+    })
+    return c.json({ error: 'failed to publish clarification response' }, 502)
+  }
+
+  return c.json({ ok: true, request_id: requestId, approved })
+})
+
 // =============================================================================
 // Chat streaming
 // =============================================================================
@@ -1868,7 +1933,12 @@ app.post('/api/credential', async (c) => {
 // =============================================================================
 
 app.get('/api/events/:taskId', (c) => {
-  const userId = activeUserId(c)
+  // EventSource cannot send custom headers, so we accept userId as a query
+  // parameter as a fallback specifically for this SSE endpoint.
+  const UUID_RE_LOCAL = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+  const headerUserId = activeUserId(c)
+  const queryUserId = c.req.query('userId')?.trim().toLowerCase() ?? null
+  const userId = headerUserId ?? (queryUserId && UUID_RE_LOCAL.test(queryUserId) ? queryUserId : null)
   if (!userId) return userIdRequired(c)
   const taskId = c.req.param('taskId');
   c.set('taskId', taskId)
@@ -1877,14 +1947,28 @@ app.get('/api/events/:taskId', (c) => {
   // doesn't reveal whether the taskId exists for another user. The demo task
   // (id '13', DEMO_MODE only) is the one exception: it has no real owner and
   // is intended as a fixed-id reference stream for the mock UI.
+  //
+  // Pre-subscription race: the /api/chat handler calls recordTaskOwnership
+  // synchronously but the SSE subscriber may arrive at the server before the
+  // chat POST is processed (both are started concurrently by the caller). We
+  // therefore only reject when the task is *known* to belong to a different
+  // user — if the task is simply not yet registered we allow the connection.
+  // Event routing always goes through ownerUserId, so a pre-subscriber under
+  // the wrong userId receives nothing even if the slot is held open.
   const isDemoFixedTask = DEMO_MODE && taskId === '13'
   if (!isDemoFixedTask) {
     const owner = ownerOfTask(taskId)
-    if (!owner || owner !== userId.toLowerCase()) {
-      logFromContext(c, 'debug', 'http', 'ui requested sse for unknown or unowned task; returning 404', {
+    if (owner && owner !== userId.toLowerCase()) {
+      logFromContext(c, 'debug', 'http', 'ui requested sse for task owned by a different user; returning 404', {
         user_id: userId,
       })
       return c.json({ error: 'Task not found' }, 404)
+    }
+    if (!owner) {
+      logFromContext(c, 'debug', 'http', 'ui pre-subscribed to event stream before task was registered; holding connection open', {
+        user_id: userId,
+        task_id: taskId,
+      })
     }
   }
   logFromContext(c, 'debug', 'http', 'ui opened sse connection for task event stream')

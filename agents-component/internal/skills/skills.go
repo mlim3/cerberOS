@@ -155,6 +155,9 @@ func (m *hierarchyManager) GetCommands(domain string) ([]*types.SkillNode, error
 			Description:             cmd.Description,
 			RequiredCredentialTypes: cmd.RequiredCredentialTypes,
 			TimeoutSeconds:          cmd.TimeoutSeconds,
+			Origin:                  cmd.Origin,
+			OwnerUserID:             cmd.OwnerUserID,
+			Scope:                   cmd.Scope,
 		})
 	}
 	return commands, nil
@@ -246,6 +249,8 @@ func (m *hierarchyManager) GetSynthesizedSkills(domain string) ([]types.Synthesi
 			Description: cmd.Description,
 			Recipe:      cmd.Recipe,
 			Spec:        cmd.Spec,
+			OwnerUserID: cmd.OwnerUserID,
+			Scope:       cmd.Scope,
 		})
 	}
 	return records, nil

@@ -127,6 +127,8 @@ type SkillNode struct {
 	// Static skills loaded from config carry Origin "" (zero value).
 	Origin        string     `json:"origin,omitempty"`         // "static" | "synthesized"
 	SynthesizedAt *time.Time `json:"synthesized_at,omitempty"` // non-nil when Origin == "synthesized"
+	OwnerUserID   string     `json:"owner_user_id,omitempty"`
+	Scope         string     `json:"scope,omitempty"`
 
 	// Recipe is set only on synthesized command nodes. It is a step-by-step
 	// procedure extracted from the session history, with {{param_name}}
@@ -148,6 +150,8 @@ type SynthesizedSkillRecord struct {
 	Description string     `json:"description"`
 	Recipe      string     `json:"recipe"`
 	Spec        *SkillSpec `json:"spec,omitempty"`
+	OwnerUserID string     `json:"owner_user_id,omitempty"`
+	Scope       string     `json:"scope,omitempty"`
 }
 
 // MemoryWrite is the tagged payload sent to the Memory Component.
@@ -473,6 +477,7 @@ const (
 	AuditEventAgentSpawnResponse   = "agent_spawn_response" // child agent result returned to parent (issue #67)
 	AuditEventSkillInvocation      = "skill_invocation"     // skill tool dispatched by the ReAct loop
 	AuditEventSkillSynthesized     = "skill_synthesized"    // new skill dynamically created by post-task synthesis
+	AuditEventSkillCreated         = "skill_created"        // new skill persisted via create_skill_from_nl; carries full node details for UI display
 )
 
 // AuditEvent is published to aegis.orchestrator.audit.event (EDD §8.8).
