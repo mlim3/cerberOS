@@ -51,8 +51,10 @@ export function subscribeOrchestratorTaskStream(
     onOpen?: () => void
     onTransportError?: () => void
   },
+  userId?: string,
 ): () => void {
-  const url = buildApiUrl(`/api/events/${encodeURIComponent(taskId)}`)
+  const base = buildApiUrl(`/api/events/${encodeURIComponent(taskId)}`)
+  const url = userId ? `${base}?userId=${encodeURIComponent(userId)}` : base
   const es = new EventSource(url)
 
   es.onopen = () => {
