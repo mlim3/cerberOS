@@ -10,7 +10,6 @@ import './AdminPanel.css'
  *  - User creation (email + role)
  *  - User listing with role badges
  *  - Skill installation (GitHub URL + scope)
- *  - "Install Superpowers for all users" one-click
  *
  * All actions hit IO API endpoints that role-check via `requireRole`. The
  * panel is rendered as an overlay alongside SettingsPanel.
@@ -274,29 +273,6 @@ function AdminPanel({ onClose }: AdminPanelProps): React.ReactElement {
     }
   }
 
-  async function handleInstallSuperpowers(): Promise<void> {
-    setSkillStatus({ kind: 'pending', msg: 'Installing Superpowers for all users…' })
-    try {
-      const res = await fetch(buildApiUrl('/api/skills/import-github'), {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Active-User': userId,
-        },
-        body: JSON.stringify({ repo: 'github.com/obra/superpowers', scope: 'all' }),
-      })
-      const data = await res.json().catch(() => ({})) as { error?: string; skills?: Array<{ name: string }> }
-      if (!res.ok) {
-        setSkillStatus({ kind: 'error', msg: data.error ?? `failed (${res.status})` })
-        return
-      }
-      const count = data.skills?.length ?? 0
-      setSkillStatus({ kind: 'ok', msg: `Superpowers installed (${count} skills, all users)` })
-    } catch (err) {
-      setSkillStatus({ kind: 'error', msg: err instanceof Error ? err.message : String(err) })
-    }
-  }
-
   return (
     <div className="admin-panel-overlay" onClick={onClose}>
       <div className="admin-panel-container" onClick={(e) => e.stopPropagation()}>
@@ -471,9 +447,6 @@ function AdminPanel({ onClose }: AdminPanelProps): React.ReactElement {
               </label>
               <div className="admin-button-row">
                 <button type="submit" className="admin-submit">Import repo skills</button>
-                <button type="button" className="admin-secondary" onClick={handleInstallSuperpowers}>
-                  Install Superpowers (all users)
-                </button>
               </div>
               {skillStatus.kind === 'pending' && <div className="admin-status-pending">{skillStatus.msg}</div>}
               {skillStatus.kind === 'ok' && <div className="admin-status-ok">{skillStatus.msg}</div>}

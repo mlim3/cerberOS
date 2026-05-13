@@ -139,11 +139,12 @@ conversation_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
 stream_file="$(mktemp /tmp/cerberos-superpowers-extract.XXXXXX)"
 
 send_chat "${task_id}" "${conversation_id}" \
-  "Here is a public GitHub repository: ${SUPERPOWERS_REPO}. Extract the skills from it and make them available to me." \
+  "Here is a public GitHub repository: ${SUPERPOWERS_REPO}. Extract the skills from it and make them available to all users." \
   "${stream_file}"
 
 chat_text="$(awk '/^data: /{sub(/^data: /,"",$0); print}' "${stream_file}" | tr '\n' ' ')"
 echo "${chat_text}" | jq -r 'select(.chunk != null) | .chunk' | sed 's/^/  | /'
+assert_contains "${chat_text}" "current user only" "chat response"
 
 info "Waiting for extract_skills_from_repo in agent logs (up to 120s)"
 if ! import_logs="$(poll_agents_logs "extract_skills_from_repo" 120)"; then

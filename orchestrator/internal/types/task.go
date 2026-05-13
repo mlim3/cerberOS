@@ -98,12 +98,12 @@ const (
 // Defines the ceiling for all credential requests during task execution (§13.2).
 
 type PolicyScope struct {
-	Domains             []string          `json:"domains"`
-	TokenRef            string            `json:"token_ref"` // Vault token accessor — NOT the token itself
-	IssuedAt            time.Time         `json:"issued_at"`
-	ExpiresAt           time.Time         `json:"expires_at"`
-	Metadata            map[string]string `json:"metadata"`
-	AvailableCredTypes  []string          `json:"available_cred_types,omitempty"` // credential types this user has registered in the Vault
+	Domains            []string          `json:"domains"`
+	TokenRef           string            `json:"token_ref"` // Vault token accessor — NOT the token itself
+	IssuedAt           time.Time         `json:"issued_at"`
+	ExpiresAt          time.Time         `json:"expires_at"`
+	Metadata           map[string]string `json:"metadata"`
+	AvailableCredTypes []string          `json:"available_cred_types,omitempty"` // credential types this user has registered in the Vault
 }
 
 // ─── StateEvent ───────────────────────────────────────────────────────────────
@@ -147,8 +147,9 @@ type TaskState struct {
 // Inbound message schema from User I/O Component (§10.2).
 
 type UserTask struct {
-	TaskID               string          `json:"task_id"`                          // UUID, required — deduplication key
-	UserID               string          `json:"user_id"`                          // Required
+	TaskID               string          `json:"task_id"` // UUID, required — deduplication key
+	UserID               string          `json:"user_id"` // Required
+	UserRole             string          `json:"user_role,omitempty"`
 	RequiredSkillDomains []string        `json:"required_skill_domains,omitempty"` // OPTIONAL in v3.0 (FR-TRK-04)
 	Priority             int             `json:"priority"`                         // 1 (lowest) to 10 (highest)
 	TimeoutSeconds       int             `json:"timeout_seconds"`                  // Min 30, max 86400

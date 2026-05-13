@@ -199,10 +199,121 @@ Apply the Superpowers workflow.
 	if persister.persisted[0].name != "using_superpowers" {
 		t.Fatalf("unexpected persisted skill name %q", persister.persisted[0].name)
 	}
+	if persister.persisted[0].scope != "user" {
+		t.Fatalf("unexpected persisted scope %q", persister.persisted[0].scope)
+	}
 	if len(persister.reloads) != 1 {
 		t.Fatalf("expected one reload signal, got %d", len(persister.reloads))
 	}
 	if !strings.Contains(result.Content, "using_superpowers") {
 		t.Fatalf("tool result should mention imported skill name, got %q", result.Content)
+	}
+}
+
+func TestExecuteExtractSkillsFromRepo_RootCanInstallForAllUsers(t *testing.T) {
+	originalAPI := githubAPIBase
+	originalRaw := rawGitHubBase
+	defer func() {
+		githubAPIBase = originalAPI
+		rawGitHubBase = originalRaw
+	}()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/repos/obra/superpowers":
+			_, _ = fmt.Fprint(w, `{"default_branch":"main"}`)
+		case r.URL.Path == "/repos/obra/superpowers/git/trees/main":
+			_, _ = fmt.Fprint(w, `{"tree":[{"path":"skills/using-superpowers/SKILL.md","type":"blob"}]}`)
+		case r.URL.Path == "/obra/superpowers/main/skills/using-superpowers/SKILL.md":
+			_, _ = fmt.Fprint(w, `---
+name: using_superpowers
+description: "Use Superpowers for coordinated work. Do NOT use for unrelated tasks."
+---
+
+# Using Superpowers
+`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	githubAPIBase = srv.URL
+	rawGitHubBase = srv.URL
+
+	persister := &fakeRepoSkillPersister{}
+	spawnCtx := &SpawnContext{
+		SkillDomain:         "general",
+		UserContextID:       "root-user-123",
+		UserRole:            "root",
+		OriginalUserMessage: "Please make them available for all users.",
+	}
+	raw, _ := json.Marshal(map[string]string{"repo": "github.com/obra/superpowers"})
+	result := executeExtractSkillsFromRepo(context.Background(), spawnCtx, persister, raw)
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content)
+	}
+	if len(persister.persisted) != 1 {
+		t.Fatalf("expected one persisted skill, got %d", len(persister.persisted))
+	}
+	if persister.persisted[0].scope != "all" {
+		t.Fatalf("unexpected persisted scope %q", persister.persisted[0].scope)
+	}
+	if !strings.Contains(result.Content, "all users") {
+		t.Fatalf("tool result should mention global availability, got %q", result.Content)
+	}
+}
+
+func TestExecuteExtractSkillsFromRepo_NonRootGlobalIntentStaysUserScoped(t *testing.T) {
+	originalAPI := githubAPIBase
+	originalRaw := rawGitHubBase
+	defer func() {
+		githubAPIBase = originalAPI
+		rawGitHubBase = originalRaw
+	}()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/repos/obra/superpowers":
+			_, _ = fmt.Fprint(w, `{"default_branch":"main"}`)
+		case r.URL.Path == "/repos/obra/superpowers/git/trees/main":
+			_, _ = fmt.Fprint(w, `{"tree":[{"path":"skills/using-superpowers/SKILL.md","type":"blob"}]}`)
+		case r.URL.Path == "/obra/superpowers/main/skills/using-superpowers/SKILL.md":
+			_, _ = fmt.Fprint(w, `---
+name: using_superpowers
+description: "Use Superpowers for coordinated work. Do NOT use for unrelated tasks."
+---
+
+# Using Superpowers
+`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	githubAPIBase = srv.URL
+	rawGitHubBase = srv.URL
+
+	persister := &fakeRepoSkillPersister{}
+	spawnCtx := &SpawnContext{
+		SkillDomain:         "general",
+		UserContextID:       "user-123",
+		UserRole:            "user",
+		OriginalUserMessage: "Please make them available for all users.",
+	}
+	raw, _ := json.Marshal(map[string]string{"repo": "github.com/obra/superpowers"})
+	result := executeExtractSkillsFromRepo(context.Background(), spawnCtx, persister, raw)
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content)
+	}
+	if len(persister.persisted) != 1 {
+		t.Fatalf("expected one persisted skill, got %d", len(persister.persisted))
+	}
+	if persister.persisted[0].scope != "user" {
+		t.Fatalf("unexpected persisted scope %q", persister.persisted[0].scope)
+	}
+	if !strings.Contains(strings.ToLower(result.Content), "current user only") {
+		t.Fatalf("tool result should mention user-scoped downgrade, got %q", result.Content)
 	}
 }

@@ -21,6 +21,22 @@ const (
 	repoSkillImportMaxRead  = 256 * 1024
 )
 
+var globalRepoImportIntentPhrases = []string{
+	"for all users",
+	"for everyone",
+	"for the whole team",
+	"for the team",
+	"global install",
+	"install globally",
+	"install for all users",
+	"install for everyone",
+	"available for all users",
+	"share with everyone",
+	"available to everyone",
+	"make it available for all users",
+	"make them available for all users",
+}
+
 var githubAPIBase = "https://api.github.com"
 
 type repoSkillPersister interface {
@@ -105,7 +121,7 @@ func executeExtractSkillsFromRepo(ctx context.Context, spawnCtx *SpawnContext, p
 	if spawnCtx != nil {
 		ownerUserID = spawnCtx.UserContextID
 	}
-	scope := "user"
+	scope, scopeNote := inferRepoImportScope(spawnCtx)
 
 	persisted := 0
 	persistedNames := make([]string, 0, len(imported.Skills))
@@ -132,6 +148,11 @@ func executeExtractSkillsFromRepo(ctx context.Context, spawnCtx *SpawnContext, p
 		}
 		fmt.Fprintf(&summary, "- %s (%s)\n", item.Node.Name, item.Path)
 	}
+	if scope == "all" {
+		summary.WriteString("Imported skills are available to all users.\n")
+	} else if scopeNote != "" {
+		summary.WriteString(scopeNote + "\n")
+	}
 	if imported.FallbackUsed {
 		summary.WriteString("Fallback mode was used because no strong skill-like files were found.\n")
 	}
@@ -144,8 +165,35 @@ func executeExtractSkillsFromRepo(ctx context.Context, spawnCtx *SpawnContext, p
 			"persisted":     persisted,
 			"fallback_used": imported.FallbackUsed,
 			"skills":        persistedNames,
+			"scope":         scope,
 		},
 	}
+}
+
+func inferRepoImportScope(spawnCtx *SpawnContext) (string, string) {
+	if spawnCtx == nil {
+		return "user", ""
+	}
+
+	text := strings.ToLower(strings.TrimSpace(spawnCtx.OriginalUserMessage + "\n" + spawnCtx.Instructions))
+	if !containsGlobalRepoImportIntent(text) {
+		return "user", ""
+	}
+
+	role := strings.ToLower(strings.TrimSpace(spawnCtx.UserRole))
+	if role == "root" {
+		return "all", ""
+	}
+	return "user", "global install requests are limited to root; imported for the current user only"
+}
+
+func containsGlobalRepoImportIntent(text string) bool {
+	for _, phrase := range globalRepoImportIntentPhrases {
+		if strings.Contains(text, phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 func importRepoSkills(ctx context.Context, repoSlug string) (repoSkillImportResult, error) {

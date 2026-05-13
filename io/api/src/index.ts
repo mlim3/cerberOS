@@ -37,7 +37,7 @@ import { ioLog, logFromContext, previewHeadTail, previewWords } from './logger'
 import { startHeartbeatEmitter } from './heartbeat'
 import { mirrorMemoryConfigured, persistOrchestratorOutcomeToMemory } from './scheduled-run-mirror'
 import { messageLooksLikeUserCronScheduling } from './scheduling-language'
-import { activeUserId, resolveSseUserId, userIdRequired, requireRole, assertNoUserIdOverride } from './identity'
+import { activeUserId, resolveSseUserId, userIdRequired, requireRole, assertNoUserIdOverride, getActiveRole } from './identity'
 import {
   broadcastStatus,
   broadcastStreamEvent,
@@ -767,6 +767,7 @@ app.post('/api/chat', async (c) => {
   }
 
   const scheduleAutomationIntent = messageLooksLikeUserCronScheduling(content ?? '')
+  const activeRole = (await getActiveRole(effectiveUserId)) ?? 'user'
 
   // Log user message via memory client — fire-and-forget so the SSE stream opens immediately.
   appendLogEntry({
@@ -812,6 +813,7 @@ app.post('/api/chat', async (c) => {
       await natsClient!.publishUserTask({
         task_id: taskId,
         user_id: effectiveUserId,
+        user_role: activeRole,
         content,
         payload: { raw_input: rawInput },
         callback_topic: callbackTopicForTask(taskId),

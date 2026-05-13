@@ -36,6 +36,7 @@ type VMConfig struct {
 	VMID              string // allocated VM identity; changes on respawn (same AgentID, new VMID)
 	TaskID            string // task the agent is being spawned to execute
 	SkillDomain       string // entry-point domain injected into the agent at spawn
+	UserRole          string // resolved user role for this task (user | manager | root)
 	CredentialPtr     string // vault permission token pointer (not the token value)
 	Instructions      string // natural-language task description for the agent
 	CommandManifest   string // pre-built "- name: description" list for the entry domain; injected into system prompt
@@ -121,6 +122,7 @@ var ErrReuseUnsupported = fmt.Errorf("lifecycle: live-process reuse not supporte
 type agentSpawnContext struct {
 	TaskID            string                         `json:"task_id"`
 	SkillDomain       string                         `json:"skill_domain"`
+	UserRole          string                         `json:"user_role,omitempty"`
 	PermissionToken   string                         `json:"permission_token"` // opaque vault reference — never a raw credential
 	Instructions      string                         `json:"instructions"`
 	CommandManifest   string                         `json:"command_manifest,omitempty"`  // "- name: description" list; injected into system prompt
@@ -221,6 +223,7 @@ func encodeSpawnContext(config VMConfig) ([]byte, error) {
 	payload, err := json.Marshal(agentSpawnContext{
 		TaskID:              config.TaskID,
 		SkillDomain:         config.SkillDomain,
+		UserRole:            config.UserRole,
 		PermissionToken:     config.CredentialPtr,
 		Instructions:        config.Instructions,
 		CommandManifest:     config.CommandManifest,
