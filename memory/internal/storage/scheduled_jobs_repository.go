@@ -85,7 +85,7 @@ func NewScheduledJobsRepository(pool *pgxpool.Pool) *ScheduledJobsRepository {
 //   - scheduling_schema and the scheduled_jobs / scheduled_job_runs tables are
 //     guaranteed to exist (matches init-db.sql shape).
 //   - The user_id column is guaranteed to be UUID NOT NULL with an FK to
-//     identity_schema.users(id). Pre-MT-5 rows used VARCHAR(64) DEFAULT ''
+//     identity_schema.users(id). Pre-MT-5 rows used VARCHAR(64) DEFAULT ”
 //     which cannot satisfy the UUID type, so a dev-DB-acceptable wipe runs
 //     before the type change. Wrapped in EXCEPTION blocks so a fresh DB (no
 //     prior column or table) silently no-ops.
@@ -93,18 +93,21 @@ func NewScheduledJobsRepository(pool *pgxpool.Pool) *ScheduledJobsRepository {
 func (r *ScheduledJobsRepository) EnsureSchema(ctx context.Context) error {
 	statements := []string{
 		`CREATE SCHEMA IF NOT EXISTS scheduling_schema;`,
-		// Pre-MT-5 rows had VARCHAR user_id with a '' default. The column
-		// type change to UUID fails on any '' value, so wipe first. Wrapped
-		// to no-op on a fresh DB where the table doesn't exist yet.
+		// Only legacy schemas used VARCHAR user_id. Detect that specific shape
+		// before taking the destructive migration path, so normal restarts on
+		// an already-migrated DB do not wipe scheduled jobs or run history.
 		`DO $$ BEGIN
-    TRUNCATE TABLE scheduling_schema.scheduled_jobs CASCADE;
-EXCEPTION WHEN undefined_table THEN NULL;
-END $$;`,
-		// If the column already exists as VARCHAR (pre-MT-5 schema), drop and
-		// recreate as UUID with the FK. Wrapped because on a fresh DB the
-		// column won't exist at all.
-		`DO $$ BEGIN
-    ALTER TABLE scheduling_schema.scheduled_jobs DROP COLUMN IF EXISTS user_id;
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'scheduling_schema'
+          AND table_name = 'scheduled_jobs'
+          AND column_name = 'user_id'
+          AND data_type = 'character varying'
+    ) THEN
+        TRUNCATE TABLE scheduling_schema.scheduled_jobs CASCADE;
+        ALTER TABLE scheduling_schema.scheduled_jobs DROP COLUMN user_id;
+    END IF;
 EXCEPTION WHEN undefined_table THEN NULL;
 END $$;`,
 		`CREATE TABLE IF NOT EXISTS scheduling_schema.scheduled_jobs (
@@ -124,6 +127,8 @@ END $$;`,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );`,
+		// Safe no-op on freshly initialized or already-migrated DBs. The
+		// legacy VARCHAR case above clears rows before the NOT NULL add.
 		`ALTER TABLE scheduling_schema.scheduled_jobs ADD COLUMN IF NOT EXISTS user_id UUID NOT NULL REFERENCES identity_schema.users(id);`,
 		`CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_next_run
     ON scheduling_schema.scheduled_jobs (next_run_at)

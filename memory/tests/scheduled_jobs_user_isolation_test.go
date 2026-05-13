@@ -113,3 +113,26 @@ func TestScheduledJobsCreateRejectsMissingUserID(t *testing.T) {
 	}
 	assertErrorCode(t, env, "invalid_argument")
 }
+
+func TestScheduledJobsUserCronsRejectMalformedUserID(t *testing.T) {
+	baseURL := blackboxBaseURL()
+	headers := internalAPIKeyHeaders()
+
+	status, env := apiJSONRequest(t, http.MethodGet, baseURL+"/api/v1/user_crons?userId=not-a-uuid", nil, headers)
+	if status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", status, http.StatusBadRequest)
+	}
+	assertErrorCode(t, env, "invalid_argument")
+}
+
+func TestScheduledJobsDeleteRejectsMalformedUserID(t *testing.T) {
+	baseURL := blackboxBaseURL()
+	headers := internalAPIKeyHeaders()
+	jobID := "00000000-0000-0000-0000-000000000123"
+
+	status, env := apiJSONRequest(t, http.MethodDelete, baseURL+"/api/v1/scheduled_jobs/"+jobID+"?userId=not-a-uuid", nil, headers)
+	if status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", status, http.StatusBadRequest)
+	}
+	assertErrorCode(t, env, "invalid_argument")
+}
