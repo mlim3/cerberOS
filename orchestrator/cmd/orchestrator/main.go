@@ -260,6 +260,29 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 		}
 	})
 
+	// Forward skill_created audit events to the IO Component so the UI can
+	// display a rich "skill created" card with full skill details.
+	gw.RegisterSkillCreatedHandler(func(agentID, taskID, domain, skillName, label, description, recipe, mode, scope string) {
+		parentTaskID := planExecutor.ParentTaskIDForOrchRef(taskID)
+		if parentTaskID == "" {
+			parentTaskID = taskID
+		}
+		if err := ioClient.PushSkillCreated(ioclient.SkillCreatedPayload{
+			TaskID:      parentTaskID,
+			AgentID:     agentID,
+			Domain:      domain,
+			SkillName:   skillName,
+			Label:       label,
+			Description: description,
+			Recipe:      recipe,
+			Mode:        mode,
+			Scope:       scope,
+			Timestamp:   time.Now().UnixMilli(),
+		}); err != nil {
+			observability.LogFromContext(context.Background()).Warn("skill_created push to IO failed", "error", err)
+		}
+	})
+
 	healthHandler := health.New(vaultClient, memClient, natsClient, taskMonitor, cfg.NodeID)
 
 	// Heartbeat: own emitter + cross-service sweeper ("cron" loop).

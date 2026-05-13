@@ -161,6 +161,7 @@ func seedMemory(t *testing.T, mem *mocks.MemoryMock, ts *types.TaskState) {
 		t.Fatalf("seedMemory: marshal error = %v", err)
 	}
 	mem.Records = append(mem.Records, types.MemoryRecord{
+		UserID:              ts.UserID,
 		OrchestratorTaskRef: ts.OrchestratorTaskRef,
 		TaskID:              ts.TaskID,
 		DataType:            types.DataTypeTaskState,

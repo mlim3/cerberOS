@@ -228,7 +228,7 @@ func (d *Dispatcher) HandleInboundTask(ctx context.Context, task types.UserTask)
 
 	{
 		dedupCtx, dedupSpan := observability.StartSpan(ctx, "dedup_check")
-		existing := d.dedupCheck(task.TaskID, idempotencyWindow)
+		existing := d.dedupCheck(task.UserID, task.TaskID, idempotencyWindow)
 		dedupSpan.End()
 		_ = dedupCtx
 		// A task_id is only a "duplicate" while a prior attempt is still in
@@ -587,7 +587,7 @@ func (d *Dispatcher) enterAwaitingApproval(ctx context.Context, ts *types.TaskSt
 	if err := d.persistTaskState(ts, now); err != nil {
 		log.Warn("could not persist task transition to AWAITING_APPROVAL in memory; continuing in-process", "error", err)
 	}
-	if err := d.persistPlanState(plan, ts.TaskID, ts.OrchestratorTaskRef, now); err != nil {
+	if err := d.persistPlanState(plan, ts, now); err != nil {
 		log.Warn("could not persist execution plan to memory; continuing in-process", "plan_id", plan.PlanID, "error", err)
 	}
 
@@ -677,7 +677,7 @@ func (d *Dispatcher) startPlanExecution(ctx context.Context, ts *types.TaskState
 	if err := d.persistTaskState(ts, now); err != nil {
 		log.Warn("could not persist task transition to PLAN_ACTIVE in memory; continuing in-process", "error", err)
 	}
-	if err := d.persistPlanState(plan, ts.TaskID, ts.OrchestratorTaskRef, now); err != nil {
+	if err := d.persistPlanState(plan, ts, now); err != nil {
 		log.Warn("could not persist execution plan to memory on PLAN_ACTIVE; continuing in-process", "plan_id", plan.PlanID, "error", err)
 	}
 
@@ -1527,9 +1527,11 @@ func classifyPlanError(err error) string {
 
 // dedupCheck queries Memory for an existing task_state within the idempotency window.
 // Returns the existing TaskState if a duplicate is found, or nil if the task is new.
-func (d *Dispatcher) dedupCheck(taskID string, windowSeconds int) *types.TaskState {
+// MT-4 (#185): scoped to userID so two tenants with colliding task_ids do not collide.
+func (d *Dispatcher) dedupCheck(userID, taskID string, windowSeconds int) *types.TaskState {
 	windowStart := time.Now().UTC().Add(-time.Duration(windowSeconds) * time.Second)
 	records, err := d.memory.Read(types.MemoryQuery{
+		UserID:        userID,
 		TaskID:        taskID,
 		DataType:      types.DataTypeTaskState,
 		FromTimestamp: &windowStart,
@@ -1552,6 +1554,7 @@ func (d *Dispatcher) persistTaskState(ts *types.TaskState, timestamp time.Time) 
 	}
 
 	return d.memory.Write(types.OrchestratorMemoryWritePayload{
+		UserID:              ts.UserID,
 		OrchestratorTaskRef: ts.OrchestratorTaskRef,
 		TaskID:              ts.TaskID,
 		DataType:            types.DataTypeTaskState,
@@ -1560,15 +1563,16 @@ func (d *Dispatcher) persistTaskState(ts *types.TaskState, timestamp time.Time) 
 	})
 }
 
-func (d *Dispatcher) persistPlanState(plan types.ExecutionPlan, taskID, orchRef string, timestamp time.Time) error {
+func (d *Dispatcher) persistPlanState(plan types.ExecutionPlan, ts *types.TaskState, timestamp time.Time) error {
 	planPayload, err := json.Marshal(plan)
 	if err != nil {
 		return fmt.Errorf("marshal plan: %w", err)
 	}
 
 	return d.memory.Write(types.OrchestratorMemoryWritePayload{
-		OrchestratorTaskRef: orchRef,
-		TaskID:              taskID,
+		UserID:              ts.UserID,
+		OrchestratorTaskRef: ts.OrchestratorTaskRef,
+		TaskID:              ts.TaskID,
 		PlanID:              plan.PlanID,
 		DataType:            types.DataTypePlanState,
 		Timestamp:           timestamp,
@@ -1689,12 +1693,13 @@ func buildDecompositionInstructionsWithFacts(taskID, rawInput string, scope type
 		"Decompose the user's task into a JSON execution plan for downstream agents.\n"+
 			"Return JSON only. Do not wrap the result in markdown fences. Do not include commentary.\n"+
 			"The JSON schema is:\n"+
-			"{\"plan_id\":\"string\",\"parent_task_id\":\"%s\",\"created_at\":\"RFC3339 timestamp\",\"subtasks\":[{\"subtask_id\":\"string\",\"required_skill_domains\":[\"domain\"],\"action\":\"string\",\"instructions\":\"string\",\"params\":{},\"depends_on\":[\"subtask_id\"],\"timeout_seconds\":30}]}\n"+
+			"{\"plan_id\":\"string\",\"parent_task_id\":\"%s\",\"created_at\":\"RFC3339 timestamp\",\"subtasks\":[{\"subtask_id\":\"string\",\"required_skill_domains\":[\"domain\"],\"action\":\"string\",\"instructions\":\"string\",\"params\":{},\"depends_on\":[\"subtask_id\"],\"timeout_seconds\":300}]}\n"+
 			"Rules:\n"+
 			"- parent_task_id must equal %q\n"+
 			"- required_skill_domains for every subtask must be a subset of %s\n"+
 			"- Do not invent new skill domain names outside the allowed list\n"+
 			"- Use an empty array for depends_on when a subtask has no dependencies\n"+
+			"- timeout_seconds MUST be 300 for every subtask — never use a lower value\n"+
 			"- Keep the plan concise and executable\n"+
 			"Skill domain guide: use \"web\" for fetch/parse/extract of known URLs AND for AI web search (web.web_search via Tavily, no Google account needed), \"data\" for transforms/reads/writes, \"comms\" for messaging, \"storage\" for file operations, \"logs\" for log queries, \"google_search\" for explicitly Google-API-backed search, \"github\" for GitHub API calls, \"local_files\" for reading/writing files in the user's home (notes, journal, etc. — paths starting with ~/ map to per-user storage), \"google_workspace\" for Gmail search/read (gmail_search, gmail_get_message) and Google Calendar access (calendar_list_events) — requires the user to have connected their Google account via OAuth, \"general\" for reasoning/summarization with no external tools.\n"+
 			"- For ANY task that requires real-world or current information (events this weekend, weather, news, prices, hours, addresses, etc.), include AT LEAST one subtask in the \"web\" domain — web.web_search composes well across topics.\n"+

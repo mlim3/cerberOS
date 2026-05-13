@@ -1,8 +1,9 @@
 import { useState, useRef, useEffect, useMemo, type ReactNode } from 'react'
 import { marked } from 'marked'
-import type { Task, CredentialRequest, CredentialRequestStatus, ChatMessage } from '@cerberos/io-core'
+import type { Task, CredentialRequest, CredentialRequestStatus, ChatMessage, SkillCreated } from '@cerberos/io-core'
 import type { UISettings } from './SettingsPanel'
 import CredentialRequestCard from './CredentialRequestCard'
+import SkillCreatedCard from './SkillCreatedCard'
 import ProgressIndicator from './ProgressIndicator'
 import { VoiceRecorder } from './VoiceRecorder'
 import { CerberOsLogo } from './icons/CerberOsLogo'
@@ -53,14 +54,26 @@ function MarkdownContent({ content }: { content: string }) {
   )
 }
 
+interface PendingCredential {
+  request: CredentialRequest
+  status: CredentialRequestStatus
+  onProvide: () => void
+  onSubmitInline?: (requestId: string, value: string) => void | Promise<void>
+}
+
 interface ChatWindowProps {
   task: Task
   onSendMessage: (taskId: string, content: string) => void | Promise<void>
   isStreaming: boolean
   streamingContent: string
   settings: UISettings
+  /** All pending credentials for this task — each gets its own inline card. */
+  pendingCredentials?: PendingCredential[]
+  /** @deprecated use pendingCredentials */
   credentialRequest?: CredentialRequest | null
+  /** @deprecated use pendingCredentials */
   credentialStatus?: CredentialRequestStatus
+  /** @deprecated use pendingCredentials */
   onProvideCredential?: () => void
   /** Rendered below the transcript, above the composer (e.g. recurring schedule panel). */
   belowMessages?: ReactNode
@@ -69,6 +82,9 @@ interface ChatWindowProps {
   composerDisabledHint?: string
   inputPlaceholder?: string
   pulseMessageKey?: string
+  /** When set, renders an inline SkillCreatedCard inside the message list. */
+  skillCreatedCard?: SkillCreated | null
+  onDismissSkillCreated?: () => void
 }
 
 const SUGGESTION_CHIPS = [
@@ -129,6 +145,7 @@ function ChatWindow({
   isStreaming,
   streamingContent,
   settings,
+  pendingCredentials = [],
   credentialRequest,
   credentialStatus,
   onProvideCredential,
@@ -137,7 +154,15 @@ function ChatWindow({
   composerDisabledHint,
   inputPlaceholder,
   pulseMessageKey,
+  skillCreatedCard,
+  onDismissSkillCreated,
 }: ChatWindowProps) {
+  // Merge legacy single-credential prop into the array for backwards compat.
+  const allCredentials: PendingCredential[] = pendingCredentials.length > 0
+    ? pendingCredentials
+    : (credentialRequest && credentialStatus && onProvideCredential
+        ? [{ request: credentialRequest, status: credentialStatus, onProvide: onProvideCredential }]
+        : [])
   const [inputValue, setInputValue] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -238,13 +263,13 @@ function ChatWindow({
           )
         })}
 
-        {credentialRequest && credentialStatus && onProvideCredential && (
-          <CredentialRequestCard
-            request={credentialRequest}
-            status={credentialStatus}
-            onProvide={onProvideCredential}
+        {skillCreatedCard && onDismissSkillCreated && (
+          <SkillCreatedCard
+            skill={skillCreatedCard}
+            onDismiss={onDismissSkillCreated}
           />
         )}
+
 
         {isStreaming && (
           <div className="message agent streaming message-lane-thinking">
@@ -271,6 +296,20 @@ function ChatWindow({
       </div>
 
       {belowMessages}
+
+      {allCredentials.length > 0 && (
+        <div className="credential-panel">
+          {allCredentials.map(c => (
+            <CredentialRequestCard
+              key={c.request.requestId}
+              request={c.request}
+              status={c.status}
+              onProvide={c.onProvide}
+              onSubmitInline={c.onSubmitInline}
+            />
+          ))}
+        </div>
+      )}
 
       <div className="chat-input-area">
         {settings.demoMode && !isStreaming && !composerDisabled && !(task.title === 'New Task' && task.messages.length === 0) && (

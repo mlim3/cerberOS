@@ -267,11 +267,13 @@ conversation_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
 # The probe value is echoed back by e2e_ping so we can assert it appears in logs.
 E2E_PROBE="skill-search-delegation-$(date +%s)"
 # The prompt describes what we need without naming the domain or tool — the agent
-# must use skills_search to discover e2e_ping, then spawn_agent to run it.
+# must use skills_search to discover e2e_ping, then call it directly after the
+# credential-free auto-registration path upgrades the current agent toolset.
 chat_prompt="$(
   cat <<EOF
 Run an automated connectivity check to verify that skill discovery and cross-domain delegation work end-to-end.
-Use skills_search to find the right tool for running an e2e connectivity probe, then use spawn_agent to run it with probe="${E2E_PROBE}".
+Use skills_search to find a tool that runs an automated e2e connectivity probe, then run it directly with probe="${E2E_PROBE}".
+Do not use spawn_agent.
 Return the result from the probe.
 EOF
 )"
@@ -282,7 +284,7 @@ chat_payload="$(
     --arg conversationId "${conversation_id}" \
     --arg userId "${TEST_USER_ID}" \
     --arg content "${chat_prompt}" \
-    '{taskId:$taskId, conversationId:$conversationId, userId:$userId, content:$content, required_skill_domains:["general","e2e_test"]}'
+    '{taskId:$taskId, conversationId:$conversationId, userId:$userId, content:$content}'
 )"
 
 stream_file="$(mktemp /tmp/cerberos-agents-sse.XXXXXX)"
@@ -290,7 +292,7 @@ event_stream_file="$(mktemp /tmp/cerberos-agent-events.XXXXXX)"
 plan_auto_approved="false"
 plan_preview_seen="false"
 approve_resp=""
-info "Sending /api/chat request with required_skill_domains=[general,e2e_test]"
+info "Sending /api/chat request (no required_skill_domains — agent must discover e2e_test via skills_search)"
 info "Subscribing to /api/events/${task_id} for plan previews and status updates (probe=${E2E_PROBE})"
 curl -N -sS -H "X-Active-User: ${TEST_USER_ID}" "${base_url}/api/events/${task_id}" >"${event_stream_file}" 2>/dev/null &
 EVENT_STREAM_PID=$!
@@ -399,17 +401,13 @@ assert_contains "${agent_logs}" '"tool":"skills_search"' "skills_search tool was
 #    first in a growing pool.
 assert_contains "${agent_logs}" '"result_count":' "skills_search returned no result_count — skill index may be empty"
 
-# 3. The e2e_test domain agent must have executed e2e_ping with the probe value —
-#    proves the full delegation chain: skills_search fires → planner routes to
-#    e2e_test domain → domain agent executes the tool → result flows back.
-#    Note: we do not assert spawn_agent was called. When the planner pre-routes a
-#    subtask to the e2e_test domain the agent already has e2e_ping in its toolkit
-#    and calls it directly — the correct behaviour. Asserting spawn_agent would
-#    penalise the agent for not double-spawning unnecessarily.
-assert_contains "${agent_logs}" '"tool":"e2e_ping"' "e2e_ping tool was not executed by the e2e_test domain agent"
+# 3. e2e_ping must have executed with the probe value. Current intended
+#    behaviour is direct execution after credential-free auto-registration into
+#    the discovering agent, not a second spawn_agent handoff.
+assert_contains "${agent_logs}" '"tool":"e2e_ping"' "e2e_ping tool was not executed after skills_search discovery"
 assert_contains "${agent_logs}" "${E2E_PROBE}" "probe value not found in agent logs — e2e_ping may not have run with the correct parameters"
 
-ok "skills_search → spawn_agent → e2e_ping delegation chain confirmed"
+ok "skills_search → e2e_ping direct execution path confirmed"
 
 section "Summary"
 echo "  model:         ${agents_embedding_model}"

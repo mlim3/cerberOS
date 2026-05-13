@@ -82,13 +82,13 @@ Each service runs in its own pod distributed across nodes (cloud-ready). Require
 
 ```bash
 # One command: create cluster, build images, install everything
-./deploy/scripts/kind-up.sh
+./k8s/scripts/kind-up.sh
 
 # Web UI → http://localhost:3001
 # Grafana → http://localhost:3000 (admin/admin)
 ```
 
-Full guide including extension recipes (HA NATS, Ingress+TLS, NetworkPolicies, Firecracker, managed cloud): **[deploy/k8s-README.md](deploy/k8s-README.md)**
+Full guide including extension recipes (HA NATS, Ingress+TLS, NetworkPolicies, Firecracker, managed cloud): **[k8s/k8s-README.md](k8s/k8s-README.md)**
 
 ---
 

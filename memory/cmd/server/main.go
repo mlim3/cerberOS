@@ -132,6 +132,11 @@ func main() {
 
 	// 2. Initialize the Repositories
 	pool := db.GetPool()
+	baseRepo := &storage.BaseRepository{Pool: pool}
+	if err := baseRepo.EnsureIdentitySchema(ctx); err != nil {
+		logger.Error("failed to ensure identity schema", "error", err)
+		os.Exit(1)
+	}
 	chatRepo := storage.NewChatRepository(pool)
 	if err := chatRepo.EnsureSchema(ctx); err != nil {
 		logger.Error("failed to ensure chat schema", "error", err)
@@ -146,6 +151,13 @@ func main() {
 	vaultRepo := storage.NewVaultRepository(pool)
 	agentLogsRepo := storage.NewAgentLogsRepository(pool)
 	scheduledJobsRepo := storage.NewScheduledJobsRepository(pool)
+	// MT-5 (#186): migrate scheduled_jobs.user_id to UUID NOT NULL with FK.
+	// Idempotent — no-ops on a freshly initialized DB where the column is
+	// already correct; wipes only when an older VARCHAR(64) column exists.
+	if err := scheduledJobsRepo.EnsureSchema(ctx); err != nil {
+		logger.Error("failed to ensure scheduling schema", "error", err)
+		os.Exit(1)
+	}
 
 	// Initialize Vault Manager
 	vaultManager, err := logic.NewVaultManager()
@@ -155,7 +167,7 @@ func main() {
 	}
 
 	// Note: We'll implement a proper repository wrapper for Personal Info
-	piRepo := &storage.BaseRepository{Pool: pool}
+	piRepo := baseRepo
 
 	embeddingAPIURL := os.Getenv("EMBEDDING_API_URL")
 	embeddingModel := os.Getenv("EMBEDDING_MODEL")

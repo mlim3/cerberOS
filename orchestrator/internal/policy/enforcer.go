@@ -233,6 +233,7 @@ func (e *Enforcer) writeAuditEvent(_ context.Context, taskID, orchestratorTaskRe
 	}
 
 	if err := e.memory.Write(types.OrchestratorMemoryWritePayload{
+		UserID:              userID,
 		OrchestratorTaskRef: orchestratorTaskRef,
 		TaskID:              taskID,
 		DataType:            types.DataTypePolicyEvent,

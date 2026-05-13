@@ -59,7 +59,10 @@ require_cmd() {
 
 assert_contains() {
   local haystack="$1" needle="$2" label="$3"
-  if ! echo "${haystack}" | rg -q "${needle}"; then
+  # Use herestring to avoid the echo→rg pipe: rg -q exits after the first match
+  # which closes the read end, causing echo to receive SIGPIPE. With set -o pipefail
+  # that makes the pipeline non-zero even though the needle was found.
+  if ! rg -q "${needle}" <<< "${haystack}"; then
     fail "${label}: expected to find '${needle}'"
   fi
   ok "${label}"
@@ -67,7 +70,7 @@ assert_contains() {
 
 assert_not_contains() {
   local haystack="$1" needle="$2" label="$3"
-  if echo "${haystack}" | rg -q "${needle}"; then
+  if rg -q "${needle}" <<< "${haystack}"; then
     fail "${label}: expected NOT to find '${needle}'"
   fi
   ok "${label}"
@@ -195,6 +198,8 @@ inject_clarification() {
   curl -sf \
     -X POST \
     -H "Content-Type: application/json" \
+    -H "X-Active-User: ${TEST_USER_ID}" \
+    -H "X-Surface-Key: cli" \
     -d "{\"request_id\": \"${request_id}\", \"approved\": ${approved}, \"user_message\": \"${user_message}\"}" \
     "http://localhost:${IO_LOCAL_PORT}/api/v1/clarification/respond" >/dev/null
 }
@@ -278,7 +283,7 @@ section "SCENARIO 2a: Credentialed — user approves"
 info "Task: web-domain agent discovers storage skill, asks user, user approves"
 
 # Submit task in background — it will pause waiting for clarification.
-scenario2a_message='Use skills_search to find a tool for reading a file called "report.json" from persistent storage. If the tool needs expanded permissions, ask the user. Once approved, read the file and return its contents.'
+scenario2a_message='Use skills_search to find the credentialed vault_storage_read tool for reading a file called "report.json" from authenticated cloud storage via Vault. Do not use local_file_read or any local disk tool. If the tool needs expanded permissions, ask the user. Once approved, read the file and return its contents.'
 
 info "Submitting task (will pause for clarification)..."
 submit_and_wait "${scenario2a_message}" 10 &
@@ -289,9 +294,9 @@ CLARIF_REQUEST_ID=""
 deadline=$(( $(date +%s) + 30 ))
 while [[ $(date +%s) -lt ${deadline} ]]; do
   agent_logs="$(collect_agent_logs)"
-  if echo "${agent_logs}" | rg -q '"message_type":"clarification.request"'; then
+  if echo "${agent_logs}" | rg -q '"msg":"clarification: request published; waiting for user response"'; then
     CLARIF_REQUEST_ID=$(echo "${agent_logs}" \
-      | rg '"message_type":"clarification.request"' \
+      | rg '"msg":"clarification: request published; waiting for user response"' \
       | rg -o '"request_id":"[^"]*"' \
       | head -1 \
       | rg -o '"[^"]*"$' \
@@ -332,7 +337,7 @@ ok "Scenario 2a complete"
 section "SCENARIO 2b: Credentialed — user denies"
 info "Task: same discovery, user denies, agent explains gracefully"
 
-scenario2b_message='Use skills_search to find a tool for reading a file called "report.json" from persistent storage. If the tool needs expanded permissions, ask the user. If permission is denied, explain why you cannot complete the task.'
+scenario2b_message='Use skills_search to find the credentialed vault_storage_read tool for reading a file called "report.json" from authenticated cloud storage via Vault. Do not use local_file_read or any local disk tool. If the tool needs expanded permissions, ask the user. If permission is denied, explain why you cannot complete the task.'
 
 info "Submitting task (will pause for clarification)..."
 submit_and_wait "${scenario2b_message}" 10 &
@@ -342,9 +347,9 @@ CLARIF_REQUEST_ID2=""
 deadline=$(( $(date +%s) + 30 ))
 while [[ $(date +%s) -lt ${deadline} ]]; do
   agent_logs="$(collect_agent_logs)"
-  if echo "${agent_logs}" | rg -q '"message_type":"clarification.request"'; then
+  if echo "${agent_logs}" | rg -q '"msg":"clarification: request published; waiting for user response"'; then
     CLARIF_REQUEST_ID2=$(echo "${agent_logs}" \
-      | rg '"message_type":"clarification.request"' \
+      | rg '"msg":"clarification: request published; waiting for user response"' \
       | tail -1 \
       | rg -o '"request_id":"[^"]*"' \
       | head -1 \

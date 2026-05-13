@@ -213,6 +213,9 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 	if err := registry.Register(skillLoadTool(registry, sl, spawnCtx.SkillLoadAllowed)); err != nil {
 		log.Warn("skill_load tool registration failed", "error", err)
 	}
+	if err := registry.Register(createSkillFromNLTool(client, sl, ve, spawnCtx, registry)); err != nil {
+		log.Warn("create_skill_from_nl tool registration failed", "error", err)
+	}
 
 	// Skill authoring — propose_skill lets an agent persist a new synthesized
 	// skill into the user's skill_cache for future reuse.
@@ -510,7 +513,12 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 				)
 				// Thread actCtx so vault operations are cancelled on steering interrupt.
 				// actParentID propagates to vault tools for session log linking (EDD §13.4).
+				// WithCredentialCancelCtx embeds actCtx as a value so requestCredentialAndRetry
+				// can retrieve it after dispatchTool wraps toolCtx with a per-tool deadline;
+				// the credential poll loop monitors actCtx.Done() for steering interrupts
+				// without being affected by the per-tool timeout.
 				toolCtx := WithParentEntryID(actCtx, actParentID)
+				toolCtx = WithCredentialCancelCtx(toolCtx, actCtx)
 				start := time.Now()
 				result := dispatchTool(toolCtx, registry.Tools(), c.name, c.input)
 				outcomes[idx] = toolOutcome{call: c, result: result, elapsedMS: time.Since(start).Milliseconds()}
@@ -760,7 +768,10 @@ func buildSystemPrompt(skillDomain, manifest, agentMemory, userProfile string) s
 	var base string
 	if skillDomain == "general" {
 		base = `You are an Aegis OS general-purpose reasoning agent. ` +
-			`Answer questions and complete tasks using your own knowledge and reasoning. ` +
+			`Answer questions and complete tasks. ` +
+			`When you need a specialized capability that is not in your current tool set, ` +
+			`use skills_search to discover available domain-specific tools, then use spawn_agent to delegate to the appropriate domain. ` +
+			`Never call create_skill_from_nl to execute a task — only call it when the user explicitly asks you to create, save, define, or teach a new reusable skill. ` +
 			`When the task is complete, call task_complete with the final result. ` +
 			`Be concise and factual.`
 	} else {

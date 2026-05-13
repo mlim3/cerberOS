@@ -182,6 +182,7 @@ CREATE TABLE IF NOT EXISTS orchestrator_schema.orchestrator_records (
     id UUID PRIMARY KEY,
     orchestrator_task_ref TEXT NOT NULL,
     task_id TEXT NOT NULL,
+    user_id UUID NOT NULL REFERENCES identity_schema.users(id),
     plan_id TEXT,
     subtask_id TEXT,
     trace_id VARCHAR(64),
@@ -192,21 +193,23 @@ CREATE TABLE IF NOT EXISTS orchestrator_schema.orchestrator_records (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_orch_records_task_id_type
-    ON orchestrator_schema.orchestrator_records (task_id, data_type, timestamp DESC);
-CREATE INDEX IF NOT EXISTS idx_orch_records_orch_ref_type
-    ON orchestrator_schema.orchestrator_records (orchestrator_task_ref, data_type, timestamp DESC);
-CREATE INDEX IF NOT EXISTS idx_orch_records_type_timestamp
-    ON orchestrator_schema.orchestrator_records (data_type, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_orch_records_user_task
+    ON orchestrator_schema.orchestrator_records (user_id, task_id);
+CREATE INDEX IF NOT EXISTS idx_orch_records_user_task_type
+    ON orchestrator_schema.orchestrator_records (user_id, task_id, data_type, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_orch_records_user_orch_ref_type
+    ON orchestrator_schema.orchestrator_records (user_id, orchestrator_task_ref, data_type, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_orch_records_user_type_timestamp
+    ON orchestrator_schema.orchestrator_records (user_id, data_type, timestamp DESC);
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_orch_records_task_state_upsert
-    ON orchestrator_schema.orchestrator_records (task_id, data_type)
+    ON orchestrator_schema.orchestrator_records (user_id, task_id, data_type)
     WHERE data_type = 'task_state';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_orch_records_plan_state_upsert
-    ON orchestrator_schema.orchestrator_records (task_id, plan_id, data_type)
+    ON orchestrator_schema.orchestrator_records (user_id, task_id, plan_id, data_type)
     WHERE data_type = 'plan_state';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_orch_records_subtask_state_upsert
-    ON orchestrator_schema.orchestrator_records (task_id, subtask_id, data_type)
+    ON orchestrator_schema.orchestrator_records (user_id, task_id, subtask_id, data_type)
     WHERE data_type = 'subtask_state';
 
 CREATE OR REPLACE FUNCTION orchestrator_schema.reject_append_only_mutation()
@@ -317,7 +320,7 @@ CREATE TABLE IF NOT EXISTS scheduling_schema.scheduled_jobs (
     interval_seconds INT,
     name VARCHAR(255) NOT NULL,
     payload JSONB,
-    user_id VARCHAR(64) NOT NULL DEFAULT '',
+    user_id UUID NOT NULL REFERENCES identity_schema.users(id),
     time_zone VARCHAR(64) NOT NULL DEFAULT 'UTC',
     cron_expression TEXT NOT NULL DEFAULT '',
     next_run_at TIMESTAMPTZ NOT NULL,
@@ -328,6 +331,13 @@ CREATE TABLE IF NOT EXISTS scheduling_schema.scheduled_jobs (
 CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_next_run
     ON scheduling_schema.scheduled_jobs (next_run_at)
     WHERE status = 'active';
+-- MT-5 (#186): scheduler poll grouping — when a future change wants per-tenant
+-- polling, this index supports both `status = 'active'` filtering and per-user
+-- scoping. Today's poll is intentionally cross-tenant (one global ticker
+-- dispatches to every user's NATS subject) but every dispatched row still
+-- carries the owning user_id from the job record.
+CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_status_user_next_run
+    ON scheduling_schema.scheduled_jobs (status, user_id, next_run_at);
 
 CREATE TABLE IF NOT EXISTS scheduling_schema.scheduled_job_runs (
     id UUID PRIMARY KEY,

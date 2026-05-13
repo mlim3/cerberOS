@@ -170,7 +170,7 @@ func TestBuildRuntime_PlannerResultTransitionsTaskToPlanActive(t *testing.T) {
 		t.Fatalf("Deliver(task result) error = %v", err)
 	}
 
-	ts, err := rt.mockMemory.GetTaskState(task.TaskID)
+	ts, err := rt.mockMemory.GetTaskState(task.UserID, task.TaskID)
 	if err != nil {
 		t.Fatalf("GetTaskState() error = %v", err)
 	}

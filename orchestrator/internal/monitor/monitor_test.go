@@ -107,6 +107,7 @@ func seedTaskState(t *testing.T, mem *mocks.MemoryMock, ts *types.TaskState) {
 	}
 
 	if err := mem.Write(types.OrchestratorMemoryWritePayload{
+		UserID:              ts.UserID,
 		OrchestratorTaskRef: ts.OrchestratorTaskRef,
 		TaskID:              ts.TaskID,
 		DataType:            types.DataTypeTaskState,
@@ -118,32 +119,54 @@ func seedTaskState(t *testing.T, mem *mocks.MemoryMock, ts *types.TaskState) {
 }
 
 // ── Rehydrate ────────────────────────────────────────────────────────────────
+//
+// MT-14 (#189): rehydrate is intentionally cross-tenant in single-host demo
+// mode; the test below covers the AC scenario (two users' active tasks both
+// loaded under their own user_id) and the basic "newer wins, terminal skipped"
+// invariants from the pre-MT-4 shape.
 
-func TestRehydrateFromMemory_LoadsLatestNonTerminalTasks(t *testing.T) {
+func TestRehydrateFromMemory_LoadsLatestNonTerminalTasksAcrossTenants(t *testing.T) {
 	m, mem, _ := newMonitor(t)
 
-	ts1Old := makeTaskState("task-1", types.StateDispatchPending)
-	ts1New := makeTaskState("task-1", types.StateRunning)
-	ts1New.StateHistory = append(ts1New.StateHistory, types.StateEvent{
+	const userA = "user-A"
+	const userB = "user-B"
+
+	taskAOld := makeTaskState("task-A", types.StateDispatchPending)
+	taskAOld.UserID = userA
+	taskAOld.OrchestratorTaskRef = "orch-A-old"
+
+	taskANew := makeTaskState("task-A", types.StateRunning)
+	taskANew.UserID = userA
+	taskANew.OrchestratorTaskRef = "orch-A-new"
+	taskANew.StateHistory = append(taskANew.StateHistory, types.StateEvent{
 		State:     types.StateRunning,
 		Timestamp: time.Now().UTC().Add(1 * time.Second),
 		NodeID:    "test-node",
 	})
 
-	ts2Terminal := makeTaskState("task-2", types.StateCompleted)
-	now := time.Now().UTC()
-	ts2Terminal.CompletedAt = &now
+	taskB := makeTaskState("task-B", types.StateDispatched)
+	taskB.UserID = userB
+	taskB.OrchestratorTaskRef = "orch-B"
 
-	seedTaskState(t, mem, ts1Old)
-	seedTaskState(t, mem, ts1New)
-	seedTaskState(t, mem, ts2Terminal)
+	taskTerminal := makeTaskState("task-C", types.StateCompleted)
+	taskTerminal.UserID = userA
+	now := time.Now().UTC()
+	taskTerminal.CompletedAt = &now
+
+	seedTaskState(t, mem, taskAOld)
+	seedTaskState(t, mem, taskANew)
+	seedTaskState(t, mem, taskB)
+	seedTaskState(t, mem, taskTerminal)
 
 	if err := m.RehydrateFromMemory(); err != nil {
 		t.Fatalf("RehydrateFromMemory() error = %v", err)
 	}
 
-	if got := m.GetActiveTaskCount(); got != 1 {
-		t.Fatalf("GetActiveTaskCount() = %d, want 1", got)
+	// Two non-terminal tasks across two users; the duplicate task-A row is
+	// deduplicated to the newer RUNNING state, and the terminal task-C is
+	// skipped via the not_terminal filter.
+	if got := m.GetActiveTaskCount(); got != 2 {
+		t.Fatalf("GetActiveTaskCount() = %d, want 2 (task-A user-A, task-B user-B)", got)
 	}
 }
 
@@ -151,6 +174,7 @@ func TestRehydrateFromMemory_ReturnsErrorOnBadPayload(t *testing.T) {
 	m, mem, _ := newMonitor(t)
 
 	if err := mem.Write(types.OrchestratorMemoryWritePayload{
+		UserID:              "user-bad",
 		OrchestratorTaskRef: "orch-bad",
 		TaskID:              "task-bad",
 		DataType:            types.DataTypeTaskState,

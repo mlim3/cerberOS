@@ -166,13 +166,38 @@ export interface SkillActivity {
   timestamp: number; // Unix ms
 }
 
+/**
+ * Emitted when a non-risky skill is successfully persisted via create_skill_from_nl.
+ * Carries the full SkillNode details so the UI can display a rich "skill created" card.
+ */
+export interface SkillCreated {
+  taskId: string;
+  agentId: string;
+  /** Skill domain (e.g. "web", "comms") */
+  domain: string;
+  /** Internal skill identifier */
+  skillName: string;
+  /** Human-readable display name */
+  label: string;
+  /** Short description of what the skill does */
+  description: string;
+  /** Truncated recipe / implementation snippet */
+  recipe: string;
+  /** Execution mode: "synthesized" | "vault" | etc. */
+  mode: string;
+  /** Access scope: "user" | "global" */
+  scope: string;
+  timestamp: number; // Unix ms
+}
+
 /** One frame on the orchestrator→IO push channel (per task stream). */
 export type OrchestratorStreamEvent =
   | { type: 'status'; payload: StatusUpdate }
   | { type: 'credential_request'; payload: CredentialRequest }
   | { type: 'chat_response'; payload: ChatResponsePayload }
   | { type: 'plan_preview'; payload: PlanPreview }
-  | { type: 'skill_activity'; payload: SkillActivity };
+  | { type: 'skill_activity'; payload: SkillActivity }
+  | { type: 'skill_created'; payload: SkillCreated };
 
 function isRecord(x: unknown): x is Record<string, unknown> {
   return typeof x === 'object' && x !== null;
@@ -277,6 +302,28 @@ export function parseOrchestratorStreamEvent(raw: unknown): OrchestratorStreamEv
           vaultDelegated: p.vaultDelegated === true,
           synthesized: p.synthesized === true,
           outcome: typeof p.outcome === 'string' ? p.outcome : '',
+          timestamp: typeof p.timestamp === 'number' ? p.timestamp : Date.now(),
+        },
+      };
+    }
+    return null;
+  }
+
+  if (raw.type === 'skill_created' && isRecord(raw.payload)) {
+    const p = raw.payload;
+    if (typeof p.taskId === 'string' && typeof p.skillName === 'string') {
+      return {
+        type: 'skill_created',
+        payload: {
+          taskId: p.taskId as string,
+          agentId: typeof p.agentId === 'string' ? p.agentId : '',
+          domain: typeof p.domain === 'string' ? p.domain : '',
+          skillName: p.skillName as string,
+          label: typeof p.label === 'string' ? p.label : (p.skillName as string),
+          description: typeof p.description === 'string' ? p.description : '',
+          recipe: typeof p.recipe === 'string' ? p.recipe : '',
+          mode: typeof p.mode === 'string' ? p.mode : '',
+          scope: typeof p.scope === 'string' ? p.scope : 'user',
           timestamp: typeof p.timestamp === 'number' ? p.timestamp : Date.now(),
         },
       };

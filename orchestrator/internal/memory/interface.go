@@ -98,7 +98,16 @@ func (i *Interface) Write(payload types.OrchestratorMemoryWritePayload) error {
 }
 
 // Read retrieves all matching records ordered by timestamp ascending (§11.4).
+//
+// Tenant scoping (MT-4 #185 / MT-14 #189): every read MUST be scoped by
+// query.UserID. The single exception is the orchestrator startup rehydrate
+// path, which sets query.AllTenants = true to opt explicitly into a
+// cross-tenant snapshot of non-terminal task states. The rehydrate caller is
+// responsible for audit-logging each rehydrated task's user_id.
 func (i *Interface) Read(query types.MemoryQuery) ([]types.MemoryRecord, error) {
+	if !query.AllTenants && query.UserID == "" {
+		return nil, fmt.Errorf("user_id is required (or AllTenants=true)")
+	}
 	if !isValidDataType(query.DataType) {
 		return nil, fmt.Errorf("invalid data_type: %q", query.DataType)
 	}
@@ -112,9 +121,13 @@ func (i *Interface) Read(query types.MemoryQuery) ([]types.MemoryRecord, error) 
 	return i.client.Read(query)
 }
 
-// ReadLatest retrieves the most recent record for a given task_id and data_type.
+// ReadLatest retrieves the most recent record for a given user_id, task_id and data_type.
 // Used by Recovery Manager to restore the last valid task state (§FR-SH-02).
-func (i *Interface) ReadLatest(taskID string, dataType string) (*types.MemoryRecord, error) {
+// MT-4 (#185): userID is required; reads must be tenant-scoped.
+func (i *Interface) ReadLatest(userID, taskID, dataType string) (*types.MemoryRecord, error) {
+	if userID == "" {
+		return nil, fmt.Errorf("user_id is required")
+	}
 	if taskID == "" {
 		return nil, fmt.Errorf("task_id is required")
 	}
@@ -122,7 +135,7 @@ func (i *Interface) ReadLatest(taskID string, dataType string) (*types.MemoryRec
 		return nil, fmt.Errorf("invalid data_type: %q", dataType)
 	}
 
-	return i.client.ReadLatest(taskID, dataType)
+	return i.client.ReadLatest(userID, taskID, dataType)
 }
 
 // Ping checks Memory Component reachability (§12.1).
@@ -141,6 +154,9 @@ func (i *Interface) MigrateSchema() error {
 }
 
 func validateWritePayload(payload types.OrchestratorMemoryWritePayload) error {
+	if payload.UserID == "" {
+		return fmt.Errorf("user_id is required")
+	}
 	if payload.OrchestratorTaskRef == "" {
 		return fmt.Errorf("orchestrator_task_ref is required")
 	}

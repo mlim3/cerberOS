@@ -44,14 +44,23 @@ func New(cfg *config.OrchestratorConfig, memory interfaces.MemoryClient, recover
 //
 // CRITICAL: Must complete before the Orchestrator accepts new tasks.
 // Returns error if rehydration takes longer than 10 seconds (§NFR-06).
+//
+// Tenant model (MT-14, #189): a cerberOS orchestrator instance is global by
+// design in single-host demo mode — one process serves every user on the box.
+// This call is the only legitimate cross-tenant read in the system: it
+// snapshots non-terminal task states across all users via MemoryQuery.AllTenants
+// so that an orchestrator restart resumes every in-flight task regardless of
+// which user owned it. Every rehydrated task is audit-logged with its user_id
+// so the global read is observable in the orchestrator log stream.
 func (m *Monitor) RehydrateFromMemory() error {
 	start := time.Now()
 	log := observability.LogFromContext(observability.WithModule(context.Background(), "task_monitor"))
 	log.Info("task monitor rehydration started")
 
 	records, err := m.memory.Read(types.MemoryQuery{
-		DataType: types.DataTypeTaskState,
-		Filter:   map[string]string{"state": "not_terminal"},
+		DataType:   types.DataTypeTaskState,
+		Filter:     map[string]string{"state": "not_terminal"},
+		AllTenants: true,
 	})
 	if err != nil {
 		return fmt.Errorf("rehydrate task states: %w", err)
@@ -72,6 +81,14 @@ func (m *Monitor) RehydrateFromMemory() error {
 	}
 
 	for _, ts := range latestByTask {
+		// MT-14 (#189) audit: every cross-tenant rehydrate emits one line per
+		// task with the owning user_id so the global read is observable.
+		log.Info("task rehydrated",
+			"task_id", ts.TaskID,
+			"user_id", ts.UserID,
+			"state", ts.State,
+			"orchestrator_task_ref", ts.OrchestratorTaskRef,
+		)
 		m.activeTasks.Store(ts.TaskID, ts)
 		go m.monitorTaskTimeout(ts)
 	}
@@ -159,6 +176,7 @@ func (m *Monitor) StateTransition(_ context.Context, taskID, newState, reason st
 		return fmt.Errorf("marshal task state transition for task %s: %w", taskID, err)
 	}
 	if err := m.memory.Write(types.OrchestratorMemoryWritePayload{
+		UserID:              ts.UserID,
 		OrchestratorTaskRef: ts.OrchestratorTaskRef,
 		TaskID:              ts.TaskID,
 		DataType:            types.DataTypeTaskState,
