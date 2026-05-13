@@ -619,6 +619,20 @@ func credentialCancelCtxFrom(ctx context.Context) context.Context {
 	return ctx
 }
 
+// buildCredentialCtxs constructs the two contexts needed for any credential
+// wait — both the owner poll loop and the duplicate waiter branch use the same
+// pair so neither can be cut short by the per-tool deadline.
+//
+//   cancelCtx — the Act-phase context for steering-interrupt detection.
+//   waitCtx   — timeout budget derived from context.WithoutCancel(ctx) so the
+//               per-tool deadline is stripped while session/trace values are
+//               preserved. Caller must call waitCancel when done.
+func buildCredentialCtxs(ctx context.Context) (cancelCtx, waitCtx context.Context, waitCancel context.CancelFunc) {
+	cancelCtx = credentialCancelCtxFrom(ctx)
+	waitCtx, waitCancel = context.WithTimeout(context.WithoutCancel(ctx), credentialRequestTimeout)
+	return
+}
+
 // credentialRetryKey is the context key that marks a vault execute call as
 // originating from inside requestCredentialAndRetry. Execute() skips the
 // MISSING_CREDENTIAL retry path when this key is present, preventing infinite
@@ -697,18 +711,27 @@ func (ve *VaultExecutor) requestCredentialAndRetry(
 
 	if alreadyPending {
 		// Another goroutine owns the modal — wait for it to finish, then retry.
+		// Use the same context pair as the owner so the per-tool deadline cannot
+		// cut the wait short: cancelCtx for steering interrupts, waitCtx for the
+		// credential budget.
 		ve.log.Info("vault execute: credential request already in progress — waiting",
 			"credential_type", credentialType,
 		)
-		timer := time.NewTimer(credentialRequestTimeout)
-		defer timer.Stop()
+		cancelCtx, waitCtx, waitCancel := buildCredentialCtxs(ctx)
+		defer waitCancel()
 		select {
 		case <-doneCh:
-			retried := ve.Execute(withCredentialRetryCtx(ctx), operationType, credentialType, operationParams, timeoutSeconds, onUpdate)
+			// Owner finished. Check for steering cancellation before retrying.
+			select {
+			case <-cancelCtx.Done():
+				return nil
+			default:
+			}
+			retried := ve.Execute(withCredentialRetryCtx(waitCtx), operationType, credentialType, operationParams, timeoutSeconds, onUpdate)
 			return &retried
-		case <-credentialCancelCtxFrom(ctx).Done(): // Act-phase cancel (steering interrupt)
+		case <-cancelCtx.Done(): // Act-phase cancel (steering interrupt)
 			return nil
-		case <-timer.C:
+		case <-waitCtx.Done(): // budget exhausted while waiting for owner
 			r := ToolResult{
 				Content:        fmt.Sprintf("No %s was provided within %s. Add your API key in Settings and try again.", credentialType, credentialRequestTimeout),
 				IsError:        true,
@@ -766,22 +789,10 @@ func (ve *VaultExecutor) requestCredentialAndRetry(
 	)
 
 	// Poll vault with withCredentialRetryCtx so Execute() does not re-enter this
-	// function. Three contexts cooperate:
-	//
-	//   cancelCtx  — the Act-phase context extracted from the tool context value
-	//     chain via credentialCancelCtxFrom. Embedded by loop.go before calling
-	//     dispatchTool so it survives the per-tool WithTimeout wrapper. Cancelled
-	//     only by steering interrupts, not by per-tool timeouts.
-	//
-	//   credWaitCtx — timeout budget for the credential wait. Derived from
-	//     context.WithoutCancel(ctx) so it preserves session/trace values from
-	//     ctx but is not cancelled by the per-tool deadline.
-	//
-	//   retryCtx — passed to each poll Execute() call; carries the retry marker
-	//     (prevents re-entry) and the credential wait budget.
-	cancelCtx := credentialCancelCtxFrom(ctx)
-	credWaitBase := context.WithoutCancel(ctx)
-	credWaitCtx, credWaitCancel := context.WithTimeout(credWaitBase, credentialRequestTimeout)
+	// function. buildCredentialCtxs provides:
+	//   cancelCtx   — Act-phase context for steering-interrupt detection
+	//   credWaitCtx — 3-minute budget, per-tool deadline stripped, values kept
+	cancelCtx, credWaitCtx, credWaitCancel := buildCredentialCtxs(ctx)
 	defer credWaitCancel()
 	retryCtx := withCredentialRetryCtx(credWaitCtx)
 	deadline := time.Now().Add(credentialRequestTimeout)
