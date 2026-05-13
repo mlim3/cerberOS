@@ -57,6 +57,12 @@ type VMConfig struct {
 	// for this conversation turn. Only this agent persists a conversation_snapshot.
 	UserFacing bool
 
+	// UserTimezone is the IANA tz from the user's browser (e.g.
+	// "America/Los_Angeles"). Threaded by the orchestrator through
+	// TaskSpec.Metadata["user_timezone"]. Empty falls back to UTC inside the
+	// agent's buildSystemPrompt.
+	UserTimezone string
+
 	// OnComplete is called by the process manager when the agent process exits.
 	// output holds the raw TaskOutput JSON written to stdout; exitErr is non-nil
 	// when the process exited with a non-zero status. The factory uses this to
@@ -130,6 +136,7 @@ type agentSpawnContext struct {
 
 	OriginalUserMessage string `json:"original_user_message,omitempty"`
 	UserFacing          bool   `json:"user_facing,omitempty"`
+	UserTimezone        string `json:"user_timezone,omitempty"`
 }
 
 // processEntry tracks a single running agent-process subprocess. The process
@@ -224,6 +231,7 @@ func encodeSpawnContext(config VMConfig) ([]byte, error) {
 		SynthesizedSkills:   config.SynthesizedSkills,
 		OriginalUserMessage: config.OriginalUserMessage,
 		UserFacing:          config.UserFacing,
+		UserTimezone:        config.UserTimezone,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("lifecycle: marshal spawn context: %w", err)

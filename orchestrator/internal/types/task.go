@@ -141,6 +141,7 @@ type TaskState struct {
 	UserContextID        string          `json:"user_context_id,omitempty"`
 	ConversationID       string          `json:"conversation_id,omitempty"` // Stable ID linking tasks in the same multi-turn conversation
 	IdempotencyWindow    int             `json:"idempotency_window_seconds"`
+	UserTimezone         string          `json:"user_timezone,omitempty"`   // IANA tz from user's browser; threaded into every dispatch so all subtasks share it
 }
 
 // ─── UserTask ─────────────────────────────────────────────────────────────────
@@ -159,6 +160,10 @@ type UserTask struct {
 	IdempotencyWindow    int             `json:"idempotency_window_seconds,omitempty"` // Default 300
 	// TraceID is W3C trace_id (32 hex) from I/O; also accepted on the inbound MessageEnvelope.trace_id.
 	TraceID string `json:"trace_id,omitempty"`
+	// UserTimezone is the IANA tz name detected from the user's browser
+	// (Intl.DateTimeFormat().resolvedOptions().timeZone). Empty when the
+	// io surface is older than tz-detection support; agents fall back to UTC.
+	UserTimezone string `json:"user_timezone,omitempty"`
 }
 
 // ─── Execution Plan & Subtask Types (NEW in v3.0) ─────────────────────────────

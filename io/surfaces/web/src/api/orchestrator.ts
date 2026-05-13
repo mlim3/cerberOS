@@ -181,6 +181,16 @@ export async function* streamOrchestratorReply(
 ): AsyncGenerator<string, void, unknown> {
   let res: Response
   try {
+    // Detect the browser's IANA tz so the agent can localise its wall-clock
+    // and report event/calendar times in the user's timezone instead of UTC.
+    // Falls back to undefined if the browser doesn't expose Intl (very old);
+    // the api/orchestrator/agent chain treats absence as "use UTC".
+    let userTimezone: string | undefined
+    try {
+      userTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone
+    } catch {
+      userTimezone = undefined
+    }
     res = await fetch(buildApiUrl('/api/chat'), {
       method: 'POST',
       headers: {
@@ -194,6 +204,7 @@ export async function* streamOrchestratorReply(
         content: userContent,
         conversationHistory,
         conversationId,
+        ...(userTimezone ? { user_timezone: userTimezone } : {}),
       }),
     })
   } catch (err) {

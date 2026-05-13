@@ -54,6 +54,12 @@
 package main
 
 import (
+	// Embed the IANA timezone database so time.LoadLocation works inside
+	// scratch / alpine containers that don't ship /usr/share/zoneinfo.
+	// Without this, buildSystemPrompt silently falls back to UTC even when
+	// the user's browser sent a valid IANA tz like "America/Los_Angeles".
+	_ "time/tzdata"
+
 	"context"
 	"encoding/json"
 	"errors"
@@ -110,6 +116,12 @@ type SpawnContext struct {
 	// non-user-facing helpers (planner, intermediate executors) cannot poison the
 	// conversation history with their orchestrator-generated user instructions.
 	UserFacing bool `json:"user_facing,omitempty"`
+
+	// UserTimezone is the IANA tz name detected from the user's browser
+	// (e.g. "America/Los_Angeles"). Empty falls back to UTC. Used by
+	// buildSystemPrompt to localise the wall-clock header so the LLM both
+	// resolves and reports times in the user's tz.
+	UserTimezone string `json:"user_timezone,omitempty"`
 }
 
 // TaskOutput is the result written to stdout when the task completes or fails.

@@ -395,6 +395,7 @@ func (m *firecrackerManager) configureMMDS(vm *fcVM, config VMConfig) error {
 			UserProfile:      config.UserProfile,
 			TraceID:          config.TraceID,
 			UserContextID:    config.UserContextID,
+			UserTimezone:     config.UserTimezone,
 		},
 		Env: fcGuestEnv(config),
 	}

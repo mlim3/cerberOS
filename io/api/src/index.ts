@@ -709,7 +709,7 @@ app.post('/api/chat', async (c) => {
   const effectiveUserId = activeUserId(c)
   if (!effectiveUserId) return userIdRequired(c)
   const body = (await c.req.json()) as SendMessageRequest;
-  const { taskId, content, conversationHistory, conversationId, required_skill_domains } = body as SendMessageRequest & { required_skill_domains?: string[] };
+  const { taskId, content, conversationHistory, conversationId, required_skill_domains, user_timezone } = body as SendMessageRequest & { required_skill_domains?: string[]; user_timezone?: string };
   const traceId = c.get('traceId') as string | undefined;
   if (taskId) c.set('taskId', taskId)
   if (conversationId) c.set('conversationId', conversationId)
@@ -779,6 +779,7 @@ app.post('/api/chat', async (c) => {
         trace_id: traceId,
         conversation_id: conversationId,
         required_skill_domains,
+        user_timezone,
       })
       awaitingOrchestratorChat = true
       logFromContext(c, 'info', 'nats', 'forwarded chat message to orchestrator on user_task subject', {

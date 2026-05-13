@@ -77,6 +77,11 @@ type TaskSpec struct {
 	ProgressSummary      string            `json:"progress_summary,omitempty"` // Set on recovery re-dispatch
 	// TraceID is W3C trace_id (32 hex); empty uses orchestrator_task_ref on the agent wire payload.
 	TraceID string `json:"trace_id,omitempty"`
+	// UserTimezone is the IANA tz name from the originating UserTask. Carried
+	// alongside UserContextID/ConversationID so every subtask spawn for a given
+	// user request can inject the same wall-clock localisation into the agent's
+	// system prompt. Surfaced to the agent wire as Metadata["user_timezone"].
+	UserTimezone string `json:"user_timezone,omitempty"`
 }
 
 // ─── Task Accepted / Result ───────────────────────────────────────────────────

@@ -1290,6 +1290,9 @@ func buildAgentMetadata(spec types.TaskSpec) map[string]string {
 	if spec.ProgressSummary != "" {
 		meta["progress_summary"] = spec.ProgressSummary
 	}
+	if spec.UserTimezone != "" {
+		meta["user_timezone"] = spec.UserTimezone
+	}
 	for k, v := range spec.Metadata {
 		meta[k] = v
 	}

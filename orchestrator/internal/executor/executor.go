@@ -540,6 +540,7 @@ func (e *PlanExecutor) dispatchSubtask(ctx context.Context, exec *planExecution,
 		UserContextID:  exec.ts.UserContextID,
 		ConversationID: exec.ts.ConversationID,
 		TraceID:        exec.ts.TraceID,
+		UserTimezone:   exec.ts.UserTimezone,
 	}
 
 	if err := e.gw.PublishTaskSpec(ctx, spec); err != nil {

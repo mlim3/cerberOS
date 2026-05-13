@@ -82,7 +82,7 @@ func TestContextWindowAction_JustBelowCompact(t *testing.T) {
 
 func TestBuildSystemPrompt_General_IgnoresManifest(t *testing.T) {
 	// "general" domain returns a fixed prompt regardless of manifest content.
-	got := buildSystemPrompt("general", "- some_tool: does something\n", "", "")
+	got := buildSystemPrompt("general", "- some_tool: does something\n", "", "", "")
 	if strings.Contains(got, "Available commands") {
 		t.Error("general domain prompt must not include command manifest")
 	}
@@ -93,7 +93,7 @@ func TestBuildSystemPrompt_General_IgnoresManifest(t *testing.T) {
 
 func TestBuildSystemPrompt_Domain_NoManifest(t *testing.T) {
 	// An empty manifest should produce the base prompt with no manifest section.
-	got := buildSystemPrompt("web", "", "", "")
+	got := buildSystemPrompt("web", "", "", "", "")
 	if strings.Contains(got, "Available commands") {
 		t.Errorf("empty manifest: prompt must not include 'Available commands' section; got %q", got)
 	}
@@ -104,7 +104,7 @@ func TestBuildSystemPrompt_Domain_NoManifest(t *testing.T) {
 
 func TestBuildSystemPrompt_Domain_WithManifest(t *testing.T) {
 	manifest := "- web_fetch: Fetches a webpage by URL.\n- web_parse: Parses HTML into text.\n"
-	got := buildSystemPrompt("web", manifest, "", "")
+	got := buildSystemPrompt("web", manifest, "", "", "")
 	if !strings.Contains(got, "Available commands:") {
 		t.Errorf("prompt with manifest must include 'Available commands:' header; got %q", got)
 	}
@@ -118,7 +118,7 @@ func TestBuildSystemPrompt_Domain_WithManifest(t *testing.T) {
 
 func TestBuildSystemPrompt_ManifestAppendsAfterBase(t *testing.T) {
 	manifest := "- web_fetch: Fetches a webpage.\n"
-	got := buildSystemPrompt("web", manifest, "", "")
+	got := buildSystemPrompt("web", manifest, "", "", "")
 	// Manifest must come after the base instructional text, not before.
 	baseIdx := strings.Index(got, "task_complete")
 	manifestIdx := strings.Index(got, "Available commands:")
@@ -135,7 +135,7 @@ func TestBuildSystemPrompt_ManifestAppendsAfterBase(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBuildSystemPrompt_WithAgentMemory_InjectsSection(t *testing.T) {
-	got := buildSystemPrompt("web", "", "The target API returns ISO8601 timestamps.", "")
+	got := buildSystemPrompt("web", "", "The target API returns ISO8601 timestamps.", "", "")
 	if !strings.Contains(got, "## Knowledge from past tasks") {
 		t.Error("agentMemory: expected '## Knowledge from past tasks' section header")
 	}
@@ -145,7 +145,7 @@ func TestBuildSystemPrompt_WithAgentMemory_InjectsSection(t *testing.T) {
 }
 
 func TestBuildSystemPrompt_WithUserProfile_InjectsSection(t *testing.T) {
-	got := buildSystemPrompt("web", "", "", "User prefers concise bullet points.")
+	got := buildSystemPrompt("web", "", "", "User prefers concise bullet points.", "")
 	if !strings.Contains(got, "## User context") {
 		t.Error("userProfile: expected '## User context' section header")
 	}
@@ -155,7 +155,7 @@ func TestBuildSystemPrompt_WithUserProfile_InjectsSection(t *testing.T) {
 }
 
 func TestBuildSystemPrompt_WithBoth_BothSectionsPresent(t *testing.T) {
-	got := buildSystemPrompt("web", "", "API fact.", "User pref.")
+	got := buildSystemPrompt("web", "", "API fact.", "User pref.", "")
 	if !strings.Contains(got, "## Knowledge from past tasks") {
 		t.Error("both: expected knowledge section")
 	}
@@ -165,7 +165,7 @@ func TestBuildSystemPrompt_WithBoth_BothSectionsPresent(t *testing.T) {
 }
 
 func TestBuildSystemPrompt_EmptyMemory_NoSectionsAdded(t *testing.T) {
-	got := buildSystemPrompt("web", "- cmd: desc.", "", "")
+	got := buildSystemPrompt("web", "- cmd: desc.", "", "", "")
 	if strings.Contains(got, "## Knowledge") {
 		t.Error("empty agentMemory must not produce knowledge section")
 	}
@@ -176,7 +176,7 @@ func TestBuildSystemPrompt_EmptyMemory_NoSectionsAdded(t *testing.T) {
 
 func TestBuildSystemPrompt_MemorySectionsAfterManifest(t *testing.T) {
 	manifest := "- web_fetch: Fetches.\n"
-	got := buildSystemPrompt("web", manifest, "fact", "pref")
+	got := buildSystemPrompt("web", manifest, "fact", "pref", "")
 	manifestIdx := strings.Index(got, "Available commands:")
 	memIdx := strings.Index(got, "## Knowledge from past tasks")
 	if manifestIdx < 0 || memIdx < 0 {
@@ -189,7 +189,7 @@ func TestBuildSystemPrompt_MemorySectionsAfterManifest(t *testing.T) {
 
 func TestBuildSystemPrompt_General_WithMemory_SectionsAppended(t *testing.T) {
 	// General domain still gets memory sections even though it has no manifest.
-	got := buildSystemPrompt("general", "", "stored fact", "")
+	got := buildSystemPrompt("general", "", "stored fact", "", "")
 	if !strings.Contains(got, "general-purpose") {
 		t.Error("general domain base text must be present")
 	}
