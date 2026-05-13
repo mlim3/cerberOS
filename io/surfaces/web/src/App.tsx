@@ -786,10 +786,11 @@ function App() {
     if (!useMockHeartbeat) return
     if (selectedTaskId !== '13') return
     setCredentialRequests(prev => {
-      if (prev['13']) return prev
+      const reqId = FALLBACK_TASK_13_CREDENTIAL.requestId
+      if (prev[reqId]) return prev
       return {
         ...prev,
-        '13': { request: FALLBACK_TASK_13_CREDENTIAL, status: 'pending' },
+        [reqId]: { request: FALLBACK_TASK_13_CREDENTIAL, status: 'pending' },
       }
     })
   }, [DEMO_MODE, useMockHeartbeat, selectedTaskId])

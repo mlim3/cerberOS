@@ -284,7 +284,7 @@ func runOneTask(rootCtx context.Context, rootLog *slog.Logger, spawnCtx *SpawnCo
 	// (ADR-004). Returns nil if NATS env vars are absent — non-credentialed tools
 	// continue to function normally. Task-scoped so each task gets its own
 	// permission token binding.
-	ve := NewVaultExecutor(log, spawnCtx.TaskID, spawnCtx.PermissionToken, spawnCtx.TraceID)
+	ve := NewVaultExecutor(log, taskCtx, spawnCtx.TaskID, spawnCtx.PermissionToken, spawnCtx.TraceID)
 	if ve != nil {
 		defer ve.Close()
 	}

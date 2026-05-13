@@ -30,8 +30,8 @@ function CredentialRequestCard({ request, status, onProvide, onSubmitInline }: C
   if (onSubmitInline) {
     const handleSubmit = (e: React.FormEvent) => {
       e.preventDefault()
-      if (!value.trim() || status === 'submitting') return
-      onSubmitInline(request.requestId, value.trim())
+      if (!value || status === 'submitting') return
+      onSubmitInline(request.requestId, value)
     }
 
     return (
@@ -69,7 +69,7 @@ function CredentialRequestCard({ request, status, onProvide, onSubmitInline }: C
             <button
               type="submit"
               className="cred-card-btn"
-              disabled={!value.trim() || status === 'submitting'}
+              disabled={!value || status === 'submitting'}
             >
               {status === 'submitting' ? 'Submitting…' : '\u{1F512} Submit securely'}
             </button>

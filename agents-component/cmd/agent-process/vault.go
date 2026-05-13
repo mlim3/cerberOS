@@ -77,6 +77,12 @@ type VaultExecutor struct {
 	cfg             VaultExecConfig
 	log             *slog.Logger
 
+	// cancelCtx is the task-level context (above per-tool timeouts).
+	// The credential poll loop selects on cancelCtx.Done() so it responds to
+	// steering interrupts and task cancellation but NOT to per-tool deadlines
+	// (e.g. vault_github_request timeout_seconds:40).
+	cancelCtx context.Context
+
 	mu                sync.Mutex
 	pending           map[string]chan types.VaultOperationResult    // requestID → result channel
 	progressCallbacks map[string]func(types.VaultOperationProgress) // requestID → onUpdate; at-most-once
@@ -114,7 +120,7 @@ type agentEnvelope struct {
 //	AEGIS_AGENT_ID  — this agent's identity (injected by Lifecycle Manager)
 //
 // Returns nil (non-fatal) if either env var is absent or NATS is unreachable.
-func NewVaultExecutor(log *slog.Logger, taskID, permissionToken, traceID string) *VaultExecutor {
+func NewVaultExecutor(log *slog.Logger, cancelCtx context.Context, taskID, permissionToken, traceID string) *VaultExecutor {
 	natsURL := os.Getenv("AEGIS_NATS_URL")
 	agentID := os.Getenv("AEGIS_AGENT_ID")
 	if natsURL == "" || agentID == "" {
@@ -153,6 +159,7 @@ func NewVaultExecutor(log *slog.Logger, taskID, permissionToken, traceID string)
 		permissionToken:   permissionToken,
 		cfg:               cfg,
 		log:               log,
+		cancelCtx:         cancelCtx,
 		pending:           make(map[string]chan types.VaultOperationResult),
 		progressCallbacks: make(map[string]func(types.VaultOperationProgress)),
 		credPending:       make(map[string]chan struct{}),
@@ -677,7 +684,7 @@ func (ve *VaultExecutor) requestCredentialAndRetry(
 		case <-doneCh:
 			retried := ve.Execute(withCredentialRetryCtx(ctx), operationType, credentialType, operationParams, timeoutSeconds, onUpdate)
 			return &retried
-		case <-ctx.Done():
+		case <-ve.cancelCtx.Done(): // task cancelled or steering interrupt only
 			return nil
 		case <-timer.C:
 			r := ToolResult{
@@ -758,9 +765,12 @@ func (ve *VaultExecutor) requestCredentialAndRetry(
 	deadline := time.Now().Add(credentialRequestTimeout)
 	for time.Now().Before(deadline) {
 		select {
-		case <-ctx.Done():          // task cancelled or steering interrupt — stop immediately
+		case <-ve.cancelCtx.Done(): // task cancelled or steering interrupt — stop immediately
+			// ve.cancelCtx is the task-level context above per-tool timeouts,
+			// so this fires only on steering directives or explicit cancellation,
+			// not on the per-tool deadline (e.g. vault_github_request 40s).
 			return nil
-		case <-credWaitCtx.Done(): // 8-minute credential wait budget exhausted
+		case <-credWaitCtx.Done(): // 3-minute credential wait budget exhausted
 			return nil
 		case <-time.After(credentialPollInterval):
 		}
