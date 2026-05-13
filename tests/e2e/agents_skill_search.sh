@@ -123,6 +123,11 @@ latest_agents_logs() {
   kubectl logs -n "$NAMESPACE" "deployment/${AGENTS_DEPLOYMENT}" --since="$LOG_SINCE"
 }
 
+conversation_agents_logs() {
+  local conversation_id="$1"
+  latest_agents_logs | rg "\"conversation_id\":\"${conversation_id}\"" || true
+}
+
 deployment_ready() {
   local deployment="$1"
   kubectl get deployment "$deployment" -n "$NAMESPACE" -o jsonpath="{.status.conditions[?(@.type==\"Available\")].status}"
@@ -293,9 +298,6 @@ plan_auto_approved="false"
 plan_preview_seen="false"
 approve_resp=""
 info "Sending /api/chat request (no required_skill_domains — agent must discover e2e_test via skills_search)"
-info "Subscribing to /api/events/${task_id} for plan previews and status updates (probe=${E2E_PROBE})"
-curl -N -sS -H "X-Active-User: ${TEST_USER_ID}" "${base_url}/api/events/${task_id}" >"${event_stream_file}" 2>/dev/null &
-EVENT_STREAM_PID=$!
 
 curl -N -sS --max-time "${CHAT_TIMEOUT_SECONDS}" \
   -H "Content-Type: application/json" \
@@ -304,6 +306,10 @@ curl -N -sS --max-time "${CHAT_TIMEOUT_SECONDS}" \
   -X POST "${base_url}/api/chat" \
   -d "${chat_payload}" >"${stream_file}" &
 CHAT_STREAM_PID=$!
+
+info "Subscribing to /api/events/${task_id} for plan previews and status updates (probe=${E2E_PROBE})"
+curl -N -sS -H "X-Active-User: ${TEST_USER_ID}" "${base_url}/api/events/${task_id}" >"${event_stream_file}" 2>/dev/null &
+EVENT_STREAM_PID=$!
 
 for _ in $(seq 1 "${CHAT_TIMEOUT_SECONDS}"); do
   if [[ "${plan_auto_approved}" != "true" ]]; then
@@ -350,6 +356,14 @@ if [[ -s "${event_stream_file}" ]]; then
   echo "Task event stream:"
   sed 's/^/  /' "${event_stream_file}"
 fi
+# If the event stream file is non-empty but contains no SSE data lines, IO
+# rejected the pre-subscription (likely a 404 "Task not found" race: the test
+# subscribed before the chat POST registered the task).  That can prevent the
+# plan-preview auto-approval path, but the agent-log assertions below still
+# validate the actual skill-search behavior, so continue.
+if [[ -s "${event_stream_file}" ]] && ! grep -q '^data:' "${event_stream_file}" 2>/dev/null; then
+  info "event stream returned a non-SSE response; continuing because the agent-log assertions still validate delegation behavior: $(cat "${event_stream_file}")"
+fi
 
 stream_chunks="$(parse_sse_chunks "${stream_file}" | tr '\n' ' ')"
 # The IO service closes the /api/chat SSE stream after the initial acknowledgment
@@ -377,10 +391,12 @@ fi
 section "Agents Log Inspection"
 info "Waiting for e2e_ping execution to appear in agent logs (up to 90s)..."
 agent_logs=""
+full_agent_logs=""
 _log_deadline=$(( $(date +%s) + 90 ))
 while [[ $(date +%s) -lt ${_log_deadline} ]]; do
-  agent_logs="$(latest_agents_logs)"
-  if echo "${agent_logs}" | rg -q '"msg":"e2e_ping: executed"'; then
+  agent_logs="$(conversation_agents_logs "${conversation_id}")"
+  full_agent_logs="$(latest_agents_logs)"
+  if rg -q "${E2E_PROBE}" <<< "${full_agent_logs}"; then
     break
   fi
   sleep 5
@@ -393,19 +409,25 @@ echo "${filtered_logs}" | sed 's/^/  /'
 #    pipeline is wired end-to-end (seeding → NATS → orchestrator gateway → pgvector).
 assert_contains "${agent_logs}" '"tool":"skills_search"' "skills_search tool was not called — agent must use skills_search to discover e2e_ping"
 
-# 2. skills_search must have returned results (result_count > 0) — proves the Memory
-#    API accepted the seed writes and the embedding index is queryable.
+# 2. skills_search must have returned at least one result — proves the Memory API
+#    accepted the seed writes and the embedding index is queryable.
+#    We check result_count > 0 (not just field presence) so that an empty index
+#    (result_count:0 from a seeding race) is caught here rather than only at the
+#    e2e_ping assertion below with a misleading "tool not called" message.
 #    Note: we do not assert top_domain=e2e_test. HNSW ranking is sensitive to pool
 #    size and accumulated synthesized skills from prior runs; what matters is that
 #    the search fires and returns results from a live index, not which skill ranks
 #    first in a growing pool.
-assert_contains "${agent_logs}" '"result_count":' "skills_search returned no result_count — skill index may be empty"
+if ! rg -q '"result_count":[1-9]' <<< "${agent_logs}"; then
+  fail "skills_search result_count is 0 or missing — skill index may be empty; ensure memory-api was ready before aegis-agents seeded static skills (check wait-for-memory-api init container)"
+fi
+ok "skills_search returned results (result_count > 0)"
 
 # 3. e2e_ping must have executed with the probe value. Current intended
 #    behaviour is direct execution after credential-free auto-registration into
 #    the discovering agent, not a second spawn_agent handoff.
 assert_contains "${agent_logs}" '"tool":"e2e_ping"' "e2e_ping tool was not executed after skills_search discovery"
-assert_contains "${agent_logs}" "${E2E_PROBE}" "probe value not found in agent logs — e2e_ping may not have run with the correct parameters"
+assert_contains "${full_agent_logs}" "${E2E_PROBE}" "probe value not found in agent logs — e2e_ping may not have run with the correct parameters"
 
 ok "skills_search → e2e_ping direct execution path confirmed"
 

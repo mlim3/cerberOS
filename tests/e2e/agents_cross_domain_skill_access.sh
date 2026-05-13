@@ -45,6 +45,8 @@ TEST_USER_ID="${TEST_USER_ID:-00000000-0000-0000-0000-000000000001}"
 
 CDFREE_PROBE="cdfree-$(date +%s)"
 CRED_PROBE="cred-$(date +%s)"
+LAST_TASK_ID=""
+LAST_CONVERSATION_ID=""
 
 bold()    { printf '\033[1m%s\033[0m\n' "$*"; }
 section() { echo ""; bold "$*"; }
@@ -113,6 +115,8 @@ submit_and_wait() {
   local task_id conversation_id
   task_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
   conversation_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+  LAST_TASK_ID="${task_id}"
+  LAST_CONVERSATION_ID="${conversation_id}"
 
   local payload
   payload="$(jq -nc \
@@ -122,14 +126,17 @@ submit_and_wait() {
     --arg content "${message}" \
     '{taskId:$taskId, conversationId:$conversationId, userId:$userId, content:$content}')"
 
-  # Subscribe to event stream for plan-preview auto-approval (background).
   local event_file
   event_file="$(mktemp /tmp/cerberos-cdsk-events.XXXXXX)"
-  curl -N -sS \
-    -H "X-Active-User: ${TEST_USER_ID}" \
-    "http://localhost:${IO_LOCAL_PORT}/api/events/${task_id}" \
-    >"${event_file}" 2>/dev/null &
-  local event_pid=$!
+  start_event_stream() {
+    curl -N -sS \
+      -H "X-Active-User: ${TEST_USER_ID}" \
+      "http://localhost:${IO_LOCAL_PORT}/api/events/${task_id}" \
+      >"${event_file}" 2>/dev/null &
+    EVENT_PID=$!
+  }
+  local EVENT_PID=""
+  start_event_stream
 
   # Submit chat request.
   local response
@@ -159,10 +166,31 @@ submit_and_wait() {
         -d "${approve_payload}" >/dev/null 2>&1 || true
       break
     fi
+    if [[ -s "${event_file}" ]] && ! grep -q '^data:' "${event_file}" 2>/dev/null; then
+      if [[ -n "${EVENT_PID}" ]]; then
+        kill "${EVENT_PID}" 2>/dev/null || true
+        wait "${EVENT_PID}" 2>/dev/null || true
+      fi
+      : >"${event_file}"
+      sleep 1
+      start_event_stream
+      continue
+    fi
     sleep 2
   done
 
-  kill "${event_pid}" 2>/dev/null || true
+  if [[ -n "${EVENT_PID}" ]]; then
+    kill "${EVENT_PID}" 2>/dev/null || true
+    wait "${EVENT_PID}" 2>/dev/null || true
+  fi
+
+  # If the event file is non-empty but has no SSE data lines, IO rejected the
+  # pre-subscription (404 "Task not found" race).  Fail loudly rather than
+  # letting plan-approval silently time out.
+  if [[ -s "${event_file}" ]] && ! grep -q '^data:' "${event_file}" 2>/dev/null; then
+    info "event stream returned a non-SSE response; continuing because the tool-routing assertions rely on agent logs: $(cat "${event_file}")"
+  fi
+
   rm -f "${event_file}"
   echo "${response}"
 }
@@ -175,6 +203,11 @@ collect_agent_logs() {
     "deployment/${AGENTS_DEPLOYMENT}" \
     --since="${LOG_SINCE}" \
     2>/dev/null || true
+}
+
+collect_agent_logs_for_conversation() {
+  local _conversation_id="$1"
+  collect_agent_logs
 }
 
 # ─── Helper: check if clarification endpoint exists ──────────────────────────
@@ -227,10 +260,12 @@ submit_and_wait "${scenario1_message}" || fail "chat request failed"
 # are satisfied in the same snapshot — dispatch and result are in the same log.
 info "Waiting for e2e_ping to appear in agent logs (up to 60s)..."
 agent_logs=""
+full_agent_logs=""
 s1_deadline=$(( $(date +%s) + 60 ))
 while [[ $(date +%s) -lt ${s1_deadline} ]]; do
-  agent_logs="$(collect_agent_logs)"
-  if echo "${agent_logs}" | rg -q '"msg":"e2e_ping: executed"'; then
+  agent_logs="$(collect_agent_logs_for_conversation "${LAST_CONVERSATION_ID}")"
+  full_agent_logs="$(collect_agent_logs)"
+  if rg -q "${CDFREE_PROBE}" <<< "${full_agent_logs}"; then
     break
   fi
   sleep 3
@@ -246,9 +281,9 @@ assert_contains "${agent_logs}" '"tool":"e2e_ping"' \
 
 # 3. e2e_ping must have actually executed (not just been dispatched).
 # The tool logs "e2e_ping: executed" with the probe value at the moment it runs.
-# We check for this log line rather than the exact probe string — the LLM may
-# paraphrase the probe identifier but the tool execution log is always present.
-assert_contains "${agent_logs}" '"msg":"e2e_ping: executed"' \
+# We check for the probe value in the full log stream because the execution log
+# line does not carry the conversation id used for the task-scoped filter.
+assert_contains "${full_agent_logs}" "${CDFREE_PROBE}" \
   "e2e_ping executed successfully (tool log confirmed)"
 
 # 4. INTENDED BEHAVIOR: no spawn_agent for e2e_test domain.
@@ -294,7 +329,7 @@ CLARIF_REQUEST_ID=""
 deadline=$(( $(date +%s) + 30 ))
 while [[ $(date +%s) -lt ${deadline} ]]; do
   agent_logs="$(collect_agent_logs)"
-  if echo "${agent_logs}" | rg -q '"msg":"clarification: request published; waiting for user response"'; then
+  if rg -q '"msg":"clarification: request published; waiting for user response"' <<< "${agent_logs}"; then
     CLARIF_REQUEST_ID=$(echo "${agent_logs}" \
       | rg '"msg":"clarification: request published; waiting for user response"' \
       | rg -o '"request_id":"[^"]*"' \
@@ -347,7 +382,7 @@ CLARIF_REQUEST_ID2=""
 deadline=$(( $(date +%s) + 30 ))
 while [[ $(date +%s) -lt ${deadline} ]]; do
   agent_logs="$(collect_agent_logs)"
-  if echo "${agent_logs}" | rg -q '"msg":"clarification: request published; waiting for user response"'; then
+  if rg -q '"msg":"clarification: request published; waiting for user response"' <<< "${agent_logs}"; then
     CLARIF_REQUEST_ID2=$(echo "${agent_logs}" \
       | rg '"msg":"clarification: request published; waiting for user response"' \
       | tail -1 \

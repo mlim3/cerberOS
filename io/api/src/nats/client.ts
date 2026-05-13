@@ -79,6 +79,31 @@ export interface IONatsClient {
   close(): void
 }
 
+export function buildUserTaskNatsPayload(task: UserTaskPayload) {
+  const userContextID = task.user_context_id?.trim() || task.user_id
+  return {
+    task_id: task.task_id,
+    user_id: task.user_id,
+    required_skill_domains: task.required_skill_domains ?? [],
+    priority: task.priority ?? 5,
+    // Runaway backstop for a whole task. Individual phases are already
+    // bounded by tighter timers in the orchestrator:
+    //   - DecompositionTimeoutSeconds (30s) — planner LLM call
+    //   - PlanApprovalTimeoutSeconds (300s) — user review of the plan
+    //   - per-subtask timeout_seconds in the plan itself (~30s each)
+    // The old 120s default was shorter than the approval window alone,
+    // so a task sitting in AWAITING_APPROVAL would be killed before the
+    // user could click "Approve". 30 minutes gives realistic headroom
+    // for approval + multi-subtask execution without sacrificing the
+    // backstop semantics.
+    timeout_seconds: task.timeout_seconds ?? 1800,
+    payload: task.payload ?? { raw_input: task.content },
+    callback_topic: task.callback_topic ?? callbackTopicForTask(task.task_id),
+    user_context_id: userContextID,
+    ...(task.conversation_id ? { conversation_id: task.conversation_id } : {}),
+  }
+}
+
 /** Outbound envelope — mirrors agents-component wire format. */
 interface OutboundEnvelope {
   message_id: string

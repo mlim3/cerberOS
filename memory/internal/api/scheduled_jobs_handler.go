@@ -25,11 +25,16 @@ var orchestratorHookHTTPClient = &http.Client{Timeout: 15 * time.Second}
 type ScheduledJobsHandler struct {
 	repo     *storage.ScheduledJobsRepository
 	userCron storage.UserCronDispatch
+	wake     func()
 }
 
 // NewScheduledJobsHandler constructs the handler. Pass userCron=nil in tests or when NATS is disabled.
 func NewScheduledJobsHandler(repo *storage.ScheduledJobsRepository, userCron storage.UserCronDispatch) *ScheduledJobsHandler {
 	return &ScheduledJobsHandler{repo: repo, userCron: userCron}
+}
+
+func (h *ScheduledJobsHandler) SetWake(fn func()) {
+	h.wake = fn
 }
 
 type createScheduledJobRequest struct {
@@ -47,9 +52,26 @@ type createScheduledJobRequest struct {
 	CronExpression  string         `json:"cronExpression"`
 }
 
+type claimIdempotencyRequest struct {
+	Key        string `json:"key"`
+	AgentID    string `json:"agentId"`
+	JobID      string `json:"jobId,omitempty"`
+	RunID      string `json:"runId,omitempty"`
+	TTLSeconds int    `json:"ttlSeconds"`
+}
+
+type completeIdempotencyRequest struct {
+	Key      string         `json:"key"`
+	Status   string         `json:"status,omitempty"`
+	Result   map[string]any `json:"result"`
+	JobID    string         `json:"jobId,omitempty"`
+	RunID    string         `json:"runId,omitempty"`
+	JobState map[string]any `json:"jobState,omitempty"`
+}
+
 // RunDue executes the same processing as POST /api/v1/scheduled_jobs/run_due (used by memory-server ticker).
 func (h *ScheduledJobsHandler) RunDue(ctx context.Context) error {
-	jobs, err := h.repo.ListDueJobs(ctx, time.Now().UTC())
+	jobs, err := h.repo.ClaimDueJobs(ctx, time.Now().UTC())
 	if err != nil {
 		return err
 	}
@@ -196,6 +218,7 @@ func (h *ScheduledJobsHandler) HandleCreateScheduledJob(w http.ResponseWriter, r
 		UserID:          req.UserID,
 		TimeZone:        strings.TrimSpace(req.TimeZone),
 		CronExpression:  strings.TrimSpace(req.CronExpression),
+		State:           []byte(`{}`),
 		NextRunAt:       nextRun.UTC(),
 	})
 	if err != nil {
@@ -208,6 +231,9 @@ func (h *ScheduledJobsHandler) HandleCreateScheduledJob(w http.ResponseWriter, r
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(SuccessResponse(scheduledJobToMap(row)))
+	if h.wake != nil {
+		h.wake()
+	}
 }
 
 func asPayloadString(v any) string {
@@ -229,11 +255,11 @@ func (h *ScheduledJobsHandler) HandleRunDueJobs(w http.ResponseWriter, r *http.R
 
 	ctx := r.Context()
 	now := time.Now().UTC()
-	jobs, err := h.repo.ListDueJobs(ctx, now)
+	jobs, err := h.repo.ClaimDueJobs(ctx, now)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(ErrorResponse("internal", "failed to list due jobs", err.Error()))
+		json.NewEncoder(w).Encode(ErrorResponse("internal", "failed to claim due jobs", err.Error()))
 		return
 	}
 
@@ -266,66 +292,53 @@ func (h *ScheduledJobsHandler) executeJob(ctx context.Context, job storage.Sched
 		trace = pgtype.UUID{Bytes: [16]byte(tid), Valid: true}
 	}
 
-	detail, status := h.runJobBody(ctx, job)
+	initialDetail, err := json.Marshal(map[string]any{
+		"jobType":        job.JobType,
+		"targetKind":     job.TargetKind,
+		"scheduledJobId": job.ID.String(),
+		"runId":          runID.String(),
+		"phase":          "dispatching",
+	})
+	if err != nil {
+		initialDetail = []byte(`{}`)
+	}
+
+	run := storage.ScheduledJobRun{
+		ID:            runID,
+		JobID:         job.ID,
+		Status:        "dispatching",
+		TargetService: job.TargetService,
+		Detail:        initialDetail,
+		TraceID:       trace,
+		StartedAt:     started,
+	}
+	if err := h.repo.InsertRun(ctx, run); err != nil {
+		return nil, err
+	}
+
+	detail, status := h.runJobBody(ctx, job, runID)
 
 	detailBytes, err := json.Marshal(detail)
 	if err != nil {
 		detailBytes = []byte(`{}`)
 	}
 
-	finished := time.Now().UTC()
-
-	run := storage.ScheduledJobRun{
-		ID:            runID,
-		JobID:         job.ID,
-		Status:        status,
-		TargetService: job.TargetService,
-		Detail:        detailBytes,
-		TraceID:       trace,
-		StartedAt:     started,
-		FinishedAt:    pgtype.Timestamptz{Time: finished, Valid: true},
+	var finishedAt pgtype.Timestamptz
+	if status != "dispatched" {
+		finishedAt = pgtype.Timestamptz{Time: time.Now().UTC(), Valid: true}
 	}
-	if err := h.repo.InsertRun(ctx, run); err != nil {
+	if err := h.repo.UpdateRunStatus(ctx, runID, status, detailBytes, finishedAt); err != nil {
 		return nil, err
 	}
-
-	if next := h.computeNextRunAt(job, finished); !next.IsZero() {
-		if err := h.repo.UpdateJobNextRun(ctx, job.ID, next); err != nil {
-			return nil, err
-		}
-	}
-
+	run.Status = status
+	run.Detail = detailBytes
+	run.FinishedAt = finishedAt
 	return scheduledRunToMap(run), nil
 }
 
-func (h *ScheduledJobsHandler) computeNextRunAt(job storage.ScheduledJob, finished time.Time) time.Time {
-	switch job.ScheduleKind {
-	case "cron":
-		if strings.TrimSpace(job.CronExpression) == "" {
-			return time.Time{}
-		}
-		interval := int32(0)
-		if job.IntervalSeconds.Valid {
-			interval = job.IntervalSeconds.Int32
-		}
-		n := scheduleutil.NextRunTime("cron", job.CronExpression, job.TimeZone, interval, finished)
-		if !n.After(finished) {
-			n = finished.Add(time.Minute)
-		}
-		return n.UTC()
-	case "interval":
-		if job.IntervalSeconds.Valid && job.IntervalSeconds.Int32 > 0 {
-			return finished.Add(time.Duration(job.IntervalSeconds.Int32) * time.Second).UTC()
-		}
-	default:
-		break
-	}
-	return time.Time{}
-}
-
-func (h *ScheduledJobsHandler) runJobBody(ctx context.Context, job storage.ScheduledJob) (map[string]any, string) {
+func (h *ScheduledJobsHandler) runJobBody(ctx context.Context, job storage.ScheduledJob, runID uuid.UUID) (map[string]any, string) {
 	if job.JobType == "user_cron" {
-		return h.runUserCron(ctx, job)
+		return h.runUserCron(ctx, job, runID)
 	}
 
 	switch job.TargetKind {
@@ -338,18 +351,28 @@ func (h *ScheduledJobsHandler) runJobBody(ctx context.Context, job storage.Sched
 	}
 }
 
-func (h *ScheduledJobsHandler) runUserCron(ctx context.Context, job storage.ScheduledJob) (map[string]any, string) {
-	detail := map[string]any{"jobType": job.JobType, "targetKind": job.TargetKind, "scheduledJobId": job.ID.String()}
+func (h *ScheduledJobsHandler) runUserCron(ctx context.Context, job storage.ScheduledJob, runID uuid.UUID) (map[string]any, string) {
+	detail := map[string]any{
+		"jobType":        job.JobType,
+		"targetKind":     job.TargetKind,
+		"scheduledJobId": job.ID.String(),
+		"runId":          runID.String(),
+	}
 	if h.userCron == nil {
 		detail["note"] = "user_cron NATS dispatch not configured"
 		return detail, "completed"
 	}
-	if err := h.userCron(ctx, job); err != nil {
+	if err := h.userCron(ctx, job, runID); err != nil {
 		detail["error"] = err.Error()
 		return detail, "failed"
 	}
 	detail["dispatched"] = true
-	return detail, "completed"
+	var jobState any = map[string]any{}
+	if len(job.State) > 0 {
+		_ = json.Unmarshal(job.State, &jobState)
+	}
+	detail["jobState"] = jobState
+	return detail, "dispatched"
 }
 
 func (h *ScheduledJobsHandler) runInternalJob(ctx context.Context, job storage.ScheduledJob) (map[string]any, string) {
@@ -713,6 +736,127 @@ func (h *ScheduledJobsHandler) HandleDeleteUserCron(w http.ResponseWriter, r *ht
 	json.NewEncoder(w).Encode(SuccessResponse(map[string]any{"deleted": true}))
 }
 
+// HandleClaimIdempotency POST /api/v1/idempotency/claim
+func (h *ScheduledJobsHandler) HandleClaimIdempotency(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req claimIdempotencyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "invalid JSON body", nil))
+		return
+	}
+	req.Key = strings.TrimSpace(req.Key)
+	req.AgentID = strings.TrimSpace(req.AgentID)
+	if req.Key == "" || req.AgentID == "" || req.TTLSeconds <= 0 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "key, agentId, and positive ttlSeconds are required", nil))
+		return
+	}
+	result, err := h.repo.ClaimIdempotency(r.Context(), storage.ClaimIdempotencyParams{
+		Key:        req.Key,
+		AgentID:    req.AgentID,
+		JobID:      strings.TrimSpace(req.JobID),
+		RunID:      strings.TrimSpace(req.RunID),
+		TTLSeconds: req.TTLSeconds,
+	})
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(ErrorResponse("internal", "failed to claim idempotency record", err.Error()))
+		return
+	}
+
+	var resultPayload any = map[string]any{}
+	if len(result.Record.Result) > 0 {
+		_ = json.Unmarshal(result.Record.Result, &resultPayload)
+	}
+	body := map[string]any{
+		"claimed":   result.Claimed,
+		"key":       result.Record.Key,
+		"status":    result.Record.Status,
+		"agentId":   result.Record.AgentID,
+		"jobId":     result.Record.JobID,
+		"runId":     result.Record.RunID,
+		"result":    resultPayload,
+		"claimedAt": result.Record.ClaimedAt.UTC().Format(time.RFC3339Nano),
+		"expiresAt": result.Record.ExpiresAt.UTC().Format(time.RFC3339Nano),
+	}
+	if result.Record.CompletedAt.Valid {
+		body["completedAt"] = result.Record.CompletedAt.Time.UTC().Format(time.RFC3339Nano)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(SuccessResponse(body))
+}
+
+// HandleCompleteIdempotency POST /api/v1/idempotency/complete
+func (h *ScheduledJobsHandler) HandleCompleteIdempotency(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req completeIdempotencyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "invalid JSON body", nil))
+		return
+	}
+	req.Key = strings.TrimSpace(req.Key)
+	if req.Key == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "key is required", nil))
+		return
+	}
+	resultBytes, err := storage.MarshalPayloadMap(req.Result)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "result must be JSON-serializable", nil))
+		return
+	}
+	var jobStateBytes []byte
+	if req.JobState != nil {
+		jobStateBytes, err = storage.MarshalPayloadMap(req.JobState)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(ErrorResponse("invalid_argument", "jobState must be JSON-serializable", nil))
+			return
+		}
+	}
+	if err := h.repo.CompleteIdempotency(r.Context(), storage.CompleteIdempotencyParams{
+		Key:      req.Key,
+		Status:   strings.TrimSpace(req.Status),
+		Result:   resultBytes,
+		JobID:    strings.TrimSpace(req.JobID),
+		RunID:    strings.TrimSpace(req.RunID),
+		JobState: jobStateBytes,
+	}); err != nil {
+		code := "internal"
+		status := http.StatusInternalServerError
+		msg := "failed to complete idempotency record"
+		if errors.Is(err, pgx.ErrNoRows) {
+			code = "not_found"
+			status = http.StatusNotFound
+			msg = "idempotency record not found"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		json.NewEncoder(w).Encode(ErrorResponse(code, msg, err.Error()))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(SuccessResponse(map[string]any{"ok": true}))
+}
+
 // HandleListScheduledJobRuns GET /api/v1/scheduled_jobs/{jobId}/runs
 func (h *ScheduledJobsHandler) HandleListScheduledJobRuns(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -782,6 +926,11 @@ func scheduledJobToMap(j storage.ScheduledJob) map[string]any {
 		_ = json.Unmarshal(j.Payload, &payload)
 	}
 	m["payload"] = payload
+	var state any = map[string]any{}
+	if len(j.State) > 0 {
+		_ = json.Unmarshal(j.State, &state)
+	}
+	m["state"] = state
 	return m
 }
 

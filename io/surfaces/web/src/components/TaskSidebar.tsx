@@ -29,7 +29,6 @@ interface TaskSidebarProps {
   userCronListLoading: boolean
   onReloadUserCronJobs: () => void | Promise<void>
   onDeleteUserCronJob: (id: string) => Promise<{ ok: true } | { ok: false; error: string }>
-  onStartRecurringChatFlow: () => void
   onSelectRecurringJob: (job: UserCronJob) => void
   highlightRecurringJobId: string | null
   conversationUnreadIds: Record<string, true>
@@ -51,7 +50,6 @@ function TaskSidebar({
   userCronListLoading,
   onReloadUserCronJobs,
   onDeleteUserCronJob,
-  onStartRecurringChatFlow,
   onSelectRecurringJob,
   highlightRecurringJobId,
   conversationUnreadIds,
@@ -128,6 +126,9 @@ function TaskSidebar({
     if (status === 'working') return 'working'
     return 'completed'
   }
+
+  const describeScheduleKind = (job: UserCronJob) =>
+    job.scheduleKind === 'cron' ? 'Cron' : `Every ${job.intervalSeconds}s`
 
   // copyConversationId puts the full conversation_id on the clipboard so the
   // user can paste it into Loki/Grafana queries. We deliberately surface the
@@ -331,17 +332,6 @@ function TaskSidebar({
             <div className="sidebar-controls-row sidebar-controls-buttons">
               <button
                 type="button"
-                className="new-task-button new-task-button-primary"
-                onClick={e => {
-                  e.preventDefault()
-                  e.stopPropagation()
-                  onStartRecurringChatFlow()
-                }}
-              >
-                Create recurring task
-              </button>
-              <button
-                type="button"
                 className="new-task-button new-task-button-secondary"
                 disabled={userCronListLoading}
                 onClick={() => {
@@ -353,8 +343,7 @@ function TaskSidebar({
               </button>
             </div>
             <p className="sidebar-recurring-explainer">
-              Opens a new chat walkthrough: say what to repeat, reply with rhythm (hourly / daily / cron), then pick the
-              first run time—all in-thread. Selecting a listed job jumps to its conversation when available.
+              Ask the agent to create a recurring task in any chat. Selecting a listed job jumps to its conversation when available.
             </p>
           </div>
           {userCronLoadError && <p className="sidebar-recurring-error">{userCronLoadError}</p>}
@@ -364,17 +353,7 @@ function TaskSidebar({
               <div className="task-list-empty">
                 <SidebarEmptyRecurringIcon className="empty-icon empty-icon--svg" />
                 <span className="empty-text">No recurring tasks yet.</span>
-                <button
-                  type="button"
-                  className="sidebar-recurring-cta-link"
-                  onClick={e => {
-                    e.preventDefault()
-                    e.stopPropagation()
-                    onStartRecurringChatFlow()
-                  }}
-                >
-                  Create a recurring task
-                </button>
+                <span className="sidebar-recurring-cta-link">Ask the agent to schedule a recurring task.</span>
               </div>
             ) : (
               <ul className="user-cron-list sidebar-recurring-list">
@@ -390,7 +369,7 @@ function TaskSidebar({
                       <div className="user-cron-card-title-row">
                         <strong className="user-cron-card-name">{j.name}</strong>
                         <span className={`user-cron-kind user-cron-kind--${j.scheduleKind}`}>
-                          {j.scheduleKind === 'cron' ? 'Cron' : 'Interval'}
+                          {describeScheduleKind(j)}
                         </span>
                       </div>
                       {j.payload?.rawInput ? (
@@ -404,7 +383,7 @@ function TaskSidebar({
                             {j.cronExpression} · {j.timeZone || 'UTC'}
                           </code>
                         ) : (
-                          <span>Every {j.intervalSeconds}s</span>
+                          <span>{describeScheduleKind(j)}</span>
                         )}
                         <span className="user-cron-next">Next · {new Date(j.nextRunAt).toLocaleString()}</span>
                       </div>

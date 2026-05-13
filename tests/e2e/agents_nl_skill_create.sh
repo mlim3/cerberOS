@@ -31,7 +31,10 @@ require_cmd() {
 }
 
 cleanup() {
-  [[ -n "${PORT_FORWARD_PID:-}" ]] && kill "${PORT_FORWARD_PID}" 2>/dev/null || true
+  if [[ -n "${PORT_FORWARD_PID:-}" ]]; then
+    kill "${PORT_FORWARD_PID}" 2>/dev/null || true
+    wait "${PORT_FORWARD_PID}" 2>/dev/null || true
+  fi
   [[ -n "${CHAT_STREAM_PID:-}" ]] && kill "${CHAT_STREAM_PID}" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -66,6 +69,26 @@ latest_agents_logs() {
   kubectl logs -n "$NAMESPACE" "deployment/${AGENTS_DEPLOYMENT}" --since="${LOG_SINCE}"
 }
 
+agents_logs_since() {
+  local since_time="$1"
+  kubectl logs -n "$NAMESPACE" "deployment/${AGENTS_DEPLOYMENT}" --since-time="${since_time}"
+}
+
+conversation_agents_logs() {
+  local conversation_id="$1"
+  local logs
+  logs="$(latest_agents_logs)"
+  printf '%s\n' "${logs}" | rg "\"conversation_id\":\"${conversation_id}\"" || true
+}
+
+conversation_agents_logs_since() {
+  local since_time="$1"
+  local conversation_id="$2"
+  local logs
+  logs="$(agents_logs_since "${since_time}")"
+  printf '%s\n' "${logs}" | rg "\"conversation_id\":\"${conversation_id}\"" || true
+}
+
 send_chat() {
   local task_id="$1" conv_id="$2" user_id="$3" content="$4" out_file="$5"
   local payload
@@ -87,11 +110,15 @@ send_chat() {
 }
 
 poll_agents_logs() {
-  local needle="$1" deadline_seconds="${2:-90}"
+  local needle="$1" deadline_seconds="${2:-90}" conversation_id="${3:-}"
   local deadline=$(( $(date +%s) + deadline_seconds ))
   local logs=""
   while [[ $(date +%s) -lt ${deadline} ]]; do
-    logs="$(latest_agents_logs)"
+    if [[ -n "${conversation_id}" ]]; then
+      logs="$(conversation_agents_logs "${conversation_id}")"
+    else
+      logs="$(latest_agents_logs)"
+    fi
     # Use a herestring to avoid the echo→grep pipe: grep -q exits after the
     # first match which closes the read end, causing echo to receive SIGPIPE.
     if grep -q "${needle}" <<< "${logs}"; then
@@ -142,7 +169,7 @@ info "SSE response: ${chunks1}"
 [[ -n "${chunks1}" ]] || fail "No SSE chunks — IO may be unreachable"
 
 info "Waiting for create_skill_from_nl in agent logs (up to 90s)"
-if ! agent_logs1="$(poll_agents_logs "create_skill_from_nl" 90)"; then
+if ! agent_logs1="$(poll_agents_logs "create_skill_from_nl" 90 "${conv1}")"; then
   fail "create_skill_from_nl tool call not found in agent logs"
 fi
 ok "create_skill_from_nl tool was invoked"
@@ -163,8 +190,9 @@ info "Sending risky create_skill_from_nl prompt (email/weekly)"
 task2="$(uuidgen | tr '[:upper:]' '[:lower:]')"
 conv2="$(uuidgen | tr '[:upper:]' '[:lower:]')"
 stream2="$(mktemp /tmp/e2e-nl-skill-sse2.XXXXXX)"
+step2_start="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-RISKY_PROMPT="Create a skill called ${RISKY_SKILL_HINT}_${SUFFIX} that sends an email to my team every Monday with a weekly digest."
+RISKY_PROMPT="Create a general-domain skill called ${RISKY_SKILL_HINT}_${SUFFIX} that sends an email to my team every Monday with a weekly digest."
 
 send_chat "${task2}" "${conv2}" "${ALICE_USER_ID}" "${RISKY_PROMPT}" "${stream2}"
 
@@ -172,16 +200,20 @@ chunks2="$(parse_sse_chunks "${stream2}" | tr '\n' ' ')"
 info "SSE response: ${chunks2}"
 
 info "Checking agent logs: draft preview must appear, skill must NOT be persisted"
-agent_logs2="$(latest_agents_logs)"
+agent_logs2="$(conversation_agents_logs_since "${step2_start}" "${conv2}")"
 
 # The risky skill must return a confirmation_required preview. The agent
 # should echo the draft_hash to the user without persisting.
 assert_contains "${agent_logs2}" "create_skill_from_nl" \
   "create_skill_from_nl was not called for risky prompt"
 
-# Confirm no premature persist for a risky skill (no persist log for the risky skill name).
-assert_not_contains "${agent_logs2}" "skill_name\":\"${RISKY_SKILL_HINT}_${SUFFIX}" \
-  "Risky skill must NOT be persisted without explicit confirmation"
+# Confirm no premature persist for a risky skill.
+if rg -q "skill persisted.*${RISKY_SKILL_HINT}_${SUFFIX}|${RISKY_SKILL_HINT}_${SUFFIX}.*skill persisted" <<< "${agent_logs2}"; then
+  fail "Risky skill must NOT be persisted without explicit confirmation"
+fi
+if rg -q "skill reload signaled.*${RISKY_SKILL_HINT}_${SUFFIX}|${RISKY_SKILL_HINT}_${SUFFIX}.*skill reload signaled" <<< "${agent_logs2}"; then
+  fail "Risky skill must NOT signal reload without explicit confirmation"
+fi
 
 ok "Risky skill returned draft preview — no premature persistence"
 
@@ -189,25 +221,36 @@ ok "Risky skill returned draft preview — no premature persistence"
 section "Step 3: Confirm risky skill with matching draft_hash"
 # ─────────────────────────────────────────────────────────────────────────────
 # Extract the draft_hash from the chunks (JSON embedded in SSE text).
-draft_hash="$(echo "${chunks2}" | grep -o '"draft_hash":"[^"]*"' | head -1 | cut -d'"' -f4 || true)"
+draft_hash="$(echo "${chunks2}" | grep -Eo '"draft_hash"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed -E 's/^"draft_hash"[[:space:]]*:[[:space:]]*"([^"]*)"$/\1/' || true)"
+if [[ -z "${draft_hash}" ]]; then
+  draft_hash="$(printf '%s\n' "${chunks2}" | grep -Eo '[0-9a-f]{64}' | head -1 || true)"
+fi
+if [[ -z "${draft_hash}" ]]; then
+  draft_hash="$(printf '%s\n' "${agent_logs2}" | grep -Eo '"draft_hash"[[:space:]]*:[[:space:]]*"[0-9a-f]{64}"' | head -1 | sed -E 's/^"draft_hash"[[:space:]]*:[[:space:]]*"([^"]+)"$/\1/' || true)"
+fi
+if [[ -z "${draft_hash}" ]]; then
+  draft_hash="$(printf '%s\n' "${agent_logs2}" | grep -Eo '[0-9a-f]{64}' | head -1 || true)"
+fi
 
 if [[ -n "${draft_hash}" ]]; then
   info "Confirming risky skill with draft_hash=${draft_hash}"
   task3="$(uuidgen | tr '[:upper:]' '[:lower:]')"
   conv3="$(uuidgen | tr '[:upper:]' '[:lower:]')"
   stream3="$(mktemp /tmp/e2e-nl-skill-sse3.XXXXXX)"
+  step3_start="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
   confirm_prompt="Yes I approve. Please create the skill. Use confirm=true and draft_hash=${draft_hash}."
   send_chat "${task3}" "${conv3}" "${ALICE_USER_ID}" "${confirm_prompt}" "${stream3}"
 
   info "Waiting for confirmed skill persist in agent logs (up to 60s)"
-  if agent_logs3="$(poll_agents_logs "${RISKY_SKILL_HINT}_${SUFFIX}" 60)"; then
+  if agent_logs3="$(agents_logs_since "${step3_start}")" && \
+     rg -q "skill persisted.*${RISKY_SKILL_HINT}_${SUFFIX}|${RISKY_SKILL_HINT}_${SUFFIX}.*skill persisted" <<< "${agent_logs3}"; then
     ok "Confirmed skill persisted and reload signaled"
   else
     info "WARNING: risky skill name not found in agent logs after confirmation — skill may persist but log signal was lost"
   fi
 else
-  info "SKIP: draft_hash not found in SSE text (agent may have formatted it differently) — skipping confirmation step"
+  fail "draft_hash not found in SSE text — confirmation step cannot proceed"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

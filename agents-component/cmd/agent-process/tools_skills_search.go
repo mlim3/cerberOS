@@ -9,16 +9,18 @@
 // ──────────────────────────────
 //
 // Credential-free, out-of-domain skill discovered (Origin="static", RequiresCred=false):
-//   The tool auto-registers the skill into DynamicRegistry using the builtinRegistry
-//   factory so the agent can call it directly without spawn_agent. A safety check
-//   (tool.RequiredCredentialTypes empty) is performed after factory construction to
-//   guard against incorrect metadata.
+//
+//	The tool auto-registers the skill into DynamicRegistry using the builtinRegistry
+//	factory so the agent can call it directly without spawn_agent. A safety check
+//	(tool.RequiredCredentialTypes empty) is performed after factory construction to
+//	guard against incorrect metadata.
 //
 // Credentialed, out-of-domain skill discovered (RequiresCred=true):
-//   The tool sends a ClarificationRequest via ClarificationSender and returns a
-//   "waiting for user approval" sentinel. When the response arrives:
-//   - Approved: recommend spawn_agent for the approved domain.
-//   - Denied: return a user-facing explanation so the agent can find an alternative.
+//
+//	The tool sends a ClarificationRequest via ClarificationSender and returns a
+//	"waiting for user approval" sentinel. When the response arrives:
+//	- Approved: recommend spawn_agent for the approved domain.
+//	- Denied: return a user-facing explanation so the agent can find an alternative.
 //
 // Synthesized skills (Origin="synthesized") are never auto-registered — they use
 // LLM-recipe execution and have no reliable builtinRegistry entry.
@@ -193,13 +195,13 @@ func executeSkillsSearch(sr SkillSearcher, currentDomain string, spawnAvailable 
 	// loaded directly from config (see SkillNode.Origin comment in types.go).
 	// Either is a static skill. Synthesized skills ("synthesized") are excluded
 	// because they have no reliable builtinRegistry entry.
-	if !top.RequiresCred && top.Origin != "synthesized" && top.Implementation != "" && registry != nil {
+	if !top.RequiresCred && top.Origin != "synthesized" && registry != nil {
 		tool, registered := tryAutoRegister(top, registry, log)
 		if registered {
 			log.Info("skills_search: credential-free cross-domain tool auto-registered",
 				"current_domain", currentDomain,
 				"tool_name", top.Name,
-				"implementation", top.Implementation,
+				"implementation", autoRegisterImplementation(top),
 			)
 			details["recommended_action"] = "call_directly"
 			details["auto_registered"] = true
@@ -209,7 +211,7 @@ func executeSkillsSearch(sr SkillSearcher, currentDomain string, spawnAvailable 
 		// Registration failed (unknown impl or vault tool) — fall through to spawn logic.
 		log.Warn("skills_search: auto-registration failed; falling back to spawn logic",
 			"tool_name", top.Name,
-			"implementation", top.Implementation,
+			"implementation", autoRegisterImplementation(top),
 		)
 	}
 
@@ -260,12 +262,31 @@ func executeSkillsSearch(sr SkillSearcher, currentDomain string, spawnAvailable 
 // guards against incorrect RequiresCred metadata in stored payloads: even if
 // a skill is mistakenly stored as requires_cred=false, a vault tool factory
 // produces a tool with RequiredCredentialTypes set, which we catch here.
+func autoRegisterImplementation(r types.SkillSearchResult) string {
+	if r.Implementation != "" {
+		return r.Implementation
+	}
+	if _, ok := builtinRegistry[r.Name]; ok {
+		return r.Name
+	}
+	return ""
+}
+
 func tryAutoRegister(r types.SkillSearchResult, registry *DynamicRegistry, log *slog.Logger) (SkillTool, bool) {
-	factory, ok := builtinRegistry[r.Implementation]
-	if !ok {
+	impl := autoRegisterImplementation(r)
+	if impl == "" {
 		log.Warn("skills_search: auto-register: implementation not in builtinRegistry",
 			"tool_name", r.Name,
 			"implementation", r.Implementation,
+		)
+		return SkillTool{}, false
+	}
+
+	factory, ok := builtinRegistry[impl]
+	if !ok {
+		log.Warn("skills_search: auto-register: implementation not in builtinRegistry",
+			"tool_name", r.Name,
+			"implementation", impl,
 		)
 		return SkillTool{}, false
 	}
@@ -277,7 +298,7 @@ func tryAutoRegister(r types.SkillSearchResult, registry *DynamicRegistry, log *
 	if len(tool.RequiredCredentialTypes) > 0 {
 		log.Warn("skills_search: auto-register: factory produced a vault tool despite requires_cred=false; skipping",
 			"tool_name", r.Name,
-			"implementation", r.Implementation,
+			"implementation", impl,
 			"credential_types", tool.RequiredCredentialTypes,
 		)
 		return SkillTool{}, false

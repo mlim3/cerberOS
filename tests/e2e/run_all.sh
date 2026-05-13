@@ -46,6 +46,12 @@ done < <(
   find "$SCRIPT_DIR" -maxdepth 1 -name '*.sh' ! -name "$(basename "$0")" | sort
 )
 
+SERIAL_ONLY_TESTS=(
+  "agents_cross_domain_skill_access.sh"
+  "agents_nl_skill_create.sh"
+  "agents_skill_search.sh"
+)
+
 if [[ ${#TESTS[@]} -eq 0 ]]; then
   printf 'No e2e test scripts found in %s\n' "$SCRIPT_DIR" >&2
   exit 1
@@ -111,12 +117,23 @@ if $SERIAL; then
     run_test "$t" || FAILURES=$(( FAILURES + 1 ))
   done
 else
+  serial_only=()
+  parallel_tests=()
+  for t in "${TESTS[@]}"; do
+    base="$(basename "$t")"
+    if printf '%s\n' "${SERIAL_ONLY_TESTS[@]}" | rg -q "^${base}$"; then
+      serial_only+=("$t")
+    else
+      parallel_tests+=("$t")
+    fi
+  done
+
   # Launch all tests concurrently; collect results in order.
   pids=()
   log_bases=()
   names=()
 
-  for t in "${TESTS[@]}"; do
+  for t in "${parallel_tests[@]}"; do
     name="$(basename "$t" .sh)"
     log_base="$(mktemp -t "e2e_${name}_XXXXXX")"
     out_file="${log_base}.out"
@@ -163,6 +180,13 @@ else
 
     rm -f "$out_file" "$exit_file" "$start_file" "$log_base"
   done
+
+  if [[ ${#serial_only[@]} -gt 0 ]]; then
+    printf '\n%bRunning serial-only e2e tests%b\n' "${BOLD}" "${RESET}"
+    for t in "${serial_only[@]}"; do
+      run_test "$t" || FAILURES=$(( FAILURES + 1 ))
+    done
+  fi
 fi
 
 # ── summary ────────────────────────────────────────────────────────────────────

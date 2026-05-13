@@ -90,6 +90,7 @@ orchestrator:
     repository: cerberos-orchestrator
     tag: local
     pullPolicy: Never
+  memoryAPIKey: "dev-internal-key"
 
 io:
   image:

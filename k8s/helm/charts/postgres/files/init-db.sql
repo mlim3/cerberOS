@@ -323,6 +323,7 @@ CREATE TABLE IF NOT EXISTS scheduling_schema.scheduled_jobs (
     user_id UUID NOT NULL REFERENCES identity_schema.users(id),
     time_zone VARCHAR(64) NOT NULL DEFAULT 'UTC',
     cron_expression TEXT NOT NULL DEFAULT '',
+    state JSONB NOT NULL DEFAULT '{}'::jsonb,
     next_run_at TIMESTAMPTZ NOT NULL,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -353,6 +354,23 @@ CREATE TABLE IF NOT EXISTS scheduling_schema.scheduled_job_runs (
 
 CREATE INDEX IF NOT EXISTS idx_scheduled_job_runs_job_id ON scheduling_schema.scheduled_job_runs(job_id);
 CREATE INDEX IF NOT EXISTS idx_scheduled_job_runs_started_at ON scheduling_schema.scheduled_job_runs(started_at DESC);
+
+CREATE TABLE IF NOT EXISTS scheduling_schema.idempotency_records (
+    key TEXT PRIMARY KEY,
+    status VARCHAR(50) NOT NULL DEFAULT 'claimed',
+    agent_id TEXT NOT NULL,
+    job_id UUID,
+    run_id UUID,
+    result JSONB,
+    claimed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMPTZ,
+    expires_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_idempotency_records_expires_at
+    ON scheduling_schema.idempotency_records(expires_at);
+CREATE INDEX IF NOT EXISTS idx_idempotency_records_claimed_at
+    ON scheduling_schema.idempotency_records(status, claimed_at);
 
 -- ==========================================
 -- agents_schema

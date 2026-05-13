@@ -170,7 +170,7 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 	// Session log persists each turn to episodic memory (EDD §13.4).
 	// Created before tools so memory tools can capture sl in their closures.
 	// nil-safe: all methods are no-ops when sl is nil.
-	sl := NewSessionLog(ve, log)
+	sl := NewSessionLog(ve, log, spawnCtx.ConversationID)
 	ctx = WithSessionLog(ctx, sl)
 
 	leafWorker := spawnCtx.LeafWorker
@@ -232,6 +232,29 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 	}
 	if err := registry.Register(extractSkillsFromRepoTool(spawnCtx, sl)); err != nil {
 		log.Warn("extract_skills_from_repo tool registration failed", "error", err)
+	}
+
+	// Skill authoring — propose_skill lets an agent persist a new synthesized
+	// skill into the user's skill_cache for future reuse.
+	if err := registry.Register(proposeSkillTool(sl, spawnCtx.UserContextID)); err != nil {
+		log.Warn("propose_skill tool registration failed", "error", err)
+	}
+
+	// Scheduling tools — let agents create, list, and cancel recurring user tasks.
+	if err := registry.Register(createScheduledJobTool(sl, spawnCtx.UserContextID)); err != nil {
+		log.Warn("create_scheduled_job tool registration failed", "error", err)
+	}
+	if err := registry.Register(listScheduledJobsTool(sl, spawnCtx.UserContextID)); err != nil {
+		log.Warn("list_scheduled_jobs tool registration failed", "error", err)
+	}
+	if err := registry.Register(cancelScheduledJobTool(sl, spawnCtx.UserContextID)); err != nil {
+		log.Warn("cancel_scheduled_job tool registration failed", "error", err)
+	}
+	if err := registry.Register(claimActionTool(sl)); err != nil {
+		log.Warn("claim_action tool registration failed", "error", err)
+	}
+	if err := registry.Register(completeActionTool(sl)); err != nil {
+		log.Warn("complete_action tool registration failed", "error", err)
 	}
 
 	// Pre-populate the registry with external skills persisted by skill_load in
@@ -795,6 +818,10 @@ func buildSystemPromptForAgent(skillDomain, manifest, agentMemory, userProfile s
 			`Answer questions and complete tasks. ` +
 			`When you need a specialized capability that is not in your current tool set, ` +
 			`use skills_search to discover available domain-specific tools, then use spawn_agent to delegate to the appropriate domain. ` +
+			`If the user is asking you to find, search for, discover, or run an existing capability, always start with skills_search and never use create_skill_from_nl or propose_skill. ` +
+			`If the user asks you to create a reusable skill from a natural-language description, call create_skill_from_nl directly. ` +
+			`If create_skill_from_nl returns a confirmation-required draft, stop and present that draft to the user verbatim, including the exact draft_hash from the tool output; do not summarize it, omit it, or call create_skill_from_nl again until the user explicitly confirms. ` +
+			`If the user asks you to automate a repeating task or schedule a recurring job, call create_scheduled_job directly instead of returning a plan blob. ` +
 			`If the user gives you a public GitHub repository link and asks you to extract, import, or install skills, use extract_skills_from_repo on that repository. ` +
 			`Never call create_skill_from_nl to execute a task — only call it when the user explicitly asks you to create, save, define, or teach a new reusable skill. ` +
 			`When the task is complete, call task_complete with the final result. ` +

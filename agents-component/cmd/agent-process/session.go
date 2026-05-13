@@ -95,27 +95,29 @@ func ParentEntryIDFromCtx(ctx context.Context) string {
 //
 // All public methods are nil-safe — when sl is nil the calls are no-ops.
 type SessionLog struct {
-	agentID string
-	taskID  string
-	traceID string
-	log     *slog.Logger
-	js      nats.JetStreamContext
-	nc      *nats.Conn // needed for ephemeral subscribe on state.read.response
+	agentID        string
+	taskID         string
+	traceID        string
+	conversationID string
+	log            *slog.Logger
+	js             nats.JetStreamContext
+	nc             *nats.Conn // needed for ephemeral subscribe on state.read.response
 }
 
 // NewSessionLog returns a SessionLog backed by ve's NATS/JetStream connection.
 // Returns nil when ve is nil (NATS unavailable); all SessionLog methods tolerate nil receivers.
-func NewSessionLog(ve *VaultExecutor, log *slog.Logger) *SessionLog {
+func NewSessionLog(ve *VaultExecutor, log *slog.Logger, conversationID string) *SessionLog {
 	if ve == nil {
 		return nil
 	}
 	return &SessionLog{
-		agentID: ve.agentID,
-		taskID:  ve.taskID,
-		traceID: ve.traceID,
-		log:     log,
-		js:      ve.js,
-		nc:      ve.nc,
+		agentID:        ve.agentID,
+		taskID:         ve.taskID,
+		traceID:        ve.traceID,
+		conversationID: conversationID,
+		log:            log,
+		js:             ve.js,
+		nc:             ve.nc,
 	}
 }
 
