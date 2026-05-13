@@ -31,7 +31,7 @@ spec:
             - sh
             - -c
             - |
-              until wget -qO- http://memory-api:8081/health > /dev/null 2>&1; do
+              until wget -qO- http://memory-api:8081/api/v1/healthz > /dev/null 2>&1; do
                 echo "Waiting for memory-api (embedding-api may still be loading model)..."; sleep 5;
               done
       {{- if .Values.firecracker.enabled }}

@@ -721,6 +721,71 @@ app.post('/api/orchestrator/plan-decision', async (c) => {
   return c.json({ ok: true })
 })
 
+/**
+ * The UI posts the user's clarification response here.
+ * Body: { request_id, approved, user_message?, agent_id? }
+ * The decision is forwarded to the agents component over NATS on
+ * `aegis.agents.clarification.response`.
+ */
+app.post('/api/v1/clarification/respond', async (c) => {
+  type ClarificationResponseRequest = {
+    request_id?: string
+    approved?: boolean
+    user_message?: string
+    agent_id?: string
+  }
+  let body: ClarificationResponseRequest
+  try {
+    body = (await c.req.json()) as ClarificationResponseRequest
+  } catch {
+    return c.json({ error: 'invalid json' }, 400)
+  }
+
+  const requestId = typeof body.request_id === 'string' ? body.request_id : ''
+  const approved = body.approved === true
+  const userMessage = typeof body.user_message === 'string' ? body.user_message : ''
+  const agentId = typeof body.agent_id === 'string' ? body.agent_id : ''
+
+  if (!requestId) {
+    return c.json({ error: 'request_id is required' }, 400)
+  }
+
+  logFromContext(c, 'info', 'clarification-proxy', `user ${approved ? 'approved' : 'rejected'} a clarification request; forwarding response to agents`, {
+    request_id: requestId,
+    agent_id: agentId || undefined,
+    approved,
+    user_message_preview: userMessage ? previewWords(userMessage) : undefined,
+  })
+
+  if (!natsClient?.connected) {
+    logFromContext(c, 'error', 'clarification-proxy', 'cannot deliver clarification response: orchestrator nats connection is down', {
+      request_id: requestId,
+      approved,
+    })
+    return c.json(
+      { error: 'orchestrator not connected — cannot deliver clarification response' },
+      503,
+    )
+  }
+
+  try {
+    await natsClient.publishClarificationResponse({
+      request_id: requestId,
+      approved,
+      user_message: userMessage,
+      agent_id: agentId || undefined,
+      trace_id: c.get('traceId'),
+    })
+  } catch (err) {
+    logFromContext(c, 'error', 'nats', 'failed to publish clarification_response to agents on nats', {
+      err: String(err),
+    })
+    return c.json({ error: 'failed to publish clarification response' }, 502)
+  }
+
+  return c.json({ ok: true, request_id: requestId, approved })
+})
+
 // =============================================================================
 // Chat streaming
 // =============================================================================

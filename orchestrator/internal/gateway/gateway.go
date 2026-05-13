@@ -188,14 +188,20 @@ type Gateway struct {
 	// When set, logs.tail / logs.query / logs.search requests are answered
 	// directly from Loki rather than the (empty) memory-api system_events table.
 	lokiURL string
+
+	// skillCacheForwardSem bounds concurrent skill_cache HTTP forwards. Static
+	// skill seeding can enqueue dozens of writes at startup; serializing them
+	// avoids stampeding memory-api/embedding-api before the embedder is ready.
+	skillCacheForwardSem chan struct{}
 }
 
 // New creates a new Gateway. Call RegisterHandlers then Start() before use.
 func New(nats interfaces.NATSClient, nodeID string) *Gateway {
 	return &Gateway{
-		nats:       nats,
-		nodeID:     nodeID,
-		agentStore: make(map[string][]json.RawMessage),
+		nats:                 nats,
+		nodeID:               nodeID,
+		agentStore:           make(map[string][]json.RawMessage),
+		skillCacheForwardSem: make(chan struct{}, 1),
 	}
 }
 
@@ -1149,11 +1155,14 @@ func (g *Gateway) fetchMemoryLogs(ctx context.Context, contextTag, agentID strin
 // maxSkillCacheRetries times with exponential backoff so that initial static skill
 // seeds that fail at startup are eventually committed once the API is healthy.
 func (g *Gateway) forwardSkillCacheWrite(tags map[string]string, payload json.RawMessage) {
-	const maxSkillCacheRetries = 5
+	const maxSkillCacheRetries = 12
 	const baseBackoff = 2 * time.Second
 	const maxBackoff = 30 * time.Second
 
 	log := observability.LogFromContext(observability.WithModule(context.Background(), "comms_gateway"))
+	g.skillCacheForwardSem <- struct{}{}
+	defer func() { <-g.skillCacheForwardSem }()
+
 	if g.memoryEndpoint == "" {
 		log.Warn("skill_cache write: memory endpoint not configured; skipping vector index write")
 		return
