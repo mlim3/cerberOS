@@ -733,19 +733,31 @@ func (ve *VaultExecutor) requestCredentialAndRetry(
 		"timeout", credentialRequestTimeout,
 	)
 
-	// Poll vault with withCredentialRetryCtx so Execute() does not re-enter
-	// this function. Use context.WithoutCancel so the poll survives the tool's
-	// per-call timeout (e.g. vault_github_request timeout_seconds:35) — the
-	// credential wait is user-paced, not API-call-paced. The pollCtx still
-	// carries ctx Values (needed for withCredentialRetryCtx) but is not
-	// cancelled when the tool deadline fires; it has its own 8-minute budget.
-	pollCtx, pollCancel := context.WithTimeout(context.WithoutCancel(ctx), credentialRequestTimeout)
-	defer pollCancel()
+	// Poll vault with withCredentialRetryCtx so Execute() does not re-enter this
+	// function. Two contexts are used deliberately:
+	//
+	//   credWaitCtx — derived from context.Background(), NOT from ctx.
+	//     This gives the poll loop its own 8-minute budget that outlives the
+	//     per-tool timeout (e.g. vault_github_request timeout_seconds:35).
+	//     retryCtx is derived from credWaitCtx so each poll Execute() call
+	//     also survives the tool deadline.
+	//
+	//   ctx (original task/Act context) — still selected in the poll loop.
+	//     This ensures steering interrupts and task cancellation are honoured
+	//     immediately, even though the budget context ignores them.
+	//     Note: cancellation is only detected between polls (not mid-HTTP call),
+	//     so there may be up to one credentialPollInterval + vault round-trip of
+	//     delay after cancellation — acceptable given the user-paced nature of
+	//     this flow.
+	credWaitCtx, credWaitCancel := context.WithTimeout(context.Background(), credentialRequestTimeout)
+	defer credWaitCancel()
+	retryCtx := withCredentialRetryCtx(credWaitCtx)
 	deadline := time.Now().Add(credentialRequestTimeout)
-	retryCtx := withCredentialRetryCtx(pollCtx)
 	for time.Now().Before(deadline) {
 		select {
-		case <-pollCtx.Done():
+		case <-ctx.Done():          // task cancelled or steering interrupt — stop immediately
+			return nil
+		case <-credWaitCtx.Done(): // 8-minute credential wait budget exhausted
 			return nil
 		case <-time.After(credentialPollInterval):
 		}
