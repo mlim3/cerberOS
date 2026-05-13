@@ -7,7 +7,6 @@ import type {
   OrchestratorStreamEvent,
   PlanPreview,
   PlanDecisionStatus,
-  SkillCreated,
 } from '@cerberos/io-core'
 import TaskSidebar, { type SidebarPrimaryTab } from './components/TaskSidebar'
 import ChatWindow from './components/ChatWindow'
@@ -392,18 +391,6 @@ function App() {
     setSkillToasts(prev => prev.filter(t => t.id !== id))
   }, [])
 
-  // Skill-created card state — populated by orchestrator 'skill_created' SSE events.
-  // Keyed by the task's currentTaskId so each conversation can show its own card.
-  const [skillCreatedCards, setSkillCreatedCards] = useState<Record<string, SkillCreated>>({})
-
-  const dismissSkillCreatedCard = useCallback((taskId: string) => {
-    setSkillCreatedCards(prev => {
-      const next = { ...prev }
-      delete next[taskId]
-      return next
-    })
-  }, [])
-
   const selectedTask = tasks.find(t => t.id === selectedTaskId)
 
   /** Fingerprint seen when conversation was focused / opened — detects new mirrored cron turns */
@@ -720,29 +707,19 @@ function App() {
           ...prev.slice(-9), // keep at most 10 toasts
           { id: nextId(), activity: ev.payload, createdAt: Date.now() },
         ])
-      } else if (ev.type === 'skill_created') {
-        // Show the inline SkillCreatedCard in the active conversation.
-        setSkillCreatedCards(prev => ({
-          ...prev,
-          [ev.payload.taskId]: ev.payload,
-        }))
       }
     }
 
     if (!activeTaskId) return
-    const unsub = subscribeOrchestratorTaskStream(
-      activeTaskId,
-      {
-        onOpen: () => {
-          if (!cancelled) setUseMockHeartbeat(false)
-        },
-        onEvent,
-        onTransportError: () => {
-          if (!cancelled) setUseMockHeartbeat(true)
-        },
+    const unsub = subscribeOrchestratorTaskStream(activeTaskId, {
+      onOpen: () => {
+        if (!cancelled) setUseMockHeartbeat(false)
       },
-      UI_USER_ID,
-    )
+      onEvent,
+      onTransportError: () => {
+        if (!cancelled) setUseMockHeartbeat(true)
+      },
+    }, UI_USER_ID)
 
     return () => {
       cancelled = true
@@ -1369,11 +1346,6 @@ function App() {
   const selectedPlanPreview =
     selectedTask?.currentTaskId && planPreviews[selectedTask.currentTaskId]
       ? planPreviews[selectedTask.currentTaskId]
-      : null
-
-  const selectedSkillCreated =
-    selectedTask?.currentTaskId
-      ? (skillCreatedCards[selectedTask.currentTaskId] ?? null)
       : null
 
   const cronStripVisible =
