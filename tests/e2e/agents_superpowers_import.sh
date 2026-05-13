@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
-# agents_superpowers_import.sh — e2e test for importing Superpowers skill files.
+# agents_superpowers_import.sh — e2e test for extracting Superpowers skill files via chat.
 #
 # What this test verifies:
-#   1. Superpowers can be imported through the IO skill-import endpoint.
-#   2. The response reports imported skills that look like the expected ones.
-#   3. The live agent runtime picks up the imported skills.
-#   4. The agent can actually use one of the imported skills in a chat task.
+#   1. A chat prompt with the Superpowers repo link triggers extract_skills_from_repo.
+#   2. The live agent runtime picks up the imported skills.
+#   3. The agent can actually use one of the imported skills in a later chat task.
 #
 # Prerequisites:
 #   kubectl, curl, jq, rg, uuidgen
@@ -134,33 +133,34 @@ section "Port-forward to IO"
 start_port_forward
 ok "io reachable at http://127.0.0.1:${IO_LOCAL_PORT}"
 
-section "Import Superpowers"
-import_payload="$(jq -nc \
-  --arg repo "${SUPERPOWERS_REPO}" \
-  --arg scope "all" \
-  '{repo:$repo, scope:$scope}')"
+section "Extract Superpowers skills via chat"
+task_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+conversation_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+stream_file="$(mktemp /tmp/cerberos-superpowers-extract.XXXXXX)"
 
-import_response="$(curl -fsS \
-  -X POST \
-  -H "Content-Type: application/json" \
-  -H "X-Active-User: ${TEST_USER_ID}" \
-  -d "${import_payload}" \
-  "http://127.0.0.1:${IO_LOCAL_PORT}/api/skills/import-github")"
+send_chat "${task_id}" "${conversation_id}" \
+  "Here is a public GitHub repository: ${SUPERPOWERS_REPO}. Extract the skills from it and make them available to me." \
+  "${stream_file}"
 
-echo "${import_response}" | jq '.'
+chat_text="$(awk '/^data: /{sub(/^data: /,"",$0); print}' "${stream_file}" | tr '\n' ' ')"
+echo "${chat_text}" | jq -r 'select(.chunk != null) | .chunk' | sed 's/^/  | /'
 
-imported_count="$(jq -r '.imported_count // 0' <<< "${import_response}")"
-published_count="$(jq -r '.published_count // 0' <<< "${import_response}")"
-fallback_used="$(jq -r '.fallback_used // false' <<< "${import_response}")"
-first_skill_name="$(jq -r '.skills[0].name // empty' <<< "${import_response}")"
-second_skill_name="$(jq -r '.skills[1].name // empty' <<< "${import_response}")"
+info "Waiting for extract_skills_from_repo in agent logs (up to 120s)"
+if ! import_logs="$(poll_agents_logs "extract_skills_from_repo" 120)"; then
+  fail "extract_skills_from_repo tool call not found in agent logs"
+fi
+ok "extract_skills_from_repo tool was invoked"
 
-[[ "${imported_count}" -gt 0 ]] || fail "expected imported_count > 0"
-[[ "${published_count}" -gt 0 ]] || fail "expected published_count > 0"
-[[ "${fallback_used}" == "false" ]] || fail "expected fallback_used=false for Superpowers"
-assert_contains "${import_response}" "using_superpowers" "import response"
-assert_contains "${import_response}" "writing_skills" "import response"
-ok "Superpowers import returned imported skills"
+info "Waiting for persisted Superpowers skills to appear in logs (up to 120s)"
+if ! import_logs="$(poll_agents_logs "writing_skills" 120)"; then
+  fail "imported skill names not found in agent logs"
+fi
+assert_contains "${import_logs}" "using_superpowers" "agent import logs"
+assert_contains "${import_logs}" "writing_skills" "agent import logs"
+ok "Superpowers import persisted the expected skills"
+
+first_skill_name="using_superpowers"
+second_skill_name="writing_skills"
 
 section "Wait for agent reload"
 if ! reload_logs="$(poll_agents_logs "skill reload signal received; re-hydrating synthesized skills" 120)"; then
@@ -168,9 +168,7 @@ if ! reload_logs="$(poll_agents_logs "skill reload signal received; re-hydrating
 fi
 ok "agent reload observed"
 
-if [[ -n "${first_skill_name}" ]]; then
-  assert_contains "${reload_logs}" "${first_skill_name}" "agent reload logs"
-fi
+assert_contains "${reload_logs}" "${first_skill_name}" "agent reload logs"
 
 section "Use an imported skill"
 skill_to_use="${second_skill_name:-${first_skill_name}}"
@@ -196,8 +194,5 @@ assert_contains "${invocation_logs}" "${skill_to_use}" "agent invocation logs"
 ok "imported skill was invoked by the agent"
 
 section "Summary"
-echo "  imported_count: ${imported_count}"
-echo "  published_count: ${published_count}"
 echo "  first_skill:     ${first_skill_name:-<none>}"
 echo "  second_skill:    ${second_skill_name:-<none>}"
-

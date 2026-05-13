@@ -93,6 +93,13 @@ func TestBuildSystemPrompt_General_IgnoresManifest(t *testing.T) {
 	}
 }
 
+func TestBuildSystemPrompt_General_MentionsRepoSkillImport(t *testing.T) {
+	got := buildSystemPrompt("general", "", "", "")
+	if !strings.Contains(got, "extract_skills_from_repo") {
+		t.Error("general prompt must mention repo skill extraction")
+	}
+}
+
 func TestBuildSystemPrompt_Domain_NoManifest(t *testing.T) {
 	// An empty manifest should produce the base prompt with no manifest section.
 	got := buildSystemPrompt("web", "", "", "")

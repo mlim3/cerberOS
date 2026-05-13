@@ -230,6 +230,9 @@ func RunLoop(ctx context.Context, log *slog.Logger, spawnCtx *SpawnContext, ve *
 	if err := registry.Register(createSkillFromNLTool(client, sl, ve, spawnCtx, registry)); err != nil {
 		log.Warn("create_skill_from_nl tool registration failed", "error", err)
 	}
+	if err := registry.Register(extractSkillsFromRepoTool(spawnCtx, sl)); err != nil {
+		log.Warn("extract_skills_from_repo tool registration failed", "error", err)
+	}
 
 	// Pre-populate the registry with external skills persisted by skill_load in
 	// prior sessions. Each record carries the serialised externalSkillManifest in
@@ -792,6 +795,7 @@ func buildSystemPromptForAgent(skillDomain, manifest, agentMemory, userProfile s
 			`Answer questions and complete tasks. ` +
 			`When you need a specialized capability that is not in your current tool set, ` +
 			`use skills_search to discover available domain-specific tools, then use spawn_agent to delegate to the appropriate domain. ` +
+			`If the user gives you a public GitHub repository link and asks you to extract, import, or install skills, use extract_skills_from_repo on that repository. ` +
 			`Never call create_skill_from_nl to execute a task — only call it when the user explicitly asks you to create, save, define, or teach a new reusable skill. ` +
 			`When the task is complete, call task_complete with the final result. ` +
 			`Be concise and factual.`
@@ -799,6 +803,7 @@ func buildSystemPromptForAgent(skillDomain, manifest, agentMemory, userProfile s
 		base = fmt.Sprintf(
 			`You are an Aegis OS agent scoped to the "%s" skill domain. `+
 				`Execute the assigned task using only the capabilities available within that domain. `+
+				`If the user gives you a public GitHub repository link and asks you to extract, import, or install skills, use extract_skills_from_repo on that repository. `+
 				`When the task is complete, call task_complete with the final result. `+
 				`Be concise and factual.`,
 			skillDomain,
