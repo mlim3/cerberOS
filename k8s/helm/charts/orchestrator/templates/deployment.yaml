@@ -52,6 +52,10 @@ spec:
               value: {{ .Values.memoryEndpoint | quote }}
             - name: IO_API_BASE
               value: {{ .Values.ioApiBase | quote }}
+            {{- if .Values.memoryAPIKey }}
+            - name: MEMORY_API_KEY
+              value: {{ .Values.memoryAPIKey | quote }}
+            {{- end }}
             - name: DECOMPOSITION_TIMEOUT_SECONDS
               value: {{ .Values.decompositionTimeoutSeconds | quote }}
             - name: LOG_LEVEL

@@ -204,6 +204,40 @@ func TestHandleStateWrite_ScheduledJobDelete_ForwardsToMemoryAPI(t *testing.T) {
 	}
 }
 
+func TestHandleStateWrite_IdempotencyComplete_ForwardsToMemoryAPI(t *testing.T) {
+	var completeCount int64
+	var receivedAPIKey string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/idempotency/complete" && r.Method == http.MethodPost {
+			atomic.AddInt64(&completeCount, 1)
+			receivedAPIKey = r.Header.Get("X-Internal-API-Key")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"data":{"ok":true}}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	_, nats := newGatewayWithMemoryBackend(t, srv)
+	payload := map[string]any{
+		"key":    "flight_watcher:user-1:bucket",
+		"status": "completed",
+		"result": map[string]any{"price": 540},
+	}
+	data := stateWriteEnvelope(t, "agent-1", "idempotency_complete", payload, map[string]string{"operation": "complete"})
+
+	if err := nats.Deliver(gateway.TopicAgentStateWrite, data); err != nil {
+		t.Fatalf("Deliver state.write: %v", err)
+	}
+
+	waitForRequest(t, &completeCount, 1)
+	if receivedAPIKey != "test-internal-key" {
+		t.Errorf("X-Internal-API-Key: want %q, got %q", "test-internal-key", receivedAPIKey)
+	}
+}
+
 // splitPath returns path segments ignoring empty parts.
 func splitPath(path string) []string {
 	var parts []string
@@ -332,6 +366,45 @@ func TestHandleStateReadRequest_ScheduledJob_FetchesFromMemoryAPI(t *testing.T) 
 	// Verify the response contains the job data.
 	if !containsJSON(resp, "daily_report") {
 		t.Errorf("state.read.response should contain job name 'daily_report'; got: %s", resp)
+	}
+}
+
+func TestHandleStateReadRequest_IdempotencyClaim_FetchesFromMemoryAPI(t *testing.T) {
+	var claimCount int64
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/idempotency/claim" && r.Method == http.MethodPost {
+			atomic.AddInt64(&claimCount, 1)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"data":{"claimed":true,"key":"flight_watcher:user-1:bucket","status":"claimed"}}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	_, nats := newGatewayWithMemoryBackend(t, srv)
+	data := stateReadRequestEnvelope(t, "agent-1", "idempotency_claim", map[string]any{
+		"key":        "flight_watcher:user-1:bucket",
+		"agentId":    "agent-1",
+		"ttlSeconds": 86400,
+	})
+
+	if err := nats.Deliver(gateway.TopicAgentStateReadRequest, data); err != nil {
+		t.Fatalf("Deliver state.read.request: %v", err)
+	}
+
+	if got := atomic.LoadInt64(&claimCount); got != 1 {
+		t.Fatalf("claim count: want 1, got %d", got)
+	}
+
+	resp := nats.LastPublished(gateway.TopicAgentStateReadResponse)
+	if resp == nil {
+		t.Fatal("state.read.response not published after idempotency_claim read request")
+	}
+	if !containsJSON(resp, "flight_watcher:user-1:bucket") {
+		t.Errorf("state.read.response should contain idempotency key; got: %s", resp)
 	}
 }
 

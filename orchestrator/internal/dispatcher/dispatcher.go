@@ -1761,6 +1761,14 @@ func (d *Dispatcher) activeTaskByOrchRef(orchRef string) *types.TaskState {
 }
 
 func policyScopeAllowsAll(scopeDomains, requestedDomains []string) bool {
+	// An empty (nil) scopeDomains means the caller imposed no ceiling at
+	// ValidateAndScope time — typically a plain user task with no
+	// required_skill_domains. Allow everything so the planner and its
+	// subtasks can use any domain (including "general") without hitting a
+	// false scope violation.
+	if len(scopeDomains) == 0 {
+		return true
+	}
 	allowed := make(map[string]struct{}, len(scopeDomains))
 	for _, domain := range scopeDomains {
 		allowed[domain] = struct{}{}

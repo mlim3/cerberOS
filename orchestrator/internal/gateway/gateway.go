@@ -821,6 +821,18 @@ func (g *Gateway) handleRawStateWrite(subject string, data []byte) error {
 		}
 	}
 
+	if peek.DataType == "idempotency_complete" {
+		ctx := extractOrCreateCtx(envelope, "comms_gateway")
+		if g.memoryEndpoint == "" {
+			observability.LogFromContext(ctx).Warn("idempotency_complete write: memory endpoint not configured; skipping")
+		} else if g.memoryAPIKey == "" {
+			observability.LogFromContext(ctx).Warn("idempotency_complete write: MEMORY_API_KEY not configured; skipping")
+		} else {
+			observability.LogFromContext(ctx).Info("idempotency_complete write received", "agent_id", peek.AgentID)
+			go g.forwardIdempotencyComplete(peek.Payload)
+		}
+	}
+
 	g.agentStoreMu.Lock()
 	g.agentStore[peek.AgentID] = append(g.agentStore[peek.AgentID], raw)
 	g.agentStoreMu.Unlock()
@@ -898,6 +910,35 @@ func (g *Gateway) handleRawStateReadRequest(subject string, data []byte) error {
 			Records []json.RawMessage `json:"records"`
 			TraceID string            `json:"trace_id"`
 		}{AgentID: req.AgentID, Records: records, TraceID: traceID}
+		if resp.Records == nil {
+			resp.Records = []json.RawMessage{}
+		}
+		_ = g.publishEnvelope(ctx, TopicAgentStateReadResponse, "state.read.response", traceID, resp)
+		return nil
+	}
+
+	if req.DataType == "idempotency_claim" {
+		var rawRecords []json.RawMessage
+		if strings.HasPrefix(g.memoryEndpoint, "http://") || strings.HasPrefix(g.memoryEndpoint, "https://") {
+			if g.memoryAPIKey == "" {
+				observability.LogFromContext(ctx).Warn("idempotency_claim read: MEMORY_API_KEY not configured")
+			} else {
+				var fetchErr error
+				rawRecords, fetchErr = g.forwardIdempotencyClaim(ctx, req.QueryParams)
+				if fetchErr != nil {
+					observability.LogFromContext(ctx).Warn("idempotency_claim read: request failed", "error", fetchErr)
+					errRec, _ := json.Marshal(map[string]string{"error": fetchErr.Error()})
+					rawRecords = []json.RawMessage{errRec}
+				}
+			}
+		} else {
+			observability.LogFromContext(ctx).Warn("idempotency_claim read: memory endpoint not configured")
+		}
+		resp := struct {
+			AgentID string            `json:"agent_id"`
+			Records []json.RawMessage `json:"records"`
+			TraceID string            `json:"trace_id"`
+		}{AgentID: req.AgentID, Records: rawRecords, TraceID: traceID}
 		if resp.Records == nil {
 			resp.Records = []json.RawMessage{}
 		}
@@ -1441,6 +1482,80 @@ func (g *Gateway) forwardScheduledJobDelete(tags map[string]string) {
 		return
 	}
 	log.Info("scheduled_job delete: Memory API accepted", "job_id", jobID, "status", resp.StatusCode)
+}
+
+func (g *Gateway) forwardIdempotencyComplete(payload json.RawMessage) {
+	log := observability.LogFromContext(observability.WithModule(context.Background(), "comms_gateway"))
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		g.memoryEndpoint+"/api/v1/idempotency/complete", bytes.NewReader(payload))
+	if err != nil {
+		log.Warn("idempotency_complete: build request failed", "error", err)
+		return
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-Internal-API-Key", g.memoryAPIKey)
+
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		log.Warn("idempotency_complete: HTTP request failed", "error", err)
+		return
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		log.Warn("idempotency_complete: Memory API returned error",
+			"status", resp.StatusCode,
+			"body", strings.TrimSpace(string(body)),
+		)
+		return
+	}
+	log.Info("idempotency_complete: Memory API accepted", "status", resp.StatusCode)
+}
+
+func (g *Gateway) forwardIdempotencyClaim(ctx context.Context, payload json.RawMessage) ([]json.RawMessage, error) {
+	log := observability.LogFromContext(observability.WithModule(ctx, "comms_gateway"))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		g.memoryEndpoint+"/api/v1/idempotency/claim", bytes.NewReader(payload))
+	if err != nil {
+		return nil, fmt.Errorf("idempotency_claim: build request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-Internal-API-Key", g.memoryAPIKey)
+	httpReq.Header.Set("Accept", "application/json")
+
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("idempotency_claim: HTTP request: %w", err)
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("idempotency_claim: Memory API returned %d: %s",
+			resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var apiResp struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(body, &apiResp); err != nil {
+		return nil, fmt.Errorf("idempotency_claim: parse response: %w", err)
+	}
+
+	wrapped, err := json.Marshal(struct {
+		DataType string          `json:"data_type"`
+		Payload  json.RawMessage `json:"payload"`
+	}{
+		DataType: "idempotency_claim",
+		Payload:  apiResp.Data,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("idempotency_claim: wrap response: %w", err)
+	}
+	log.Info("idempotency_claim: fetched claim response")
+	return []json.RawMessage{wrapped}, nil
 }
 
 // fetchScheduledJobs queries GET /api/v1/user_crons?userId=... and returns

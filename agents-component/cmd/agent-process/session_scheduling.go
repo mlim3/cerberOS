@@ -30,6 +30,7 @@ type CreateScheduledJobParams struct {
 	IntervalSeconds      int       // e.g. 3600  (used when ScheduleKind == "interval")
 	NextRunAt            time.Time // first scheduled run; defaults to now+interval when zero
 	UserContextID        string    // the user who owns the job
+	ConversationID       string    // optional conversation thread to write scheduled runs back into
 	RequiredSkillDomains []string  // skill domains to pre-authorize at dispatch (nil → unrestricted)
 }
 
@@ -55,6 +56,7 @@ func (sl *SessionLog) CreateScheduledJob(p CreateScheduledJobParams) error {
 		"payload": map[string]any{
 			"userId":               p.UserContextID,
 			"rawInput":             p.RawInput,
+			"conversationId":       p.ConversationID,
 			"requiredSkillDomains": p.RequiredSkillDomains, // nil serialises as null; dispatcher treats null as unrestricted
 		},
 		"nextRunAt": p.NextRunAt.UTC().Format(time.RFC3339),

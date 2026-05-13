@@ -64,6 +64,8 @@ func RegisterRoutes(mux *http.ServeMux, h AppHandlers) {
 	mux.Handle("GET /api/v1/scheduled_jobs/{jobId}/runs", RequireVaultKey(http.HandlerFunc(h.ScheduledJobs.HandleListScheduledJobRuns)))
 	mux.Handle("GET /api/v1/user_crons", RequireVaultKey(http.HandlerFunc(h.ScheduledJobs.HandleListUserCrons)))
 	mux.Handle("DELETE /api/v1/scheduled_jobs/{jobId}", RequireVaultKey(http.HandlerFunc(h.ScheduledJobs.HandleDeleteUserCron)))
+	mux.Handle("POST /api/v1/idempotency/claim", RequireVaultKey(http.HandlerFunc(h.ScheduledJobs.HandleClaimIdempotency)))
+	mux.Handle("POST /api/v1/idempotency/complete", RequireVaultKey(http.HandlerFunc(h.ScheduledJobs.HandleCompleteIdempotency)))
 	mux.Handle("POST /api/v1/system/maintenance/run", RequireVaultKey(http.HandlerFunc(h.ScheduledJobs.HandleRunSystemMaintenance)))
 
 	// Vault (internal — protected by vault key)

@@ -127,6 +127,9 @@ function TaskSidebar({
     return 'completed'
   }
 
+  const describeScheduleKind = (job: UserCronJob) =>
+    job.scheduleKind === 'cron' ? 'Cron' : `Every ${job.intervalSeconds}s`
+
   // copyConversationId puts the full conversation_id on the clipboard so the
   // user can paste it into Loki/Grafana queries. We deliberately surface the
   // copy via a dropdown action (and a hover-revealed short prefix) rather
@@ -366,7 +369,7 @@ function TaskSidebar({
                       <div className="user-cron-card-title-row">
                         <strong className="user-cron-card-name">{j.name}</strong>
                         <span className={`user-cron-kind user-cron-kind--${j.scheduleKind}`}>
-                          {j.scheduleKind === 'cron' ? 'Cron' : 'Interval'}
+                          {describeScheduleKind(j)}
                         </span>
                       </div>
                       {j.payload?.rawInput ? (
@@ -380,7 +383,7 @@ function TaskSidebar({
                             {j.cronExpression} · {j.timeZone || 'UTC'}
                           </code>
                         ) : (
-                          <span>Every {j.intervalSeconds}s</span>
+                          <span>{describeScheduleKind(j)}</span>
                         )}
                         <span className="user-cron-next">Next · {new Date(j.nextRunAt).toLocaleString()}</span>
                       </div>

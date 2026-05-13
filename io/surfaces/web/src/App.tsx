@@ -7,6 +7,7 @@ import type {
   OrchestratorStreamEvent,
   PlanPreview,
   PlanDecisionStatus,
+  SkillCreated,
 } from '@cerberos/io-core'
 import TaskSidebar, { type SidebarPrimaryTab } from './components/TaskSidebar'
 import ChatWindow from './components/ChatWindow'
@@ -386,12 +387,24 @@ function App() {
 
   // Skill-activity toast state — populated by orchestrator 'skill_activity' SSE events.
   const [skillToasts, setSkillToasts] = useState<SkillToastItem[]>([])
+  const [skillCreatedByTask, setSkillCreatedByTask] = useState<Record<string, SkillCreated>>({})
 
   const dismissSkillToast = useCallback((id: string) => {
     setSkillToasts(prev => prev.filter(t => t.id !== id))
   }, [])
 
+  const dismissSkillCreatedCard = useCallback((taskId: string) => {
+    setSkillCreatedByTask(prev => {
+      if (!prev[taskId]) return prev
+      const next = { ...prev }
+      delete next[taskId]
+      return next
+    })
+  }, [])
+
   const selectedTask = tasks.find(t => t.id === selectedTaskId)
+  const selectedSkillCreated =
+    selectedTask?.currentTaskId ? (skillCreatedByTask[selectedTask.currentTaskId] ?? null) : null
 
   /** Fingerprint seen when conversation was focused / opened — detects new mirrored cron turns */
   const readLogFingerprintsRef = useRef<Record<string, string>>({})
@@ -707,6 +720,11 @@ function App() {
           ...prev.slice(-9), // keep at most 10 toasts
           { id: nextId(), activity: ev.payload, createdAt: Date.now() },
         ])
+      } else if (ev.type === 'skill_created') {
+        setSkillCreatedByTask(prev => ({
+          ...prev,
+          [ev.payload.taskId]: ev.payload,
+        }))
       }
     }
 
@@ -1348,6 +1366,11 @@ function App() {
       ? planPreviews[selectedTask.currentTaskId]
       : null
 
+  const describeCronJobSchedule = (job: UserCronJob) =>
+    job.scheduleKind === 'cron'
+      ? `${job.cronExpression} (${job.timeZone || 'UTC'})`
+      : `Every ${job.intervalSeconds}s`
+
   const cronStripVisible =
     Boolean(cronContextJob &&
       selectedTask &&
@@ -1434,11 +1457,9 @@ function App() {
               <div className="header-recurring-strip">
                 <strong>Scheduled</strong> · next run {new Date(cronContextJob.nextRunAt).toLocaleString()} ·{' '}
                 {cronContextJob.scheduleKind === 'cron' ? (
-                  <code>
-                    {cronContextJob.cronExpression} ({cronContextJob.timeZone || 'UTC'})
-                  </code>
+                  <code>{describeCronJobSchedule(cronContextJob)}</code>
                 ) : (
-                  <span>every {cronContextJob.intervalSeconds}s</span>
+                  <span>{describeCronJobSchedule(cronContextJob)}</span>
                 )}
               </div>
             )}
@@ -1512,9 +1533,7 @@ function App() {
             <p className="empty-state-text">This repeating task is not tied to an open conversation.</p>
             <p className="cron-orphan-schedule">
               Next run {new Date(cronContextJob.nextRunAt).toLocaleString()}
-              {cronContextJob.scheduleKind === 'cron'
-                ? ` · ${cronContextJob.cronExpression} (${cronContextJob.timeZone || 'UTC'})`
-                : ` · every ${cronContextJob.intervalSeconds}s`}
+              {` · ${describeCronJobSchedule(cronContextJob)}`}
             </p>
             <button type="button" className="cron-orphan-close" onClick={() => setCronContextJob(null)}>
               Close

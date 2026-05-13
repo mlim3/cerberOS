@@ -156,6 +156,9 @@ func executeCreateScheduledJob(sl *SessionLog, userContextID string, raw json.Ra
 		UserContextID:        userContextID,
 		RequiredSkillDomains: params.RequiredSkillDomains,
 	}
+	if sl != nil {
+		p.ConversationID = sl.conversationID
+	}
 
 	if err := sl.CreateScheduledJob(p); err != nil {
 		return ToolResult{
