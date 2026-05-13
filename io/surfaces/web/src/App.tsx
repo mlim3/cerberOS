@@ -764,16 +764,10 @@ function App() {
         setTaskHeartbeats(prev => ({ ...prev, [p.taskId]: Date.now() }))
       } else if (ev.type === 'credential_request') {
         setCredentialRequests(prev => {
-          const ex = prev[ev.payload.taskId]
-          if (
-            ex?.status === 'submitted' &&
-            ex.request.requestId === ev.payload.requestId
-          ) {
-            return prev
-          }
+          if (prev[ev.payload.requestId]?.status === 'submitted') return prev
           return {
             ...prev,
-            [ev.payload.taskId]: { request: ev.payload, status: 'pending' },
+            [ev.payload.requestId]: { request: ev.payload, status: 'pending' },
           }
         })
       } else if (ev.type === 'plan_preview') {
@@ -823,10 +817,11 @@ function App() {
     if (!useMockHeartbeat) return
     if (selectedTaskId !== '13') return
     setCredentialRequests(prev => {
-      if (prev['13']) return prev
+      const reqId = FALLBACK_TASK_13_CREDENTIAL.requestId
+      if (prev[reqId]) return prev
       return {
         ...prev,
-        '13': { request: FALLBACK_TASK_13_CREDENTIAL, status: 'pending' },
+        [reqId]: { request: FALLBACK_TASK_13_CREDENTIAL, status: 'pending' },
       }
     })
   }, [DEMO_MODE, useMockHeartbeat, selectedTaskId])
@@ -1771,99 +1766,89 @@ function App() {
 
   // ── Credential handlers (completely separate from chat) ──
 
-  const selectedTaskCredential = selectedTask
-    ? selectedTask.currentTaskId
-      ? credentialRequests[selectedTask.currentTaskId] ?? null
-      : null
-    : null
-
-  const handleOpenCredentialModal = useCallback(() => {
-    if (!selectedTask?.currentTaskId) return
-    setActiveCredentialTaskId(selectedTask.currentTaskId)
-    setShowCredentialModal(true)
-  }, [selectedTask])
+  type CredentialEntry = { request: CredentialRequest; status: CredentialRequestStatus }
 
   const handleCredentialSubmit = useCallback(
-    async (requestId: string, _credential: string) => {
-      const taskId = activeCredentialTaskId
-      if (!taskId) return
+    async (_requestId: string, _credential: string) => {
+      // Inline cards pass the requestId directly; modal path uses activeCredentialTaskId.
+      const reqId = _requestId || activeCredentialTaskId
+      if (!reqId) return
 
-      const credRequest = credentialRequests[taskId]?.request
+      const credRequest = credentialRequests[reqId]?.request
       if (!credRequest) return
 
       setCredentialRequests(prev => ({
         ...prev,
-        [taskId]: { ...prev[taskId], status: 'submitting' },
+        [reqId]: { ...prev[reqId], status: 'submitting' },
       }))
 
-      const result = await submitCredential({
-        taskId,
-        requestId,
-        userId: credRequest.userId,
-        keyName: credRequest.keyName,
-        value: _credential,
-      })
+      try {
+        const result = await submitCredential({
+          taskId: credRequest.taskId,
+          requestId: reqId,
+          userId: credRequest.userId,
+          keyName: credRequest.keyName,
+          value: _credential,
+        })
 
-      if (result.ok) {
-        setCredentialRequests(prev => ({
-          ...prev,
-          [taskId]: { ...prev[taskId], status: 'submitted' },
-        }))
-
-        // Add a system-level message (no content leaked)
-        const sysMsg: ChatMessage = {
-          id: nextId(),
-          role: 'user',
-          content: 'Credential provided securely via isolated channel',
-          timestamp: timeLabel(),
-          isRedacted: true,
-        }
-        setTasks(prev =>
-          prev.map(t =>
-            t.currentTaskId === taskId ? { ...t, messages: [...t.messages, sysMsg] } : t
-          )
-        )
-
-        if (uiSettings.showActivityLog) {
-          addLogEntry({
-            type: 'status_change',
-            taskId,
-            taskTitle: tasks.find(t => t.currentTaskId === taskId)?.title.slice(0, 20) ?? '',
-            message: 'Credential submitted through secure channel (content not logged)',
+        const topTaskId = credRequest.taskId
+        if (result.ok) {
+          // Mark this card submitted AND collapse any duplicate cards for the
+          // same (taskId, keyName) — multiple agents can independently request
+          // the same credential type; once one is stored the others will pick
+          // it up on their next poll, so the duplicate UI cards can be cleared.
+          setCredentialRequests(prev => {
+            const updated = { ...prev }
+            Object.keys(updated).forEach(id => {
+              const entry = updated[id]
+              if (
+                entry.status === 'pending' &&
+                entry.request.taskId === topTaskId &&
+                entry.request.keyName === credRequest.keyName
+              ) {
+                updated[id] = { ...entry, status: 'submitted' }
+              }
+            })
+            updated[reqId] = { ...updated[reqId], status: 'submitted' }
+            return updated
           })
-        }
 
-        // Simulate the orchestrator acknowledging receipt after a short delay
-        setTimeout(() => {
-          const ackMsg: ChatMessage = {
+          const sysMsg: ChatMessage = {
             id: nextId(),
-            role: 'agent',
-            content: 'Credentials received securely. Running the migration now — I\'ll update you when it completes.',
+            role: 'user',
+            content: 'Credential provided securely via isolated channel',
             timestamp: timeLabel(),
+            isRedacted: true,
           }
           setTasks(prev =>
             prev.map(t =>
-              t.currentTaskId === taskId
-                ? {
-                    ...t,
-                    status: 'working',
-                    lastUpdate: 'Running production migration…',
-                    expectedNextInput: '~3 min',
-                    messages: [...t.messages, ackMsg],
-                  }
-                : t
+              t.currentTaskId === topTaskId ? { ...t, messages: [...t.messages, sysMsg] } : t
             )
           )
-        }, 800)
-      } else {
+
+          if (uiSettings.showActivityLog) {
+            addLogEntry({
+              type: 'status_change',
+              taskId: topTaskId,
+              taskTitle: tasks.find(t => t.currentTaskId === topTaskId)?.title.slice(0, 20) ?? '',
+              message: 'Credential submitted through secure channel (content not logged)',
+            })
+          }
+        } else {
+          setCredentialRequests(prev => ({
+            ...prev,
+            [reqId]: { ...prev[reqId], status: 'error' },
+          }))
+        }
+      } catch {
         setCredentialRequests(prev => ({
           ...prev,
-          [taskId]: { ...prev[taskId], status: 'error' },
+          [reqId]: { ...prev[reqId], status: 'error' },
         }))
+      } finally {
+        setShowCredentialModal(false)
+        setActiveCredentialTaskId(null)
       }
-
-      setShowCredentialModal(false)
-      setActiveCredentialTaskId(null)
     },
     [activeCredentialTaskId, credentialRequests, tasks, uiSettings.showActivityLog, addLogEntry]
   )
@@ -2044,9 +2029,22 @@ function App() {
               isStreaming={streamingForTaskId === selectedTask.id}
               streamingContent={streamingForTaskId === selectedTask.id ? streamingContent : ''}
               settings={uiSettings}
-              credentialRequest={selectedTaskCredential?.request}
-              credentialStatus={selectedTaskCredential?.status}
-              onProvideCredential={handleOpenCredentialModal}
+              pendingCredentials={
+                selectedTask.currentTaskId
+                  ? (Object.entries(credentialRequests) as Array<[string, CredentialEntry]>)
+                      .filter(([, v]) => v.request.taskId === selectedTask.currentTaskId && v.status !== 'error')
+                      .map(([reqId, v]) => ({
+                        request: v.request,
+                        status: v.status,
+                        onProvide: () => {
+                          setActiveCredentialTaskId(reqId)
+                          setShowCredentialModal(true)
+                        },
+                        onSubmitInline: (_requestId: string, value: string) =>
+                          handleCredentialSubmit(_requestId, value),
+                      }))
+                  : []
+              }
               pulseMessageKey={liveLogPulseKeyByTask[selectedTask.id] ?? undefined}
               skillCreatedCard={selectedSkillCreated}
               onDismissSkillCreated={

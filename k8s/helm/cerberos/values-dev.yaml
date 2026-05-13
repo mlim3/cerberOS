@@ -1,0 +1,133 @@
+# =============================================================================
+# values-dev.yaml — kind local cluster overrides
+# =============================================================================
+# Usage:
+#   ./k8s/scripts/kind-up.sh
+#
+# Optional secrets: set in the shell and/or in repo-root `.env` (same keys as
+# root `.env.example`). kind-up.sh sources `.env` before Helm but restores any
+# value you already exported in the parent shell so the shell wins.
+#
+# Keys wired into Helm when non-empty: ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL,
+# TAVILY_API_KEY, OPENAI_API_KEY, GMAIL_DEMO_EMAIL, GMAIL_DEMO_APP_PASSWORD.
+# =============================================================================
+
+# Use locally-built images (loaded via kind load docker-image)
+nats:
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+postgres:
+  auth:
+    password: password
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+openbao:
+  # devMode=true: in-memory storage, auto-unsealed, no PVC needed.
+  # Flip to false and provide baoToken for persistent storage.
+  devMode: true
+  postgres:
+    password: password
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+
+vault-engine:
+  image:
+    repository: cerberos-vault-engine
+    tag: local
+    pullPolicy: Never
+  # Dev-mode OpenBao (-dev-root-token-id=root) auto-unseals with this token
+  baoToken: "root"
+  googleOAuth:
+    clientId: ""     # set via: helm upgrade ... --set vault-engine.googleOAuth.clientId=<id>
+    clientSecret: "" # set via: helm upgrade ... --set vault-engine.googleOAuth.clientSecret=<secret>
+
+memory-api:
+  image:
+    repository: cerberos-memory-api
+    tag: local
+    pullPolicy: Never
+  db:
+    password: password
+  vaultMasterKey: "00000000000000000000000000000000"
+  internalVaultApiKey: "dev-internal-key"
+  # Applies default schedules from k8s/helm/charts/memory-api/values.yaml
+  systemMaintenanceCron:
+    enabled: true
+
+embedding-api:
+  image:
+    repository: cerberos-embedding-api
+    tag: local
+    pullPolicy: Never
+  auth:
+    hfToken: ""
+
+orchestrator:
+  image:
+    repository: cerberos-orchestrator
+    tag: local
+    pullPolicy: Never
+
+io:
+  image:
+    repository: cerberos-io
+    tag: local
+    pullPolicy: Never
+  # Must match memory-api.internalVaultApiKey above (IO → Memory X-Internal-API-Key)
+  internalVaultApiKey: "dev-internal-key"
+  googleOAuth:
+    clientId: ""     # set via: helm upgrade ... --set io.googleOAuth.clientId=<id>
+    clientSecret: "" # set via: helm upgrade ... --set io.googleOAuth.clientSecret=<secret>
+    redirectUri: "http://localhost:3001/api/admin/google-oauth/callback"
+
+aegis-databus:
+  image:
+    repository: cerberos-aegis-databus
+    tag: local
+    pullPolicy: Never
+
+aegis-agents:
+  image:
+    repository: cerberos-aegis-agents
+    tag: local
+    pullPolicy: Never
+  # anthropicApiKey: set via --set at install time
+
+observability:
+  enabled: true
+  loki:
+    loki:
+      useTestSchema: true
+      commonConfig:
+        replication_factor: 1
+      storage:
+        type: filesystem
+      auth_enabled: false
+  grafana:
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+  prometheus:
+    server:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 128Mi
+
+network-policies:
+  enabled: false

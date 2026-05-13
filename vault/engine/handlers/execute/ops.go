@@ -128,6 +128,9 @@ func execGoogleSearch(ctx context.Context, credential string, params map[string]
 // execGitHubRequest makes an authenticated GitHub REST API request.
 // credential is the GitHub personal access token. params must include "path".
 func execGitHubRequest(ctx context.Context, credential string, params map[string]any) opResult {
+	if credential == "" {
+		return opResult{err: fmt.Errorf("github_token is required"), code: ErrCodeCredentialUnavailable}
+	}
 	path, ok := params["path"].(string)
 	if !ok || path == "" {
 		return opResult{err: fmt.Errorf("path parameter is required"), code: ErrCodeInvalidParams}

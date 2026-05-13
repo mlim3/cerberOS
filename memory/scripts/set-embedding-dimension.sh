@@ -2,7 +2,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-TARGET_FILE="${SCRIPT_DIR}/init-db.sql"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+CANONICAL_FILE="${SCRIPT_DIR}/init-db.sql"
+K8S_COPY="${REPO_ROOT}/k8s/helm/charts/postgres/files/init-db.sql"
 DIMENSION="${1:-${EMBEDDING_DIM:-}}"
 
 if [ -z "${DIMENSION}" ]; then
@@ -15,7 +17,7 @@ if ! [[ "${DIMENSION}" =~ ^[0-9]+$ ]] || [ "${DIMENSION}" -le 0 ]; then
   exit 1
 fi
 
-python3 - "${TARGET_FILE}" "${DIMENSION}" <<'PY'
+python3 - "${CANONICAL_FILE}" "${DIMENSION}" <<'PY'
 import pathlib
 import re
 import sys
@@ -29,4 +31,12 @@ if count < 1:
 path.write_text(updated)
 PY
 
-echo "Updated ${TARGET_FILE} to embedding VECTOR(${DIMENSION})"
+echo "Updated ${CANONICAL_FILE} to embedding VECTOR(${DIMENSION})"
+
+# Mirror the canonical schema into the Helm chart so the K8s Postgres initdb
+# ConfigMap can never drift from memory/scripts/init-db.sql. Helm's Files.Get
+# is restricted to the chart directory, so we copy rather than symlink.
+if [ -f "${K8S_COPY}" ] || [ -d "$(dirname "${K8S_COPY}")" ]; then
+  cp "${CANONICAL_FILE}" "${K8S_COPY}"
+  echo "Mirrored to ${K8S_COPY}"
+fi
