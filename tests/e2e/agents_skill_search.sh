@@ -350,6 +350,13 @@ if [[ -s "${event_stream_file}" ]]; then
   echo "Task event stream:"
   sed 's/^/  /' "${event_stream_file}"
 fi
+# If the event stream file is non-empty but contains no SSE data lines, IO
+# rejected the pre-subscription (likely a 404 "Task not found" race: the test
+# subscribed before the chat POST registered the task).  This silently prevents
+# plan-preview auto-approval and stalls the task.
+if [[ -s "${event_stream_file}" ]] && ! grep -q '^data:' "${event_stream_file}" 2>/dev/null; then
+  fail "event stream returned a non-SSE response — IO may have rejected the pre-subscription with 404 (task-registration race): $(cat "${event_stream_file}")"
+fi
 
 stream_chunks="$(parse_sse_chunks "${stream_file}" | tr '\n' ' ')"
 # The IO service closes the /api/chat SSE stream after the initial acknowledgment
@@ -393,13 +400,19 @@ echo "${filtered_logs}" | sed 's/^/  /'
 #    pipeline is wired end-to-end (seeding → NATS → orchestrator gateway → pgvector).
 assert_contains "${agent_logs}" '"tool":"skills_search"' "skills_search tool was not called — agent must use skills_search to discover e2e_ping"
 
-# 2. skills_search must have returned results (result_count > 0) — proves the Memory
-#    API accepted the seed writes and the embedding index is queryable.
+# 2. skills_search must have returned at least one result — proves the Memory API
+#    accepted the seed writes and the embedding index is queryable.
+#    We check result_count > 0 (not just field presence) so that an empty index
+#    (result_count:0 from a seeding race) is caught here rather than only at the
+#    e2e_ping assertion below with a misleading "tool not called" message.
 #    Note: we do not assert top_domain=e2e_test. HNSW ranking is sensitive to pool
 #    size and accumulated synthesized skills from prior runs; what matters is that
 #    the search fires and returns results from a live index, not which skill ranks
 #    first in a growing pool.
-assert_contains "${agent_logs}" '"result_count":' "skills_search returned no result_count — skill index may be empty"
+if ! echo "${agent_logs}" | rg -q '"result_count":[1-9]'; then
+  fail "skills_search result_count is 0 or missing — skill index may be empty; ensure memory-api was ready before aegis-agents seeded static skills (check wait-for-memory-api init container)"
+fi
+ok "skills_search returned results (result_count > 0)"
 
 # 3. e2e_ping must have executed with the probe value. Current intended
 #    behaviour is direct execution after credential-free auto-registration into

@@ -163,6 +163,14 @@ submit_and_wait() {
   done
 
   kill "${event_pid}" 2>/dev/null || true
+
+  # If the event file is non-empty but has no SSE data lines, IO rejected the
+  # pre-subscription (404 "Task not found" race).  Fail loudly rather than
+  # letting plan-approval silently time out.
+  if [[ -s "${event_file}" ]] && ! grep -q '^data:' "${event_file}" 2>/dev/null; then
+    fail "event stream returned a non-SSE response — IO may have rejected the pre-subscription with 404 (task-registration race): $(cat "${event_file}")"
+  fi
+
   rm -f "${event_file}"
   echo "${response}"
 }
