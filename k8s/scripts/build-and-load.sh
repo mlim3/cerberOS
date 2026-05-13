@@ -46,6 +46,19 @@ build_and_load() {
   kind load docker-image "${name}:${TAG}" --name "${CLUSTER}"
 }
 
+# Pre-pull upstream third-party images on the host and load them onto every
+# kind node. Without this each worker has to pull (e.g. pgvector ~400MB) via
+# its own kubelet, which on Docker Hub can stretch to 15+ minutes per node
+# and is the primary cause of "did not become ready in time" rollouts.
+prepull_and_load() {
+  local image="$1"
+  echo ""
+  echo "--- Pre-pulling ${image} ---"
+  docker pull "${image}"
+  echo "--- Loading ${image} into kind ---"
+  kind load docker-image "${image}" --name "${CLUSTER}"
+}
+
 build_and_load cerberos-orchestrator   "${REPO_ROOT}/orchestrator"
 build_and_load cerberos-io             "${REPO_ROOT}/io"
 build_and_load cerberos-memory-api     "${REPO_ROOT}/memory"
@@ -53,6 +66,12 @@ build_and_load cerberos-embedding-api  "${REPO_ROOT}/embedding-api"
 build_and_load cerberos-vault-engine   "${REPO_ROOT}/vault/engine"
 build_and_load cerberos-aegis-agents   "${REPO_ROOT}/agents-component"
 build_and_load cerberos-aegis-databus  "${REPO_ROOT}/aegis-databus" aegis-databus
+
+# Third-party infra images. Keep this list in sync with the image refs in
+# k8s/helm/charts/{postgres,nats,openbao}/values.yaml.
+prepull_and_load pgvector/pgvector:pg16
+prepull_and_load nats:2.10-alpine
+prepull_and_load openbao/openbao:latest
 
 echo ""
 echo "==> All images loaded. Run 'kubectl get nodes' to verify the cluster."

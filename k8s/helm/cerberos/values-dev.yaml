@@ -89,6 +89,10 @@ io:
     pullPolicy: Never
   # Must match memory-api.internalVaultApiKey above (IO → Memory X-Internal-API-Key)
   internalVaultApiKey: "dev-internal-key"
+  googleOAuth:
+    clientId: ""     # set via: helm upgrade ... --set io.googleOAuth.clientId=<id>
+    clientSecret: "" # set via: helm upgrade ... --set io.googleOAuth.clientSecret=<secret>
+    redirectUri: "http://localhost:3001/api/admin/google-oauth/callback"
 
 aegis-databus:
   image:

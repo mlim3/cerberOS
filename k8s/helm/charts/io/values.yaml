@@ -25,6 +25,15 @@ internalVaultApiKey: ""
 
 # Optional — cloud STT / OpenAI paths (see root .env.example).
 openaiApiKey: ""
+
+# Google OAuth credentials for the Admin UI "Connect Google Account" flow
+# (gmail_search, gmail_get_message, calendar_list_events skills). Mirrors
+# .env.example GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET/GOOGLE_REDIRECT_URI.
+googleOAuth:
+  clientId: ""
+  clientSecret: ""
+  redirectUri: "http://localhost:3001/api/admin/google-oauth/callback"
+
 logLevel: "info"
 demoMode: "false"
 sttProvider: "disabled"

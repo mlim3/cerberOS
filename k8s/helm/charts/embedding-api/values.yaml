@@ -20,6 +20,13 @@ runtime:
 auth:
   hfToken: ""
 
+startupProbe:
+  periodSeconds: 10
+  # 240 * 10s = 40 min. First boot has to download model weights from
+  # Hugging Face; subsequent boots reuse the in-image cache and finish in
+  # seconds. Tighten for production where weights are baked into the image.
+  failureThreshold: 240
+
 resources:
   requests:
     cpu: 500m

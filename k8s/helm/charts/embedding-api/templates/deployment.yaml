@@ -68,8 +68,10 @@ spec:
               port: http
             # The Python app loads the embedding model during FastAPI startup,
             # so the HTTP socket is not bound until model initialization
-            # completes. Give startup enough time before liveness begins.
-            periodSeconds: 10
-            failureThreshold: 60
+            # completes. On a cold cluster the first boot also has to download
+            # weights from Hugging Face, which on slow links can take longer
+            # than the failure budget. Both knobs are overridable in values.
+            periodSeconds: {{ .Values.startupProbe.periodSeconds | default 10 }}
+            failureThreshold: {{ .Values.startupProbe.failureThreshold | default 240 }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}

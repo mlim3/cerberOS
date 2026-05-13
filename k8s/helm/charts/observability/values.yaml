@@ -143,7 +143,7 @@ tempo:
 promtail:
   config:
     clients:
-      - url: http://cerberos-loki-gateway:80/loki/api/v1/push
+      - url: http://cerberos-loki:3100/loki/api/v1/push
     snippets:
       extraRelabelConfigs:
         # Pods use app.kubernetes.io/name (not `app`), which Promtail SD exposes

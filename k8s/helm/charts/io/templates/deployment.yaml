@@ -63,6 +63,16 @@ spec:
             - name: OPENAI_API_KEY
               value: {{ .Values.openaiApiKey | quote }}
             {{- end }}
+            {{- if .Values.googleOAuth.clientId }}
+            - name: GOOGLE_CLIENT_ID
+              value: {{ .Values.googleOAuth.clientId | quote }}
+            - name: GOOGLE_CLIENT_SECRET
+              value: {{ .Values.googleOAuth.clientSecret | quote }}
+            {{- end }}
+            {{- if .Values.googleOAuth.redirectUri }}
+            - name: GOOGLE_REDIRECT_URI
+              value: {{ .Values.googleOAuth.redirectUri | quote }}
+            {{- end }}
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: {{ .Values.observability.otlpEndpoint | quote }}
             - name: OTEL_SERVICE_NAME

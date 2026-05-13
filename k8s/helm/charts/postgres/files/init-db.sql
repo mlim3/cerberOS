@@ -1,10 +1,5 @@
--- =============================================================================
--- Postgres init for the k8s deployment.
---
--- This file is a COPY of memory/scripts/init-db.sql (which docker-compose
--- bind-mounts directly). Both files MUST stay in sync — if you edit the schema
--- here, also update memory/scripts/init-db.sql, and vice versa.
--- =============================================================================
+-- Note: the embedding VECTOR dimension in this file is synced by
+-- memory/scripts/set-embedding-dimension.sh so it matches the selected model.
 
 -- Enable pgvector extension
 CREATE EXTENSION IF NOT EXISTS vector;
@@ -17,6 +12,7 @@ CREATE SCHEMA IF NOT EXISTS agent_logs_schema;
 CREATE SCHEMA IF NOT EXISTS service_log_schema;
 CREATE SCHEMA IF NOT EXISTS scheduler_schema;
 CREATE SCHEMA IF NOT EXISTS orchestrator_schema;
+CREATE SCHEMA IF NOT EXISTS agents_schema;
 
 -- ==========================================
 -- identity_schema
@@ -108,7 +104,7 @@ CREATE TABLE IF NOT EXISTS personal_info_schema.personal_info_chunks (
     id UUID PRIMARY KEY,
     user_id UUID NOT NULL,
     raw_text TEXT NOT NULL,
-    embedding VECTOR(1536),
+    embedding VECTOR(640),
     model_version VARCHAR(50) NOT NULL,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -186,6 +182,7 @@ CREATE TABLE IF NOT EXISTS orchestrator_schema.orchestrator_records (
     id UUID PRIMARY KEY,
     orchestrator_task_ref TEXT NOT NULL,
     task_id TEXT NOT NULL,
+    user_id UUID NOT NULL REFERENCES identity_schema.users(id),
     plan_id TEXT,
     subtask_id TEXT,
     trace_id VARCHAR(64),
@@ -196,21 +193,23 @@ CREATE TABLE IF NOT EXISTS orchestrator_schema.orchestrator_records (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_orch_records_task_id_type
-    ON orchestrator_schema.orchestrator_records (task_id, data_type, timestamp DESC);
-CREATE INDEX IF NOT EXISTS idx_orch_records_orch_ref_type
-    ON orchestrator_schema.orchestrator_records (orchestrator_task_ref, data_type, timestamp DESC);
-CREATE INDEX IF NOT EXISTS idx_orch_records_type_timestamp
-    ON orchestrator_schema.orchestrator_records (data_type, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_orch_records_user_task
+    ON orchestrator_schema.orchestrator_records (user_id, task_id);
+CREATE INDEX IF NOT EXISTS idx_orch_records_user_task_type
+    ON orchestrator_schema.orchestrator_records (user_id, task_id, data_type, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_orch_records_user_orch_ref_type
+    ON orchestrator_schema.orchestrator_records (user_id, orchestrator_task_ref, data_type, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_orch_records_user_type_timestamp
+    ON orchestrator_schema.orchestrator_records (user_id, data_type, timestamp DESC);
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_orch_records_task_state_upsert
-    ON orchestrator_schema.orchestrator_records (task_id, data_type)
+    ON orchestrator_schema.orchestrator_records (user_id, task_id, data_type)
     WHERE data_type = 'task_state';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_orch_records_plan_state_upsert
-    ON orchestrator_schema.orchestrator_records (task_id, plan_id, data_type)
+    ON orchestrator_schema.orchestrator_records (user_id, task_id, plan_id, data_type)
     WHERE data_type = 'plan_state';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_orch_records_subtask_state_upsert
-    ON orchestrator_schema.orchestrator_records (task_id, subtask_id, data_type)
+    ON orchestrator_schema.orchestrator_records (user_id, task_id, subtask_id, data_type)
     WHERE data_type = 'subtask_state';
 
 CREATE OR REPLACE FUNCTION orchestrator_schema.reject_append_only_mutation()
@@ -347,3 +346,23 @@ CREATE TABLE IF NOT EXISTS scheduling_schema.scheduled_job_runs (
 
 CREATE INDEX IF NOT EXISTS idx_scheduled_job_runs_job_id ON scheduling_schema.scheduled_job_runs(job_id);
 CREATE INDEX IF NOT EXISTS idx_scheduled_job_runs_started_at ON scheduling_schema.scheduled_job_runs(started_at DESC);
+
+-- ==========================================
+-- agents_schema
+-- ==========================================
+CREATE TABLE IF NOT EXISTS agents_schema.skill_cache (
+    id          UUID PRIMARY KEY,
+    domain      TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    origin      TEXT NOT NULL,
+    description TEXT NOT NULL,
+    payload     JSONB NOT NULL,
+    embedding   VECTOR(640),
+    seed_hash   TEXT NOT NULL DEFAULT '',
+    created_at  TIMESTAMPTZ DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (domain, name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_skill_cache_domain ON agents_schema.skill_cache(domain);
+CREATE INDEX IF NOT EXISTS idx_skill_cache_embedding ON agents_schema.skill_cache USING hnsw (embedding vector_cosine_ops);

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Create the kind cluster, load local images, and install the umbrella Helm chart.
-# Usage: ./deploy/scripts/kind-up.sh [--skip-build] [--skip-install] [--embedding-model MODEL]
+# Usage: ./k8s/scripts/kind-up.sh [--skip-build] [--skip-install] [--embedding-model MODEL]
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -112,23 +112,6 @@ check_dependencies() {
   fi
 }
 
-for arg in "$@"; do
-  case $arg in
-    --skip-build) SKIP_BUILD=true ;;
-    --skip-install) SKIP_INSTALL=true ;;
-    -h|--help)
-      print_help
-      exit 0
-      ;;
-    *)
-      echo "error: unknown option '$1'" >&2
-      echo "" >&2
-      print_help >&2
-      exit 1
-      ;;
-  esac
-done
-
 case "${EMBEDDING_MODEL}" in
   embeddinggemma)
     EMBEDDING_MODEL="google/embeddinggemma-300m"
@@ -183,6 +166,9 @@ fi
 if [ "$SKIP_INSTALL" = false ]; then
   echo ""
   echo "==> [5/5] Installing umbrella Helm chart ..."
+  # Clear any stale half-resolved sub-chart bundles from previous failed runs
+  # so `helm dependency update` always starts from a clean slate.
+  rm -rf "${REPO_ROOT}"/k8s/helm/cerberos/tmpcharts-* 2>/dev/null || true
   # Resolve sub-chart deps for any component chart that declares them
   # (e.g. observability → prometheus/grafana/loki/tempo). Must run BEFORE
   # the umbrella's helm dependency update, otherwise the observability
@@ -207,6 +193,9 @@ if [ "$SKIP_INSTALL" = false ]; then
     _saved_OPENAI_API_KEY="${OPENAI_API_KEY-}"
     _saved_GMAIL_DEMO_EMAIL="${GMAIL_DEMO_EMAIL-}"
     _saved_GMAIL_DEMO_APP_PASSWORD="${GMAIL_DEMO_APP_PASSWORD-}"
+    _saved_GOOGLE_CLIENT_ID="${GOOGLE_CLIENT_ID-}"
+    _saved_GOOGLE_CLIENT_SECRET="${GOOGLE_CLIENT_SECRET-}"
+    _saved_GOOGLE_REDIRECT_URI="${GOOGLE_REDIRECT_URI-}"
     set -a
     # shellcheck disable=SC1090
     source "${_env_file}"
@@ -217,8 +206,12 @@ if [ "$SKIP_INSTALL" = false ]; then
     [[ -n "${_saved_OPENAI_API_KEY}" ]] && export OPENAI_API_KEY="${_saved_OPENAI_API_KEY}"
     [[ -n "${_saved_GMAIL_DEMO_EMAIL}" ]] && export GMAIL_DEMO_EMAIL="${_saved_GMAIL_DEMO_EMAIL}"
     [[ -n "${_saved_GMAIL_DEMO_APP_PASSWORD}" ]] && export GMAIL_DEMO_APP_PASSWORD="${_saved_GMAIL_DEMO_APP_PASSWORD}"
+    [[ -n "${_saved_GOOGLE_CLIENT_ID}" ]] && export GOOGLE_CLIENT_ID="${_saved_GOOGLE_CLIENT_ID}"
+    [[ -n "${_saved_GOOGLE_CLIENT_SECRET}" ]] && export GOOGLE_CLIENT_SECRET="${_saved_GOOGLE_CLIENT_SECRET}"
+    [[ -n "${_saved_GOOGLE_REDIRECT_URI}" ]] && export GOOGLE_REDIRECT_URI="${_saved_GOOGLE_REDIRECT_URI}"
     unset _saved_ANTHROPIC_API_KEY _saved_ANTHROPIC_BASE_URL _saved_TAVILY_API_KEY \
-      _saved_OPENAI_API_KEY _saved_GMAIL_DEMO_EMAIL _saved_GMAIL_DEMO_APP_PASSWORD
+      _saved_OPENAI_API_KEY _saved_GMAIL_DEMO_EMAIL _saved_GMAIL_DEMO_APP_PASSWORD \
+      _saved_GOOGLE_CLIENT_ID _saved_GOOGLE_CLIENT_SECRET _saved_GOOGLE_REDIRECT_URI
   fi
 
   HELM_SET_ARGS=()
@@ -240,6 +233,17 @@ if [ "$SKIP_INSTALL" = false ]; then
     HELM_SET_ARGS+=(--set-string "vault-engine.gmailDemoEmail=${GMAIL_DEMO_EMAIL}")
     HELM_SET_ARGS+=(--set-string "vault-engine.gmailDemoAppPassword=${GMAIL_DEMO_APP_PASSWORD}")
   fi
+  if [ -n "${GOOGLE_CLIENT_ID:-}" ] && [ -n "${GOOGLE_CLIENT_SECRET:-}" ]; then
+    # IO drives the Admin UI "Connect Google Account" flow; vault-engine uses
+    # the same client id/secret for token refresh on long-running sessions.
+    HELM_SET_ARGS+=(--set-string "io.googleOAuth.clientId=${GOOGLE_CLIENT_ID}")
+    HELM_SET_ARGS+=(--set-string "io.googleOAuth.clientSecret=${GOOGLE_CLIENT_SECRET}")
+    HELM_SET_ARGS+=(--set-string "vault-engine.googleOAuth.clientId=${GOOGLE_CLIENT_ID}")
+    HELM_SET_ARGS+=(--set-string "vault-engine.googleOAuth.clientSecret=${GOOGLE_CLIENT_SECRET}")
+  fi
+  if [ -n "${GOOGLE_REDIRECT_URI:-}" ]; then
+    HELM_SET_ARGS+=(--set-string "io.googleOAuth.redirectUri=${GOOGLE_REDIRECT_URI}")
+  fi
   HELM_SET_ARGS+=(--set "global.embedding.model=${EMBEDDING_MODEL}")
   HELM_SET_ARGS+=(--set "global.embedding.dimensions=${EMBEDDING_DIM}")
   HELM_SET_ARGS+=(--set "global.embedding.promptStyle=${EMBEDDING_PROMPT_STYLE}")
@@ -257,21 +261,125 @@ if [ "$SKIP_INSTALL" = false ]; then
   set -u
 
   echo ""
-  echo "    Waiting for core workloads to be ready (up to 5 min) ..."
+  echo "    Waiting for core workloads to be ready ..."
   ROLLOUT_FAILED=false
+  ROLLOUT_TIMEOUT="8m"
+  ROLLOUT_TMP="$(mktemp -d)"
+  trap 'rm -rf "${ROLLOUT_TMP}"' EXIT
+
+  # --- Embedding model warmup (cold-start friendly) -------------------------
+  # On a fresh cluster, embedding-api downloads ~500 MB+ of model weights from
+  # Hugging Face during its FastAPI startup. memory-api blocks on this via its
+  # `wait-for-embedding-api` init container, so without a dedicated waiter the
+  # whole stack looks "stuck on memory-api" to a first-time user. Poll the
+  # embedding-api pod, print download progress, and only fall through to the
+  # parallel rollout waits once it's Ready (or the warmup budget is exhausted).
+  EMBED_WARMUP_BUDGET_SEC=2400  # 40 min, matches the chart startup probe
+  EMBED_WARMUP_DEADLINE=$(( $(date +%s) + EMBED_WARMUP_BUDGET_SEC ))
+  embed_pod=""
+  echo ""
+  echo "    [warmup] Waiting for embedding-api to load the model (cold boot can take 10-20 min on slow HF links) ..."
+  while [ "$(date +%s)" -lt "${EMBED_WARMUP_DEADLINE}" ]; do
+    embed_pod="$(kubectl get pod -n "${NAMESPACE}" -l app.kubernetes.io/name=embedding-api -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+    if [ -z "${embed_pod}" ]; then
+      sleep 5
+      continue
+    fi
+    ready="$(kubectl get pod -n "${NAMESPACE}" "${embed_pod}" -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null || echo false)"
+    if [ "${ready}" = "true" ]; then
+      echo "    [warmup] embedding-api is ready."
+      break
+    fi
+    cache_size="$(kubectl exec -n "${NAMESPACE}" "${embed_pod}" -- du -sh /root/.cache/huggingface 2>/dev/null | awk '{print $1}')"
+    incomplete="$(kubectl exec -n "${NAMESPACE}" "${embed_pod}" -- sh -c 'ls /root/.cache/huggingface/hub/*/blobs/*.incomplete 2>/dev/null | wc -l' 2>/dev/null | tr -d '[:space:]')"
+    if [ -n "${cache_size}" ]; then
+      if [ "${incomplete:-0}" -gt 0 ] 2>/dev/null; then
+        echo "    [warmup] downloading model weights ... cache=${cache_size}, ${incomplete} file(s) still incomplete"
+      else
+        echo "    [warmup] cache=${cache_size}, loading model into RAM ..."
+      fi
+    fi
+    sleep 20
+  done
+  if [ "${embed_pod}" != "" ]; then
+    final_ready="$(kubectl get pod -n "${NAMESPACE}" "${embed_pod}" -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null || echo false)"
+    if [ "${final_ready}" != "true" ]; then
+      echo "    [warmup] (warning: embedding-api still not ready after ${EMBED_WARMUP_BUDGET_SEC}s; downstream waits will likely fail)"
+    fi
+  fi
+  echo ""
+
+  wait_for() {
+    local kind="$1"  # statefulset | deployment
+    local name="$2"
+    local logfile="${ROLLOUT_TMP}/${kind}-${name}.log"
+    if kubectl rollout status "${kind}" "${name}" -n "${NAMESPACE}" --timeout="${ROLLOUT_TIMEOUT}" >"${logfile}" 2>&1; then
+      echo "ok" >"${ROLLOUT_TMP}/${kind}-${name}.status"
+    else
+      echo "fail" >"${ROLLOUT_TMP}/${kind}-${name}.status"
+    fi
+  }
+
+  diagnose() {
+    local kind="$1"  # statefulset | deployment
+    local name="$2"
+    local label_sel
+    case "${kind}-${name}" in
+      deployment-vault) label_sel="app.kubernetes.io/name=vault-engine" ;;
+      *) label_sel="app.kubernetes.io/name=${name}" ;;
+    esac
+    local pod
+    pod="$(kubectl get pod -n "${NAMESPACE}" -l "${label_sel}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+    if [ -z "${pod}" ]; then
+      echo "        (no pod found for ${kind}/${name})"
+      return
+    fi
+    # Init container blocker (e.g. memory-api → wait-for-embedding-api)
+    local init_blocker
+    init_blocker="$(kubectl get pod -n "${NAMESPACE}" "${pod}" -o jsonpath='{range .status.initContainerStatuses[?(@.ready==false)]}{.name}{"\n"}{end}' 2>/dev/null | head -1)"
+    if [ -n "${init_blocker}" ]; then
+      echo "        blocked on init container: ${init_blocker}"
+      return
+    fi
+    # Main container last termination reason (e.g. OOMKilled, Error)
+    local reason exit_code
+    reason="$(kubectl get pod -n "${NAMESPACE}" "${pod}" -o jsonpath='{.status.containerStatuses[0].lastState.terminated.reason}' 2>/dev/null || true)"
+    exit_code="$(kubectl get pod -n "${NAMESPACE}" "${pod}" -o jsonpath='{.status.containerStatuses[0].lastState.terminated.exitCode}' 2>/dev/null || true)"
+    if [ -n "${reason}" ]; then
+      echo "        last termination: ${reason} (exit ${exit_code})"
+      return
+    fi
+    local phase
+    phase="$(kubectl get pod -n "${NAMESPACE}" "${pod}" -o jsonpath='{.status.phase}' 2>/dev/null || echo Unknown)"
+    echo "        pod phase: ${phase} (use: kubectl logs -n ${NAMESPACE} ${pod})"
+  }
+
   # StatefulSets: use rollout status (handles the case where the pod
   # hasn't been created yet when we start waiting).
-  for sts in memory-db openbao nats; do
-    if ! kubectl rollout status statefulset "${sts}" -n "${NAMESPACE}" --timeout=5m; then
+  STS_LIST=(memory-db openbao nats)
+  # Deployments: wait on the deployment condition directly. Note that the
+  # vault-engine chart names its Deployment 'vault' (not 'vault-engine').
+  DEPLOY_LIST=(vault memory-api orchestrator io aegis-databus aegis-agents)
+
+  for sts in "${STS_LIST[@]}"; do
+    wait_for statefulset "${sts}" &
+  done
+  for deploy in "${DEPLOY_LIST[@]}"; do
+    wait_for deployment "${deploy}" &
+  done
+  wait
+
+  for sts in "${STS_LIST[@]}"; do
+    if [ "$(cat "${ROLLOUT_TMP}/statefulset-${sts}.status" 2>/dev/null || echo fail)" != "ok" ]; then
       echo "    (warning: statefulset/${sts} did not become ready in time)"
+      diagnose statefulset "${sts}"
       ROLLOUT_FAILED=true
     fi
   done
-  # Deployments: wait on the deployment condition directly. Note that the
-  # vault-engine chart names its Deployment 'vault' (not 'vault-engine').
-  for deploy in vault memory-api orchestrator io aegis-databus aegis-agents simulator; do
-    if ! kubectl rollout status deployment "${deploy}" -n "${NAMESPACE}" --timeout=5m; then
+  for deploy in "${DEPLOY_LIST[@]}"; do
+    if [ "$(cat "${ROLLOUT_TMP}/deployment-${deploy}.status" 2>/dev/null || echo fail)" != "ok" ]; then
       echo "    (warning: deployment/${deploy} did not become ready in time)"
+      diagnose deployment "${deploy}"
       ROLLOUT_FAILED=true
     fi
   done
@@ -311,12 +419,12 @@ else
   echo "    HF_TOKEN:     ✗ not set"
   if [ "${EMBEDDING_MODEL}" = "google/embeddinggemma-300m" ]; then
     echo "      How to inject:"
-    echo "        Fresh start:   export HF_TOKEN=<token> && ./deploy/scripts/kind-up.sh --skip-build --embedding-model embeddinggemma"
+    echo "        Fresh start:   export HF_TOKEN=<token> && ./k8s/scripts/kind-up.sh --skip-build --embedding-model embeddinggemma"
   fi
 fi
 echo "    Change model:"
-echo "      Fresh start:   ./deploy/scripts/kind-down.sh && ./deploy/scripts/kind-up.sh --embedding-model harrier"
-echo "      Custom model:  ./deploy/scripts/kind-down.sh && ./deploy/scripts/kind-up.sh --embedding-model <hf-model-id> --embedding-dim <n> --embedding-prompt-style <style>"
+echo "      Fresh start:   ./k8s/scripts/kind-down.sh && ./k8s/scripts/kind-up.sh --embedding-model harrier"
+echo "      Custom model:  ./k8s/scripts/kind-down.sh && ./k8s/scripts/kind-up.sh --embedding-model <hf-model-id> --embedding-dim <n> --embedding-prompt-style <style>"
 echo ""
 echo "  Anthropic (aegis-agents):"
 if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
