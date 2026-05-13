@@ -52,6 +52,7 @@ NATS_URL=nats://localhost:4222 IO_API_BASE=http://localhost:3001 ./orchestrator
 | `MAX_TASK_RETRIES` | No | `3` | Max retries per task |
 | `DECOMPOSITION_TIMEOUT_SECONDS` | No | `30` | Planner agent timeout |
 | `MAX_SUBTASKS_PER_PLAN` | No | `20` | Max subtasks per execution plan |
+| `PLAN_EXECUTOR_MAX_PARALLEL` | No | `12` | Max subtasks the Plan Executor may dispatch simultaneously |
 
 *If `VAULT_ADDR` and `MEMORY_ENDPOINT` are missing, the orchestrator starts in demo mode with mock implementations.
 

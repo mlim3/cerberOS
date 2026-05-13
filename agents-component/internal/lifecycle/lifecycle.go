@@ -49,6 +49,9 @@ type VMConfig struct {
 	SynthesizedSkills []types.SynthesizedSkillRecord // skills created by prior synthesis; each gets a dynamic SkillTool at spawn
 	ExternalSkills    []types.SynthesizedSkillRecord // skills loaded via skill_load in prior sessions; Recipe holds serialised externalSkillManifest JSON
 	SkillLoadAllowed  bool                           // whether this user may invoke the skill_load built-in (derived from policy scope at spawn)
+	TaskKind          string                         // orchestrator task kind metadata (e.g. subtask, agent_spawn_child)
+	SpawnDepth        int                            // depth in an agent_spawn chain; 0 for root/planner-created tasks
+	LeafWorker        bool                           // true for slim child agents that should avoid delegation/history bloat
 
 	// OriginalUserMessage is the user's literal chat input. Threaded by the orchestrator
 	// through TaskSpec.Metadata["original_user_message"] so the user-facing agent can
@@ -131,6 +134,9 @@ type agentSpawnContext struct {
 	SynthesizedSkills []types.SynthesizedSkillRecord `json:"synthesized_skills,omitempty"` // skills created by prior synthesis; each gets a dynamic SkillTool with LLM-based execution
 	ExternalSkills    []types.SynthesizedSkillRecord `json:"external_skills,omitempty"`    // skills loaded via skill_load in prior sessions; Recipe holds serialised externalSkillManifest JSON
 	SkillLoadAllowed  bool                           `json:"skill_load_allowed,omitempty"` // whether this user may invoke the skill_load built-in
+	TaskKind          string                         `json:"task_kind,omitempty"`
+	SpawnDepth        int                            `json:"spawn_depth,omitempty"`
+	LeafWorker        bool                           `json:"leaf_worker,omitempty"`
 
 	OriginalUserMessage string `json:"original_user_message,omitempty"`
 	UserFacing          bool   `json:"user_facing,omitempty"`
@@ -228,6 +234,9 @@ func encodeSpawnContext(config VMConfig) ([]byte, error) {
 		SynthesizedSkills:   config.SynthesizedSkills,
 		ExternalSkills:      config.ExternalSkills,
 		SkillLoadAllowed:    config.SkillLoadAllowed,
+		TaskKind:            config.TaskKind,
+		SpawnDepth:          config.SpawnDepth,
+		LeafWorker:          config.LeafWorker,
 		OriginalUserMessage: config.OriginalUserMessage,
 		UserFacing:          config.UserFacing,
 	})

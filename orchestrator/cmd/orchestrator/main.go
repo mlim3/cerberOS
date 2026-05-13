@@ -340,6 +340,11 @@ func applyEnvOverrides(cfg *config.OrchestratorConfig) {
 			cfg.DecompositionTimeoutSeconds = parsed
 		}
 	}
+	if v := os.Getenv("PLAN_EXECUTOR_MAX_PARALLEL"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			cfg.PlanExecutorMaxParallel = parsed
+		}
+	}
 	if v := os.Getenv("CRON_WAKE_SECRET"); v != "" {
 		cfg.CronWakeSecret = v
 	}
@@ -448,7 +453,7 @@ func demoConfig() *config.OrchestratorConfig {
 		VaultPolicyCacheTTL:         60,
 		DecompositionTimeoutSeconds: 30,
 		MaxSubtasksPerPlan:          20,
-		PlanExecutorMaxParallel:     5,
+		PlanExecutorMaxParallel:     12,
 		MaxTaskRetries:              3,
 		TaskDedupWindowSeconds:      300,
 		HealthCheckIntervalSeconds:  10,

@@ -1098,7 +1098,7 @@ All Orchestrator configuration is injected via environment variables. No configu
 | `TASK_DEDUP_WINDOW_SECONDS` | integer | 300 | Deduplication window for `task_id` reuse detection. |
 | `DECOMPOSITION_TIMEOUT_SECONDS` | integer | 30 | Max time to wait for Planner Agent's decomposition response. |
 | `MAX_SUBTASKS_PER_PLAN` | integer | 20 | Maximum subtasks allowed in a single execution plan. |
-| `PLAN_EXECUTOR_MAX_PARALLEL` | integer | 5 | Max subtasks the Plan Executor may dispatch simultaneously. |
+| `PLAN_EXECUTOR_MAX_PARALLEL` | integer | 12 | Max subtasks the Plan Executor may dispatch simultaneously. |
 | `HEALTH_CHECK_INTERVAL_SECONDS` | integer | 10 | Interval for dependency health checks. |
 | `METRICS_EMIT_INTERVAL_SECONDS` | integer | 15 | How frequently metrics are published to NATS. |
 | `QUEUE_HIGH_WATER_MARK` | integer | 500 | Pending task queue depth that triggers `queue_pressure` metric. |

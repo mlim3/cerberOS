@@ -200,6 +200,48 @@ func TestBuildSystemPrompt_General_WithMemory_SectionsAppended(t *testing.T) {
 	}
 }
 
+func TestBuildSystemPrompt_LeafWorkerOmitsDelegationGuidance(t *testing.T) {
+	got := buildSystemPromptForAgent("web", "- web_search: Search the web.\n", "", "", false)
+	if strings.Contains(got, "Delegation and parallel work") {
+		t.Fatal("leaf worker prompt must not include delegation guidance")
+	}
+	if strings.Contains(got, "spawn_agent") {
+		t.Fatal("leaf worker prompt must not mention spawn_agent")
+	}
+	if !strings.Contains(got, "Worker mode") {
+		t.Fatal("leaf worker prompt must include worker mode guidance")
+	}
+	if !strings.Contains(got, "return exactly that number") {
+		t.Fatal("leaf worker prompt must include fixed-count output guidance")
+	}
+}
+
+func TestBuildSystemPrompt_CoordinatorRequiresFullFanInBeforeComplete(t *testing.T) {
+	got := buildSystemPromptForAgent("web", "- web_search: Search the web.\n", "", "", true)
+	for _, want := range []string{
+		"same skill domain as you",
+		"one spawn_agent call per item",
+		"Do not call task_complete after only listing the discovered items",
+		"must satisfy every user-requested deliverable",
+		"recommendation",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("coordinator prompt missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestWithoutTools_RemovesNamedTools(t *testing.T) {
+	tools := []SkillTool{taskCompleteTool(), skillsSearchTool(nil, "web", false, nil, nil)}
+	got := withoutTools(tools, "skills_search")
+	if len(got) != 1 {
+		t.Fatalf("filtered tools length = %d, want 1", len(got))
+	}
+	if got[0].Definition.Name != toolNameTaskComplete {
+		t.Fatalf("remaining tool = %q, want %q", got[0].Definition.Name, toolNameTaskComplete)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // RunLoop — vault fast-fail guard
 // ---------------------------------------------------------------------------

@@ -97,8 +97,7 @@ services:
       args:
         ENABLE_VOICE: "false"
     env_file:
-      - path: .env
-        required: false
+      - .env
     command:
       - /bin/sh
       - -lc
@@ -157,8 +156,7 @@ services:
     build:
       context: ./embedding-api
     env_file:
-      - path: .env
-        required: false
+      - .env
     environment:
       MODEL_ID: ${EMBEDDING_MODEL:-microsoft/harrier-oss-v1-270m}
       EMBEDDING_DIM: ${EMBEDDING_DIM:-640}
@@ -184,8 +182,7 @@ services:
     build:
       context: ./memory
     env_file:
-      - path: .env
-        required: false
+      - .env
     depends_on:
       memory-db:
         condition: service_healthy
@@ -283,8 +280,7 @@ services:
     build:
       context: ./vault/engine
     env_file:
-      - path: .env
-        required: false
+      - .env
     ports:
       - "8000:8000"
     environment:
@@ -437,8 +433,7 @@ services:
     build:
       context: ./agents-component
     env_file:
-      - path: .env
-        required: false
+      - .env
     depends_on:
       nats-1:
         condition: service_healthy
@@ -452,7 +447,7 @@ services:
       # JetStream delivers task.inbound serially and each HandleTaskSpec
       # (Firecracker provision) blocks subsequent tasks — two back-to-back
       # user tasks then hit the overall timeout.
-      AEGIS_AGENTS_MAX_CONCURRENT_TASKS: "8"
+      AEGIS_AGENTS_MAX_CONCURRENT_TASKS: "10"
       # Live-process reuse (cold-start-tax elimination). The factory's
       # CompleteTask leaves the agent-process alive and the registry entry in
       # IDLE when this timeout is > 0; the next matching task enters the warm

@@ -32,7 +32,7 @@ type OrchestratorConfig struct {
 	// Task decomposition (NEW in v3.0)
 	DecompositionTimeoutSeconds int // DECOMPOSITION_TIMEOUT_SECONDS — default: 30
 	MaxSubtasksPerPlan          int // MAX_SUBTASKS_PER_PLAN — default: 20
-	PlanExecutorMaxParallel     int // PLAN_EXECUTOR_MAX_PARALLEL — default: 5
+	PlanExecutorMaxParallel     int // PLAN_EXECUTOR_MAX_PARALLEL — default: 12
 
 	// Multi-step prompting / plan confirmation (NEW in milestone 3).
 	// PLAN_APPROVAL_MODE: off | multi (default) | always
@@ -121,7 +121,7 @@ func Load() (*OrchestratorConfig, error) {
 	// ── Task decomposition (NEW in v3.0) ─────────────────────────────────────
 	cfg.DecompositionTimeoutSeconds = envInt("DECOMPOSITION_TIMEOUT_SECONDS", 30)
 	cfg.MaxSubtasksPerPlan = envInt("MAX_SUBTASKS_PER_PLAN", 20)
-	cfg.PlanExecutorMaxParallel = envInt("PLAN_EXECUTOR_MAX_PARALLEL", 5)
+	cfg.PlanExecutorMaxParallel = envInt("PLAN_EXECUTOR_MAX_PARALLEL", 12)
 
 	switch os.Getenv("PLAN_APPROVAL_MODE") {
 	case "off", "always", "multi":
