@@ -581,9 +581,12 @@ func (ve *VaultExecutor) Execute(ctx context.Context, operationType, credentialT
 }
 
 // credentialRequestTimeout is how long requestCredentialAndRetry polls for the
-// user to enter a missing API key via the IO credential modal before giving up.
+// user to enter a missing API key before giving up. The subtask context
+// (timeout_seconds: 300 from the planner) minus ~60s of agent startup gives
+// roughly 4 minutes of actual input window, so 3 minutes here is the
+// intentional user-facing budget.
 const (
-	credentialRequestTimeout = 8 * time.Minute
+	credentialRequestTimeout = 3 * time.Minute
 	credentialPollInterval   = 8 * time.Second
 )
 
