@@ -619,7 +619,7 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 		VMID:                vmID,
 		TaskID:              spec.TaskID,
 		SkillDomain:         entryDomain,
-		UserRole:            spec.UserRole,
+		UserRole:            extractUserRole(spec),
 		CredentialPtr:       token,
 		Instructions:        spec.Instructions,
 		CommandManifest:     manifest,
@@ -759,7 +759,7 @@ func (f *Factory) assignTask(agentID string, spec *types.TaskSpec) error {
 		AgentID:             agentID,
 		TaskID:              spec.TaskID,
 		SkillDomain:         entryDomain,
-		UserRole:            spec.UserRole,
+		UserRole:            extractUserRole(spec),
 		CredentialPtr:       token,
 		Instructions:        spec.Instructions,
 		CommandManifest:     manifest,
@@ -1648,6 +1648,22 @@ func extractSkillLoadAllowed(spec *types.TaskSpec) bool {
 		return true // absent = allowed (backward-compatible default)
 	}
 	return v != "false"
+}
+
+// extractUserRole returns the orchestrator-provided user role when present in
+// TaskSpec metadata. Older specs may not include a role, so the empty string is
+// preserved as a backward-compatible fallback.
+func extractUserRole(spec *types.TaskSpec) string {
+	if spec == nil || spec.Metadata == nil {
+		return ""
+	}
+	if role := strings.TrimSpace(spec.Metadata["user_role"]); role != "" {
+		return role
+	}
+	if role := strings.TrimSpace(spec.Metadata["role"]); role != "" {
+		return role
+	}
+	return ""
 }
 
 func extractRuntimeMetadata(spec *types.TaskSpec) (taskKind string, spawnDepth int, leafWorker bool) {
