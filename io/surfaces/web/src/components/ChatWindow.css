@@ -253,6 +253,22 @@
   letter-spacing: 0.05em;
 }
 
+.credential-panel {
+  display: flex;
+  flex-direction: row;
+  gap: 8px;
+  padding: 10px 16px;
+  background-color: var(--bg-primary);
+  border-top: var(--border-subtle);
+}
+
+.credential-panel > * {
+  flex: 1;
+  min-width: 0;
+  max-width: unset;
+  align-self: unset;
+}
+
 .chat-input-area {
   background-color: var(--bg-primary);
   border-top: var(--border);

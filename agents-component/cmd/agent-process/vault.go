@@ -583,7 +583,7 @@ func (ve *VaultExecutor) Execute(ctx context.Context, operationType, credentialT
 // credentialRequestTimeout is how long requestCredentialAndRetry polls for the
 // user to enter a missing API key via the IO credential modal before giving up.
 const (
-	credentialRequestTimeout = 5 * time.Minute
+	credentialRequestTimeout = 8 * time.Minute
 	credentialPollInterval   = 8 * time.Second
 )
 
@@ -733,13 +733,19 @@ func (ve *VaultExecutor) requestCredentialAndRetry(
 		"timeout", credentialRequestTimeout,
 	)
 
-	// Poll vault_google_search with withCredentialRetryCtx so Execute() does not
-	// re-enter this function. The poll succeeds as soon as the user stores the key.
+	// Poll vault with withCredentialRetryCtx so Execute() does not re-enter
+	// this function. Use context.WithoutCancel so the poll survives the tool's
+	// per-call timeout (e.g. vault_github_request timeout_seconds:35) — the
+	// credential wait is user-paced, not API-call-paced. The pollCtx still
+	// carries ctx Values (needed for withCredentialRetryCtx) but is not
+	// cancelled when the tool deadline fires; it has its own 8-minute budget.
+	pollCtx, pollCancel := context.WithTimeout(context.WithoutCancel(ctx), credentialRequestTimeout)
+	defer pollCancel()
 	deadline := time.Now().Add(credentialRequestTimeout)
-	retryCtx := withCredentialRetryCtx(ctx)
+	retryCtx := withCredentialRetryCtx(pollCtx)
 	for time.Now().Before(deadline) {
 		select {
-		case <-ctx.Done():
+		case <-pollCtx.Done():
 			return nil
 		case <-time.After(credentialPollInterval):
 		}
