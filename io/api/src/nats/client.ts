@@ -12,6 +12,10 @@
 
 import { connect, type JetStreamClient, type NatsConnection, type Subscription } from 'nats'
 import { ioLog } from '../logger'
+import { buildUserTaskWirePayload, callbackTopicForTask, type UserTaskPayload } from './wire'
+
+export { IO_RESULTS_TOPIC_PREFIX, callbackTopicForTask } from './wire'
+export type { UserTaskPayload } from './wire'
 
 // ── NATS subjects (aligned with agents-component/internal/comms/subjects.go) ──
 
@@ -57,24 +61,6 @@ export interface ClarificationResponsePayload {
 export interface NatsConfig {
   url: string
   credsPath?: string
-}
-
-export interface UserTaskPayload {
-  task_id: string
-  user_id: string
-  content: string
-  priority?: number
-  timeout_seconds?: number
-  payload?: { raw_input: string }
-  callback_topic?: string
-  required_skill_domains?: string[]
-  user_context_id?: string
-  /** Stable ID linking follow-up messages in the same conversation. When set,
-   *  the orchestrator threads it to agents so they can fetch prior turns from
-   *  their ConversationSnapshot rather than relying on the raw_input history block. */
-  conversation_id?: string
-  /** W3C trace_id (32 hex) — forwarded on the wire envelope for orchestrator logs */
-  trace_id?: string
 }
 
 export interface IONatsClient {
@@ -147,14 +133,6 @@ function buildEnvelope(
   }
   if (traceId) env.trace_id = traceId
   return env
-}
-
-/** Prefix for per-task IO callback subjects (`aegis.io.results.<client_task_id>`). */
-export const IO_RESULTS_TOPIC_PREFIX = 'aegis.io.results.'
-
-/** Build a callback topic for a given task. */
-export function callbackTopicForTask(taskId: string): string {
-  return `${IO_RESULTS_TOPIC_PREFIX}${taskId}`
 }
 
 /**
@@ -264,7 +242,7 @@ export function createNatsClient(config: NatsConfig): IONatsClient | null {
 
     async publishUserTask(task: UserTaskPayload) {
       if (!nc) throw new Error('NATS not connected')
-      const natsPayload = buildUserTaskNatsPayload(task)
+      const natsPayload = buildUserTaskWirePayload(task)
       const envelope = buildEnvelope('user_task', task.task_id, natsPayload, task.trace_id)
       const data = new TextEncoder().encode(JSON.stringify(envelope))
       // Core publish — orchestrator subscribes with nc.Subscribe (not JetStream). JetStream-only

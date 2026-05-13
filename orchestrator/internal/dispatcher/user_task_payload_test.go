@@ -65,3 +65,29 @@ func TestBuildDecompositionInstructionsWithFactsAndSystemPrompt(t *testing.T) {
 		t.Fatal("missing system section")
 	}
 }
+
+func TestBuildDecompositionInstructionsIncludesListThenPerItemPattern(t *testing.T) {
+	t.Parallel()
+	scope := types.PolicyScope{Domains: []string{"web", "general"}}
+	out := buildDecompositionInstructionsWithFacts(
+		"550e8400-e29b-41d4-a716-446655440000",
+		"Find the top 10 restaurants and research popular dishes for each.",
+		scope,
+		nil,
+		"",
+	)
+
+	for _, want := range []string{
+		"list-then-per-item parallel research tasks",
+		"call spawn_agent exactly once per discovered item",
+		"including the item name and the user's original goal",
+		"Do NOT collapse per-item research into one broad search subtask",
+		"include every user-requested deliverable",
+		"MUST NOT complete after only listing the discovered items",
+		"fan out with spawn_agent once per item",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("instructions missing %q:\n%s", want, out)
+		}
+	}
+}

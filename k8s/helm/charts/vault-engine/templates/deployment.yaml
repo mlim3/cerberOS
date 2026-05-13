@@ -36,27 +36,40 @@ spec:
             - name: BAO_ADDR
               value: "http://openbao:8200"
             - name: BAO_TOKEN
-              value: {{ .Values.baoToken | quote }}
-            {{- if .Values.googleOAuth.clientId }}
-            - name: GOOGLE_CLIENT_ID
-              value: {{ .Values.googleOAuth.clientId | quote }}
-            - name: GOOGLE_CLIENT_SECRET
-              value: {{ .Values.googleOAuth.clientSecret | quote }}
-            {{- end }}
-            {{- if .Values.tavilyApiKey }}
+              valueFrom:
+                secretKeyRef:
+                  name: vault-engine-secrets
+                  key: BAO_TOKEN
             - name: TAVILY_API_KEY
-              value: {{ .Values.tavilyApiKey | quote }}
-            {{- end }}
-            {{- if .Values.openaiApiKey }}
-            - name: OPENAI_API_KEY
-              value: {{ .Values.openaiApiKey | quote }}
-            {{- end }}
-            {{- if and .Values.gmailDemoEmail .Values.gmailDemoAppPassword }}
+              valueFrom:
+                secretKeyRef:
+                  name: vault-engine-secrets
+                  key: TAVILY_API_KEY
             - name: GMAIL_DEMO_EMAIL
-              value: {{ .Values.gmailDemoEmail | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: vault-engine-secrets
+                  key: GMAIL_DEMO_EMAIL
             - name: GMAIL_DEMO_APP_PASSWORD
-              value: {{ .Values.gmailDemoAppPassword | quote }}
-            {{- end }}
+              valueFrom:
+                secretKeyRef:
+                  name: vault-engine-secrets
+                  key: GMAIL_DEMO_APP_PASSWORD
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.sharedSecretName | quote }}
+                  key: OPENAI_API_KEY
+            - name: GOOGLE_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.sharedSecretName | quote }}
+                  key: GOOGLE_CLIENT_ID
+            - name: GOOGLE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.sharedSecretName | quote }}
+                  key: GOOGLE_CLIENT_SECRET
           securityContext:
             runAsUser: 1001
             runAsNonRoot: true

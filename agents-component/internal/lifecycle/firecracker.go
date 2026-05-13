@@ -395,6 +395,9 @@ func (m *firecrackerManager) configureMMDS(vm *fcVM, config VMConfig) error {
 			UserProfile:      config.UserProfile,
 			TraceID:          config.TraceID,
 			UserContextID:    config.UserContextID,
+			TaskKind:         config.TaskKind,
+			SpawnDepth:       config.SpawnDepth,
+			LeafWorker:       config.LeafWorker,
 		},
 		Env: fcGuestEnv(config),
 	}

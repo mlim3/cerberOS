@@ -43,11 +43,23 @@ global:
     dimensions: "640"
     promptStyle: "harrier"
     hfToken: ""
+  # Cross-chart secrets — rendered into a single Secret (cerberos-shared-secrets)
+  # by the umbrella chart and consumed via secretKeyRef in each sub-chart.
+  # Override at install time:
+  #   --set global.sharedSecrets.INTERNAL_VAULT_API_KEY=<key>
+  #   --set global.sharedSecrets.OPENAI_API_KEY=<key>
+  #   --set global.sharedSecrets.GOOGLE_CLIENT_ID=<id>
+  #   --set global.sharedSecrets.GOOGLE_CLIENT_SECRET=<secret>
+  sharedSecrets:
+    INTERNAL_VAULT_API_KEY: ""
+    OPENAI_API_KEY: ""
+    GOOGLE_CLIENT_ID: ""
+    GOOGLE_CLIENT_SECRET: ""
+    GOOGLE_REDIRECT_URI: "http://localhost:3001/api/admin/google-oauth/callback"
 
 vault-engine:
   baoToken: ""
   tavilyApiKey: ""
-  openaiApiKey: ""
   gmailDemoEmail: ""
   gmailDemoAppPassword: ""
 
@@ -56,8 +68,7 @@ memory-api:
     user: user
     password: changeme
     name: memory_db
-  vaultMasterKey: "CHANGE_ME_32_ASCII_CHARS_EXACTLY!"
-  internalVaultApiKey: "CHANGE_ME_INTERNAL_VAULT_KEY"
+  vaultMasterKey: ""
   embedding:
     provider: tei
     apiUrl: "http://embedding-api/v1/embeddings"
@@ -69,8 +80,7 @@ embedding-api: {}
 
 orchestrator: {}
 
-io:
-  openaiApiKey: ""
+io: {}
 
 aegis-databus: {}
 

@@ -10,6 +10,7 @@
  *   cerberos admin gmail-status
  *   cerberos skill create "<description>"
  *   cerberos skill import github.com/user/repo [--all-users]
+ *     (imports skill-like files from the repo and publishes matching skills)
  *
  * All admin commands hit the IO API. They use CLI_USER_ID as the active user
  * (so the `requireRole` middleware can enforce role >= manager). Honor-system

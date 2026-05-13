@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -476,6 +477,7 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 		"command_names", cmdNames,
 		"manifest_chars", len(manifest),
 	)
+	taskKind, spawnDepth, leafWorker := extractRuntimeMetadata(spec)
 
 	// Step 1b: Enforce spawn context token budget (EDD §13.3, PRD FR-FAC-05).
 	// Counted components: system prompt (including manifest) + task instructions
@@ -484,7 +486,7 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 	// that approximates a real Vault token reference is used.
 	// Abort immediately if the budget is exceeded — no agent is created.
 	if f.tokenCounter != nil {
-		ctxText := buildSpawnContextText(spawnSystemPrompt(entryDomain, manifest), spec.Instructions, entryDomain, permTokenPlaceholder)
+		ctxText := buildSpawnContextText(spawnSystemPrompt(entryDomain, manifest, !leafWorker), spec.Instructions, entryDomain, permTokenPlaceholder)
 		count, err := f.tokenCounter.CountTokens(ctxText)
 		if err != nil {
 			return fmt.Errorf("factory: token count: %w", err)
@@ -598,6 +600,18 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 	priorTurns, _ := f.fetchPriorTurns(spec.ConversationID, spec.TraceID)
 	originalUserMessage, userFacing := extractConversationMetadata(spec)
 	skillLoadAllowed := extractSkillLoadAllowed(spec)
+	if leafWorker {
+		agentMemory = ""
+		userProfile = ""
+		priorTurns = nil
+		skillLoadAllowed = false
+	}
+	synthesizedSkills := f.synthesizedSkillsForDomain(entryDomain, spec.UserContextID)
+	externalSkills := f.loadExternalSkills()
+	if leafWorker {
+		synthesizedSkills = nil
+		externalSkills = nil
+	}
 
 	// Step 6: Spawn agent process.
 	vmCfg := lifecycle.VMConfig{
@@ -605,6 +619,7 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 		VMID:                vmID,
 		TaskID:              spec.TaskID,
 		SkillDomain:         entryDomain,
+		UserRole:            extractUserRole(spec),
 		CredentialPtr:       token,
 		Instructions:        spec.Instructions,
 		CommandManifest:     manifest,
@@ -614,8 +629,11 @@ func (f *Factory) provision(agentID string, spec *types.TaskSpec) error {
 		UserContextID:       spec.UserContextID,
 		ConversationID:      spec.ConversationID,
 		PriorTurns:          priorTurns,
-		SynthesizedSkills:   f.synthesizedSkillsForDomain(entryDomain, spec.UserContextID),
-		ExternalSkills:      f.loadExternalSkills(),
+		SynthesizedSkills:   synthesizedSkills,
+		ExternalSkills:      externalSkills,
+		TaskKind:            taskKind,
+		SpawnDepth:          spawnDepth,
+		LeafWorker:          leafWorker,
 		OriginalUserMessage: originalUserMessage,
 		UserFacing:          userFacing,
 		SkillLoadAllowed:    skillLoadAllowed,
@@ -723,11 +741,25 @@ func (f *Factory) assignTask(agentID string, spec *types.TaskSpec) error {
 	priorTurns, _ := f.fetchPriorTurns(spec.ConversationID, spec.TraceID)
 	originalUserMessage, userFacing := extractConversationMetadata(spec)
 	skillLoadAllowed := extractSkillLoadAllowed(spec)
+	taskKind, spawnDepth, leafWorker := extractRuntimeMetadata(spec)
+	if leafWorker {
+		agentMemory = ""
+		userProfile = ""
+		priorTurns = nil
+		skillLoadAllowed = false
+	}
+	synthesizedSkills := f.synthesizedSkillsForDomain(entryDomain, spec.UserContextID)
+	externalSkills := f.loadExternalSkills()
+	if leafWorker {
+		synthesizedSkills = nil
+		externalSkills = nil
+	}
 
 	vmCfg := lifecycle.VMConfig{
 		AgentID:             agentID,
 		TaskID:              spec.TaskID,
 		SkillDomain:         entryDomain,
+		UserRole:            extractUserRole(spec),
 		CredentialPtr:       token,
 		Instructions:        spec.Instructions,
 		CommandManifest:     manifest,
@@ -737,8 +769,11 @@ func (f *Factory) assignTask(agentID string, spec *types.TaskSpec) error {
 		UserContextID:       spec.UserContextID,
 		ConversationID:      spec.ConversationID,
 		PriorTurns:          priorTurns,
-		SynthesizedSkills:   f.synthesizedSkillsForDomain(entryDomain, spec.UserContextID),
-		ExternalSkills:      f.loadExternalSkills(),
+		SynthesizedSkills:   synthesizedSkills,
+		ExternalSkills:      externalSkills,
+		TaskKind:            taskKind,
+		SpawnDepth:          spawnDepth,
+		LeafWorker:          leafWorker,
 		OriginalUserMessage: originalUserMessage,
 		UserFacing:          userFacing,
 		SkillLoadAllowed:    skillLoadAllowed,
@@ -1516,7 +1551,7 @@ func (f *Factory) loadExternalSkills() []types.SynthesizedSkillRecord {
 // Must stay in sync with buildSystemPrompt in cmd/agent-process/loop.go.
 // agentMemory and userProfile are intentionally excluded from the budget count —
 // they are system overhead, not task payload.
-func spawnSystemPrompt(skillDomain, manifest string) string {
+func spawnSystemPrompt(skillDomain, manifest string, allowDelegation bool) string {
 	base := fmt.Sprintf(
 		`You are an Aegis OS agent scoped to the "%s" skill domain. `+
 			`Execute the assigned task using only the capabilities available within that domain. `+
@@ -1524,10 +1559,24 @@ func spawnSystemPrompt(skillDomain, manifest string) string {
 			`Be concise and factual.`,
 		skillDomain,
 	)
-	if manifest == "" {
-		return base
+	guidance := workerModeGuidance()
+	if allowDelegation {
+		guidance = spawnDelegationGuidance()
 	}
-	return base + "\n\nAvailable commands:\n" + manifest
+	if manifest == "" {
+		return base + "\n\n" + guidance
+	}
+	return base + "\n\nAvailable commands:\n" + manifest + "\n\n" + guidance
+}
+
+func spawnDelegationGuidance() string {
+	return "## Delegation and parallel work\n" +
+		"If spawn_agent is available and the task requires the same independent operation across a discovered bounded list of items, use a coordinator pattern even when the children use the same skill domain as you: first discover the exact requested item list with your own tools, then emit one spawn_agent call per item in a single assistant response so the child agents run in parallel. Give each child complete, self-contained instructions for exactly one item, including the item name, the user's original goal, the requested output count or fields, and the required skill domain. After all spawn_agent results return, aggregate them and call task_complete. Do not call task_complete after only listing the discovered items; the final result must satisfy every user-requested deliverable, including any per-item findings, comparison, ranking, recommendation, and rationale. Do not use spawn_agent for work that is not independent per item, and never include credential values in child instructions."
+}
+
+func workerModeGuidance() string {
+	return "## Worker mode\n" +
+		"Complete only the assigned item-level task. Keep tool calls and final output compact. Do not delegate further work. Prefer the minimum useful number of tool calls. For web/search work, use exactly one web_search call with max_results no higher than 5 unless the first result set is unusable; avoid web_fetch or web_extract unless search results lack enough evidence. If the child task asks for a fixed number of findings, return exactly that number when evidence is available; otherwise return the best available findings and briefly mark what was missing. Return compact JSON or compact structured text only."
 }
 
 // fetchAgentMemory reads domain-scoped agent memory facts from the Memory
@@ -1599,6 +1648,36 @@ func extractSkillLoadAllowed(spec *types.TaskSpec) bool {
 		return true // absent = allowed (backward-compatible default)
 	}
 	return v != "false"
+}
+
+// extractUserRole returns the orchestrator-provided user role when present in
+// TaskSpec metadata. Older specs may not include a role, so the empty string is
+// preserved as a backward-compatible fallback.
+func extractUserRole(spec *types.TaskSpec) string {
+	if spec == nil || spec.Metadata == nil {
+		return ""
+	}
+	if role := strings.TrimSpace(spec.Metadata["user_role"]); role != "" {
+		return role
+	}
+	if role := strings.TrimSpace(spec.Metadata["role"]); role != "" {
+		return role
+	}
+	return ""
+}
+
+func extractRuntimeMetadata(spec *types.TaskSpec) (taskKind string, spawnDepth int, leafWorker bool) {
+	if spec == nil || spec.Metadata == nil {
+		return "", 0, false
+	}
+	taskKind = strings.TrimSpace(spec.Metadata["task_kind"])
+	if raw := strings.TrimSpace(spec.Metadata["spawn_depth"]); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			spawnDepth = parsed
+		}
+	}
+	leafWorker = taskKind == "agent_spawn_child" || spawnDepth > 0
+	return taskKind, spawnDepth, leafWorker
 }
 
 // fetchPriorTurns retrieves the latest ConversationSnapshot for conversationID
@@ -1956,6 +2035,19 @@ func (f *Factory) wakeAgent(agentID string, spec *types.TaskSpec) error {
 	priorTurns, _ := f.fetchPriorTurns(spec.ConversationID, spec.TraceID)
 	originalUserMessage, userFacing := extractConversationMetadata(spec)
 	skillLoadAllowed := extractSkillLoadAllowed(spec)
+	taskKind, spawnDepth, leafWorker := extractRuntimeMetadata(spec)
+	if leafWorker {
+		agentMemory = ""
+		userProfile = ""
+		priorTurns = nil
+		skillLoadAllowed = false
+	}
+	synthesizedSkills := f.synthesizedSkillsForDomain(entryDomain, spec.UserContextID)
+	externalSkills := f.loadExternalSkills()
+	if leafWorker {
+		synthesizedSkills = nil
+		externalSkills = nil
+	}
 	vmCfg := lifecycle.VMConfig{
 		AgentID:             agentID,
 		VMID:                newVMID,
@@ -1970,8 +2062,11 @@ func (f *Factory) wakeAgent(agentID string, spec *types.TaskSpec) error {
 		UserContextID:       spec.UserContextID,
 		ConversationID:      spec.ConversationID,
 		PriorTurns:          priorTurns,
-		SynthesizedSkills:   f.synthesizedSkillsForDomain(entryDomain, spec.UserContextID),
-		ExternalSkills:      f.loadExternalSkills(),
+		SynthesizedSkills:   synthesizedSkills,
+		ExternalSkills:      externalSkills,
+		TaskKind:            taskKind,
+		SpawnDepth:          spawnDepth,
+		LeafWorker:          leafWorker,
 		OriginalUserMessage: originalUserMessage,
 		UserFacing:          userFacing,
 		SkillLoadAllowed:    skillLoadAllowed,

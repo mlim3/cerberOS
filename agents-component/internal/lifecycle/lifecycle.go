@@ -36,6 +36,7 @@ type VMConfig struct {
 	VMID              string // allocated VM identity; changes on respawn (same AgentID, new VMID)
 	TaskID            string // task the agent is being spawned to execute
 	SkillDomain       string // entry-point domain injected into the agent at spawn
+	UserRole          string // resolved user role for this task (user | manager | root)
 	CredentialPtr     string // vault permission token pointer (not the token value)
 	Instructions      string // natural-language task description for the agent
 	CommandManifest   string // pre-built "- name: description" list for the entry domain; injected into system prompt
@@ -49,6 +50,9 @@ type VMConfig struct {
 	SynthesizedSkills []types.SynthesizedSkillRecord // skills created by prior synthesis; each gets a dynamic SkillTool at spawn
 	ExternalSkills    []types.SynthesizedSkillRecord // skills loaded via skill_load in prior sessions; Recipe holds serialised externalSkillManifest JSON
 	SkillLoadAllowed  bool                           // whether this user may invoke the skill_load built-in (derived from policy scope at spawn)
+	TaskKind          string                         // orchestrator task kind metadata (e.g. subtask, agent_spawn_child)
+	SpawnDepth        int                            // depth in an agent_spawn chain; 0 for root/planner-created tasks
+	LeafWorker        bool                           // true for slim child agents that should avoid delegation/history bloat
 
 	// OriginalUserMessage is the user's literal chat input. Threaded by the orchestrator
 	// through TaskSpec.Metadata["original_user_message"] so the user-facing agent can
@@ -118,6 +122,7 @@ var ErrReuseUnsupported = fmt.Errorf("lifecycle: live-process reuse not supporte
 type agentSpawnContext struct {
 	TaskID            string                         `json:"task_id"`
 	SkillDomain       string                         `json:"skill_domain"`
+	UserRole          string                         `json:"user_role,omitempty"`
 	PermissionToken   string                         `json:"permission_token"` // opaque vault reference — never a raw credential
 	Instructions      string                         `json:"instructions"`
 	CommandManifest   string                         `json:"command_manifest,omitempty"`  // "- name: description" list; injected into system prompt
@@ -131,6 +136,9 @@ type agentSpawnContext struct {
 	SynthesizedSkills []types.SynthesizedSkillRecord `json:"synthesized_skills,omitempty"` // skills created by prior synthesis; each gets a dynamic SkillTool with LLM-based execution
 	ExternalSkills    []types.SynthesizedSkillRecord `json:"external_skills,omitempty"`    // skills loaded via skill_load in prior sessions; Recipe holds serialised externalSkillManifest JSON
 	SkillLoadAllowed  bool                           `json:"skill_load_allowed,omitempty"` // whether this user may invoke the skill_load built-in
+	TaskKind          string                         `json:"task_kind,omitempty"`
+	SpawnDepth        int                            `json:"spawn_depth,omitempty"`
+	LeafWorker        bool                           `json:"leaf_worker,omitempty"`
 
 	OriginalUserMessage string `json:"original_user_message,omitempty"`
 	UserFacing          bool   `json:"user_facing,omitempty"`
@@ -215,6 +223,7 @@ func encodeSpawnContext(config VMConfig) ([]byte, error) {
 	payload, err := json.Marshal(agentSpawnContext{
 		TaskID:              config.TaskID,
 		SkillDomain:         config.SkillDomain,
+		UserRole:            config.UserRole,
 		PermissionToken:     config.CredentialPtr,
 		Instructions:        config.Instructions,
 		CommandManifest:     config.CommandManifest,
@@ -228,6 +237,9 @@ func encodeSpawnContext(config VMConfig) ([]byte, error) {
 		SynthesizedSkills:   config.SynthesizedSkills,
 		ExternalSkills:      config.ExternalSkills,
 		SkillLoadAllowed:    config.SkillLoadAllowed,
+		TaskKind:            config.TaskKind,
+		SpawnDepth:          config.SpawnDepth,
+		LeafWorker:          config.LeafWorker,
 		OriginalUserMessage: config.OriginalUserMessage,
 		UserFacing:          config.UserFacing,
 	})

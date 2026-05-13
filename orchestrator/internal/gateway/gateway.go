@@ -1879,6 +1879,9 @@ func buildAgentMetadata(spec types.TaskSpec) map[string]string {
 		"user_id":               spec.UserID,
 		"callback_topic":        spec.CallbackTopic,
 	}
+	if spec.UserRole != "" {
+		meta["user_role"] = spec.UserRole
+	}
 	if spec.ProgressSummary != "" {
 		meta["progress_summary"] = spec.ProgressSummary
 	}

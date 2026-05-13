@@ -85,6 +85,7 @@ type mmdsPayload struct {
 type SpawnContext struct {
 	TaskID            string                         `json:"task_id"`
 	SkillDomain       string                         `json:"skill_domain"`
+	UserRole          string                         `json:"user_role,omitempty"`
 	PermissionToken   string                         `json:"permission_token"` // opaque credential ref — never a raw credential value
 	Instructions      string                         `json:"instructions"`
 	CommandManifest   string                         `json:"command_manifest,omitempty"`  // "- name: description" list built by factory; injected into system prompt
@@ -98,6 +99,9 @@ type SpawnContext struct {
 	SynthesizedSkills []types.SynthesizedSkillRecord `json:"synthesized_skills,omitempty"` // skills created by prior synthesis; each gets a dynamic SkillTool with LLM-based execution
 	ExternalSkills    []types.SynthesizedSkillRecord `json:"external_skills,omitempty"`    // skills loaded via skill_load in prior sessions; Recipe holds the serialised externalSkillManifest JSON
 	SkillLoadAllowed  bool                           `json:"skill_load_allowed,omitempty"` // false = skill_load tool is disabled for this user; absent/true = allowed
+	TaskKind          string                         `json:"task_kind,omitempty"`          // orchestrator task kind metadata
+	SpawnDepth        int                            `json:"spawn_depth,omitempty"`        // depth in an agent_spawn chain; 0 for root/planner-created tasks
+	LeafWorker        bool                           `json:"leaf_worker,omitempty"`        // true for slim child agents that should avoid delegation/history bloat
 
 	// OriginalUserMessage is the user's literal input as typed in the chat surface.
 	// The orchestrator carries it through plan/subtask metadata so the user-facing

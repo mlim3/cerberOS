@@ -373,6 +373,7 @@ func (d *Dispatcher) HandleInboundTask(ctx context.Context, task types.UserTask)
 		OrchestratorTaskRef:  orchRef,
 		TaskID:               orchRef,
 		UserID:               task.UserID,
+		UserRole:             task.UserRole,
 		RequiredSkillDomains: []string{"general"},
 		PolicyScope:          scope,
 		TimeoutSeconds:       minInt(task.TimeoutSeconds, d.cfg.DecompositionTimeoutSeconds),
@@ -785,7 +786,7 @@ func (d *Dispatcher) HandleAgentSpawnRequest(ctx context.Context, req types.Agen
 		PolicyScope:          childCtx.PolicyScope,
 		TimeoutSeconds:       timeoutSec,
 		Payload:              json.RawMessage(`{}`),
-		Instructions:         strings.TrimSpace(req.Instructions),
+		Instructions:         buildAgentSpawnChildInstructions(req.Instructions),
 		Metadata: map[string]string{
 			"task_kind":              "agent_spawn_child",
 			"parent_task_id":         req.ParentTaskID,
@@ -818,6 +819,21 @@ func (d *Dispatcher) HandleAgentSpawnRequest(ctx context.Context, req types.Agen
 		"spawn_depth", childCtx.Depth,
 	)
 	return nil
+}
+
+func buildAgentSpawnChildInstructions(instructions string) string {
+	base := strings.TrimSpace(instructions)
+	guidance := "Leaf-worker constraints:\n" +
+		"- Complete only this child task; do not delegate or broaden scope.\n" +
+		"- Prefer the minimum useful number of tool calls. For web/search work, use exactly one web_search call with max_results no higher than 5 unless the first result set is unusable.\n" +
+		"- Do not call fetch/extract tools unless search results lack enough evidence to answer.\n" +
+		"- If asked for a fixed number of findings, return exactly that number when evidence is available; otherwise return the best available findings and briefly mark what was missing.\n" +
+		"- Return compact JSON or compact structured text only, with short evidence and source URLs when available.\n" +
+		"- Do not include long explanations, hidden reasoning, or unrelated context."
+	if base == "" {
+		return guidance
+	}
+	return base + "\n\n" + guidance
 }
 
 func validateAgentSpawnRequest(req types.AgentSpawnRequest, parentDepth int) error {
@@ -1704,6 +1720,12 @@ func buildDecompositionInstructionsWithFacts(taskID, rawInput string, scope type
 			"Skill domain guide: use \"web\" for fetch/parse/extract of known URLs AND for AI web search (web.web_search via Tavily, no Google account needed), \"data\" for transforms/reads/writes, \"comms\" for messaging, \"storage\" for file operations, \"logs\" for log queries, \"google_search\" for explicitly Google-API-backed search, \"github\" for GitHub API calls, \"local_files\" for reading/writing files in the user's home (notes, journal, etc. — paths starting with ~/ map to per-user storage), \"google_workspace\" for Gmail search/read (gmail_search, gmail_get_message) and Google Calendar access (calendar_list_events) — requires the user to have connected their Google account via OAuth, \"general\" for reasoning/summarization with no external tools.\n"+
 			"- For ANY task that requires real-world or current information (events this weekend, weather, news, prices, hours, addresses, etc.), include AT LEAST one subtask in the \"web\" domain — web.web_search composes well across topics.\n"+
 			"- Multi-fact tasks (e.g. \"events this weekend AND weather AND what to wear\") MUST be decomposed into one web.web_search subtask per fact dimension followed by a final \"general\" subtask that composes the answer. Independent search subtasks have empty depends_on so they run in parallel; only the composer subtask depends on them.\n"+
+			"- For list-then-per-item parallel research tasks, use the coordinator + spawn_agent pattern instead of broad static subtasks.\n"+
+			"- A task is a list-then-per-item parallel research task when: (1) the user asks to first discover a bounded list of items, such as top N places/restaurant/products/events/papers/files/companies, and (2) the user then asks for the same independent research to be performed for each discovered item.\n"+
+			"- In this pattern, create ONE coordinator subtask in the domain that can discover the list. The coordinator instructions MUST tell the agent to: (1) discover exactly the requested number of items, (2) call spawn_agent exactly once per discovered item, preferably in a single response so child agents run in parallel, (3) give each child agent complete self-contained instructions for exactly one item, including the item name and the user's original goal, (4) require each child agent to use the appropriate search/tool domain when current or external information is needed, (5) aggregate all child results into the final answer after spawn_agent results return, and (6) include every user-requested deliverable, such as per-item findings plus any comparison, summary, ranking, recommendation, or rationale the user asked for.\n"+
+			"- Do NOT collapse per-item research into one broad search subtask when the items are discovered at runtime. If each item can be researched independently, the coordinator must fan out with spawn_agent once per item.\n"+
+			"- A coordinator MUST NOT complete after only listing the discovered items. It may call task_complete only after the per-item child results have returned and the final answer satisfies the user's full request.\n"+
+			"- Use a static DAG only when the independent work units are already explicit in the user task.\n"+
 			"- Use \"google_search\" when the user's message contains phrases like \"search Google\", \"Google search\", \"use Google\", \"find on Google\", \"look up on Google\", or any explicit reference to Google as the search engine. In all other cases default to \"web\" because Tavily is bootstrap-seeded and works out of the box.\n"+
 			"- The \"web\" domain (web.fetch, web.parse, web.extract, web.web_search) covers BOTH known-URL fetching AND open-web search. Use web.web_search for the search step unless the user explicitly names Google as the search engine.\n"+
 			"- For \"create a skill that …\" or \"save / write to ~/<file>\" requests, choose the \"local_files\" domain — local_file_write covers ~/notes.txt-style persistence without requiring credentials.\n"+

@@ -12,6 +12,18 @@
 # TAVILY_API_KEY, OPENAI_API_KEY, GMAIL_DEMO_EMAIL, GMAIL_DEMO_APP_PASSWORD.
 # =============================================================================
 
+# Shared cross-chart secrets — kind-up.sh auto-generates and forwards a real
+# INTERNAL_VAULT_API_KEY (and persists it to repo-root .env). The empty
+# defaults here are intentional: a misconfigured install fails fast at the
+# memory-api/io auth check rather than silently shipping a known-bad key.
+global:
+  sharedSecrets:
+    INTERNAL_VAULT_API_KEY: ""
+    OPENAI_API_KEY: ""
+    GOOGLE_CLIENT_ID: ""
+    GOOGLE_CLIENT_SECRET: ""
+    GOOGLE_REDIRECT_URI: "http://localhost:3001/api/admin/google-oauth/callback"
+
 # Use locally-built images (loaded via kind load docker-image)
 nats:
   resources:
@@ -51,9 +63,6 @@ vault-engine:
     pullPolicy: Never
   # Dev-mode OpenBao (-dev-root-token-id=root) auto-unseals with this token
   baoToken: "root"
-  googleOAuth:
-    clientId: ""     # set via: helm upgrade ... --set vault-engine.googleOAuth.clientId=<id>
-    clientSecret: "" # set via: helm upgrade ... --set vault-engine.googleOAuth.clientSecret=<secret>
 
 memory-api:
   image:
@@ -62,8 +71,8 @@ memory-api:
     pullPolicy: Never
   db:
     password: password
-  vaultMasterKey: "00000000000000000000000000000000"
-  internalVaultApiKey: "dev-internal-key"
+  # vaultMasterKey is required; kind-up.sh auto-generates and forwards via --set
+  # if missing from the parent shell / .env (see bootstrap.sh for the same logic).
   # Applies default schedules from k8s/helm/charts/memory-api/values.yaml
   systemMaintenanceCron:
     enabled: true
@@ -88,12 +97,8 @@ io:
     repository: cerberos-io
     tag: local
     pullPolicy: Never
-  # Must match memory-api.internalVaultApiKey above (IO → Memory X-Internal-API-Key)
-  internalVaultApiKey: "dev-internal-key"
-  googleOAuth:
-    clientId: ""     # set via: helm upgrade ... --set io.googleOAuth.clientId=<id>
-    clientSecret: "" # set via: helm upgrade ... --set io.googleOAuth.clientSecret=<secret>
-    redirectUri: "http://localhost:3001/api/admin/google-oauth/callback"
+  # INTERNAL_VAULT_API_KEY, OPENAI_API_KEY, GOOGLE_CLIENT_* come from the
+  # umbrella `cerberos-shared-secrets` Secret (global.sharedSecrets.*).
 
 aegis-databus:
   image:

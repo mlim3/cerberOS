@@ -36,7 +36,8 @@ import { traceMiddleware } from './trace-context'
 import { ioLog, logFromContext, previewHeadTail, previewWords } from './logger'
 import { startHeartbeatEmitter } from './heartbeat'
 import { mirrorMemoryConfigured, persistOrchestratorOutcomeToMemory } from './scheduled-run-mirror'
-import { activeUserId, resolveSseUserId, userIdRequired, requireRole, assertNoUserIdOverride } from './identity'
+import { messageLooksLikeUserCronScheduling } from './scheduling-language'
+import { activeUserId, resolveSseUserId, userIdRequired, requireRole, assertNoUserIdOverride, getActiveRole } from './identity'
 import {
   broadcastStatus,
   broadcastStreamEvent,
@@ -754,6 +755,10 @@ app.post('/api/chat', async (c) => {
     return c.json({ error: 'conversationId is required' }, 400)
   }
 
+  const scheduleAutomationIntent = messageLooksLikeUserCronScheduling(content ?? '')
+  const activeRole = (await getActiveRole(effectiveUserId)) ?? 'user'
+
+
   // Log user message via memory client — fire-and-forget so the SSE stream opens immediately.
   appendLogEntry({
     conversationId,
@@ -796,6 +801,7 @@ app.post('/api/chat', async (c) => {
       await natsClient!.publishUserTask({
         task_id: taskId,
         user_id: effectiveUserId,
+        user_role: activeRole,
         content,
         payload: { raw_input: rawInput },
         callback_topic: callbackTopicForTask(taskId),
@@ -1079,11 +1085,11 @@ app.post('/api/skills/create', async (c) => {
   return c.json({ skill: { name: node.name, domain, description: node.description } }, 201)
 })
 
-// Permissive GitHub skill importer. Pulls the repo's README (best-effort) and
-// translates it into a cerberOS skill node, persists, and reloads. scope='all'
-// is manager-gated; scope='me' is the default for regular users. Repos that
-// are private, missing a README, or unreachable still produce a stub skill
-// so the manager-installed-Superpowers flow stays demo-friendly.
+// Permissive GitHub skill importer. Scans the repo for skill-like files,
+// validates each candidate, translates matching files into cerberOS skill
+// nodes, persists them, and reloads once at the end. scope='all' is
+// manager-gated; scope='me' is the default for regular users. Repos that have
+// no skill-like files still produce a stub skill so the flow remains demo-friendly.
 app.post('/api/skills/import-github', async (c) => {
   const userId = activeUserId(c)
   if (!userId) return userIdRequired(c)
@@ -1100,28 +1106,49 @@ app.post('/api/skills/import-github', async (c) => {
     const guard = await requireRole(c, 'manager')
     if (!('ok' in guard)) return guard
   }
-  const { nodeFromRepo, publishSkill } = await import('./skills/publisher')
-  const node = await nodeFromRepo(body.repo)
+  const { importSkillsFromRepo, publishSkill, publishSkillReload } = await import('./skills/publisher')
+  const imported = await importSkillsFromRepo(body.repo)
   const domain = (typeof body.domain === 'string' && body.domain) || 'general'
-  const ok = publishSkill(natsClient, {
-    domain,
-    node,
-    ownerUserId: userId,
-    scope,
-  })
-  if (!ok) {
+  const published: Array<{ name: string; path: string }> = []
+  for (const item of imported.skills) {
+    const ok = publishSkill(natsClient, {
+      domain,
+      node: item.node,
+      ownerUserId: userId,
+      scope,
+      reload: false,
+    })
+    if (!ok) {
+      continue
+    }
+    published.push({ name: item.node.name, path: item.path })
+  }
+  if (published.length === 0) {
     return c.json({ error: 'skill publish failed (NATS unavailable)' }, 502)
   }
+  publishSkillReload(natsClient, domain, published[0]!.name, scope)
   logFromContext(c, 'info', 'http', 'skill imported from github', {
-    skill_name: node.name,
+    skill_count: published.length,
     domain,
     repo: body.repo,
     scope,
     actor_user_id: userId,
   })
   return c.json({
-    skill: { name: node.name, domain, description: node.description },
-    skills: [{ name: node.name, domain }],
+    skill: {
+      name: published[0]!.name,
+      domain,
+      description: imported.skills[0]?.node.description,
+    },
+    skills: published.map((skill, idx) => ({
+      name: skill.name,
+      domain,
+      path: skill.path,
+      description: imported.skills[idx]?.node.description,
+    })),
+    imported_count: imported.skills.length,
+    published_count: published.length,
+    fallback_used: imported.fallbackUsed,
   }, 201)
 })
 

@@ -204,6 +204,13 @@ if [ "$SKIP_INSTALL" = false ]; then
     _saved_GOOGLE_CLIENT_ID="${GOOGLE_CLIENT_ID-}"
     _saved_GOOGLE_CLIENT_SECRET="${GOOGLE_CLIENT_SECRET-}"
     _saved_GOOGLE_REDIRECT_URI="${GOOGLE_REDIRECT_URI-}"
+    _saved_POSTGRES_PASSWORD="${POSTGRES_PASSWORD-}"
+    _saved_VAULT_MASTER_KEY="${VAULT_MASTER_KEY-}"
+    _saved_INTERNAL_VAULT_API_KEY="${INTERNAL_VAULT_API_KEY-}"
+    _saved_BAO_TOKEN="${BAO_TOKEN-}"
+    _saved_CRON_WAKE_SECRET="${CRON_WAKE_SECRET-}"
+    _saved_PLAN_APPROVAL_MODE="${PLAN_APPROVAL_MODE-}"
+    _saved_SKILL_LOAD_ALLOWED_USERS="${SKILL_LOAD_ALLOWED_USERS-}"
     set -a
     # shellcheck disable=SC1090
     source "${_env_file}"
@@ -217,9 +224,36 @@ if [ "$SKIP_INSTALL" = false ]; then
     [[ -n "${_saved_GOOGLE_CLIENT_ID}" ]] && export GOOGLE_CLIENT_ID="${_saved_GOOGLE_CLIENT_ID}"
     [[ -n "${_saved_GOOGLE_CLIENT_SECRET}" ]] && export GOOGLE_CLIENT_SECRET="${_saved_GOOGLE_CLIENT_SECRET}"
     [[ -n "${_saved_GOOGLE_REDIRECT_URI}" ]] && export GOOGLE_REDIRECT_URI="${_saved_GOOGLE_REDIRECT_URI}"
+    [[ -n "${_saved_POSTGRES_PASSWORD}" ]] && export POSTGRES_PASSWORD="${_saved_POSTGRES_PASSWORD}"
+    [[ -n "${_saved_VAULT_MASTER_KEY}" ]] && export VAULT_MASTER_KEY="${_saved_VAULT_MASTER_KEY}"
+    [[ -n "${_saved_INTERNAL_VAULT_API_KEY}" ]] && export INTERNAL_VAULT_API_KEY="${_saved_INTERNAL_VAULT_API_KEY}"
+    [[ -n "${_saved_BAO_TOKEN}" ]] && export BAO_TOKEN="${_saved_BAO_TOKEN}"
+    [[ -n "${_saved_CRON_WAKE_SECRET}" ]] && export CRON_WAKE_SECRET="${_saved_CRON_WAKE_SECRET}"
+    [[ -n "${_saved_PLAN_APPROVAL_MODE}" ]] && export PLAN_APPROVAL_MODE="${_saved_PLAN_APPROVAL_MODE}"
+    [[ -n "${_saved_SKILL_LOAD_ALLOWED_USERS}" ]] && export SKILL_LOAD_ALLOWED_USERS="${_saved_SKILL_LOAD_ALLOWED_USERS}"
     unset _saved_ANTHROPIC_API_KEY _saved_ANTHROPIC_BASE_URL _saved_TAVILY_API_KEY \
       _saved_OPENAI_API_KEY _saved_GMAIL_DEMO_EMAIL _saved_GMAIL_DEMO_APP_PASSWORD \
-      _saved_GOOGLE_CLIENT_ID _saved_GOOGLE_CLIENT_SECRET _saved_GOOGLE_REDIRECT_URI
+      _saved_GOOGLE_CLIENT_ID _saved_GOOGLE_CLIENT_SECRET _saved_GOOGLE_REDIRECT_URI \
+      _saved_POSTGRES_PASSWORD _saved_VAULT_MASTER_KEY _saved_INTERNAL_VAULT_API_KEY \
+      _saved_BAO_TOKEN _saved_CRON_WAKE_SECRET _saved_PLAN_APPROVAL_MODE \
+      _saved_SKILL_LOAD_ALLOWED_USERS
+  fi
+
+  # Credential-broker secrets must be supplied by the operator via the parent
+  # shell or repo-root .env (cp .env.example .env and fill them in). We don't
+  # auto-generate or persist them here — keeping kind-up.sh strictly read-only
+  # for secrets avoids surprising .env mutations.
+  if [[ -z "${VAULT_MASTER_KEY:-}" ]]; then
+    echo "error: VAULT_MASTER_KEY is not set. Add it to ${REPO_ROOT}/.env (cp .env.example .env) or export it before running." >&2
+    exit 1
+  fi
+  if [[ "${#VAULT_MASTER_KEY}" -ne 32 ]]; then
+    echo "error: VAULT_MASTER_KEY must be exactly 32 characters (got ${#VAULT_MASTER_KEY})" >&2
+    exit 1
+  fi
+  if [[ -z "${INTERNAL_VAULT_API_KEY:-}" ]]; then
+    echo "error: INTERNAL_VAULT_API_KEY is not set. Add it to ${REPO_ROOT}/.env (cp .env.example .env) or export it before running." >&2
+    exit 1
   fi
 
   HELM_SET_ARGS=()
@@ -232,25 +266,47 @@ if [ "$SKIP_INSTALL" = false ]; then
   if [ -n "${TAVILY_API_KEY:-}" ]; then
     HELM_SET_ARGS+=(--set-string "vault-engine.tavilyApiKey=${TAVILY_API_KEY}")
   fi
+  # Cross-chart shared secrets land in the umbrella `cerberos-shared-secrets`
+  # Secret (one value, all consumers read via secretKeyRef).
+  HELM_SET_ARGS+=(--set-string "global.sharedSecrets.INTERNAL_VAULT_API_KEY=${INTERNAL_VAULT_API_KEY}")
   if [ -n "${OPENAI_API_KEY:-}" ]; then
-    HELM_SET_ARGS+=(--set-string "memory-api.openaiApiKey=${OPENAI_API_KEY}")
-    HELM_SET_ARGS+=(--set-string "io.openaiApiKey=${OPENAI_API_KEY}")
-    HELM_SET_ARGS+=(--set-string "vault-engine.openaiApiKey=${OPENAI_API_KEY}")
+    HELM_SET_ARGS+=(--set-string "global.sharedSecrets.OPENAI_API_KEY=${OPENAI_API_KEY}")
   fi
   if [ -n "${GMAIL_DEMO_EMAIL:-}" ] && [ -n "${GMAIL_DEMO_APP_PASSWORD:-}" ]; then
     HELM_SET_ARGS+=(--set-string "vault-engine.gmailDemoEmail=${GMAIL_DEMO_EMAIL}")
     HELM_SET_ARGS+=(--set-string "vault-engine.gmailDemoAppPassword=${GMAIL_DEMO_APP_PASSWORD}")
   fi
   if [ -n "${GOOGLE_CLIENT_ID:-}" ] && [ -n "${GOOGLE_CLIENT_SECRET:-}" ]; then
-    # IO drives the Admin UI "Connect Google Account" flow; vault-engine uses
-    # the same client id/secret for token refresh on long-running sessions.
-    HELM_SET_ARGS+=(--set-string "io.googleOAuth.clientId=${GOOGLE_CLIENT_ID}")
-    HELM_SET_ARGS+=(--set-string "io.googleOAuth.clientSecret=${GOOGLE_CLIENT_SECRET}")
-    HELM_SET_ARGS+=(--set-string "vault-engine.googleOAuth.clientId=${GOOGLE_CLIENT_ID}")
-    HELM_SET_ARGS+=(--set-string "vault-engine.googleOAuth.clientSecret=${GOOGLE_CLIENT_SECRET}")
+    HELM_SET_ARGS+=(--set-string "global.sharedSecrets.GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}")
+    HELM_SET_ARGS+=(--set-string "global.sharedSecrets.GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}")
   fi
   if [ -n "${GOOGLE_REDIRECT_URI:-}" ]; then
-    HELM_SET_ARGS+=(--set-string "io.googleOAuth.redirectUri=${GOOGLE_REDIRECT_URI}")
+    HELM_SET_ARGS+=(--set-string "global.sharedSecrets.GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI}")
+  fi
+  # Per-chart single-owner secrets.
+  HELM_SET_ARGS+=(--set-string "memory-api.vaultMasterKey=${VAULT_MASTER_KEY}")
+  if [ -n "${POSTGRES_PASSWORD:-}" ]; then
+    HELM_SET_ARGS+=(--set-string "postgres.auth.password=${POSTGRES_PASSWORD}")
+    HELM_SET_ARGS+=(--set-string "memory-api.db.password=${POSTGRES_PASSWORD}")
+    HELM_SET_ARGS+=(--set-string "openbao.postgres.password=${POSTGRES_PASSWORD}")
+  fi
+  if [ -n "${BAO_TOKEN:-}" ]; then
+    HELM_SET_ARGS+=(--set-string "vault-engine.baoToken=${BAO_TOKEN}")
+  fi
+  if [ -n "${PLAN_APPROVAL_MODE:-}" ]; then
+    HELM_SET_ARGS+=(--set-string "orchestrator.planApprovalMode=${PLAN_APPROVAL_MODE}")
+  fi
+  if [ -n "${SKILL_LOAD_ALLOWED_USERS:-}" ]; then
+    HELM_SET_ARGS+=(--set-string "orchestrator.skillLoadAllowedUsers=${SKILL_LOAD_ALLOWED_USERS}")
+  fi
+  if [ -n "${CRON_WAKE_SECRET:-}" ]; then
+    # Pre-create the Secret out-of-band: the orchestrator chart references it
+    # via secretKeyRef and treats it as externally managed (no template).
+    kubectl create secret generic orchestrator-cron-wake \
+      --from-literal=CRON_WAKE_SECRET="${CRON_WAKE_SECRET}" \
+      -n "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+    HELM_SET_ARGS+=(--set-string "orchestrator.cronWake.secretName=orchestrator-cron-wake")
+    HELM_SET_ARGS+=(--set-string "orchestrator.cronWake.secretKey=CRON_WAKE_SECRET")
   fi
   HELM_SET_ARGS+=(--set "global.embedding.model=${EMBEDDING_MODEL}")
   HELM_SET_ARGS+=(--set "global.embedding.dimensions=${EMBEDDING_DIM}")
@@ -404,9 +460,99 @@ if [ "$SKIP_INSTALL" = false ]; then
       ROLLOUT_FAILED=true
     fi
   done
+
 else
   echo ""
   echo "==> [5/5] Skipping Helm install (--skip-install)."
+fi
+
+# ── OpenBao post-install: KV mount + shared-secret seeding ────────────────
+# Dev-mode OpenBao auto-mounts a KV-v2 engine at `secret/`, but the
+# vault-engine code hardcodes `KvMount = "kv"` (vault/engine/secretmanager
+# /openbao/openbao_defs.go), so every credential lookup would 404 without
+# this step. We also seed system-shared credentials (gmail_app_password,
+# TAVILY_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY) here — mirrors what
+# bootstrap.sh does for docker-compose so the two stacks stay in sync.
+# All commands are idempotent: re-running kind-up.sh just overwrites.
+# Runs even with --skip-install so the seed can be reapplied to a live
+# cluster without a full helm round-trip.
+GMAIL_SEED_STATUS="not configured"
+BAO_POD="$(kubectl get pod -n "${NAMESPACE}" -l app.kubernetes.io/name=openbao -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+if [ -n "${BAO_POD}" ]; then
+  echo ""
+  echo "==> Configuring OpenBao (kv mount + shared secrets) ..."
+  # Wait briefly for the pod to be Ready in case we beat the rollout.
+  BAO_READY="$(kubectl get pod -n "${NAMESPACE}" "${BAO_POD}" -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null || echo false)"
+  if [ "${BAO_READY}" != "true" ]; then
+    kubectl wait --for=condition=Ready -n "${NAMESPACE}" "pod/${BAO_POD}" --timeout=60s >/dev/null 2>&1 || true
+  fi
+
+  # Enable KV-v2 at kv/. `bao secrets enable` returns non-zero with a
+  # specific "path is already in use" error when re-run; treat that as
+  # success so kind-up.sh stays idempotent.
+  _enable_out="$(kubectl exec -n "${NAMESPACE}" "${BAO_POD}" -- env BAO_TOKEN=root \
+    bao secrets enable -path=kv -version=2 kv 2>&1 || true)"
+  case "${_enable_out}" in
+    *"path is already in use"*|*"Success"*) ;;
+    *)
+      echo "    (warning: enabling kv mount returned unexpected output)"
+      echo "    ${_enable_out}" | sed 's/^/      /'
+      ;;
+  esac
+
+  # Helper: write one kv key whose JSON has a single field named after
+  # the key. Reads the value from $BLOB inside the pod so it never lands
+  # in process args / shell history on the host.
+  bao_put_field() {
+    local key="$1" value="$2"
+    kubectl exec -n "${NAMESPACE}" "${BAO_POD}" -- env BAO_TOKEN=root BLOB="${value}" \
+      sh -c "bao kv put kv/${key} ${key}=\"\$BLOB\"" >/dev/null
+  }
+
+  if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+    if bao_put_field "ANTHROPIC_API_KEY" "${ANTHROPIC_API_KEY}"; then
+      echo "    Seeded ANTHROPIC_API_KEY"
+    else
+      echo "    (warning: seeding ANTHROPIC_API_KEY failed)"
+    fi
+  fi
+  if [ -n "${TAVILY_API_KEY:-}" ]; then
+    if bao_put_field "TAVILY_API_KEY" "${TAVILY_API_KEY}"; then
+      echo "    Seeded TAVILY_API_KEY"
+    else
+      echo "    (warning: seeding TAVILY_API_KEY failed)"
+    fi
+  fi
+  if [ -n "${OPENAI_API_KEY:-}" ]; then
+    if bao_put_field "OPENAI_API_KEY" "${OPENAI_API_KEY}"; then
+      echo "    Seeded OPENAI_API_KEY"
+    else
+      echo "    (warning: seeding OPENAI_API_KEY failed)"
+    fi
+  fi
+
+  # Gmail demo: store {email, app_password} as a single JSON blob under
+  # the key `gmail_app_password`. The vault engine parses it via
+  # parseGmailCredential (ops_gmail.go) and expects a 16-char app
+  # password. We strip spaces (Google displays them grouped as
+  # "xxxx xxxx xxxx xxxx") to match bootstrap.sh's behaviour.
+  if [ -n "${GMAIL_DEMO_EMAIL:-}" ] && [ -n "${GMAIL_DEMO_APP_PASSWORD:-}" ]; then
+    _pw_clean="${GMAIL_DEMO_APP_PASSWORD// /}"
+    if [ "${#_pw_clean}" -ne 16 ]; then
+      echo "    (warning: GMAIL_DEMO_APP_PASSWORD is ${#_pw_clean} chars after stripping spaces, expected 16; skipping seed)"
+      GMAIL_SEED_STATUS="invalid (${#_pw_clean} chars, expected 16)"
+    else
+      _gmail_blob="$(printf '{"email":"%s","app_password":"%s"}' "${GMAIL_DEMO_EMAIL}" "${_pw_clean}")"
+      if bao_put_field "gmail_app_password" "${_gmail_blob}"; then
+        echo "    Seeded gmail_app_password (${GMAIL_DEMO_EMAIL})"
+        GMAIL_SEED_STATUS="seeded (${GMAIL_DEMO_EMAIL})"
+      else
+        echo "    (warning: seeding gmail_app_password failed)"
+        GMAIL_SEED_STATUS="seed failed"
+      fi
+      unset _pw_clean _gmail_blob
+    fi
+  fi
 fi
 
 echo ""
@@ -446,6 +592,9 @@ fi
 echo "    Change model:"
 echo "      Fresh start:   ./k8s/scripts/kind-down.sh && ./k8s/scripts/kind-up.sh --embedding-model harrier"
 echo "      Custom model:  ./k8s/scripts/kind-down.sh && ./k8s/scripts/kind-up.sh --embedding-model <hf-model-id> --embedding-dim <n> --embedding-prompt-style <style>"
+echo ""
+echo "  Gmail demo (vault-engine):"
+echo "    gmail_app_password ${GMAIL_SEED_STATUS:-not configured}"
 echo ""
 echo "  Anthropic (aegis-agents):"
 if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
