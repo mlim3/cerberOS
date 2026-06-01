@@ -725,17 +725,6 @@ app.post('/api/orchestrator/plan-decision', async (c) => {
 // Chat streaming
 // =============================================================================
 
-/** When recurrence language would hit NATS unnecessarily, steer to user crons. */
-const SCHEDULING_AUTOMATION_CHAT_REPLY =
-  [
-    'That kind of repeating message belongs in **Scheduled tasks**, not in the planner chat loop.',
-    '',
-    '- Open **Create recurring task** (or **Settings → Scheduling**), set the rhythm (e.g. every minute), and put your text — e.g. **I am waiting** — in what runs each time.',
-    '- Stopping automatically at a wall time like **9:15 PM** is **not modeled yet**. Delete or pause that scheduled task when you are finished; we could add end times later.',
-    '',
-    '(This chat endpoint does not run timers or impersonate cron.)',
-  ].join('\n')
-
 // Send a message (returns streaming response)
 app.post('/api/chat', async (c) => {
   const effectiveUserId = activeUserId(c)
@@ -769,6 +758,7 @@ app.post('/api/chat', async (c) => {
   const scheduleAutomationIntent = messageLooksLikeUserCronScheduling(content ?? '')
   const activeRole = (await getActiveRole(effectiveUserId)) ?? 'user'
 
+
   // Log user message via memory client — fire-and-forget so the SSE stream opens immediately.
   appendLogEntry({
     conversationId,
@@ -786,9 +776,7 @@ app.post('/api/chat', async (c) => {
     expectedNextInputMinutes: 1,
     timestamp: Date.now(),
   };
-  if (!scheduleAutomationIntent) {
-    persistAndBroadcastStatus(effectiveUserId, workingStatus)
-  }
+  persistAndBroadcastStatus(effectiveUserId, workingStatus)
 
   const encoder = new TextEncoder();
 
@@ -802,7 +790,7 @@ app.post('/api/chat', async (c) => {
   let userTaskPublishError: string | null = null
 
   // Publish user message to orchestrator via NATS
-  if (useRealOrchestrator && !scheduleAutomationIntent) {
+  if (useRealOrchestrator) {
     try {
       // When conversationId is set the agent fetches prior turns natively from
       // its ConversationSnapshot; skip text injection to avoid double-context.
@@ -841,33 +829,6 @@ app.post('/api/chat', async (c) => {
 
   const stream = new ReadableStream({
     start(controller) {
-      const finishCronSteerAssistant = async (body: string) => {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ chunk: body })}\n\n`))
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true })}\n\n`))
-        controller.close()
-        await appendLogEntry({
-          conversationId,
-          userId: effectiveUserId,
-          role: 'assistant',
-          content: body,
-          taskId,
-          traceId,
-        })
-        const doneStatus: StatusUpdate = {
-          taskId,
-          status: 'awaiting_feedback',
-          lastUpdate: 'Response complete',
-          expectedNextInputMinutes: 0,
-          timestamp: Date.now(),
-        }
-        persistAndBroadcastStatus(effectiveUserId, doneStatus)
-      }
-
-      if (scheduleAutomationIntent) {
-        void finishCronSteerAssistant(SCHEDULING_AUTOMATION_CHAT_REPLY)
-        return
-      }
-
       // Not connected, not demo → clear fallback
       if (!DEMO_MODE && !natsClient?.connected) {
         const fallbackMsg = '[IO] Orchestrator is not connected. The message was logged but cannot be processed.\n\n' +
@@ -1031,7 +992,6 @@ app.post('/api/chat', async (c) => {
       'Cache-Control': 'no-cache',
       Connection: 'keep-alive',
       'X-Content-Type-Options': 'nosniff',
-      ...(scheduleAutomationIntent ? { 'X-IO-Chat-Scheduling-Steer': '1' } : {}),
     },
   });
 });

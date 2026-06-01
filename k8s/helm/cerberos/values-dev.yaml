@@ -90,6 +90,8 @@ orchestrator:
     repository: cerberos-orchestrator
     tag: local
     pullPolicy: Never
+  # MEMORY_API_KEY comes from the umbrella `cerberos-shared-secrets` Secret
+  # (global.sharedSecrets.INTERNAL_VAULT_API_KEY).
 
 io:
   image:

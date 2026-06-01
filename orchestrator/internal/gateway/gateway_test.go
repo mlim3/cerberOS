@@ -156,7 +156,7 @@ func TestHandleAgentSpawnRequest_RoutesToRegisteredHandler(t *testing.T) {
 	}
 }
 
-func TestHandleCredentialRequest_RoutesToRegisteredHandler(t *testing.T) {
+func TestHandleCredentialRequest_RoutesUserInputToRegisteredHandler(t *testing.T) {
 	nats := mocks.NewNATSMock()
 	gw := gateway.New(nats, "test-node")
 
@@ -175,8 +175,9 @@ func TestHandleCredentialRequest_RoutesToRegisteredHandler(t *testing.T) {
 		RequestID:    "cred-req-1",
 		AgentID:      "agent-123",
 		TaskID:       "orch-ref-123",
-		Operation:    "authorize",
-		SkillDomains: []string{"general"},
+		Operation:    "user_input",
+		Label:        "Need approval",
+		Description:  "Please confirm",
 	}
 	raw, err := json.Marshal(req)
 	if err != nil {
@@ -203,11 +204,14 @@ func TestHandleCredentialRequest_RoutesToRegisteredHandler(t *testing.T) {
 	if got.RequestID != req.RequestID {
 		t.Fatalf("handler request_id = %q, want %q", got.RequestID, req.RequestID)
 	}
-	if got.Operation != "authorize" {
-		t.Fatalf("handler operation = %q, want authorize", got.Operation)
+	if got.Operation != "user_input" {
+		t.Fatalf("handler operation = %q, want user_input", got.Operation)
 	}
-	if len(got.SkillDomains) != 1 || got.SkillDomains[0] != "general" {
-		t.Fatalf("handler skill_domains = %v, want [general]", got.SkillDomains)
+	if got.Label != "Need approval" {
+		t.Fatalf("handler label = %q, want Need approval", got.Label)
+	}
+	if got.Description != "Please confirm" {
+		t.Fatalf("handler description = %q, want Please confirm", got.Description)
 	}
 	if got.TraceID != envelope.TraceID {
 		t.Fatalf("handler payload trace_id = %q, want %q", got.TraceID, envelope.TraceID)

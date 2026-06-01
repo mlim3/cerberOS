@@ -108,6 +108,11 @@ func TestMain(m *testing.M) {
 		logger.Error("failed to ensure scheduling schema for testing", "error", err)
 		os.Exit(1)
 	}
+	skillCacheRepo := storage.NewSkillCacheRepository(dbPool)
+	if err := skillCacheRepo.EnsureSchema(ctx, 640); err != nil {
+		logger.Error("failed to ensure skill_cache schema for testing", "error", err)
+		os.Exit(1)
+	}
 
 	vaultManager, err := logic.NewVaultManager()
 	if err != nil {
@@ -118,6 +123,7 @@ func TestMain(m *testing.M) {
 	piRepo := &storage.BaseRepository{Pool: dbPool}
 	testEmbedder := &deterministicTestEmbedder{}
 	piProcessor := logic.NewProcessor(piRepo, testEmbedder)
+	skillCacheProcessor := logic.NewSkillCacheProcessor(skillCacheRepo, testEmbedder)
 
 	mux := http.NewServeMux()
 	api.RegisterRoutes(mux, api.AppHandlers{
@@ -128,6 +134,7 @@ func TestMain(m *testing.M) {
 		Vault:         api.NewVaultHandler(vaultRepo, vaultManager, logRepo),
 		Agent:         api.NewAgentHandler(agentLogsRepo),
 		ScheduledJobs: api.NewScheduledJobsHandler(scheduledJobsRepo, nil),
+		SkillCache:    api.NewSkillCacheHandler(skillCacheProcessor),
 		Users:         api.NewUsersHandler(piRepo, logger),
 	})
 
@@ -228,6 +235,7 @@ CREATE TABLE IF NOT EXISTS scheduling_schema.scheduled_jobs (
     interval_seconds INT,
     name VARCHAR(255) NOT NULL,
     payload JSONB,
+    state JSONB NOT NULL DEFAULT '{}'::jsonb,
     next_run_at TIMESTAMPTZ NOT NULL,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -236,6 +244,7 @@ CREATE TABLE IF NOT EXISTS scheduling_schema.scheduled_jobs (
 ALTER TABLE scheduling_schema.scheduled_jobs ADD COLUMN IF NOT EXISTS user_id VARCHAR(64) NOT NULL DEFAULT '';
 ALTER TABLE scheduling_schema.scheduled_jobs ADD COLUMN IF NOT EXISTS time_zone VARCHAR(64) NOT NULL DEFAULT 'UTC';
 ALTER TABLE scheduling_schema.scheduled_jobs ADD COLUMN IF NOT EXISTS cron_expression TEXT NOT NULL DEFAULT '';
+ALTER TABLE scheduling_schema.scheduled_jobs ADD COLUMN IF NOT EXISTS state JSONB NOT NULL DEFAULT '{}'::jsonb;
 
 CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_next_run
     ON scheduling_schema.scheduled_jobs (next_run_at)
@@ -255,6 +264,23 @@ CREATE TABLE IF NOT EXISTS scheduling_schema.scheduled_job_runs (
 
 CREATE INDEX IF NOT EXISTS idx_scheduled_job_runs_job_id ON scheduling_schema.scheduled_job_runs(job_id);
 CREATE INDEX IF NOT EXISTS idx_scheduled_job_runs_started_at ON scheduling_schema.scheduled_job_runs(started_at DESC);
+
+CREATE TABLE IF NOT EXISTS scheduling_schema.idempotency_records (
+    key TEXT PRIMARY KEY,
+    status VARCHAR(50) NOT NULL DEFAULT 'claimed',
+    agent_id TEXT NOT NULL,
+    job_id UUID,
+    run_id UUID,
+    result JSONB,
+    claimed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMPTZ,
+    expires_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_idempotency_records_expires_at
+    ON scheduling_schema.idempotency_records(expires_at);
+CREATE INDEX IF NOT EXISTS idx_idempotency_records_claimed_at
+    ON scheduling_schema.idempotency_records(status, claimed_at);
 `
 
 func seedUser(t *testing.T, userID string) {

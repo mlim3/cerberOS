@@ -46,6 +46,42 @@ done < <(
   find "$SCRIPT_DIR" -maxdepth 1 -name '*.sh' ! -name "$(basename "$0")" | sort
 )
 
+SERIAL_ONLY_TESTS=(
+  "agents_cross_domain_skill_access.sh"
+  "agents_nl_skill_create.sh"
+  "agents_skill_search.sh"
+)
+
+is_serial_only_test() {
+  local test_name="$1"
+  local serial_name
+  for serial_name in "${SERIAL_ONLY_TESTS[@]}"; do
+    [[ "$test_name" == "$serial_name" ]] && return 0
+  done
+  return 1
+}
+
+env_for_test() {
+  local test_name="$1"
+  case "$test_name" in
+    agents_scheduled_jobs.sh)
+      printf 'IO_LOCAL_PORT=13011'
+      ;;
+    agents_cross_domain_skill_access.sh)
+      printf 'IO_LOCAL_PORT=13012'
+      ;;
+    agents_nl_skill_create.sh)
+      printf 'IO_LOCAL_PORT=13013'
+      ;;
+    agents_skill_search.sh)
+      printf 'IO_LOCAL_PORT=13014'
+      ;;
+    memory_embeddings.sh)
+      printf 'MEMORY_LOCAL_PORT=18082'
+      ;;
+  esac
+}
+
 if [[ ${#TESTS[@]} -eq 0 ]]; then
   printf 'No e2e test scripts found in %s\n' "$SCRIPT_DIR" >&2
   exit 1
@@ -66,6 +102,8 @@ run_test() {
   local script="$1"
   local name
   name="$(basename "$script" .sh)"
+  local env_assignment
+  env_assignment="$(env_for_test "$(basename "$script")")"
   local log_base
   log_base="$(mktemp -t "e2e_${name}_XXXXXX")"
   local out_file="${log_base}.out"
@@ -76,10 +114,18 @@ run_test() {
 
   if $VERBOSE; then
     # tee so we see output live AND capture it for the failure block
-    bash "$script" 2>&1 | tee "$out_file"
+    if [[ -n "${env_assignment}" ]]; then
+      env "${env_assignment}" bash "$script" 2>&1 | tee "$out_file"
+    else
+      bash "$script" 2>&1 | tee "$out_file"
+    fi
     echo "${PIPESTATUS[0]}" > "$exit_file"
   else
-    bash "$script" >"$out_file" 2>&1
+    if [[ -n "${env_assignment}" ]]; then
+      env "${env_assignment}" bash "$script" >"$out_file" 2>&1
+    else
+      bash "$script" >"$out_file" 2>&1
+    fi
     echo "$?" > "$exit_file"
   fi
 
@@ -111,13 +157,25 @@ if $SERIAL; then
     run_test "$t" || FAILURES=$(( FAILURES + 1 ))
   done
 else
+  serial_only=()
+  parallel_tests=()
+  for t in "${TESTS[@]}"; do
+    base="$(basename "$t")"
+    if is_serial_only_test "$base"; then
+      serial_only+=("$t")
+    else
+      parallel_tests+=("$t")
+    fi
+  done
+
   # Launch all tests concurrently; collect results in order.
   pids=()
   log_bases=()
   names=()
 
-  for t in "${TESTS[@]}"; do
+  for t in "${parallel_tests[@]}"; do
     name="$(basename "$t" .sh)"
+    env_assignment="$(env_for_test "$(basename "$t")")"
     log_base="$(mktemp -t "e2e_${name}_XXXXXX")"
     out_file="${log_base}.out"
     exit_file="${log_base}.exit"
@@ -126,9 +184,17 @@ else
     date +%s > "$start_file"
 
     if $VERBOSE; then
-      bash "$t" 2>&1 | tee "$out_file"; echo "${PIPESTATUS[0]}" > "$exit_file" &
+      if [[ -n "${env_assignment}" ]]; then
+        ( env "${env_assignment}" bash "$t" 2>&1 | tee "$out_file"; echo "${PIPESTATUS[0]}" > "$exit_file" ) &
+      else
+        ( bash "$t" 2>&1 | tee "$out_file"; echo "${PIPESTATUS[0]}" > "$exit_file" ) &
+      fi
     else
-      ( bash "$t" >"$out_file" 2>&1; echo "$?" > "$exit_file" ) &
+      if [[ -n "${env_assignment}" ]]; then
+        ( env "${env_assignment}" bash "$t" >"$out_file" 2>&1; echo "$?" > "$exit_file" ) &
+      else
+        ( bash "$t" >"$out_file" 2>&1; echo "$?" > "$exit_file" ) &
+      fi
     fi
 
     pids+=("$!")
@@ -163,6 +229,13 @@ else
 
     rm -f "$out_file" "$exit_file" "$start_file" "$log_base"
   done
+
+  if [[ ${#serial_only[@]} -gt 0 ]]; then
+    printf '\n%bRunning serial-only e2e tests%b\n' "${BOLD}" "${RESET}"
+    for t in "${serial_only[@]}"; do
+      run_test "$t" || FAILURES=$(( FAILURES + 1 ))
+    done
+  fi
 fi
 
 # ── summary ────────────────────────────────────────────────────────────────────

@@ -230,6 +230,13 @@ func main() {
 	scheduledJobsHandler := api.NewScheduledJobsHandler(scheduledJobsRepo, userDispatch)
 	usersHandler := api.NewUsersHandler(piRepo, logger)
 	skillCacheHandler := api.NewSkillCacheHandler(skillCacheProc)
+	wakeDueRunner := make(chan struct{}, 1)
+	scheduledJobsHandler.SetWake(func() {
+		select {
+		case wakeDueRunner <- struct{}{}:
+		default:
+		}
+	})
 
 	// Set up the router using Go 1.22's enhanced mux
 	mux := http.NewServeMux()
@@ -280,18 +287,47 @@ func main() {
 		}
 	}()
 
-	// Due-job runner (user_cron dispatch + internal schedulers) — 1m tick
+	// Due-job runner (user_cron dispatch + internal schedulers) — sleep until the
+	// next due job, but wake immediately when a new job is created.
 	go func() {
-		t := time.NewTicker(1 * time.Minute)
-		defer t.Stop()
 		for {
+			if err := scheduledJobsHandler.RunDue(ctx); err != nil {
+				logger.Error("scheduled_jobs run_due failed", "error", err)
+			}
+			if expired, stale, err := scheduledJobsRepo.CleanupIdempotency(
+				ctx,
+				time.Now().UTC(),
+				time.Now().UTC().Add(-30*time.Minute),
+			); err != nil {
+				logger.Error("scheduled_jobs idempotency cleanup failed", "error", err)
+			} else if expired > 0 || stale > 0 {
+				logger.Info("scheduled_jobs idempotency cleanup completed", "expired_deleted", expired, "stale_claimed_deleted", stale)
+			}
+
+			waitFor := 60 * time.Second
+			if nextRunAt, ok, err := scheduledJobsRepo.NextDueTime(ctx, time.Now().UTC()); err != nil {
+				logger.Error("scheduled_jobs next due lookup failed", "error", err)
+			} else if ok {
+				if d := time.Until(nextRunAt); d > 0 && d < waitFor {
+					waitFor = d
+				} else if d <= 0 {
+					waitFor = 0
+				}
+			}
+
+			timer := time.NewTimer(waitFor)
 			select {
 			case <-ctx.Done():
+				timer.Stop()
 				return
-			case <-t.C:
-				if err := scheduledJobsHandler.RunDue(ctx); err != nil {
-					logger.Error("scheduled_jobs run_due failed", "error", err)
+			case <-wakeDueRunner:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
 				}
+			case <-timer.C:
 			}
 		}
 	}()

@@ -172,6 +172,9 @@ func buildRuntime(cfg *config.OrchestratorConfig) (*runtime, error) {
 	if cfg.LokiURL != "" {
 		gw.SetLokiURL(cfg.LokiURL)
 	}
+	if cfg.MemoryAPIKey != "" {
+		gw.SetMemoryAPIKey(cfg.MemoryAPIKey)
+	}
 
 	recoveryBridge := &recoveryProxy{}
 	taskMonitor := monitor.New(cfg, memClient, recoveryBridge)

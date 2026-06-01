@@ -196,6 +196,57 @@ func TestSkillsSearch_CredFreeOutOfDomain_AutoRegisters(t *testing.T) {
 	}
 }
 
+// TestSkillsSearch_CredFreeOutOfDomain_AutoRegistersWhenImplementationMissing
+// verifies that a static credential-free hit can still be auto-registered when
+// the Memory payload omits the implementation field, as long as the tool name
+// itself matches a builtinRegistry key.
+func TestSkillsSearch_CredFreeOutOfDomain_AutoRegistersWhenImplementationMissing(t *testing.T) {
+	registry := newDynamicRegistry([]SkillTool{testWebFetchTool()})
+	cs := &fakeClarificationSender{}
+	searcher := &fakeSearcherWithMeta{
+		results: []types.SkillSearchResult{
+			{
+				Domain:       "e2e_test",
+				Name:         "e2e_ping",
+				Description:  "Test credential-free skill in e2e_test",
+				Score:        0.92,
+				RequiresCred: false,
+				Origin:       "static",
+				// Implementation intentionally omitted to mirror the live-memory
+				// failure mode that triggered fallback behavior.
+			},
+		},
+	}
+
+	tool := skillsSearchTool(searcher, "general", true, registry, cs)
+	raw, _ := json.Marshal(map[string]interface{}{"query": "automated e2e connectivity probe"})
+	result := tool.Execute(nil, raw)
+
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content)
+	}
+	if result.Details["recommended_action"] != "call_directly" {
+		t.Fatalf("expected recommended_action=call_directly, got %v", result.Details["recommended_action"])
+	}
+	if !strings.Contains(result.Content, "e2e_ping") {
+		t.Fatalf("expected response to mention e2e_ping, got %q", result.Content)
+	}
+	if strings.Contains(result.Content, "spawn_agent") {
+		t.Fatalf("response should not recommend spawn_agent when builtin fallback is available; got %q", result.Content)
+	}
+
+	found := false
+	for _, rt := range registry.Tools() {
+		if rt.Definition.Name == "e2e_ping" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("e2e_ping was not auto-registered when implementation was omitted")
+	}
+}
+
 // TestSkillsSearch_CredFreeOutOfDomain_UnknownImpl treats a credential-free
 // result whose Implementation is not in builtinRegistry as unregisterable.
 // The tool should fall back to recommending spawn_agent (if available),

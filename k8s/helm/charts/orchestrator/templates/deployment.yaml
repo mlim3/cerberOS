@@ -56,6 +56,16 @@ spec:
               value: {{ .Values.memoryEndpoint | quote }}
             - name: IO_API_BASE
               value: {{ .Values.ioApiBase | quote }}
+            {{- if .Values.memoryAPIKey }}
+            - name: MEMORY_API_KEY
+              value: {{ .Values.memoryAPIKey | quote }}
+            {{- else }}
+            - name: MEMORY_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.sharedSecretName | quote }}
+                  key: INTERNAL_VAULT_API_KEY
+            {{- end }}
             - name: DECOMPOSITION_TIMEOUT_SECONDS
               value: {{ .Values.decompositionTimeoutSeconds | quote }}
             - name: PLAN_APPROVAL_MODE

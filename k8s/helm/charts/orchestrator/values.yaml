@@ -17,6 +17,8 @@ vaultAddr: "http://openbao:8200"
 vaultEngineEndpoint: "http://vault:8000"
 memoryEndpoint: "http://memory-api:8081"
 ioApiBase: "http://io:3001"
+memoryAPIKey: ""
+sharedSecretName: "cerberos-shared-secrets"
 
 decompositionTimeoutSeconds: "120"
 # Plan approval gate (off | manager | admin). Mirrors docker-compose default.

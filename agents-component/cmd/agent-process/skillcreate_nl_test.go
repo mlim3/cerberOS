@@ -436,6 +436,87 @@ func TestExecuteCreateSkillFromNL_ConfirmWithoutHash(t *testing.T) {
 	}
 }
 
+func TestFormatSkillDraftPreviewPayload_RoundTrips(t *testing.T) {
+	n := goodNode()
+	gen := generatedSkill{
+		Node:        n,
+		Mode:        "fallback",
+		RiskReasons: []string{"global scope"},
+		DraftHash:   "deadbeef",
+	}
+	content := formatSkillDraft("general", gen, true)
+	payload, ok := parseSkillDraftPreviewPayload(content)
+	if !ok {
+		t.Fatal("expected preview payload to parse")
+	}
+	if payload == nil {
+		t.Fatal("expected non-nil payload")
+	}
+	if payload.Status != "confirmation_required" {
+		t.Fatalf("unexpected status %q", payload.Status)
+	}
+	if payload.Domain != "general" {
+		t.Fatalf("unexpected domain %q", payload.Domain)
+	}
+	if payload.DraftHash != "deadbeef" {
+		t.Fatalf("unexpected draft hash %q", payload.DraftHash)
+	}
+	if payload.Skill == nil || payload.Skill.Name != n.Name {
+		t.Fatalf("unexpected skill payload: %#v", payload.Skill)
+	}
+}
+
+func TestExtractConfirmedSkillDraftFromEntries_UsesReviewedPreview(t *testing.T) {
+	n := goodNode()
+	gen := generatedSkill{
+		Node:        n,
+		Mode:        "fallback",
+		RiskReasons: []string{"global scope"},
+		DraftHash:   "deadbeef",
+	}
+	preview := formatSkillDraft("general", gen, true)
+	entries := []types.SessionEntry{
+		{TurnType: turnTypeUserMessage, Content: "please create a skill"},
+		{TurnType: turnTypeAssistantResponse, Content: preview},
+	}
+
+	skill, hash, err := extractConfirmedSkillDraftFromEntries(entries, "general", nlSkillCreateInput{DraftHash: "deadbeef"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if skill == nil {
+		t.Fatal("expected recovered skill")
+	}
+	if skill.Name != n.Name {
+		t.Fatalf("unexpected skill name %q", skill.Name)
+	}
+	if hash != "deadbeef" {
+		t.Fatalf("unexpected recovered hash %q", hash)
+	}
+}
+
+func TestExtractConfirmedSkillDraftFromEntries_DomainMismatchSkipsPreview(t *testing.T) {
+	n := goodNode()
+	gen := generatedSkill{
+		Node:        n,
+		Mode:        "fallback",
+		RiskReasons: []string{"global scope"},
+		DraftHash:   "deadbeef",
+	}
+	preview := formatSkillDraft("general", gen, true)
+	entries := []types.SessionEntry{
+		{TurnType: turnTypeAssistantResponse, Content: preview},
+	}
+
+	skill, hash, err := extractConfirmedSkillDraftFromEntries(entries, "web", nlSkillCreateInput{DraftHash: "deadbeef"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if skill != nil || hash != "" {
+		t.Fatalf("expected no match on domain mismatch, got skill=%v hash=%q", skill, hash)
+	}
+}
+
 // mustMarshal is a test helper that marshals v or panics.
 func mustMarshal(v interface{}) json.RawMessage {
 	b, err := json.Marshal(v)
