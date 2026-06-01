@@ -493,7 +493,7 @@ func (d *Dispatcher) handleAgentSpawnChildResult(ctx context.Context, pending *p
 	}
 	if result.Success {
 		resp.Status = "success"
-		resp.Result = string(result.Result)
+		resp.Result = agentSpawnResultString(result.Result)
 	} else {
 		resp.Status = "failed"
 		resp.ErrorCode = firstNonEmpty(result.ErrorCode, types.ErrCodeSubtaskFailed)
@@ -511,6 +511,14 @@ func (d *Dispatcher) handleAgentSpawnChildResult(ctx context.Context, pending *p
 	)
 
 	return d.gateway.PublishAgentSpawnResponse(ctx, resp)
+}
+
+func agentSpawnResultString(raw json.RawMessage) string {
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	return string(raw)
 }
 
 // HandleDecompositionResponse processes a task_decomposition_response from the Planner Agent.
@@ -869,6 +877,9 @@ func validateAgentSpawnRequest(req types.AgentSpawnRequest, parentDepth int) err
 func (d *Dispatcher) resolveAgentSpawnContext(parentTaskID string) (agentSpawnContext, error) {
 	if tsVal, ok := d.activeTasks.Load(parentTaskID); ok {
 		ts := tsVal.(*types.TaskState)
+		return agentSpawnContextFromTaskState(ts, 0), nil
+	}
+	if ts := d.activeTaskByOrchRef(parentTaskID); ts != nil {
 		return agentSpawnContextFromTaskState(ts, 0), nil
 	}
 	if resolver, ok := d.executor.(subtaskParentResolver); ok {

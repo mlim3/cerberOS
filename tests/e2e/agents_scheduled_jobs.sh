@@ -137,6 +137,36 @@ collect_agent_logs() {
     2>/dev/null || true
 }
 
+fetch_user_crons() {
+  curl -fsS \
+    -H "X-Active-User: ${TEST_USER_ID}" \
+    -H "X-Surface-Key: cli" \
+    "http://localhost:${IO_LOCAL_PORT}/api/user-crons?userId=${TEST_USER_ID}"
+}
+
+wait_for_scheduled_job() {
+  local job_name="$1"
+  local timeout="${2:-90}"
+  local deadline=$(( $(date +%s) + timeout ))
+  local jobs_json job_id
+  while [[ $(date +%s) -lt ${deadline} ]]; do
+    jobs_json="$(fetch_user_crons 2>/dev/null || true)"
+    if [[ -n "${jobs_json}" ]]; then
+      job_id="$(
+        echo "${jobs_json}" \
+          | jq -r --arg name "${job_name}" '.data.jobs[]? | select(.name == $name) | .id' \
+          | head -n 1
+      )"
+      if [[ -n "${job_id}" && "${job_id}" != "null" ]]; then
+        echo "${job_id}"
+        return 0
+      fi
+    fi
+    sleep 3
+  done
+  return 1
+}
+
 wait_for_log() {
   local needle="$1"
   local timeout="${2:-60}"
@@ -196,17 +226,7 @@ agent_logs="$(wait_for_log '"tool":"create_scheduled_job"' 90)" \
 assert_contains "${agent_logs}" '"tool":"create_scheduled_job"' "agent invoked create_scheduled_job"
 
 section "Checking persisted scheduled job"
-user_crons_json="$(curl -fsS \
-  -H "X-Active-User: ${TEST_USER_ID}" \
-  -H "X-Surface-Key: cli" \
-  "http://localhost:${IO_LOCAL_PORT}/api/user-crons?userId=${TEST_USER_ID}")"
-
-SCHED_JOB_ID="$(
-  echo "${user_crons_json}" \
-    | jq -r --arg name "${JOB_NAME}" '.data.jobs[] | select(.name == $name) | .id' \
-    | head -n 1
-)"
-[[ -n "${SCHED_JOB_ID}" && "${SCHED_JOB_ID}" != "null" ]] \
+SCHED_JOB_ID="$(wait_for_scheduled_job "${JOB_NAME}" 90)" \
   || fail "created scheduled job ${JOB_NAME} not found in /api/user-crons"
 ok "scheduled job persisted with id ${SCHED_JOB_ID}"
 

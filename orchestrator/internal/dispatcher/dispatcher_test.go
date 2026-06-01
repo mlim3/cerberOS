@@ -385,8 +385,8 @@ func TestHandleAgentSpawnRequest_DispatchesChildTaskAndPublishesResponseOnSucces
 		t.Fatalf("HandleAgentSpawnRequest() error = %v", err)
 	}
 
-	if len(gw.CapabilityCalls) != 1 {
-		t.Fatalf("capability queries = %d, want 1", len(gw.CapabilityCalls))
+	if len(gw.CapabilityCalls) != 0 {
+		t.Fatalf("capability queries = %d, want 0; agent_spawn now dispatches the child task directly", len(gw.CapabilityCalls))
 	}
 	if len(gw.TaskSpecCalls) != initialTaskSpecCount+1 {
 		t.Fatalf("task spec publishes = %d, want %d", len(gw.TaskSpecCalls), initialTaskSpecCount+1)
@@ -446,8 +446,8 @@ func TestHandleAgentSpawnRequest_PublishesFailureWhenParentContextMissing(t *tes
 	if resp.Status != "failed" {
 		t.Fatalf("spawn response status = %q, want failed", resp.Status)
 	}
-	if resp.ErrorCode != types.ErrCodeInvalidTaskSpec {
-		t.Fatalf("spawn response error_code = %q, want %q", resp.ErrorCode, types.ErrCodeInvalidTaskSpec)
+	if resp.ErrorCode != "UNKNOWN_PARENT_TASK" {
+		t.Fatalf("spawn response error_code = %q, want UNKNOWN_PARENT_TASK", resp.ErrorCode)
 	}
 }
 
