@@ -18,12 +18,12 @@ import (
 )
 
 const (
-	nlSkillCreateToolName = "create_skill_from_nl"
+	nlSkillCreateToolName  = "create_skill_from_nl"
 	nlSkillCreateMaxTokens = 768
 )
 
 var (
-	skillNameRE = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,63}$`)
+	skillNameRE  = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,63}$`)
 	secretLikeRE = regexp.MustCompile(`(?i)(sk-[a-z0-9_-]{12,}|xox[baprs]-[a-z0-9-]{12,}|api[_ -]?key\s*[:=]\s*\S+|token\s*[:=]\s*\S+|password\s*[:=]\s*\S+)`)
 )
 
@@ -39,29 +39,39 @@ type nlSkillCreateInput struct {
 }
 
 type generatedSkill struct {
-	Node       *types.SkillNode
-	Mode       string
-	Warnings   []string
+	Node        *types.SkillNode
+	Mode        string
+	Warnings    []string
 	RiskReasons []string
-	DraftHash  string
+	DraftHash   string
+}
+
+type skillDraftPreviewPayload struct {
+	Status               string           `json:"status"`
+	Domain               string           `json:"domain"`
+	Skill                *types.SkillNode `json:"skill"`
+	GenerationMode       string           `json:"generation_mode"`
+	DraftHash            string           `json:"draft_hash"`
+	RiskReasons          []string         `json:"risk_reasons"`
+	ConfirmationRequired bool             `json:"confirmation_required"`
 }
 
 func createSkillFromNLTool(client *anthropic.Client, sl *SessionLog, ve *VaultExecutor, spawnCtx *SpawnContext, registry *DynamicRegistry) SkillTool {
 	return SkillTool{
 		Label: "Create Skill From Natural Language",
 		Definition: anthropic.ToolParam{
-			Name: nlSkillCreateToolName,
+			Name:        nlSkillCreateToolName,
 			Description: anthropic.String("Create a reusable learned skill from the user's natural-language description. Use only when the user explicitly asks to create, save, define, or teach a skill. Risky skills return a draft that requires confirmation before persistence. Do NOT use to execute the described task."),
 			InputSchema: anthropic.ToolInputSchemaParam{
 				Properties: map[string]interface{}{
 					"description": map[string]interface{}{"type": "string", "description": "The user's natural-language description of the skill to create."},
-					"domain": map[string]interface{}{"type": "string", "description": "Target skill domain. Defaults to the current domain."},
-					"name": map[string]interface{}{"type": "string", "description": "Optional snake_case skill name requested by the user."},
-					"scope": map[string]interface{}{"type": "string", "enum": []string{"user", "global"}, "description": "Skill visibility scope. Defaults to user."},
-					"confirm": map[string]interface{}{"type": "boolean", "description": "Set true only after the user explicitly confirms a risky or overwrite draft."},
-					"draft_hash": map[string]interface{}{"type": "string", "description": "Hash from the draft preview being confirmed."},
-					"draft": map[string]interface{}{"type": "object", "description": "Optional exact draft SkillNode returned by a previous unpersisted preview."},
-					"overwrite": map[string]interface{}{"type": "boolean", "description": "Set true only after the user explicitly confirms replacing an existing synthesized skill with the same name."},
+					"domain":      map[string]interface{}{"type": "string", "description": "Target skill domain. Defaults to the current domain."},
+					"name":        map[string]interface{}{"type": "string", "description": "Optional snake_case skill name requested by the user."},
+					"scope":       map[string]interface{}{"type": "string", "enum": []string{"user", "global"}, "description": "Skill visibility scope. Defaults to user."},
+					"confirm":     map[string]interface{}{"type": "boolean", "description": "Set true only after the user explicitly confirms a risky or overwrite draft."},
+					"draft_hash":  map[string]interface{}{"type": "string", "description": "Hash from the draft preview being confirmed."},
+					"draft":       map[string]interface{}{"type": "object", "description": "Optional exact draft SkillNode returned by a previous unpersisted preview."},
+					"overwrite":   map[string]interface{}{"type": "boolean", "description": "Set true only after the user explicitly confirms replacing an existing synthesized skill with the same name."},
 				},
 				Required: []string{"description"},
 			},
@@ -129,13 +139,30 @@ func executeCreateSkillFromNL(ctx context.Context, client *anthropic.Client, sl 
 	}
 	needsConfirm := len(generated.RiskReasons) > 0
 	if needsConfirm && !input.Confirm {
-		return ToolResult{Content: formatSkillDraft(domain, generated, true)}
+		preview := formatSkillDraft(domain, generated, true)
+		if sl != nil {
+			_ = sl.Write(turnTypeAssistantResponse, preview, "", "")
+		}
+		return ToolResult{Content: preview}
 	}
-	if needsConfirm && input.DraftHash != "" && input.DraftHash != generated.DraftHash {
-		return ToolResult{Content: "The confirmed draft hash does not match the current generated draft. Ask the user to review the latest draft before persisting.", IsError: true}
+	if needsConfirm {
+		confirmedNode, confirmedHash, err := resolveConfirmedSkillDraft(sl, domain, input, generated)
+		if err != nil {
+			return ToolResult{Content: err.Error(), IsError: true}
+		}
+		if confirmedNode == nil {
+			return ToolResult{Content: "Confirmation requires the reviewed draft payload or a recoverable prior preview.", IsError: true}
+		}
+		generated.Node = confirmedNode
+		generated.DraftHash = confirmedHash
+		if input.DraftHash != "" && input.DraftHash != confirmedHash {
+			return ToolResult{Content: "The confirmed draft hash does not match the reviewed draft. Ask the user to confirm the exact draft_hash from the preview.", IsError: true}
+		}
 	}
 	if needsConfirm && input.DraftHash == "" {
-		return ToolResult{Content: "Confirmation requires the draft_hash from the reviewed draft.", IsError: true}
+		if generated.DraftHash == "" {
+			return ToolResult{Content: "Confirmation requires the draft_hash from the reviewed draft.", IsError: true}
+		}
 	}
 	if sl == nil {
 		return ToolResult{Content: "Cannot persist skill: session log/NATS connection is unavailable.", IsError: true}
@@ -152,6 +179,59 @@ func executeCreateSkillFromNL(ctx context.Context, client *anthropic.Client, sl 
 		ve.EmitSkillCreated(domain, generated.Node, generated.Mode)
 	}
 	return ToolResult{Content: fmt.Sprintf("Created skill %s in domain %s using %s generation. It was persisted, reload was signaled, and it is scoped to this user.", generated.Node.Name, domain, generated.Mode)}
+}
+
+func resolveConfirmedSkillDraft(sl *SessionLog, domain string, input nlSkillCreateInput, generated generatedSkill) (*types.SkillNode, string, error) {
+	if len(input.Draft) > 0 && string(input.Draft) != "null" {
+		var node types.SkillNode
+		if err := json.Unmarshal(input.Draft, &node); err != nil {
+			return nil, "", fmt.Errorf("parse draft: %w", err)
+		}
+		if err := validateGeneratedSkill(&node); err != nil {
+			return nil, "", err
+		}
+		return &node, draftHash(domain, &node), nil
+	}
+	if sl == nil {
+		return nil, "", nil
+	}
+	return extractConfirmedSkillDraftFromEntries(sl.ReadSession(sl.traceID), domain, input)
+}
+
+func parseSkillDraftPreviewPayload(content string) (*skillDraftPreviewPayload, bool) {
+	idx := strings.Index(content, "{")
+	if idx < 0 {
+		return nil, false
+	}
+	var payload skillDraftPreviewPayload
+	if err := json.Unmarshal([]byte(content[idx:]), &payload); err != nil {
+		return nil, false
+	}
+	if payload.Status != "confirmation_required" || payload.Skill == nil {
+		return nil, false
+	}
+	return &payload, true
+}
+
+func extractConfirmedSkillDraftFromEntries(entries []types.SessionEntry, domain string, input nlSkillCreateInput) (*types.SkillNode, string, error) {
+	for i := len(entries) - 1; i >= 0; i-- {
+		entry := entries[i]
+		if entry.TurnType != turnTypeAssistantResponse {
+			continue
+		}
+		payload, ok := parseSkillDraftPreviewPayload(entry.Content)
+		if !ok || payload == nil || payload.Skill == nil {
+			continue
+		}
+		if payload.Domain != "" && payload.Domain != domain {
+			continue
+		}
+		if input.DraftHash != "" && payload.DraftHash != input.DraftHash {
+			continue
+		}
+		return payload.Skill, payload.DraftHash, nil
+	}
+	return nil, "", nil
 }
 
 func generateSkillFromNL(ctx context.Context, client *anthropic.Client, log *slog.Logger, domain, description, requestedName string, draft json.RawMessage) (generatedSkill, error) {
@@ -180,9 +260,9 @@ func generateSkillFromNL(ctx context.Context, client *anthropic.Client, log *slo
 
 func synthesizeSkillFromDescription(ctx context.Context, client *anthropic.Client, log *slog.Logger, domain, description, requestedName string) (*types.SkillNode, error) {
 	resp, err := client.Messages.New(ctx, anthropic.MessageNewParams{
-		Model: anthropic.ModelClaudeHaiku4_5,
+		Model:     anthropic.ModelClaudeHaiku4_5,
 		MaxTokens: nlSkillCreateMaxTokens,
-		System: []anthropic.TextBlockParam{{Text: skillCreateNLSystemPrompt(domain, requestedName)}},
+		System:    []anthropic.TextBlockParam{{Text: skillCreateNLSystemPrompt(domain, requestedName)}},
 		Messages: []anthropic.MessageParam{
 			anthropic.NewUserMessage(anthropic.NewTextBlock("Create a reusable skill from this user request. Output ONLY valid JSON.\n\n" + description)),
 		},
@@ -240,13 +320,13 @@ func fallbackSkillFromDescription(description, requestedName string) *types.Skil
 	}
 	now := time.Now().UTC()
 	return &types.SkillNode{
-		Name:        name,
-		Level:       "command",
-		Label:       label,
-		Description: desc,
-		Recipe:      "1. Interpret the user's request using this learned procedure: " + description + "\n2. Use only currently available tools and context.\n3. Return a concise factual result.",
-		Spec:        &types.SkillSpec{Parameters: map[string]types.ParameterDef{}},
-		Origin:      "synthesized",
+		Name:          name,
+		Level:         "command",
+		Label:         label,
+		Description:   desc,
+		Recipe:        "1. Interpret the user's request using this learned procedure: " + description + "\n2. Use only currently available tools and context.\n3. Return a concise factual result.",
+		Spec:          &types.SkillSpec{Parameters: map[string]types.ParameterDef{}},
+		Origin:        "synthesized",
 		SynthesizedAt: &now,
 	}
 }
@@ -330,12 +410,12 @@ func formatSkillDraft(domain string, generated generatedSkill, confirmationRequi
 	reasons := append([]string(nil), generated.RiskReasons...)
 	sort.Strings(reasons)
 	payload := map[string]interface{}{
-		"status": "confirmation_required",
-		"domain": domain,
-		"skill": generated.Node,
-		"generation_mode": generated.Mode,
-		"draft_hash": generated.DraftHash,
-		"risk_reasons": reasons,
+		"status":                "confirmation_required",
+		"domain":                domain,
+		"skill":                 generated.Node,
+		"generation_mode":       generated.Mode,
+		"draft_hash":            generated.DraftHash,
+		"risk_reasons":          reasons,
 		"confirmation_required": confirmationRequired,
 	}
 	b, _ := json.MarshalIndent(payload, "", "  ")
